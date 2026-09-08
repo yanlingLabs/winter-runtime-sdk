@@ -84,6 +84,22 @@ function scriptedQuery(messages: SdkMessage[]): Query {
     accountInfo: unsupported("accountInfo") as () => Promise<AccountInfo>,
     rewindFiles: unsupported("rewindFiles") as (userMessageId: string, options?: { dryRun?: boolean }) => Promise<RewindFilesResult>,
     setPermissionMode: unsupported("setPermissionMode") as (mode: PermissionMode) => Promise<void>,
+    // R-7b-4's per-session messaging facet, added to `Query` by the SDK's own 0.0.2 (Task 0). Every
+    // member is `unsupported` for the same reason as the rest of this fake: a facet that silently
+    // answered would let a test claim a messaging path works when nothing implemented it. Lane B's
+    // adapters drive the REAL facet.
+    messaging: {
+      listReachable: unsupported("messaging.listReachable"),
+      deliver: unsupported("messaging.deliver"),
+      steerChild: unsupported("messaging.steerChild"),
+      resumeChild: unsupported("messaging.resumeChild"),
+      subscribeIdle: unsupported("messaging.subscribeIdle"),
+      senderClass: unsupported("messaging.senderClass"),
+      readNotifications: unsupported("messaging.readNotifications"),
+      onIdleNotice: () => {
+        throw new Error("fake winter peer: Query.messaging.onIdleNotice() is not scripted");
+      },
+    } as unknown as Query["messaging"],
   };
   return query;
 }

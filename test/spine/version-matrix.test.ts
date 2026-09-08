@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { createFakeClaudePeer, createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
-import { assertVersionMatrix, createRuntimeSdk, parseVersion, readExportedVersion, satisfiesRange, SUPPORTED, SUPPORTED_PROTOCOL_VERSIONS } from "../../src/index.ts";
+import { assertVersionMatrix, createRuntimeSdk, parseVersion, readExportedVersion, readResolvedManifestVersion, satisfiesRange, SUPPORTED, SUPPORTED_PROTOCOL_VERSIONS } from "../../src/index.ts";
 import { RuntimeSdkVersionError } from "../../src/errors.ts";
 import type { RuntimeSdkPeers } from "../../src/sdk.ts";
 
@@ -123,10 +123,26 @@ describe("assertVersionMatrix", () => {
 
   test("no version identity anywhere -> the second probe answers, and here that is the REAL installed peer", () => {
     // A namespace with no version export at all. Probe 2 resolves `@yanlinglabs/winter-agent-sdk`
-    // from this repository's own node_modules -- the `link:`ed sibling checkout, 0.0.1 today -- and
-    // refuses it. This is the live path until the Winter SDK exports a version identity of its own
+    // from this repository's own node_modules -- the `link:`ed sibling checkout -- and answers from
+    // its manifest. This is the live path until the Winter SDK exports a version identity of its own
     // (the CARRY in the Task 1 report), so the test asserts the SOURCE, not the number.
+    //
+    // WHAT CHANGED (P7b fix round 1, Lane A): the SDK repository BUMPED to 0.0.2, which is inside the
+    // matrix -- so the assertion "the real peer is refused" stopped being true, in this repository and
+    // in CI, without a line of this package changing. The spine's own concern 2 predicted exactly this
+    // ("every construction with the REAL peer refuses UNTIL THE SDK BUMPS"). The test now derives its
+    // expectation from the resolved manifest instead of hard-coding either side of that bump, so it
+    // stays honest across the transition rather than pinning whichever side happened to be current.
     const noVersion = { PROTOCOL_VERSION: "1.0" } as unknown as RuntimeSdkPeers["winter"];
+    const resolved = readResolvedManifestVersion("@yanlinglabs/winter-agent-sdk");
+    const insideMatrix = resolved !== undefined && satisfiesRange(resolved, SUPPORTED.winterAgentSdk);
+    if (insideMatrix) {
+      const report = assertVersionMatrix({ winter: noVersion });
+      expect(report.winterAgentSdk.packageVersion).toBe(resolved);
+      // …and the SOURCE is still the second probe: the module exported no identity of its own.
+      expect(report.winterAgentSdk.source).toBe("resolved-manifest");
+      return;
+    }
     let thrown: unknown;
     try {
       assertVersionMatrix({ winter: noVersion });
