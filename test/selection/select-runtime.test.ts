@@ -12,6 +12,7 @@ import {
   authFamilyFromRefKind,
   D14_CLAUDE_OAUTH_APPROVED_DEFAULT,
   officialServesBackend,
+  OFFICIAL_SERVED_AUTH_FAMILIES,
   reviewPersistedSelection,
   ruleIdOf,
   selectionVersionsFrom,
@@ -22,7 +23,7 @@ import {
 import { isSelectionRefusal, SelectionRefusedError } from "../../src/selection/runtime-selection.ts";
 import { createRuntimeSdk } from "../../src/sdk.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
-import type { RuntimeSelection, SelectionInput, SelectionRefusal } from "../../src/selection/runtime-selection.ts";
+import type { RuntimeSelection, SelectionAuthFamily, SelectionInput, SelectionRefusal } from "../../src/selection/runtime-selection.ts";
 import { claudeFamily, credentials, gptFamily, listing, NOW, PROVIDER_VIEWS, row, VERSIONS } from "./fixtures.ts";
 
 /** A Code-mode session on the Claude family with an Anthropic API key and an official peer present. */
@@ -53,6 +54,7 @@ function refused(over: Partial<SelectionInput> = {}): SelectionRefusal {
 }
 
 const oauth = { anthropic: { authFamily: "claude-oauth" as const, protocols: ["anthropic-messages"] } };
+const consoleOauth = { anthropic: { authFamily: "console-oauth" as const, protocols: ["anthropic-messages"] } };
 
 describe("D13 row 1 — Claude OAuth", () => {
   test("D13 row 1 — a Claude OAuth credential routes to the official runtime, always", () => {
@@ -109,6 +111,16 @@ describe("D13 row 2 — the official runtime", () => {
     expect(ruleIdOf(selection)).toBe("D13-2");
   });
 
+  test("D13 row 2 — a Console OAuth bearer on the Anthropic-dialect backend routes to the official runtime", () => {
+    // R-7b-1 as clarified 2026-09-08: an API key and a Console OAuth bearer are both token-priced API
+    // access the official runtime accepts, so neither is a reason to route away from it. (This test
+    // asserted the opposite until review r1's I1 — see `officialServesBackend`'s own note.)
+    const selection = selected({ credentials: credentials(["anthropic"], consoleOauth) });
+    expect(selection.runtimeKind).toBe("claude-agent");
+    expect(selection.authFamily).toBe("console-oauth");
+    expect(ruleIdOf(selection)).toBe("D13-2");
+  });
+
   test("D13 row 2 — a cloud credential chain is a backend the official branch serves, dialect notwithstanding", () => {
     // Bedrock's catalog dialect is `bedrock-converse`, NOT the Anthropic one — it reaches the official
     // branch through WS-14 §12's auth table, which is the distinction this test pins.
@@ -129,10 +141,25 @@ describe("D13 row 3 — the Winter runtime", () => {
     expect(ruleIdOf(selection)).toBe("D13-3-endpoint");
   });
 
-  test("D13 row 3 — a console-OAuth Anthropic credential is not a family the official branch serves", () => {
-    const selection = selected({ credentials: credentials(["anthropic"], { anthropic: { authFamily: "console-oauth", protocols: ["anthropic-messages"] } }) });
+  test("D13 row 3 — a console-OAuth credential on a non-Anthropic-dialect backend routes to Winter", () => {
+    // The protocol gate applies to `console-oauth` exactly as it does to `api-key`: a token-priced
+    // bearer does not make an OpenAI-shaped reseller an Anthropic-protocol backend.
+    const selection = selected({
+      requested: { slot: "opus", provider: "kie" },
+      credentials: credentials(["kie"], { kie: { authFamily: "console-oauth", protocols: ["openai-chat-completions"] } }),
+    });
     expect(selection.runtimeKind).toBe("winter-agent");
+    expect(selection.authFamily).toBe("console-oauth");
     expect(ruleIdOf(selection)).toBe("D13-3-endpoint");
+  });
+
+  test("D13 row 3 — a console-OAuth Code session in Dispatch or Chat still runs on Winter", () => {
+    for (const mode of ["dispatch", "chat"] as const) {
+      const selection = selected({ mode, credentials: credentials(["anthropic"], consoleOauth) });
+      expect(selection.runtimeKind).toBe("winter-agent");
+      expect(selection.authFamily).toBe("console-oauth");
+      expect(ruleIdOf(selection)).toBe("D13-3-mode");
+    }
   });
 
   test("D13 row 3 — Dispatch and Chat run on Winter even on the Anthropic-protocol backend", () => {
@@ -385,6 +412,33 @@ describe("the structural rules", () => {
     }
     // …and the accepted path returns the record itself.
     expect(sdk.selectRuntime(input({ hasClaudePeer: false })).runtimeKind).toBe("winter-agent");
+  });
+
+  test("officialServesBackend agrees with OFFICIAL_SERVED_AUTH_FAMILIES for every auth family", () => {
+    // M2: the served set has ONE home, and this is the test that keeps the predicate derived from it.
+    // Anthropic-dialect and OpenAI-dialect views for each family, so the protocol gate is visible.
+    const families: SelectionAuthFamily[] = ["api-key", "console-oauth", "cloud-credential-chain", "claude-oauth", "local-none", "custom"];
+    for (const authFamily of families) {
+      const anthropicDialect = { authFamily, protocols: ["anthropic-messages"] };
+      const otherDialect = { authFamily, protocols: ["openai-chat-completions"] };
+      const inSet = OFFICIAL_SERVED_AUTH_FAMILIES.includes(authFamily);
+      expect({ authFamily, served: officialServesBackend("anthropic", anthropicDialect) }).toEqual({ authFamily, served: inSet });
+      // Outside the set nothing is served at any dialect; inside it, only the two bearer families are
+      // protocol-gated.
+      const gated = authFamily === "api-key" || authFamily === "console-oauth";
+      expect({ authFamily, served: officialServesBackend("kie", otherDialect) }).toEqual({ authFamily, served: inSet && !gated });
+    }
+    expect([...OFFICIAL_SERVED_AUTH_FAMILIES]).toEqual(["api-key", "console-oauth", "cloud-credential-chain", "claude-oauth"]);
+  });
+
+  test("ruleIdOf never returns an inherited property name for an untrusted persisted reason", () => {
+    // M3: `in` walked the prototype chain, so a record off a host's durable store whose `reason` began
+    // `toString:` came back as a SelectionRuleId. `Object.hasOwn` is the fix.
+    const withReason = (reason: string): RuntimeSelection => ({ ...selected(), reason });
+    for (const reason of ["toString: not a rule", "constructor: not a rule", "valueOf: nope", "hasOwnProperty: no", "unknown-id: x", "no-colon-at-all"]) {
+      expect({ reason, id: ruleIdOf(withReason(reason)) }).toEqual({ reason, id: undefined });
+    }
+    expect(ruleIdOf(withReason("D13-2: real"))).toBe("D13-2");
   });
 
   test("selectionVersionsFrom carries both peer identities out of the constructor's matrix report", () => {

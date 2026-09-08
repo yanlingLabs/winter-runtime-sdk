@@ -23,7 +23,7 @@
 // child use", it has a different answer type, and folding it into the selector would have made a
 // resume capable of re-deciding — which is the one thing it must never do.
 import type { ChildSelectionInput, RuntimeSelection, SelectionInput, SelectionRefusal } from "./runtime-selection.ts";
-import { decideRuntime, resolveCandidate } from "./select-runtime.ts";
+import { decideRuntime, resolveCandidate, resolveCandidateRows } from "./select-runtime.ts";
 
 const isRefusal = (value: unknown): value is SelectionRefusal => typeof value === "object" && value !== null && (value as SelectionRefusal).refused === true;
 
@@ -122,46 +122,55 @@ export type ChildResumeOutcome =
 /**
  * Re-resolves a child under its OWN recorded model and provider, for a resume or a SendMessage.
  *
- * THE ONE COMPARISON THIS FUNCTION EXISTS FOR: "the resolved provider id must equal the recorded one".
- * So it resolves the recorded `modelRef` — the provider-qualified catalog key, which is why row 17's
- * identity matters — against the CURRENT listing and credential map, and then checks that what came
- * back is the same provider the record names. Anything else is a refusal: not a substitution onto
- * whichever provider still has a credential, which is exactly the silent re-routing WS-13c §4's
- * "never a substitution; never a different family" forbids, and which would strand a session's
- * continuation on a backend it never ran on.
+ * WHAT IT ASKS, precisely: "is the row this child is RECORDED on still servable?" — not "which row
+ * would a fresh decision pick". WS-10's Phase 6.6 amendment requires that "the resolved provider id
+ * must equal the recorded one", and the recorded provider is PINNED into the resolution
+ * (`provider: record.providerId`), so `candidatesFor` drops every other provider's rows before this
+ * function ever sees them: provider equality is enforced by the pin, not by a comparison afterwards.
+ * (It used to be a comparison afterwards, which review r1's M1 measured as unreachable — a live-looking
+ * guard that no drifted catalog could fire.)
  *
- * THE RUNTIME IS NEVER RE-DECIDED EITHER. Even when the fresh resolution succeeds, the returned
- * selection is the persisted record, not a new one — "resume and SendMessage follow the child's
- * record, never the parent's current runtime" (R-7b-1), and a resume that re-ran the D13 table could
- * move a live child between runtimes on a credential change.
+ * The two things the pin does NOT enforce, and which this function therefore checks:
+ *
+ *   1. THE ROW ITSELF. One provider can serve two rows for one canonical model, so "the pinned
+ *      provider still serves this model" is weaker than "the recorded row is still there". The
+ *      recorded `modelRef` is a provider-qualified row key (row 17's whole point), and it must appear
+ *      among the servable candidates.
+ *   2. THE FAMILY. A row key can move between families across a catalog regeneration, and continuing
+ *      a `claude` child on a row that is now in another family would be "a substitution… a different
+ *      family", which WS-13c §4 forbids in exactly those words.
+ *
+ * Either miss is a refusal, never a fall-back onto whichever sibling row still has a credential — that
+ * silent re-routing is what would strand a session's continuation on a backend it never ran on.
+ *
+ * THE RUNTIME IS NEVER RE-DECIDED EITHER. Even when the resolution succeeds, the returned selection is
+ * the persisted record, not a new one — "resume and SendMessage follow the child's record, never the
+ * parent's current runtime" (R-7b-1), and a resume that re-ran the D13 table could move a live child
+ * between runtimes on a credential change.
  */
 export function resumeChildSelection(record: RuntimeSelection, context: Omit<ChildSelectionInput, "slot" | "model" | "provider">): ChildResumeOutcome {
-  const resolved = resolveCandidate(
-    childInput({
-      ...context,
-      model: record.modelRef,
-      provider: record.providerId,
-    }),
-  );
-  if (isRefusal(resolved)) {
+  const input = childInput({ ...context, model: record.modelRef, provider: record.providerId });
+  const rows = resolveCandidateRows({ ...input, requested: { ...input.requested, model: record.modelRef } });
+  if (isRefusal(rows)) {
     return {
       kind: "unavailable",
       retryable: false,
-      reason: `${CHILD_PROVIDER_UNAVAILABLE}: ${record.modelRef} on provider ${record.providerId} — ${resolved.detail}`,
+      reason: `${CHILD_PROVIDER_UNAVAILABLE}: ${record.modelRef} on provider ${record.providerId} — ${rows.detail}`,
     };
   }
-  if (resolved.row.providerId !== record.providerId) {
+  const recorded = rows.find((candidate) => candidate.row.key === record.modelRef);
+  if (recorded === undefined) {
     return {
       kind: "unavailable",
       retryable: false,
-      reason: `${CHILD_PROVIDER_UNAVAILABLE}: this child is recorded on provider ${record.providerId} (${record.modelRef}) and its recorded model now resolves to ${resolved.row.providerId} (${resolved.row.key}); a resumed child re-resolves under its OWN recorded model and provider and the resolved provider id must equal the recorded one (WS-10, Phase 6.6 amendment)`,
+      reason: `${CHILD_PROVIDER_UNAVAILABLE}: this child is recorded on the row ${record.modelRef} (provider ${record.providerId}), which is no longer among the servable rows for that provider (now: ${rows.map((candidate) => candidate.row.key).join(", ")}); a resumed child re-resolves under its OWN recorded model and provider (WS-10, Phase 6.6 amendment)`,
     };
   }
-  if (resolved.family !== record.family) {
+  if (recorded.family !== record.family) {
     return {
       kind: "unavailable",
       retryable: false,
-      reason: `${CHILD_PROVIDER_UNAVAILABLE}: this child is recorded in the ${record.family} family and its recorded model now resolves into ${resolved.family}; never a substitution, never a different family (WS-13c §4)`,
+      reason: `${CHILD_PROVIDER_UNAVAILABLE}: this child is recorded in the ${record.family} family and its recorded row ${record.modelRef} now resolves into ${recorded.family}; never a substitution, never a different family (WS-13c §4)`,
     };
   }
   return { kind: "resumed", selection: record };

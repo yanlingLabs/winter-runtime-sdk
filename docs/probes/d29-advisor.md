@@ -30,6 +30,12 @@ is not the pin, a launch that throws, or a run that never yields `system/init`).
 | Requests observed | every condition: `HEAD /api/hello` then `POST /v1/messages`, both to the loopback fake. No other path, and no real endpoint was configured for it to reach |
 | Trace | the SDK's yielded messages, run through `@yanlinglabs/winter-conformance`'s `normalizeTrace` — the same normalizer the SDK repository's differential uses |
 
+**Provenance of condition H's variable** (review r1, N5): `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL`
+was found in the **pinned artifact's own strings** while orienting (beside a disable twin), not in any
+public documentation — this record has not checked it against published docs, and says "the
+experimental enable variable" only in that sense. It is named here because the probe SET it, which is a
+fact about the probe; nothing about the router depends on it.
+
 **A methodological catch worth keeping.** During development this probe was first run from a scratch
 directory, where the same import specifier resolved to a **different version** out of a global install
 cache (`0.3.265`, `claude-cli/2.1.265`) rather than to the repository's pin. The test now asserts the
@@ -69,6 +75,12 @@ configured advisor model. It carries no input schema: nothing about it is client
 
 In condition I the block came back to the SDK consumer **verbatim**, as an assistant content block
 `server_tool_use` named `advisor` — with no client-side tool ever having been advertised for it.
+
+**One observation banked for Lane A** (review r1, N6), visible in every condition above and in the CI
+log: the wire tool list names **`Agent`** where `init.tools` names **`Task`**. That is the runtime's own
+client-name → wire-name mapping, and it is the only name in the set that differs between the two lists —
+`SendMessage` and `ListAgents`, the two WS-14 §7 aliases, appear unchanged in both. Anything reasoning
+about alias identity should compare against the list it actually means.
 
 ## 3. Verdict
 

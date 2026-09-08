@@ -4,7 +4,8 @@
 // nothing else: given what the session asked for, which providers have a configured credential ref,
 // which runtimes this router actually holds, and which mode the session is in, it produces the record
 // that is PERSISTED AT SESSION CREATION and read on every later resume. It touches no filesystem, no
-// clock the caller did not hand it (`SelectionInput.now`), no environment and no credential material.
+// environment, no credential material, and no clock the caller did not hand it (`SelectionInput.now`)
+// — except the `decidedAt` stamp, which falls back to the wall clock when `now` is omitted.
 //
 // THREE PROPERTIES THE STRUCTURE ENFORCES, rather than merely intending:
 //
@@ -84,8 +85,15 @@ export const D14_CLAUDE_OAUTH_APPROVED_DEFAULT = false;
 /** What a `RuntimeSelection` records when the caller supplied no version identity for that runtime. */
 export const UNKNOWN_VERSION = "unknown";
 
-/** The auth families the official branch serves (R-7b-1, verbatim), before any per-rule gate. */
-export const OFFICIAL_SERVED_AUTH_FAMILIES: readonly SelectionAuthFamily[] = ["api-key", "cloud-credential-chain", "claude-oauth"];
+/**
+ * The auth families the official branch serves (R-7b-1 as clarified 2026-09-08), before any per-rule
+ * gate.
+ *
+ * THE ONE HOME FOR THE SET. `officialServesBackend` DERIVES from this list rather than restating it —
+ * the alternative was two places to edit, and review r1's I1 was the first time that cost something
+ * real (a family was added to the rule and the constant said otherwise, with nothing failing).
+ */
+export const OFFICIAL_SERVED_AUTH_FAMILIES: readonly SelectionAuthFamily[] = ["api-key", "console-oauth", "cloud-credential-chain", "claude-oauth"];
 
 // --- the rules, by id -----------------------------------------------------------------------------
 
@@ -113,10 +121,17 @@ export function reasonFor(rule: SelectionRuleId): string {
   return `${rule}: ${SELECTION_RULES[rule]}`;
 }
 
-/** The rule id a produced record was decided by, recovered from its `reason`. */
+/**
+ * The rule id a produced record was decided by, recovered from its `reason`.
+ *
+ * `Object.hasOwn`, NOT `in` — `in` walks the prototype chain, so a persisted record whose `reason`
+ * began `toString:` would have come back as a `SelectionRuleId` and `SELECTION_RULES[id]` would have
+ * handed the caller a `Function` where it expects a sentence. A `RuntimeSelection` arrives off a
+ * host's durable store, so it is exactly the kind of input that must not be trusted to be one of ours.
+ */
 export function ruleIdOf(selection: RuntimeSelection): SelectionRuleId | undefined {
   const id = selection.reason.slice(0, selection.reason.indexOf(":"));
-  return id in SELECTION_RULES ? (id as SelectionRuleId) : undefined;
+  return Object.hasOwn(SELECTION_RULES, id) ? (id as SelectionRuleId) : undefined;
 }
 
 // --- the listing, read the way WS-13c §4 reads it -------------------------------------------------
@@ -182,21 +197,31 @@ export function speaksAnthropicProtocol(providerId: string, auth: ProviderAuthVi
 /**
  * Can the OFFICIAL branch serve this backend at all? (R-7b-1's served set, WS-14 §12's table.)
  *
- * Three ways in, and no fourth: an approved Claude OAuth (gated separately, because it is D13's own
- * row 1); a cloud credential chain, which is WS-14 §12's Bedrock and Vertex rows — their wire dialects
- * are not `anthropic-messages`, and the official runtime speaks them itself, so the auth family is
- * the honest test there; and an API key on a backend that speaks the Anthropic dialect, which is
- * WS-13 §9's row 2 and the one place the protocol test does the work.
+ * MEMBERSHIP FIRST, THEN THE PROTOCOL GATE. A family outside `OFFICIAL_SERVED_AUTH_FAMILIES` is not
+ * served, full stop; a family inside it is served either unconditionally or only on a backend that
+ * speaks the Anthropic dialect, and which of the two it is follows from what the family means:
  *
- * `console-oauth` is deliberately NOT in the set. R-7b-1 names exactly three served families, and
- * WS-13c §6 puts a Console OAuth credential on Winter's own `anthropic` leg ("api-key or Console OAuth
- * credential"). Adding it here would be a routing decision no spec makes.
+ *   `claude-oauth`             — served (and gated separately, because it is D13's own row 1).
+ *   `cloud-credential-chain`   — served. These are WS-14 §12's Bedrock and Vertex rows: their catalog
+ *                                dialects are NOT `anthropic-messages`, and the official runtime
+ *                                speaks them itself, so the auth family is the honest test there.
+ *   `api-key`, `console-oauth` — served ONLY on an Anthropic-dialect backend. Both are token-priced
+ *                                bearer credentials the official runtime accepts through its bearer
+ *                                variable (R-7b-1 as clarified 2026-09-08), so neither is a reason to
+ *                                route away from the official branch — but a Claude model resold over
+ *                                an OpenAI-shaped endpoint still is, which is WS-13 §9's row 3 and the
+ *                                one place the protocol test does the work.
+ *
+ * `console-oauth` was excluded here until review r1's I1. The reasoning had been WS-13c §6's "the
+ * `anthropic` provider first (api-key or Console OAuth credential)" — but that sentence sits inside
+ * §6's WINTER-ALONE paragraph, and the router leg is the next sentence ("With the runtime SDK present:
+ * `claude` slots prefer the official SDK per D13"). The exclusion was never required by the spec, and
+ * it contradicted D28's "anthropic models always prefer claude agent sdk".
  */
 export function officialServesBackend(providerId: string, auth: ProviderAuthView): boolean {
-  if (auth.authFamily === "claude-oauth") return true;
-  if (auth.authFamily === "cloud-credential-chain") return true;
-  if (auth.authFamily === "api-key") return speaksAnthropicProtocol(providerId, auth);
-  return false;
+  if (!OFFICIAL_SERVED_AUTH_FAMILIES.includes(auth.authFamily)) return false;
+  if (auth.authFamily === "api-key" || auth.authFamily === "console-oauth") return speaksAnthropicProtocol(providerId, auth);
+  return true;
 }
 
 function familyById(listing: ModelFamilyListing, id: string): FamilyEntry | undefined {
@@ -295,6 +320,30 @@ const isRefusal = (value: unknown): value is SelectionRefusal => typeof value ==
  * `admission.tier`). This package re-sorts nothing: the listing is produced by the code that owns
  * those rules, and a second ordering here would be a second answer.
  */
+/** A candidate list that is non-empty BY TYPE, so a caller never has to guard an impossible empty. */
+export type NonEmptyCandidates = [SelectionCandidate, ...SelectionCandidate[]];
+
+/**
+ * EVERY candidate row for an explicitly named model or catalog row key, in the listing's own order.
+ *
+ * `resolveCandidate` below takes the first of these and is what a fresh decision uses. A RESUME needs
+ * the whole list instead (`resumeChildSelection`): its question is not "which row would we pick now"
+ * but "is the row this child is RECORDED on still servable", and those differ the moment one provider
+ * serves two rows for one canonical model. Review r1's M1 is exactly that difference — the old code
+ * compared against the first row and called it a provider check, which the provider pin had already
+ * guaranteed.
+ */
+export function resolveCandidateRows(input: SelectionInput & { requested: { model: string } }): NonEmptyCandidates | SelectionRefusal {
+  const resolved = resolveModel(input.families, input.requested.model);
+  if (isRefusal(resolved)) return resolved;
+  const candidates = candidatesFor(input.families, resolved.familyId, resolved.canonicalModelId, input);
+  const [first, ...rest] = candidates;
+  if (first === undefined) {
+    return refuse("slot-unservable", unservableDetail(`the model ${JSON.stringify(input.requested.model)} (${resolved.familyId}/${resolved.canonicalModelId})`, input));
+  }
+  return [first, ...rest];
+}
+
 export function resolveCandidate(input: SelectionInput): SelectionCandidate | SelectionRefusal {
   const listing = input.families;
   if (input.requested.slot !== undefined) {
@@ -306,12 +355,9 @@ export function resolveCandidate(input: SelectionInput): SelectionCandidate | Se
     return refuse("slot-unservable", unservableDetail(`the slot ${JSON.stringify(input.requested.slot)} (${resolved.familyId}/${resolved.canonicalModelId})`, input));
   }
   if (input.requested.model !== undefined) {
-    const resolved = resolveModel(listing, input.requested.model);
-    if (isRefusal(resolved)) return resolved;
-    const candidates = candidatesFor(listing, resolved.familyId, resolved.canonicalModelId, input);
-    const first = candidates[0];
-    if (first !== undefined) return first;
-    return refuse("slot-unservable", unservableDetail(`the model ${JSON.stringify(input.requested.model)} (${resolved.familyId}/${resolved.canonicalModelId})`, input));
+    const rows = resolveCandidateRows({ ...input, requested: { ...input.requested, model: input.requested.model } });
+    if (isRefusal(rows)) return rows;
+    return rows[0];
   }
   const active = listing.active;
   if (active === undefined) {

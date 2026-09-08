@@ -64,6 +64,16 @@ export type RuntimeKind = "winter-agent" | "claude-agent";
 export interface RuntimeSelection {
   runtimeKind: RuntimeKind;
   providerId: string;
+  /**
+   * The provider-qualified catalog **row key** (`anthropic/claude-opus-5`) — this session's model
+   * IDENTITY, never the raw model id.
+   *
+   * READ IT AS AN IDENTITY, NOT AS A WIRE VALUE. The id a runtime actually sends is derived from the
+   * row, never from this field: handing `modelRef` straight to a runtime's `model` option sends the
+   * provider prefix with it, and that fails at the endpoint rather than at compile time. WS-17 row 17
+   * is why the field is qualified at all — `claude-opus-5` is six catalog rows behind six providers,
+   * and two sessions on two of them must not persist byte-identical records.
+   */
   modelRef: string;
   family: string;
   authFamily: "api-key" | "cloud-credential-chain" | "claude-oauth" | "console-oauth" | "local-none" | "custom";

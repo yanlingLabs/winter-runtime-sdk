@@ -11,7 +11,7 @@ import { CHILD_PROVIDER_UNAVAILABLE, resumeChildSelection, selectChildRuntime, s
 import { isSelectionRefusal } from "../../src/selection/runtime-selection.ts";
 import type { ChildSelectionInput, RuntimeSelection, SelectionRefusal } from "../../src/selection/runtime-selection.ts";
 import { ruleIdOf, selectRuntime } from "../../src/selection/select-runtime.ts";
-import { credentials, listing, NOW, VERSIONS } from "./fixtures.ts";
+import { claudeFamily, credentials, listing, NOW, row, VERSIONS } from "./fixtures.ts";
 
 const ALL_PROVIDERS = ["anthropic", "bedrock", "kie", "agentrouter", "openai", "azure-openai", "google", "vertex"];
 
@@ -189,6 +189,97 @@ describe("WS-13c §8 — resume follows the child's own record", () => {
     if (outcome.kind !== "unavailable") throw new Error("unreachable");
     expect(outcome.reason).toContain("kie");
     expect(outcome.reason).toContain(CHILD_PROVIDER_UNAVAILABLE);
+  });
+
+  test("WS-13c §8 — a resume succeeds on a recorded row that is not its provider's first row", () => {
+    // One provider, TWO rows for one canonical model — the shape the pinned resolution alone cannot
+    // distinguish. The child is recorded on the SECOND row, and the resume must accept it: comparing
+    // against the first candidate (what this function used to do) would refuse a perfectly live child.
+    const twoRows = {
+      ...claudeFamily,
+      models: [
+        {
+          canonicalModelId: "claude-opus-5",
+          displayName: "Opus 5",
+          rows: [row("anthropic/claude-opus-5", "anthropic"), row("anthropic/claude-opus-5-20260301", "anthropic")],
+        },
+      ],
+    };
+    const record: RuntimeSelection = {
+      runtimeKind: "claude-agent",
+      providerId: "anthropic",
+      modelRef: "anthropic/claude-opus-5-20260301",
+      family: "claude",
+      authFamily: "api-key",
+      sdkVersion: "0.3.250",
+      reason: "recorded at spawn",
+      decidedAt: NOW,
+    };
+    const outcome = resumeChildSelection(record, resumeContext({ families: listing(undefined, [twoRows]) }));
+    expect(outcome.kind).toBe("resumed");
+    if (outcome.kind !== "resumed") throw new Error("unreachable");
+    expect(outcome.selection).toBe(record);
+  });
+
+  test("WS-13c §8 — a resume refuses when the recorded ROW is unservable though its provider still serves the model", () => {
+    // The dated row was deprecated in a catalog regeneration; the provider still serves the model
+    // through its sibling row. Continuing there would be a substitution the child never ran on — and
+    // it is the case the provider pin cannot catch, because the pin is satisfied by the sibling.
+    const rowGone = {
+      ...claudeFamily,
+      models: [
+        {
+          canonicalModelId: "claude-opus-5",
+          displayName: "Opus 5",
+          rows: [row("anthropic/claude-opus-5", "anthropic"), row("anthropic/claude-opus-5-20260301", "anthropic", { status: "deprecated" })],
+        },
+      ],
+    };
+    const record: RuntimeSelection = {
+      runtimeKind: "claude-agent",
+      providerId: "anthropic",
+      modelRef: "anthropic/claude-opus-5-20260301",
+      family: "claude",
+      authFamily: "api-key",
+      sdkVersion: "0.3.250",
+      reason: "recorded at spawn",
+      decidedAt: NOW,
+    };
+    const outcome = resumeChildSelection(record, resumeContext({ families: listing(undefined, [rowGone]) }));
+    expect(outcome.kind).toBe("unavailable");
+    if (outcome.kind !== "unavailable") throw new Error("unreachable");
+    expect(outcome.retryable).toBe(false);
+    expect(outcome.reason).toContain(CHILD_PROVIDER_UNAVAILABLE);
+    expect(outcome.reason).toContain("anthropic/claude-opus-5-20260301");
+    expect(outcome.reason).toContain("no longer among the servable rows");
+  });
+
+  test("WS-13c §8 — a resume refuses when the recorded row has moved into another family", () => {
+    // A row key that changed families across a regeneration: "never a substitution, never a different
+    // family" (WS-13c §4), so the child is unavailable rather than quietly continued.
+    const moved = {
+      ...claudeFamily,
+      id: "other",
+      displayName: "other",
+      slots: [],
+      models: [{ canonicalModelId: "claude-opus-5", displayName: "Opus 5", rows: [row("anthropic/claude-opus-5", "anthropic")] }],
+    };
+    const record: RuntimeSelection = {
+      runtimeKind: "claude-agent",
+      providerId: "anthropic",
+      modelRef: "anthropic/claude-opus-5",
+      family: "claude",
+      authFamily: "api-key",
+      sdkVersion: "0.3.250",
+      reason: "recorded at spawn",
+      decidedAt: NOW,
+    };
+    const outcome = resumeChildSelection(record, resumeContext({ families: listing(undefined, [moved]) }));
+    expect(outcome.kind).toBe("unavailable");
+    if (outcome.kind !== "unavailable") throw new Error("unreachable");
+    expect(outcome.retryable).toBe(false);
+    expect(outcome.reason).toContain("now resolves into other");
+    expect(outcome.reason).toContain("never a different family");
   });
 
   test("WS-13c §8 — a resume never re-decides the runtime, even when the table would now differ", () => {

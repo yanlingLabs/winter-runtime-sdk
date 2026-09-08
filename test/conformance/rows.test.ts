@@ -39,7 +39,17 @@ export interface RouterRow {
   /** Which lane's landing flips this row (or which one already did). */
   owner: string;
   citations?: Citation[];
+  /** Context a reader of the table needs — rendered IN the table, not only under the citations. */
   note?: string;
+  /**
+   * Set when this row's claim is NARROWER than WS-17's own sentence, so the status cell says so.
+   *
+   * Only WS17-13 carries it: its bullet says "the Winter distribution" and "ephemeral CI fetch only",
+   * and what the router proves is its OWN distribution plus a `--frozen-lockfile` install into a
+   * gitignored tree. Every other note is context, not a narrower claim, and labelling those "scoped"
+   * would make the word mean nothing.
+   */
+  scoped?: true;
 }
 
 const SELECTION = "../selection";
@@ -109,6 +119,7 @@ export const ROUTER_ROWS: RouterRow[] = [
     id: "WS17-13",
     bullet: "No verbatim all-rights-reserved artifacts in the Winter distribution; ephemeral CI fetch only.",
     status: "proven",
+    scoped: true,
     owner: "the spine (the packing and source gates), with this file's lockfile-integrity check",
     citations: [
       { file: `${GATES}/release-gates.test.ts`, testName: "nothing tracked is the pinned package, its bundle, or a vendored copy" },
@@ -160,7 +171,9 @@ export const RULING_ROWS: RouterRow[] = [
     citations: [
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 1 — a Claude OAuth credential routes to the official runtime, always" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 2 — a Claude-family model on an Anthropic-protocol backend in Code mode routes to the official runtime" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 2 — a Console OAuth bearer on the Anthropic-dialect backend routes to the official runtime" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 2 — a cloud credential chain is a backend the official branch serves, dialect notwithstanding" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "officialServesBackend agrees with OFFICIAL_SERVED_AUTH_FAMILIES for every auth family" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 3 — the same Claude model through a non-Anthropic-protocol endpoint routes to Winter" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 3 — Dispatch and Chat run on Winter even on the Anthropic-protocol backend" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D28 — a gpt-family slot routes to Winter even with an official peer present" },
@@ -192,6 +205,9 @@ export const RULING_ROWS: RouterRow[] = [
       { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a gpt-family child of an official parent runs on the Winter runtime" },
       { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a cross-runtime parent/child pair is flagged for the directory channel" },
       { file: `${SELECTION}/child-runtime.test.ts`, testName: "WS-13c §8 — a resume never re-decides the runtime, even when the table would now differ" },
+      { file: `${SELECTION}/child-runtime.test.ts`, testName: "WS-13c §8 — a resume succeeds on a recorded row that is not its provider's first row" },
+      { file: `${SELECTION}/child-runtime.test.ts`, testName: "WS-13c §8 — a resume refuses when the recorded ROW is unservable though its provider still serves the model" },
+      { file: `${SELECTION}/child-runtime.test.ts`, testName: "WS-13c §8 — a resume refuses when the recorded row has moved into another family" },
     ],
   },
   {
@@ -243,6 +259,21 @@ function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
+/**
+ * A row's status cell.
+ *
+ * A row whose claim is NARROWER than WS-17's own sentence says so in the STATUS, not only in a note
+ * three sections further down — review r1's M4: WS17-13's bullet says "the Winter distribution" and
+ * "ephemeral CI fetch only", while the router's evidence is its own distribution plus a
+ * `--frozen-lockfile` install into a gitignored tree. A close-out reading the table must see the
+ * scope where the claim is. Notes that are context rather than a narrower claim ride the table's own
+ * note column instead (also M4), and leave the status word alone.
+ */
+function statusCell(row: RouterRow): string {
+  if (row.status !== "proven") return "unproven";
+  return row.scoped === true ? "**proven** (router-scoped — see the note)" : "**proven**";
+}
+
 /** The checked-in document, rendered from the table above. */
 export function renderRowsDocument(): string {
   const lines: string[] = [];
@@ -258,18 +289,18 @@ export function renderRowsDocument(): string {
   lines.push("");
   lines.push("## WS-17 §8 — the router's proof rows");
   lines.push("");
-  lines.push("| Row | Status | Owner | Obligation |");
-  lines.push("| --- | --- | --- | --- |");
+  lines.push("| Row | Status | Owner | Obligation | Scope / note |");
+  lines.push("| --- | --- | --- | --- | --- |");
   for (const row of ROUTER_ROWS) {
-    lines.push(`| ${row.id} | ${row.status === "proven" ? "**proven**" : "unproven"} | ${row.owner} | ${row.bullet} |`);
+    lines.push(`| ${row.id} | ${statusCell(row)} | ${row.owner} | ${row.bullet} | ${row.note ?? "—"} |`);
   }
   lines.push("");
   lines.push("## Phase 7b rulings discharged (not WS-17 rows)");
   lines.push("");
-  lines.push("| Ruling | Status | Owner | Obligation |");
-  lines.push("| --- | --- | --- | --- |");
+  lines.push("| Ruling | Status | Owner | Obligation | Scope / note |");
+  lines.push("| --- | --- | --- | --- | --- |");
   for (const row of RULING_ROWS) {
-    lines.push(`| ${row.id} | ${row.status === "proven" ? "**proven**" : "unproven"} | ${row.owner} | ${row.bullet} |`);
+    lines.push(`| ${row.id} | ${statusCell(row)} | ${row.owner} | ${row.bullet} | ${row.note ?? "—"} |`);
   }
   lines.push("");
   lines.push("## Citations");
@@ -278,10 +309,6 @@ export function renderRowsDocument(): string {
     if (row.citations === undefined || row.citations.length === 0) continue;
     lines.push(`### ${row.id}`);
     lines.push("");
-    if (row.note !== undefined) {
-      lines.push(row.note);
-      lines.push("");
-    }
     for (const citation of row.citations) {
       lines.push(`- \`${repoRelative(citation.file)}\` — \`${citation.testName}\``);
     }
@@ -357,6 +384,17 @@ describe("WS-17 §8 — the router's conformance rows", () => {
     }
     expect(existsSync(DOC_PATH), "docs/conformance-rows.md is missing — regenerate it with WINTER_ROWS_WRITE=1").toBe(true);
     expect(readFileSync(DOC_PATH, "utf8")).toBe(rendered);
+  });
+
+  test("a scoped row says so in its status, and only a scoped row does", () => {
+    const rendered = renderRowsDocument();
+    for (const row of ALL_ROWS) {
+      const line = rendered.split("\n").find((candidate) => candidate.startsWith(`| ${row.id} |`));
+      expect(line, `${row.id} has no row in the rendered table`).toBeDefined();
+      expect(line?.includes("router-scoped"), `${row.id}: only a row flagged \`scoped\` may say so`).toBe(row.scoped === true);
+      // M4: every note reaches the table itself, not only the citations section.
+      if (row.note !== undefined) expect(line).toContain(row.note);
+    }
   });
 
   test("summary — how many rows this branch has flipped (informational)", () => {
