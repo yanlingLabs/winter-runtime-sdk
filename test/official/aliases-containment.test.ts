@@ -1,0 +1,206 @@
+// WS-14 §7/§8/§10: the alias map and the two things that are NOT the alias — the deny floor and the
+// permission bridge.
+//
+// The real-runtime halves of these rows (a model-emitted `SendMessage` arriving at the canonical
+// handler with native args; nothing creating a vendor-named path across a whole session) live in
+// `runtime-aliases.test.ts` and `runtime-containment.test.ts`. What is proven HERE is the part a live
+// session cannot show: that the argument acceptor is exact in both directions, that the floor is a
+// path rule rather than a tool-name rule, and that `dontAsk` never reaches the broker.
+import { describe, expect, test } from "bun:test";
+import { WINTER_BRAND, mcpToolName } from "@yanlinglabs/winter-agent-sdk";
+
+import {
+  ALIASED_BUILTINS,
+  CANONICAL_DUPLICATE_EXPOSURE,
+  NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
+  NATIVE_SEND_MESSAGE_SCHEMA,
+  acceptNativeListAgentsArgs,
+  acceptNativeSendMessageArgs,
+  aliasTargetFor,
+  officialToolAliases,
+} from "../../src/official/aliases.ts";
+import { containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, targetsForbiddenPath } from "../../src/official/containment.ts";
+import { createApprovalBridge, createFirstResponseWins, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
+
+const brand = WINTER_BRAND;
+
+describe("WS-14 §7 — the alias map", () => {
+  test("both built-ins point at the BRAND's own canonical tools", () => {
+    expect(officialToolAliases(brand)).toEqual({
+      SendMessage: mcpToolName(brand, "send_message"),
+      ListAgents: mcpToolName(brand, "list_agents"),
+    });
+    expect(officialToolAliases({ mcpServerName: "acme" })).toEqual({
+      SendMessage: "mcp__acme__send_message",
+      ListAgents: "mcp__acme__list_agents",
+    });
+    expect(aliasTargetFor("SendMessage", { mcpServerName: "acme" })).toBe("mcp__acme__send_message");
+    expect(ALIASED_BUILTINS.map((entry) => entry.builtin)).toEqual(["SendMessage", "ListAgents"]);
+  });
+
+  test("the canonical duplicates are DEFERRED rather than hidden — they stay addressable by name", () => {
+    expect(CANONICAL_DUPLICATE_EXPOSURE).toBe("deferred");
+  });
+
+  describe("the native argument schemas are accepted EXACTLY", () => {
+    test("SendMessage: every WS-10 §10.1 constraint, and no extra field", () => {
+      expect(acceptNativeSendMessageArgs({ to: "reviewer", message: "ping" })).toEqual({ ok: true, args: { to: "reviewer", message: "ping" } });
+      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", summary: "s", notify_when_idle: true })).toEqual({
+        ok: true,
+        args: { to: "r", message: "m", summary: "s", notify_when_idle: true },
+      });
+      // "no more" is as load-bearing as "no less": an extra field would be a second schema.
+      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", priority: "high" })).toEqual({ ok: false, reason: "unknown argument(s): priority" });
+      expect(acceptNativeSendMessageArgs({ message: "m" }).ok).toBe(false);
+      expect(acceptNativeSendMessageArgs({ to: "r" }).ok).toBe(false);
+      expect(acceptNativeSendMessageArgs({ to: "*", message: "m" })).toEqual({ ok: false, reason: "broadcast is not addressable: `to` must name one recipient" });
+      expect(acceptNativeSendMessageArgs({ to: "a\nb", message: "m" }).ok).toBe(false);
+      expect(acceptNativeSendMessageArgs({ to: "x".repeat(301), message: "m" }).ok).toBe(false);
+      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", summary: "s".repeat(201) }).ok).toBe(false);
+      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", notify_when_idle: "yes" }).ok).toBe(false);
+      expect(acceptNativeSendMessageArgs("nope").ok).toBe(false);
+      // An empty message is legal — WS-10 §10.1: `""` is the pure idle subscription.
+      expect(acceptNativeSendMessageArgs({ to: "r", message: "", notify_when_idle: true }).ok).toBe(true);
+    });
+
+    test("ListAgents: two reserved optional fields, nothing else, and its output shape is pinned", () => {
+      expect(acceptNativeListAgentsArgs({})).toEqual({ ok: true, args: {} });
+      expect(acceptNativeListAgentsArgs(undefined)).toEqual({ ok: true, args: {} });
+      expect(acceptNativeListAgentsArgs({ channel: "c", q: "q" })).toEqual({ ok: true, args: { channel: "c", q: "q" } });
+      expect(acceptNativeListAgentsArgs({ limit: 5 }).ok).toBe(false);
+      expect(acceptNativeListAgentsArgs({ q: "x".repeat(257) }).ok).toBe(false);
+      expect(NATIVE_LIST_AGENTS_OUTPUT_SCHEMA.required).toEqual(["listing"]);
+    });
+
+    test("the mirrored schema keeps WS-10 §10.1's own constraints where a reader will look for them", () => {
+      expect(NATIVE_SEND_MESSAGE_SCHEMA.required).toEqual(["to", "message"]);
+      expect(NATIVE_SEND_MESSAGE_SCHEMA.properties.to.maxLength).toBe(300);
+      expect(NATIVE_SEND_MESSAGE_SCHEMA.properties.summary.maxLength).toBe(200);
+    });
+  });
+});
+
+describe("WS-14 §8 — builtin-path containment", () => {
+  test("the dispositions redirect into the BRAND's own project directory", () => {
+    expect(containmentPaths({ projectDirName: ".acme" })).toEqual({
+      worktrees: ".acme/worktrees",
+      workflows: ".acme/workflows",
+      plans: ".acme/plans",
+      localSettings: ".acme/settings.local.json",
+    });
+    const rows = containmentDispositions(brand);
+    expect(rows.map((row) => row.disposition)).toEqual(["redirect", "disable", "redirect", "disable", "owned-by-product", "deny"]);
+    // §16 q2 is FIXED as `disable`, with the host able to choose the other answer explicitly.
+    expect(containmentDispositions(brand, { savedWebFetchApprovals: "redirect" })[3]).toMatchObject({ disposition: "redirect", target: ".winter/settings.local.json" });
+    expect(officialDisallowedTools()).toEqual(["CronCreate"]);
+  });
+
+  test("the forbidden-target predicate matches SEGMENTS, never substrings", () => {
+    expect(targetsForbiddenPath("/w/CLAUDE.md")).toEqual({ forbidden: true, target: "CLAUDE.md" });
+    expect(targetsForbiddenPath("/w/.claude/settings.json")).toEqual({ forbidden: true, target: ".claude" });
+    expect(targetsForbiddenPath("/Users/u/.claude/plans/p.md")).toEqual({ forbidden: true, target: ".claude/plans" });
+    for (const near of ["/w/MY_CLAUDE.mdx", "/w/CLAUDE.md.bak", "/w/.claude-backup/x", "/w/claude/x", "/w/notes/claude.md"]) {
+      expect([near, targetsForbiddenPath(near).forbidden]).toEqual([near, false]);
+    }
+  });
+
+  test("the floor is a PATH rule, so it covers tools no disposition anticipated", () => {
+    expect(containmentDecisionFor("Write", { file_path: "/w/CLAUDE.md", content: "x" }).allow).toBe(false);
+    expect(containmentDecisionFor("NotebookEdit", { notebook_path: "/w/.claude/x.ipynb" }).allow).toBe(false);
+    expect(containmentDecisionFor("SomeToolInventedTomorrow", { path: "/w/.claude/anything" }).allow).toBe(false);
+    expect(containmentDecisionFor("Bash", { command: "mkdir -p ~/.claude/plans" }).allow).toBe(false);
+    expect(containmentDecisionFor("Bash", { command: "echo hi > CLAUDE.md" }).allow).toBe(false);
+    expect(containmentDecisionFor("CronCreate", { durable: true, schedule: "* * * * *" }).allow).toBe(false);
+    // …and it does not deny the ordinary work of the session
+    expect(containmentDecisionFor("Write", { file_path: "/w/.winter/plans/p.md", content: "x" }).allow).toBe(true);
+    expect(containmentDecisionFor("Bash", { command: "ls -la" }).allow).toBe(true);
+    expect(containmentDecisionFor("CronCreate", { durable: false }).allow).toBe(true);
+  });
+});
+
+describe("WS-14 §10 — callback bridging", () => {
+  const options = (over: Partial<Omit<ApprovalRequest, "toolName" | "input">> = {}): Omit<ApprovalRequest, "toolName" | "input"> => ({
+    signal: new AbortController().signal,
+    requestId: "req-1",
+    toolUseID: "toolu-1",
+    ...over,
+  });
+
+  test("the broker's typed result is carried back verbatim, and `null` is unspellable at this seam", async () => {
+    const seen: ApprovalRequest[] = [];
+    const bridge = createApprovalBridge({
+      brand,
+      mode: "default",
+      broker: async (request) => {
+        seen.push(request);
+        return { behavior: "allow", updatedInput: { ...request.input, redacted: true }, updatedPermissions: [], toolUseID: request.toolUseID };
+      },
+    });
+    const result = await bridge("Read", { file_path: "/w/x.ts" }, options({ agentID: "agent-9", suggestions: [], decisionReason: "ask rule" }));
+    expect(result).toEqual({ behavior: "allow", updatedInput: { file_path: "/w/x.ts", redacted: true }, updatedPermissions: [], toolUseID: "toolu-1" });
+    // §10: requestId, toolUseID, agentID and the suggestions all reach the broker.
+    expect(seen[0]).toMatchObject({ requestId: "req-1", toolUseID: "toolu-1", agentID: "agent-9", toolName: "Read", decisionReason: "ask rule" });
+  });
+
+  test("`dontAsk` NEVER invokes the callback", async () => {
+    let called = 0;
+    const bridge = createApprovalBridge({
+      brand,
+      mode: "dontAsk",
+      broker: async () => {
+        called += 1;
+        return { behavior: "deny", message: "should never run" };
+      },
+    });
+    const result = await bridge("Read", { file_path: "/w/x.ts" }, options());
+    expect(called).toBe(0);
+    expect(result).toEqual({ behavior: "allow", updatedInput: { file_path: "/w/x.ts" }, toolUseID: "toolu-1" });
+  });
+
+  test("the containment floor runs BEFORE the broker — and `dontAsk` does not lift it", async () => {
+    let called = 0;
+    const sources: string[] = [];
+    const make = (mode: "default" | "dontAsk" | "bypassPermissions") =>
+      createApprovalBridge({
+        brand,
+        mode,
+        onDecision: ({ source }) => sources.push(source),
+        broker: async () => {
+          called += 1;
+          return { behavior: "allow" };
+        },
+      });
+    for (const mode of ["default", "dontAsk", "bypassPermissions"] as const) {
+      const result = await make(mode)("Write", { file_path: "/w/.claude/settings.json" }, options());
+      expect([mode, result.behavior]).toEqual([mode, "deny"]);
+    }
+    expect(called).toBe(0);
+    expect(sources).toEqual(["containment-floor", "containment-floor", "containment-floor"]);
+  });
+
+  test("a resumed decision revalidates all FIVE facts, and first response wins", () => {
+    const decision = {
+      requestId: "req-1",
+      toolUseID: "toolu-1",
+      sessionId: "s1",
+      policyVersion: "v3",
+      normalizedPaths: ["/w/a.ts", "/w/b.ts"],
+      runtimeOwner: "claude-agent",
+    };
+    const live = { ...decision } as const;
+    expect(revalidateResumedDecision(decision, live)).toEqual({ valid: true });
+    // order-insensitive on paths, and identity-sensitive on everything else
+    expect(revalidateResumedDecision(decision, { ...live, normalizedPaths: ["/w/b.ts", "/w/a.ts"] })).toEqual({ valid: true });
+    expect(revalidateResumedDecision(decision, { ...live, sessionId: "s2" }).valid).toBe(false);
+    expect(revalidateResumedDecision(decision, { ...live, toolUseID: "toolu-2" }).valid).toBe(false);
+    expect(revalidateResumedDecision(decision, { ...live, policyVersion: "v4" }).valid).toBe(false);
+    expect(revalidateResumedDecision(decision, { ...live, runtimeOwner: "winter-agent" }).valid).toBe(false);
+    expect(revalidateResumedDecision(decision, { ...live, normalizedPaths: ["/w/a.ts"] }).valid).toBe(false);
+
+    const latch = createFirstResponseWins();
+    expect(latch.claim("req-1")).toBe(true);
+    expect(latch.claim("req-1")).toBe(false);
+    expect(latch.claim("req-2")).toBe(true);
+    expect(latch.claimed()).toEqual(["req-1", "req-2"]);
+  });
+});
