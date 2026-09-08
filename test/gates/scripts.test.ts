@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { entriesFor, missingPeerDeclarations, peerPackageDir, rewriteDeclarationSpecifiers } from "../../scripts/build-packages.ts";
-import { scanExtracted } from "../../scripts/release-pack.ts";
+import { moduleSpecifiersIn, reachableDeclarations, scanExtracted } from "../../scripts/release-pack.ts";
 import { assertInstalledTreeIsDistOnly, deriveImportTargets, runtimesFor } from "../../scripts/smoke-installed.ts";
 import { checkReleaseVersion, versionFromRef } from "../../scripts/check-release-version.ts";
 import { withTempDir } from "../../src/testing/index.ts";
@@ -90,6 +90,43 @@ describe("release-pack's tarball scan", () => {
     expect(await scanSynthetic({ "dist/credentials.js": "" }, cleanManifest)).toEqual([]);
   });
 
+  test("rule 7: the OPTIONAL peer named in a REACHABLE declaration is rejected -- and only there", async () => {
+    const manifest = { name: "@yanlinglabs/winter-runtime-sdk", types: "./dist/index.d.ts", exports: { ".": { types: "./dist/index.d.ts", default: "./dist/index.js" } } };
+    const clean = {
+      "dist/index.js": "export {};",
+      "dist/index.d.ts": 'export * from "./seams/index.js";\n',
+      "dist/seams/index.d.ts": 'export type { OfficialAdapter } from "./official-adapter.js";\n',
+      "dist/seams/official-adapter.d.ts": "export interface OfficialAdapter { launch(): void }\n",
+    };
+    expect(await scanSynthetic(clean, manifest)).toEqual([]);
+
+    // A specifier in a file the `types` entry reaches: REJECTED.
+    const reachable = { ...clean, "dist/seams/official-adapter.d.ts": 'import type { Options } from "@anthropic-ai/claude-agent-sdk";\nexport type O = Options;\n' };
+    expect((await scanSynthetic(reachable, manifest)).join("\n")).toContain("forces every consumer to install an OPTIONAL peer");
+
+    // The SAME specifier in a file nothing reaches (Lane A's own internals): allowed, by design.
+    const unreachable = { ...clean, "dist/official/adapter.d.ts": 'import type { Options } from "@anthropic-ai/claude-agent-sdk";\nexport type O = Options;\n' };
+    expect(await scanSynthetic(unreachable, manifest)).toEqual([]);
+
+    // A doc COMMENT naming the peer is not a specifier -- the false positive that would otherwise
+    // teach everyone to delete the explanation.
+    const commented = { ...clean, "dist/seams/official-adapter.d.ts": '/** not `typeof import("@anthropic-ai/claude-agent-sdk")` -- see the header */\nexport interface OfficialAdapter { launch(): void }\n' };
+    expect(await scanSynthetic(commented, manifest)).toEqual([]);
+  });
+
+  test("the declaration walker and the specifier extractor (plants)", () => {
+    expect(moduleSpecifiersIn('import type { A } from "./a.js";\nexport * from "pkg";\n')).toEqual(["./a.js", "pkg"]);
+    expect(moduleSpecifiersIn('type X = import("./b.js").B;')).toEqual(["./b.js"]);
+    expect(moduleSpecifiersIn('// import { x } from "commented";\n')).toEqual([]);
+    expect(moduleSpecifiersIn('/* from "blocked" */\nexport {};')).toEqual([]);
+    // A KNOWN LIMIT, asserted rather than wished away: a `from "…"` inside a STRING LITERAL TYPE is
+    // indistinguishable from a specifier without a parser, so the extractor reports it. The failure
+    // direction is a false POSITIVE -- loud, and fixable by rewording -- and no declaration this
+    // package emits carries such a type. A false negative would be the dangerous one, and comments
+    // (the only realistic source of one) are stripped.
+    expect(moduleSpecifiersIn('const s = "from \'in-a-string\'";')).toEqual(["in-a-string"]);
+  });
+
   test("a surviving `bun` condition or a foreign manifest name is rejected", async () => {
     const withBun = { name: "@yanlinglabs/winter-runtime-sdk", exports: { ".": { bun: "./src/index.ts", default: "./dist/index.js" } } };
     expect((await scanSynthetic({ "dist/index.js": "" }, withBun)).join("\n")).toContain("`bun` condition");
@@ -101,6 +138,17 @@ describe("release-pack's tarball scan", () => {
 });
 
 describe("smoke-installed", () => {
+  test("reachableDeclarations follows relative specifiers transitively and stops at package ones", async () => {
+    await withTempDir("reach", async (dir) => {
+      mkdirSync(join(dir, "nested"), { recursive: true });
+      writeFileSync(join(dir, "index.d.ts"), 'export * from "./nested/a.js";\nexport type { B } from "pkg";\n');
+      writeFileSync(join(dir, "nested", "a.d.ts"), 'export type { C } from "../c.js";\n');
+      writeFileSync(join(dir, "c.d.ts"), "export type C = 1;\n");
+      writeFileSync(join(dir, "orphan.d.ts"), 'import type { X } from "@anthropic-ai/claude-agent-sdk";\nexport type Y = X;\n');
+      expect(reachableDeclarations(dir, "./index.d.ts")).toEqual(["c.d.ts", "index.d.ts", "nested/a.d.ts"]);
+    });
+  });
+
   test("`runtimesFor` reads the package's own engines, and fails CLOSED on a package with none", () => {
     expect(runtimesFor({ name: "x", engines: { node: ">=18" } })).toEqual(["node", "bun"]);
     expect(runtimesFor({ name: "x", engines: { bun: ">=1.2" } })).toEqual(["bun"]);

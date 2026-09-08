@@ -10,9 +10,11 @@ import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/inde
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { NotImplementedYet } from "../../src/errors.ts";
 import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubOfficialAdapter, stubRuntimeDirectory } from "../../src/seams/stubs.ts";
-import type { RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
+import type { SeamContext, SeamContextWithDirectory } from "../../src/seams/context.ts";
+import type { DeliveryRecord, IdleSubscriptionRecord, NameLeaseRecord, RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
+import type { GlobalAgentMessage } from "../../src/seams/messaging-contract.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import type { SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import { WINTER_BRAND, type SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
 const keychain = createFakeKeychain();
 
@@ -32,12 +34,34 @@ const entry = (address: string): RuntimeDirectoryEntry => ({
   parsed: { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: address.replace("session:", "") },
   runtimeKind: "winter-agent",
   objectKind: "session",
+  transport: "winter-session",
   status: "running",
   mode: "code",
   generation: 1,
   selection: selection(),
   capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
   updatedAt: new Date(0).toISOString(),
+});
+
+/** A context with the shape every seam factory takes, over an in-memory store and a fake peer. */
+function seamContext(): SeamContextWithDirectory {
+  const { peer } = createFakeWinterPeer();
+  const base: SeamContext = { peers: { winter: peer }, keychain, brand: WINTER_BRAND, directoryStore: createInMemoryRuntimeDirectoryStore() };
+  return { ...base, directory: stubRuntimeDirectory(base) };
+}
+
+const message = (): GlobalAgentMessage => ({
+  messageId: "m1",
+  from: entry("session:a").parsed,
+  fromGeneration: 1,
+  to: entry("session:b").parsed,
+  toGeneration: 1,
+  body: "hi",
+  notifyWhenIdle: false,
+  createdAt: 0,
+  expiresAt: 0,
+  hopCount: 0,
+  senderPermissionClass: "prompts",
 });
 
 /** Collects the lane of every `NotImplementedYet` a thunk throws (sync or async). */
@@ -53,7 +77,7 @@ async function laneOfThrow(fn: () => unknown): Promise<string> {
 
 describe("every stub throws NotImplementedYet, naming its lane", () => {
   test("the official adapter is Lane A's, including the spawn proxy", async () => {
-    const adapter = stubOfficialAdapter();
+    const adapter = stubOfficialAdapter(seamContext());
     expect(await laneOfThrow(() => adapter.launch({} as never))).toBe("lane-a");
     expect(await laneOfThrow(() => adapter.resume({} as never))).toBe("lane-a");
     expect(await laneOfThrow(() => adapter.buildOptions({} as never))).toBe("lane-a");
@@ -62,7 +86,7 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
   });
 
   test("the directory and the messaging router are Lane B's", async () => {
-    const directory = stubRuntimeDirectory(createInMemoryRuntimeDirectoryStore());
+    const directory = stubRuntimeDirectory(seamContext());
     for (const call of [
       () => directory.list(),
       () => directory.get("session:x"),
@@ -73,7 +97,7 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     ]) {
       expect(await laneOfThrow(call)).toBe("lane-b");
     }
-    const messaging = stubGlobalMessaging();
+    const messaging = stubGlobalMessaging(seamContext());
     for (const call of [
       () => messaging.listReachable({ from: entry("session:x").parsed }),
       () => messaging.send({ from: entry("session:x").parsed, to: "someone", body: "hi" }),
@@ -87,12 +111,12 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
   });
 
   test("the barrier and the decorator are Lane C's -- but the decorator's DOOR already answers", async () => {
-    const barrier = stubHandoffBarrier();
+    const barrier = stubHandoffBarrier(seamContext());
     const key: SessionKey = { projectKey: "p", sessionId: "s" };
     expect(await laneOfThrow(() => barrier.plan(key, "claude-agent"))).toBe("lane-c");
     expect(await laneOfThrow(() => barrier.execute({} as never))).toBe("lane-c");
 
-    const decorator = stubMaterializedResumeDecorator();
+    const decorator = stubMaterializedResumeDecorator(seamContext());
     // WS-13 §8.2 makes FALLBACK the always-available door and PREFERRED the one four probes open.
     // "Which door is open" has a correct answer before Lane C lands, and reporting "preferred" would
     // be the lie -- so this one is a value, not a throw.
@@ -158,20 +182,7 @@ describe("the in-memory RuntimeDirectoryStore is the real thing", () => {
 
   test("held messages: hold, list, take once, clear, and the receiver sweep", async () => {
     const store = createInMemoryRuntimeDirectoryStore();
-    const message = {
-      messageId: "m1",
-      from: entry("session:a").parsed,
-      fromGeneration: 1,
-      to: entry("session:b").parsed,
-      toGeneration: 1,
-      body: "hi",
-      notifyWhenIdle: false,
-      createdAt: 0,
-      expiresAt: 0,
-      hopCount: 0,
-      senderPermissionClass: "prompts" as const,
-    };
-    await store.mailboxes.hold({ messageId: "m1", receiver: "session:b", reason: "default-class", kind: "default", heldAt: 0, message });
+    await store.mailboxes.hold({ messageId: "m1", receiver: "session:b", reason: "default-class", kind: "default", heldAt: 0, message: message() });
     expect(await store.mailboxes.receivers()).toEqual(["session:b"]);
     expect((await store.mailboxes.listHeld("session:b")).map((r) => r.messageId)).toEqual(["m1"]);
     expect((await store.mailboxes.takeHeld("session:b", "m1"))?.message.body).toBe("hi");
@@ -179,28 +190,15 @@ describe("the in-memory RuntimeDirectoryStore is the real thing", () => {
     // rule, but the store must not hand the same held message out twice.
     expect(await store.mailboxes.takeHeld("session:b", "m1")).toBeUndefined();
     expect(await store.mailboxes.receivers()).toEqual([]);
-    await store.mailboxes.hold({ messageId: "m2", receiver: "session:b", reason: "explicit", kind: "explicit", heldAt: 0, message });
+    await store.mailboxes.hold({ messageId: "m2", receiver: "session:b", reason: "explicit", kind: "explicit", heldAt: 0, message: message() });
     await store.mailboxes.clear("session:b");
     expect(await store.mailboxes.listHeld("session:b")).toEqual([]);
   });
 
   test("the store enforces NO policy -- caps and expiry belong to the router (Lane B)", async () => {
     const store = createInMemoryRuntimeDirectoryStore();
-    const message = {
-      messageId: "m",
-      from: entry("session:a").parsed,
-      fromGeneration: 1,
-      to: entry("session:b").parsed,
-      toGeneration: 1,
-      body: "hi",
-      notifyWhenIdle: false,
-      createdAt: 0,
-      expiresAt: 0,
-      hopCount: 0,
-      senderPermissionClass: "prompts" as const,
-    };
     for (let i = 0; i < 150; i++) {
-      await store.mailboxes.hold({ messageId: `m${i}`, receiver: "session:b", reason: "r", kind: "default", heldAt: 0, message });
+      await store.mailboxes.hold({ messageId: `m${i}`, receiver: "session:b", reason: "r", kind: "default", heldAt: 0, message: message() });
     }
     // 150 > WS-10 §13's held cap of 100, ON PURPOSE: a cap enforced here would be a second, invisible
     // copy of a rule the router has to apply anyway (it owes the visible refusal), and the two would
@@ -209,16 +207,122 @@ describe("the in-memory RuntimeDirectoryStore is the real thing", () => {
   });
 });
 
+describe("the durable sinks WS-15 §6.2-6.4 needs (I1)", () => {
+  const delivery = (messageId: string, overrides: Partial<DeliveryRecord> = {}): DeliveryRecord => ({
+    messageId,
+    message: { ...message(), messageId },
+    toGeneration: 1,
+    updatedAt: new Date(0).toISOString(),
+    ...overrides,
+  });
+
+  test("a delivery record round-trips, and a retry reads the STORED outcome", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    expect(await store.deliveries.get("m1")).toBeUndefined();
+    // WS-15 §6.2's order: the id and the envelope are persisted BEFORE resolution, so even an
+    // ambiguous or not-found outcome is idempotent.
+    await store.deliveries.put(delivery("m1"));
+    expect((await store.deliveries.get("m1"))?.message.body).toBe("hi");
+    await store.deliveries.put(delivery("m1", { claimedBy: "winter-agent", outcome: { status: "delivered", messageId: "m1" } }));
+    expect((await store.deliveries.get("m1"))?.outcome).toEqual({ status: "delivered", messageId: "m1" });
+  });
+
+  test("claimed-but-unreceipted is exactly the crash window, and nothing else", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    await store.deliveries.put(delivery("never-claimed"));
+    await store.deliveries.put(delivery("claimed", { claimedBy: "claude-agent" }));
+    await store.deliveries.put(delivery("receipted", { claimedBy: "winter-agent", outcome: { status: "queued", messageId: "receipted" } }));
+    expect((await store.deliveries.claimedWithoutReceipt()).map((r) => r.messageId)).toEqual(["claimed"]);
+  });
+
+  test("idle subscriptions survive as records with their target GENERATION", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    const sub: IdleSubscriptionRecord = { messageId: "m1", subscriber: "session:a", target: "session:b", targetGeneration: 3, createdAt: 0, expiresAt: 12 * 60 * 60 * 1000 };
+    await store.subscriptions.add(sub);
+    expect(await store.subscriptions.list()).toEqual([sub]);
+    // The generation is what stops a notice firing for a later incarnation of the same address.
+    expect((await store.subscriptions.list())[0]?.targetGeneration).toBe(3);
+    await store.subscriptions.remove("m1");
+    expect(await store.subscriptions.list()).toEqual([]);
+  });
+
+  test("a name lease is STAMPED on release, never deleted -- that is what makes a stale name refusable", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    const lease: NameLeaseRecord = { name: "reviewer", address: "agent:session:a:c1", generation: 1, claimedAt: new Date(0).toISOString() };
+    await store.names.claim(lease);
+    expect((await store.names.held()).map((r) => r.name)).toEqual(["reviewer"]);
+    await store.names.release("reviewer", "agent:session:a:c1", new Date(1000).toISOString());
+    expect(await store.names.held()).toEqual([]);
+    // WS-10 §11 rule 5: the name is STALE, which is a different answer from "no such agent" -- and
+    // the only reason the router can tell them apart is that this record outlived the entry.
+    const history = await store.names.lookup("reviewer");
+    expect(history).toHaveLength(1);
+    expect(history[0]?.releasedAt).toBe(new Date(1000).toISOString());
+    expect(await store.names.lookup("never-used")).toEqual([]);
+  });
+
+  test("a re-claim after a release is a second record, and only the live one is `held`", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    await store.names.claim({ name: "reviewer", address: "agent:session:a:c1", generation: 1, claimedAt: new Date(0).toISOString() });
+    await store.names.release("reviewer", "agent:session:a:c1", new Date(1).toISOString());
+    await store.names.claim({ name: "reviewer", address: "agent:session:a:c2", generation: 2, claimedAt: new Date(2).toISOString() });
+    expect((await store.names.lookup("reviewer")).map((r) => r.address)).toEqual(["agent:session:a:c1", "agent:session:a:c2"]);
+    expect((await store.names.held()).map((r) => r.address)).toEqual(["agent:session:a:c2"]);
+  });
+
+  test("WS-15 §6.4 steps 5-7 are EXPRESSIBLE against the seam -- the whole point of I1", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    // A process died mid-flight: one claimed-unreceipted delivery, one pending subscription, one
+    // held message, one live name lease.
+    await store.deliveries.put(delivery("in-flight", { claimedBy: "claude-agent" }));
+    await store.subscriptions.add({ messageId: "sub-1", subscriber: "session:a", target: "session:b", targetGeneration: 1, createdAt: 0, expiresAt: 1 });
+    await store.mailboxes.hold({ messageId: "held-1", receiver: "session:b", reason: "receiver is prompting", kind: "default", heldAt: 0, expiresAt: 5 * 60 * 1000, message: message() });
+    await store.names.claim({ name: "reviewer", address: "session:b", generation: 1, claimedAt: new Date(0).toISOString() });
+
+    // STEP 5 — reconcile claimed-but-unreceipted as uncertain.
+    const uncertain = await store.deliveries.claimedWithoutReceipt();
+    expect(uncertain.map((r) => r.messageId)).toEqual(["in-flight"]);
+    for (const record of uncertain) {
+      await store.deliveries.put({
+        ...record,
+        outcome: { status: "delivery_uncertain", messageId: record.messageId, deliveryMayHaveOccurred: true, reason: "process exited between the claim and the receipt" },
+        updatedAt: new Date(10).toISOString(),
+      });
+    }
+    expect(await store.deliveries.claimedWithoutReceipt()).toEqual([]);
+    expect((await store.deliveries.get("in-flight"))?.outcome?.status).toBe("delivery_uncertain");
+
+    // STEP 6 — expire stale name leases and idle subscriptions by generation/TTL.
+    for (const sub of await store.subscriptions.list()) if (sub.expiresAt <= 2) await store.subscriptions.remove(sub.messageId);
+    expect(await store.subscriptions.list()).toEqual([]);
+    for (const lease of await store.names.held()) {
+      const entryForLease = (await store.load()).find((e) => e.address === lease.address);
+      if (entryForLease === undefined) await store.names.release(lease.name, lease.address, new Date(11).toISOString());
+    }
+    expect(await store.names.held()).toEqual([]);
+    expect((await store.names.lookup("reviewer"))[0]?.releasedAt).toBe(new Date(11).toISOString());
+
+    // STEP 7 — re-evaluate held messages (release or keep) once policy is known again.
+    const receivers = await store.mailboxes.receivers();
+    expect(receivers).toEqual(["session:b"]);
+    const released = await store.mailboxes.takeHeld("session:b", "held-1");
+    expect(released?.message.body).toBe("hi");
+    expect(await store.mailboxes.receivers()).toEqual([]);
+  });
+});
+
 describe("the handle's internals are reachable for the lanes' own wiring", () => {
-  test("`runtimeSdkInternals` hands back the seams and the injected collaborators", () => {
+  test("`runtimeSdkInternals` hands back the seams and the ONE context every factory was given", () => {
     const { peer } = createFakeWinterPeer();
     const store = createInMemoryRuntimeDirectoryStore();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, directoryStore: store, vendoredOfficialRuntime: "/vendored/winter" });
     const internals = runtimeSdkInternals(sdk);
-    expect(internals?.directoryStore).toBe(store);
-    expect(internals?.keychain).toBe(keychain);
-    expect(internals?.peers.winter).toBe(peer);
-    expect(internals?.vendoredOfficialRuntime).toBe("/vendored/winter");
+    expect(internals?.context.directoryStore).toBe(store);
+    expect(internals?.context.keychain).toBe(keychain);
+    expect(internals?.context.peers.winter).toBe(peer);
+    expect(internals?.context.vendoredOfficialRuntime).toBe("/vendored/winter");
+    // The directory on the handle IS the one in the context -- one object, not two (M3's hoist).
+    expect(internals?.context.directory).toBe(sdk.directory);
     expect(runtimeSdkInternals({} as never)).toBeUndefined();
   });
 
@@ -226,6 +330,6 @@ describe("the handle's internals are reachable for the lanes' own wiring", () =>
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     const internals = runtimeSdkInternals(sdk);
-    expect(await internals?.directoryStore.load()).toEqual([]);
+    expect(await internals?.context.directoryStore.load()).toEqual([]);
   });
 });

@@ -30,6 +30,14 @@
 //      drops it.
 //   6. PACKAGE IDENTITY — the packed manifest is the package this script asked for, under the
 //      `@yanlinglabs/` scope.
+//   7. THE OPTIONAL PEER IS NOT NAMED IN THE REACHABLE DECLARATION GRAPH (review r1, M7). Walking the
+//      relative imports out of the package's `types` entry gives exactly the `.d.ts` files a
+//      consumer's type-checker loads when it imports this package. A specifier for
+//      `@anthropic-ai/claude-agent-sdk` in ANY of them makes a consumer who (correctly) did not
+//      install an OPTIONAL peer see `Cannot find module` coming out of us. Lane A may `import type`
+//      from the peer inside `src/official/**` — those declarations are emitted but UNREACHABLE, so no
+//      consumer ever loads them — and this rule is what keeps that distinction real rather than
+//      remembered.
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,6 +72,128 @@ const CREDENTIAL_FILENAME_RE = /^\.env(\..+)?$|\.(pem|key|p12|pfx)$|^id_(rsa|dsa
 const CREDENTIAL_SUBSTRING_RE = /credential/i;
 const NON_CREDENTIAL_SOURCE_EXTENSIONS_RE = /\.(ts|tsx|js|jsx|mjs|cjs|md)$/i;
 const TEST_FILE_RE = /\.test\.ts$|\.test-support\.ts$/;
+/** The peer whose specifier must not appear in the reachable declaration graph (scan rule 7). */
+const OPTIONAL_PEER = "@anthropic-ai/claude-agent-sdk";
+
+/**
+ * Every MODULE SPECIFIER in a declaration file — `from "x"` and `import("x")`, nothing else.
+ *
+ * Specifiers, not mentions. `tsc` keeps doc comments in its emit, and the modules that explain WHY the
+ * optional peer is not imported necessarily name it in prose; a substring search flags those and
+ * teaches the next reader to delete the explanation. What forces a type-checker to resolve a module is
+ * a specifier, and that is what this finds. Exported for its plant test.
+ */
+export function moduleSpecifiersIn(source: string): string[] {
+  const out: string[] = [];
+  for (const match of stripComments(source).matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)(["'])([^"']+)\1/g)) out.push(match[2] as string);
+  return out;
+}
+
+/**
+ * Blanks out `//` and block comments, leaving string literals and code intact.
+ *
+ * NEEDED, not tidiness: the two modules that explain why the optional peer is NOT imported both quote
+ * the exact form `typeof import("@anthropic-ai/…")` in their doc comments, `tsc` keeps doc comments in
+ * its emit, and the first run of this rule flagged both. A gate whose first output is a false positive
+ * against its own documentation teaches everyone to delete the documentation.
+ *
+ * Comments are replaced by spaces rather than removed, so every reported offset still lines up with
+ * the original source.
+ */
+function stripComments(source: string): string {
+  let out = "";
+  let state: "code" | "line" | "block" | "sq" | "dq" | "tmpl" = "code";
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i] as string;
+    const n = i + 1 < source.length ? (source[i + 1] as string) : "";
+    if (state === "code") {
+      if (c === "/" && n === "/") {
+        state = "line";
+        out += "  ";
+        i++;
+        continue;
+      }
+      if (c === "/" && n === "*") {
+        state = "block";
+        out += "  ";
+        i++;
+        continue;
+      }
+      if (c === "'") state = "sq";
+      else if (c === '"') state = "dq";
+      else if (c === "`") state = "tmpl";
+      out += c;
+      continue;
+    }
+    if (state === "line") {
+      if (c === "\n") {
+        state = "code";
+        out += c;
+      } else out += " ";
+      continue;
+    }
+    if (state === "block") {
+      if (c === "*" && n === "/") {
+        state = "code";
+        out += "  ";
+        i++;
+      } else out += c === "\n" ? c : " ";
+      continue;
+    }
+    // inside a string literal
+    if (c === "\\") {
+      out += c + (n === "" ? "" : n);
+      i++;
+      continue;
+    }
+    if ((state === "sq" && c === "'") || (state === "dq" && c === '"') || (state === "tmpl" && c === "`")) state = "code";
+    out += c;
+  }
+  return out;
+}
+
+/**
+ * Every `.d.ts` a consumer's type-checker loads when it imports this package: the `types` entry plus
+ * everything reachable from it through RELATIVE specifiers, transitively.
+ *
+ * Exported for its plant test. A specifier that cannot be resolved to a file on disk is skipped
+ * rather than reported — an unresolvable relative import is a different defect, and the missing-file
+ * checks in `build-packages.ts` already own it.
+ */
+export function reachableDeclarations(packageRoot: string, entry: string): string[] {
+  const seen = new Set<string>();
+  const queue = [entry.replace(/^\.\//, "")];
+  while (queue.length > 0) {
+    const relative = queue.shift() as string;
+    if (seen.has(relative)) continue;
+    const full = join(packageRoot, relative);
+    let source: string;
+    try {
+      source = readFileSync(full, "utf8");
+    } catch {
+      continue; // not on disk (or not a file) -- see the note above
+    }
+    seen.add(relative);
+    const dir = relative.includes("/") ? relative.slice(0, relative.lastIndexOf("/")) : "";
+    for (const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)(["'])(\.[^"']*)\1/g)) {
+      const specifier = match[2] as string;
+      const resolved = normalizePath(dir === "" ? specifier : `${dir}/${specifier}`);
+      queue.push(resolved.replace(/\.js$/, ".d.ts"));
+    }
+  }
+  return [...seen].sort();
+}
+
+/** `a/b/../c.js` -> `a/c.js`. No `path.normalize`: these are always POSIX-shaped package paths. */
+function normalizePath(input: string): string {
+  const out: string[] = [];
+  for (const segment of input.split("/")) {
+    if (segment === "." || segment === "") continue;
+    if (segment === "..") out.pop();
+    else out.push(segment);
+  }
+  return out.join("/");
+}
 
 interface PnpmPackJson {
   name: string;
@@ -137,7 +267,7 @@ export function scanExtracted(root: string, expectedName: string): { violations:
   }
 
   const manifestPath = join(packageRoot, "package.json");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: string; exports?: Record<string, unknown> | string };
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: string; types?: string; exports?: Record<string, unknown> | string };
   if (manifest.name !== expectedName) violations.push(`  ${expectedName}: the packed manifest names "${manifest.name}"`);
   if (!(manifest.name ?? "").startsWith("@yanlinglabs/")) violations.push(`  ${expectedName}: the packed manifest is outside the @yanlinglabs scope`);
   const exportsField = manifest.exports;
@@ -148,6 +278,17 @@ export function scanExtracted(root: string, expectedName: string): { violations:
         if (condition === "bun") violations.push(`  ${expectedName}: the packed exports["${subpath}"] still carries a \`bun\` condition (${String(target)}), which points outside a dist-only package`);
         if (typeof target === "string" && target.startsWith("./src/")) violations.push(`  ${expectedName}: the packed exports["${subpath}"].${condition} names ${target}`);
       }
+    }
+  }
+  // Rule 7: the optional peer must not be reachable from what a consumer's type-checker loads.
+  const typesEntry = manifest.types ?? "./dist/index.d.ts";
+  for (const declaration of reachableDeclarations(packageRoot, typesEntry)) {
+    const specifiers = moduleSpecifiersIn(readFileSync(join(packageRoot, declaration), "utf8"));
+    if (specifiers.some((specifier) => specifier === OPTIONAL_PEER || specifier.startsWith(`${OPTIONAL_PEER}/`))) {
+      violations.push(
+        `  ${expectedName}: ${declaration} is reachable from the package's \`types\` entry and names ${OPTIONAL_PEER}, ` +
+          `which forces every consumer to install an OPTIONAL peer to type-check (see src/seams/official-sdk-shapes.ts)`,
+      );
     }
   }
   return { violations, filesScanned: files.length };

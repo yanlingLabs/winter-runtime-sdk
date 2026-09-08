@@ -5,36 +5,33 @@
 // environment), it OWNS the supervised spawn proxy those options carry, and it LAUNCHES or RESUMES a
 // session. The message stream itself is the official SDK's own `Query`, passed back untouched.
 //
-// THE OFFICIAL SDK IS NEVER IMPORTED AS A VALUE BY THIS PACKAGE. Its module instance is injected
-// (`RuntimeSdkPeers.claude`) and only its TYPES are referenced here, so a Winter-only host that never
-// installs it never loads it. A host whose type-checker runs without `skipLibCheck` and without the
-// optional peer installed will need the types present — noted in docs/architecture.md.
-import type { Options as OfficialOptions, Query as OfficialQuery, SDKUserMessage as OfficialUserMessage } from "@anthropic-ai/claude-agent-sdk";
+// THE OFFICIAL SDK IS NEVER IMPORTED BY THIS PACKAGE — as a value OR as a type, on the published
+// surface. Its module instance is injected (`RuntimeSdkPeers.claude`), and every shape this seam
+// needs is declared structurally in `./official-sdk-shapes.ts` so that a consumer who does not
+// install the OPTIONAL peer can still type-check against this package (review r1, M7). That file's
+// header carries the reasoning, the WS-02 §2 position, and the rule for Lane A.
+//
+// The spawn proxy is one of those shapes, and it is a DELIBERATE DEVIATION FROM THE PLAN'S PINNED
+// LINE worth restating here because it is load-bearing. The plan types `OfficialAdapter.spawnProxy`
+// as the Winter SDK's exported `SpawnClaudeCodeProcess` (`(opts: SpawnRuntimeOptions) =>
+// SpawnedRuntimeProcess`). The two hooks are NOT structurally compatible — measured against both
+// declarations:
+//
+//   Winter    `stdout: AsyncIterable<string>`, `exited: Promise<{code, signal}>`, `kill(signal?: string): void`,
+//             `env: Record<string, string>`
+//   official  `stdout: Readable`, `on('exit'|'error', ...)`, `kill(signal: NodeJS.Signals): boolean`,
+//             `env: { [k: string]: string | undefined }`
+//
+// This proxy is handed to the OFFICIAL runtime (WS-14 §6 is the Claude branch's own spec, and its
+// "`SpawnOptions.env.CLAUDE_CONFIG_DIR` observed value is authoritative" rule is about that runtime's
+// `SpawnOptions`), so it must have that shape or it cannot be passed at all. The Winter name still
+// reaches a consumer unchanged through this package's contract re-export.
 import type { BrandProfile, SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
+import type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, OfficialUserMessage } from "./official-sdk-shapes.ts";
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
 
-export type { OfficialOptions, OfficialQuery, OfficialUserMessage };
-
-/**
- * WS-14 §6's supervised spawn proxy, in the shape the OFFICIAL SDK's own `Options` expects.
- *
- * DELIBERATE DEVIATION FROM THE PLAN'S PINNED LINE, recorded here because it is load-bearing. The
- * plan types `OfficialAdapter.spawnProxy` as the Winter SDK's exported `SpawnClaudeCodeProcess`
- * (`(opts: SpawnRuntimeOptions) => SpawnedRuntimeProcess`). The two hooks are NOT structurally
- * compatible — measured against both declarations:
- *
- *   Winter    `stdout: AsyncIterable<string>`, `exited: Promise<{code, signal}>`, `kill(signal?: string): void`,
- *             `env: Record<string, string>`
- *   official  `stdout: Readable`, `on('exit'|'error', ...)`, `kill(signal: NodeJS.Signals): boolean`,
- *             `env: { [k: string]: string | undefined }`
- *
- * This proxy is handed to the OFFICIAL SDK (WS-14 §6 is the Claude branch's own spec, and its
- * "`SpawnOptions.env.CLAUDE_CONFIG_DIR` observed value is authoritative" rule is about that SDK's
- * `SpawnOptions`), so it must have that SDK's shape or it cannot be passed at all. The Winter name
- * still reaches a consumer unchanged through this package's contract re-export.
- */
-export type OfficialSpawnClaudeCodeProcess = NonNullable<OfficialOptions["spawnClaudeCodeProcess"]>;
+export type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, OfficialUserMessage };
 
 /**
  * WS-14 §1: `CLAUDE_CONFIG_DIR` has TWO values by launch profile.
@@ -68,6 +65,13 @@ export interface OptionsTemplateInput {
 export interface EnvInput {
   selection: RuntimeSelection;
   configDir: string;
+  /**
+   * The RESOLVED brand profile (I2). Every Winter-owned name in the child environment derives from
+   * it — `envName(brand, …)` for anything this branch is told to pass, and the spool/home segments
+   * WS-14 §1 builds. Never a literal: the brand gate forbids one, and a reuser's child would
+   * otherwise be handed Winter's names.
+   */
+  brand: BrandProfile;
   /**
    * Exactly one auth family's variables, fetched from the host's Keychain seam AT SPAWN and never
    * written to disk (WS-14 §12). The adapter must not retain them (§6).

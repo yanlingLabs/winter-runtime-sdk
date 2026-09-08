@@ -45,10 +45,12 @@ package owns, who owns which files, and the interfaces the four lanes build behi
 | --- | --- | --- |
 | Scaffold, CI, release, contract re-export, constructor + version matrix, seams (interfaces + stubs), test harness wiring | `package.json`, `tsconfig*.json`, `.github/workflows/*`, `scripts/**`, `src/index.ts`, `src/sdk.ts`, `src/version-matrix.ts`, `src/errors.ts`, `src/seams/**`, `src/testing/**` | Task 1 (spine) |
 | Official adapter | `src/official/**` (`options-template.ts`, `env-allowlist.ts`, `spool.ts`, `spawn-proxy.ts`, `containment.ts`, `aliases.ts`, `supervision.ts`, `callbacks.ts`, `mcp-descriptors.ts`, `auth.ts`, `errors.ts`, `adapter.ts`) + `test/official/**` | Lane A |
-| RuntimeDirectory + messaging router + adapters | `src/directory/**`, `src/messaging/**`, the in-memory store implementation in `src/seams/directory-store.ts` + `test/messaging/**` | Lane B |
+| RuntimeDirectory + messaging router + adapters | `src/directory/**`, `src/messaging/**` + `test/messaging/**` | Lane B |
 | Store wiring + handoff barrier + materialized-resume doors | `src/store/**` (`wiring.ts`, `handoff-barrier.ts`, `materialized-resume.ts`, `temp-continuity.ts`) + `test/store/**` | Lane C |
 | Selection + persisted choice + child-runtime rule + D29 probe + WS-17 rows | `src/selection/**`, `docs/probes/d29-advisor.md`, `test/selection/**`, `test/conformance/rows.test.ts` | Lane D |
 | Close-out | `README.md`, `docs/conformance-rows.md`, the repo flip to public, the spec amendments | Task 6 |
+
+> **The in-memory `RuntimeDirectoryStore` is SPINE-owned and already complete** (`src/seams/directory-store.ts`). The plan's ownership map listed it under Lane B; it shipped with the spine instead, because it is the default store and every hermetic test's store. Lane B implements the DIRECTORY and the MESSAGING ROUTER over it — not the store.
 
 **Shared files (`src/index.ts`, `src/seams/*.ts`, `package.json`) are spine-owned.** A lane that needs
 a change there posts NEEDS_CONTEXT with the exact diff. Two edits are pre-authorised because the
@@ -70,7 +72,9 @@ These are the signatures every lane builds against. They are in `src/`; this tab
 | `RuntimeSdkPeers`, `RuntimeSdkOptions`, `RuntimeSdk`, `RouterOptions`, `createRuntimeSdk` | `src/sdk.ts` |
 | `SUPPORTED`, `SUPPORTED_PROTOCOL_VERSIONS`, `assertVersionMatrix`, `VersionMatrixReport` | `src/version-matrix.ts` |
 | `RuntimeKind`, `RuntimeSelection`, `SelectionInput`, `SelectionRefusal`, `selectRuntime`, `selectChildRuntime` | `src/selection/runtime-selection.ts` |
-| `RuntimeDirectoryStore`, `RuntimeDirectoryEntry`, `CursorStore`, `MailboxStore`, `createInMemoryRuntimeDirectoryStore` | `src/seams/directory-store.ts` |
+| `RuntimeDirectoryStore`, `RuntimeDirectoryEntry`, `RuntimeTransport`, `CursorStore`, `MailboxStore`, `DeliveryRecordStore`, `IdleSubscriptionStore`, `NameLeaseStore`, `createInMemoryRuntimeDirectoryStore` | `src/seams/directory-store.ts` |
+| `SeamContext`, `SeamContextWithDirectory` (what every seam factory is handed) | `src/seams/context.ts` |
+| `OfficialSdkModule`, `OfficialOptions`, `OfficialQuery`, `OfficialUserMessage`, `OfficialSpawnOptions`, `OfficialSpawnedProcess`, `OfficialSpawnClaudeCodeProcess` | `src/seams/official-sdk-shapes.ts` |
 | `OfficialAdapter`, `OfficialLaunchPlan`, `OfficialResumePlan`, `OfficialSession`, `OptionsTemplateInput`, `EnvInput` | `src/seams/official-adapter.ts` |
 | `HandoffBarrier`, `HandoffPlan`, `HandoffOutcome` | `src/seams/handoff.ts` |
 | `MaterializedResumeDecorator` and its probe report | `src/seams/materialized-resume.ts` |
@@ -78,7 +82,7 @@ These are the signatures every lane builds against. They are in `src/`; this tab
 | `RuntimeDirectory`, `GlobalMessaging` | `src/seams/directory.ts`, `src/seams/global-messaging.ts` |
 | `RuntimeAddress`, `ListedRuntimeObject`, `DeliveryOutcome`, `GlobalAgentMessage`, `RuntimeMessagingAdapter` | `src/seams/messaging-contract.ts` (temporary — see above) |
 
-### Three places the plan's pinned text had to change, and why
+### Four places the plan's pinned text had to change, and why
 
 Each is documented at the site as well; they are collected here so a reviewer sees them together.
 
@@ -98,6 +102,22 @@ Each is documented at the site as well; they are collected here so a reviewer se
    `stdout: AsyncIterable<string>` and an `exited` promise, the official one `stdout: Readable` with
    `on('exit')` — and this proxy is handed to the official SDK (WS-14 §6 is the Claude branch's own
    spec). The Winter name still reaches a consumer unchanged through the contract re-export.
+4. **`RuntimeSdkPeers.claude` is a structural `OfficialSdkModule`, not `typeof import("@anthropic-ai/
+   claude-agent-sdk")`** (fix round 1, review M7). A `typeof import(…)` in a published `.d.ts` makes
+   every consumer's type-checker resolve that module — so a Winter-only host that correctly did not
+   install an OPTIONAL peer saw `Cannot find module` coming out of this package. Every shape the
+   published surface needs is now declared structurally in `src/seams/official-sdk-shapes.ts`;
+   fidelity moved into `test/spine/official-shapes-conformance.test.ts`, which asserts the REAL
+   0.3.250 declarations satisfy each one (it caught two mismatches the day it landed: `interrupt()`
+   resolves a response rather than `void`, and `Options.env` values are `string | undefined`). Two
+   gates keep it that way: `release-pack.ts` scan rule 7 walks the declaration graph reachable from
+   the package's `types` entry and fails the pack if the peer is named there, and the installed smoke
+   type-checks a probe project that does NOT have the peer installed, with `skipLibCheck: false`.
+
+   **The rule for Lane A:** `src/official/**` MAY `import type` from the optional peer for its own
+   internals — those declarations are emitted but unreachable from `dist/index.d.ts`, so no consumer
+   loads them. What must not happen is one of those types reaching an exported member of
+   `src/index.ts`. Rule 7 is the enforcement, not the convention.
 
 ---
 
@@ -143,6 +163,33 @@ tsc. CI does it explicitly.
 
 **At the close-out** the three `link:` dependencies become `^0.0.2` from the registries, the second
 checkout disappears from both workflows, and the smoke installs the peer instead of symlinking it.
+
+---
+
+## The brand (I2)
+
+`createRuntimeSdk` resolves the brand exactly once, through the **injected** peer's own `resolveBrand`
+(so a host that vendored its own copy of the Winter SDK gets its validation and its
+`InvalidBrandError`), and exposes the result as `RuntimeSdk.brand: BrandProfile`. Precedence, in one
+sentence: **a per-query `Options.brand` wins on the Winter leg and is never rewritten; the constructor
+profile fills in when a query supplies none; Winter's own defaults fill in when neither does.** With
+no constructor brand the forwarded options object is still the caller's own, by reference — the
+resolved default *is* Winter's default, so injecting it would change nothing but identity.
+
+Both branches read the same resolved profile: the Winter leg through the forwarded `Options.brand`,
+the official branch through `SeamContext.brand`, which is what `OptionsTemplateInput.brand` and
+`EnvInput.brand` are populated from. No lane spells a Winter-owned name; the brand gate forbids it.
+
+---
+
+## The seam context (what a lane's factory receives)
+
+Every seam factory takes ONE object (`src/seams/context.ts`): the injected `peers`, the host's
+`keychain`, the resolved `brand`, the `directoryStore`, the optional `vendoredOfficialRuntime`, and —
+for everything except the directory itself — the `directory`, which is built first and hoisted out of
+the handle's object literal. A lane's wiring diff in `src/sdk.ts` is therefore one line
+(`stubX(context)` → `createX(context)`), and a lane that needs something new adds one field here where
+the other three lanes can see it.
 
 ---
 

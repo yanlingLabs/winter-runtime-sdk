@@ -18,7 +18,20 @@ const WORKFLOW_DIR = join(REPO_ROOT, ".github", "workflows");
 
 const readWorkflow = (name: string): string => readFileSync(join(WORKFLOW_DIR, name), "utf8");
 
-/** The `on:` block, from `on:` to the next top-level key. Text, deliberately: no YAML dependency. */
+/**
+ * The parsed workflow. `Bun.YAML.parse` is the structural reading (review r1, M6): the text slice
+ * below is kept as a second belt, but a re-indent or a `#`-comment inside the block could move what
+ * IT sees, and the trigger set is the one fact in this repository that must not be misread.
+ *
+ * Typed through a cast because `@types/bun` does not declare `Bun.YAML` at the pinned version, and a
+ * gate should not wait on a types release to become structural.
+ */
+function parseWorkflow(name: string): { on?: unknown; jobs?: Record<string, unknown> } {
+  const yaml = (Bun as unknown as { YAML: { parse(source: string): unknown } }).YAML;
+  return yaml.parse(readWorkflow(name)) as { on?: unknown; jobs?: Record<string, unknown> };
+}
+
+/** The `on:` block, from `on:` to the next top-level key. Text — the second belt. */
 function triggerBlock(source: string): string {
   const lines = source.split("\n");
   const start = lines.findIndex((line) => /^on:/.test(line));
@@ -31,7 +44,20 @@ function triggerBlock(source: string): string {
 describe("the release workflow", () => {
   const release = readWorkflow("release.yml");
 
-  test("fires ONLY on a `v*` tag or a workflow_dispatch", () => {
+  test("fires ONLY on a `v*` tag or a workflow_dispatch (parsed, not sliced)", () => {
+    // THE STRUCTURAL ASSERTION: the whole `on` object, compared as data. A third trigger, a branch
+    // filter, a `phase-*` tag pattern -- any of them changes this object and fails here.
+    expect(parseWorkflow("release.yml").on).toEqual({ push: { tags: ["v*"] }, workflow_dispatch: {} });
+    expect(Object.keys(parseWorkflow("release.yml").jobs ?? {}).sort()).toEqual(["publish", "publish-npm"]);
+  });
+
+  test("ci.yml's own triggers carry no tag and no publish job", () => {
+    const ci = parseWorkflow("ci.yml");
+    expect(ci.on).toEqual(["push", "pull_request"]);
+    expect(Object.keys(ci.jobs ?? {}).sort()).toEqual(["build", "pack-smoke"]);
+  });
+
+  test("the text belt agrees with the parse", () => {
     const block = triggerBlock(release);
     expect(block).toContain('tags: ["v*"]');
     expect(block).toContain("workflow_dispatch:");

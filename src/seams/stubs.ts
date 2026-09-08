@@ -11,15 +11,23 @@
 // throw names the lane and the seam, so `bun test` output attributes an unimplemented path
 // immediately, and `test/spine/seams.test.ts` asserts every stub is still honest.
 import { NotImplementedYet } from "../errors.ts";
+import type { SeamContext, SeamContextWithDirectory } from "./context.ts";
 import type { RuntimeDirectory } from "./directory.ts";
-import type { RuntimeDirectoryStore } from "./directory-store.ts";
 import type { GlobalMessaging } from "./global-messaging.ts";
 import type { HandoffBarrier } from "./handoff.ts";
 import type { MaterializedResumeDecorator } from "./materialized-resume.ts";
 import type { OfficialAdapter, OfficialSpawnClaudeCodeProcess } from "./official-adapter.ts";
 
-/** WS-14 §1–§13 — Lane A. */
-export function stubOfficialAdapter(): OfficialAdapter {
+/**
+ * WS-14 §1–§13 — Lane A.
+ *
+ * Takes the full context because its real factory needs three things from it that nothing else in the
+ * spine reaches: the injected `peers.claude` (to construct a query at all), the `KeychainSeam` (WS-14
+ * §12's "fetched at spawn" — `EnvInput.credentials` arrives already built, so the fetch is Lane A's),
+ * and the resolved `brand`.
+ */
+export function stubOfficialAdapter(context: SeamContextWithDirectory): OfficialAdapter {
+  void context;
   const spawnProxy: OfficialSpawnClaudeCodeProcess = () => {
     throw new NotImplementedYet("lane-a", "the supervised spawn proxy (WS-14 §6)");
   };
@@ -43,11 +51,11 @@ export function stubOfficialAdapter(): OfficialAdapter {
 /**
  * WS-15 §6.1 — Lane B.
  *
- * Takes the resolved store even though it cannot use it yet, so the wiring line in `sdk.ts` already
- * passes what the real implementation needs and the lane's diff stays one line.
+ * Built FIRST, from the context without a directory in it, because everything else takes the
+ * directory. That ordering is why `createRuntimeSdk` hoists it out of the handle's object literal.
  */
-export function stubRuntimeDirectory(store: RuntimeDirectoryStore): RuntimeDirectory {
-  void store;
+export function stubRuntimeDirectory(context: SeamContext): RuntimeDirectory {
+  void context;
   return {
     async list() {
       throw new NotImplementedYet("lane-b", "RuntimeDirectory.list (WS-15 §6.1)");
@@ -70,8 +78,9 @@ export function stubRuntimeDirectory(store: RuntimeDirectoryStore): RuntimeDirec
   };
 }
 
-/** WS-15 §6.2–6.4 — Lane B. */
-export function stubGlobalMessaging(): GlobalMessaging {
+/** WS-15 §6.2–6.4 — Lane B. Needs the directory (resolution) and the store's new durable sinks (I1). */
+export function stubGlobalMessaging(context: SeamContextWithDirectory): GlobalMessaging {
+  void context;
   return {
     async listReachable() {
       throw new NotImplementedYet("lane-b", "GlobalMessaging.listReachable (WS-10 §10.2)");
@@ -94,8 +103,9 @@ export function stubGlobalMessaging(): GlobalMessaging {
   };
 }
 
-/** WS-05 §12 — Lane C. */
-export function stubHandoffBarrier(): HandoffBarrier {
+/** WS-05 §12 — Lane C. Needs the directory and the store to compute `HandoffPlan.from`. */
+export function stubHandoffBarrier(context: SeamContextWithDirectory): HandoffBarrier {
+  void context;
   return {
     async plan() {
       throw new NotImplementedYet("lane-c", "HandoffBarrier.plan (WS-05 §12)");
@@ -113,7 +123,8 @@ export function stubHandoffBarrier(): HandoffBarrier {
  * door and PREFERRED the one that four probes must open. "Which door is open" therefore has a correct
  * answer before the lane lands, and it is this one — reporting `"preferred"` would be the lie.
  */
-export function stubMaterializedResumeDecorator(): MaterializedResumeDecorator {
+export function stubMaterializedResumeDecorator(context: SeamContextWithDirectory): MaterializedResumeDecorator {
+  void context;
   return {
     door: "fallback",
     async probe() {

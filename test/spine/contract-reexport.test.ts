@@ -97,6 +97,17 @@ const _familyListingIsTheSdks: Exact<router.ModelFamilyListing, winter.ModelFami
 const _sessionKeyIsTheSdks: Exact<router.SessionKey, winter.SessionKey> = true;
 // `RouterOptions` EXTENDS `Options` -- additive, never a redefinition.
 const _routerOptionsIsAnOptions: router.RouterOptions extends winter.Options ? true : false = true;
+// M2: NO ROUTER-OWNED OPTION KEY IS A REAL `Options` MEMBER.
+//
+// `forwardableOptions` DELETES every `ROUTER_ONLY_OPTION_KEYS` entry from what it forwards. Today
+// `runtime` is not an `Options` member, so it deletes nothing real -- but if a future Winter release
+// adds one, the router would silently drop it from every forwarded call and no runtime test would
+// fail, because a fake peer never asserts on a key it was not told about. This line fails the
+// TYPECHECK the day the collision appears, which is the only moment anyone can act on it.
+const _noRouterKeyCollision: Extract<router.RouterOnlyOptionKey, keyof winter.Options> extends never ? true : false = true;
+// ...and the pattern above really does discriminate: a name that IS an `Options` member takes the
+// other branch. Without this line the tripwire would pass even if `Extract<>` were misspelled.
+const _tripwireIsNotVacuous: Extract<"model", keyof winter.Options> extends never ? false : true = true;
 void [
   _optionsIsTheSdks,
   _queryIsTheSdks,
@@ -107,4 +118,6 @@ void [
   _familyListingIsTheSdks,
   _sessionKeyIsTheSdks,
   _routerOptionsIsAnOptions,
+  _noRouterKeyCollision,
+  _tripwireIsNotVacuous,
 ];

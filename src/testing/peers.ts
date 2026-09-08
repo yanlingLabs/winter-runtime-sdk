@@ -9,6 +9,7 @@
 // `options` VALUES it was handed (by reference — `test/spine/query-passthrough.test.ts` asserts
 // identity, not deep equality) and yields exactly the messages it was scripted with, so "the stream
 // passes through verbatim" is checkable rather than assumed.
+import { InvalidBrandError, resolveBrand } from "@yanlinglabs/winter-agent-sdk";
 import type { AccountInfo, ModelFamilyListing, ModelInfo, Options, PermissionMode, Query, RewindFilesResult, SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 
 import type { RuntimeSdkPeers } from "../sdk.ts";
@@ -94,6 +95,11 @@ export function createFakeWinterPeer(options: FakeWinterPeerOptions = {}): FakeW
   const namespace = {
     SDK_VERSION: options.packageVersion ?? "0.0.2",
     PROTOCOL_VERSION: options.protocolVersion ?? "1.0",
+    // THE REAL brand functions, not stand-ins. `createRuntimeSdk` calls `resolveBrand` and throws
+    // `InvalidBrandError` THROUGH THE INJECTED PEER (so a host that vendored its own copy catches its
+    // own class), and a fake that answered differently would make every brand test measure the fake.
+    resolveBrand,
+    InvalidBrandError,
     query: (args: { prompt: string | AsyncIterable<string>; options: Options }): Query => {
       calls.push({ prompt: args.prompt, options: args.options });
       return options.query === undefined ? scriptedQuery(scripted) : options.query(args);
