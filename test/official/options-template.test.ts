@@ -83,12 +83,18 @@ describe("WS-14 §2 — the Options template", () => {
       systemPromptAppend: "<deterministically built instructions>",
       advertisesHandoff: mode === "code",
       mcpServers: { acme: { type: "sdk", name: "acme" } },
-      env: { CLAUDE_CONFIG_DIR: "/home/.acme/runtimes/official-agent-spool", ANTHROPIC_API_KEY: "<redacted>", PATH: "/usr/bin" },
+      // A REALISTIC credential on purpose (review r1, m2): the goldens used to be clean only because
+      // this line passed the literal `"<redacted>"`. `captureOptions` masks the values now, so the
+      // fixture proves the masking rather than the test's own good manners.
+      env: { CLAUDE_CONFIG_DIR: "/home/.acme/runtimes/official-agent-spool", ANTHROPIC_API_KEY: "sk-ant-a-real-looking-secret", PATH: "/usr/bin" },
       sessionId: "00000000-0000-4000-8000-000000000001",
     });
     const captured = captureOptions(options);
     const golden = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", `options-${mode}.golden.json`), "utf8")) as unknown;
     expect(captured).toEqual(golden as Record<string, unknown>);
+    // The variable NAMES are what the golden is about; not one value survives the capture.
+    expect(Object.keys((captured as { env: Record<string, string> }).env)).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", "PATH"]);
+    expect(JSON.stringify(captured)).not.toContain("sk-ant-a-real-looking-secret");
   });
 
   test("every Winter-owned name in the template is BRAND-derived", () => {

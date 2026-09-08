@@ -5,8 +5,8 @@
   ],
   "env": {
     "ANTHROPIC_API_KEY": "<redacted>",
-    "CLAUDE_CONFIG_DIR": "/home/.acme/runtimes/official-agent-spool",
-    "PATH": "/usr/bin"
+    "CLAUDE_CONFIG_DIR": "<redacted>",
+    "PATH": "<redacted>"
   },
   "includeHookEvents": true,
   "includePartialMessages": true,

@@ -22,6 +22,7 @@
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
 import type { EnvInput } from "../seams/official-adapter.ts";
+import type { RuntimeSelection } from "../selection/runtime-selection.ts";
 import { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, validateAuthEnvironment, type ClaudeOauthGate } from "./auth.ts";
 import { officialBranchLabel } from "./branding.ts";
 import { OfficialConfigurationError } from "./errors.ts";
@@ -172,7 +173,7 @@ export function buildOfficialChildEnv(input: OfficialEnvInput, policy: OfficialE
   }
   for (const [name, value] of Object.entries(policy.configuredExtras ?? {})) env[name] = value;
 
-  assertNoForbiddenChildVariables(env, { brand: input.brand, policy, branchLabel });
+  assertNoForbiddenChildVariables(env, { brand: input.brand, selection: input.selection, policy, branchLabel });
   return Object.fromEntries(Object.entries(env).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
@@ -190,11 +191,13 @@ export function buildOfficialChildEnv(input: OfficialEnvInput, policy: OfficialE
  */
 export function assertNoForbiddenChildVariables(
   env: Readonly<Record<string, string>>,
-  args: { brand: Pick<BrandProfile, "envPrefix" | "processLabel">; policy?: OfficialEnvPolicy; branchLabel?: string },
+  args: { brand: Pick<BrandProfile, "envPrefix" | "processLabel">; selection?: Pick<RuntimeSelection, "authFamily" | "providerId">; policy?: OfficialEnvPolicy; branchLabel?: string },
 ): void {
   const branchLabel = args.branchLabel ?? officialBranchLabel(args.brand);
   const declared = new Set(Object.keys(args.policy?.configuredExtras ?? {}));
   const prefixes = [args.brand.envPrefix, ...(args.policy?.hostEnvPrefixes ?? [])];
+  const runtimeVariables: readonly string[] = Object.values(OFFICIAL_RUNTIME_VARIABLES);
+  const familyVariables = args.selection === undefined ? undefined : allowedAuthVariables(args.selection);
   for (const [name, value] of Object.entries(env)) {
     const refuse = (reason: string): never => {
       throw new OfficialConfigurationError({ option: `env.${name}`, reason, branchLabel });
@@ -205,11 +208,42 @@ export function assertNoForbiddenChildVariables(
     if (NEVER_INJECTED_AUTH_VARIABLES.includes(name)) {
       refuse("this credential is never injected on this branch (WS-14 §12 / WS-01 §2.5); the supported subscription flow stores its state inside the spool namespace");
     }
+    // REVIEW r1, M1 — THE FAMILY CHECK RUNS ON THE FINAL ENVIRONMENT, and `declared` does NOT exempt
+    // it. `configuredExtras` is the documented door for a gateway proxy, and it was merged AFTER the
+    // credential validator: a session selected as `api-key` could be handed `ANTHROPIC_AUTH_TOKEN`
+    // through it, and the runtime's precedence puts the token ABOVE the key — so the session bills,
+    // rate-limits and audits against an account the persisted selection does not name, silently.
+    // That is the exact failure §12's "exactly one auth family" exists to prevent, so the check
+    // belongs where every merge has already happened.
+    if (familyVariables !== undefined && ALL_AUTH_VARIABLES.includes(name) && !familyVariables.includes(name)) {
+      refuse(
+        `it is a credential variable outside this session's ${args.selection?.authFamily} family (${familyVariables.length === 0 ? "which injects nothing" : familyVariables.join(", ")}); the runtime resolves two families by its own precedence order, not by the host's selection (WS-14 §12)`,
+      );
+    }
+    // REVIEW r1, M1 (the same hatch, the other target): a declared extra may not SHADOW a variable
+    // this branch owns. `CLAUDE_CONFIG_DIR` through `configuredExtras` moved the transcript root out
+    // from under §1's record, and for a store-backed resume nothing downstream would have caught it.
+    if (declared.has(name) && runtimeVariables.includes(name)) {
+      refuse("a configured extra may not override a variable this branch owns: the config dir, the transcript project key and the shared temp root are §1/§3's own, and the record is written against them");
+    }
     if (!declared.has(name) && (PROXY_AND_TELEMETRY_VARIABLES.includes(name) || PROXY_AND_TELEMETRY_PREFIXES.some((prefix) => name.startsWith(prefix)))) {
       refuse("proxy and telemetry variables reach this child only when the deployment configures them explicitly (WS-14 §3); an inherited one redirects or duplicates traffic invisibly");
     }
     if (VENDOR_HOME_SEGMENT_RE.test(value)) {
       refuse(`its value (${value}) points into the vendor's user-level home; this branch is isolated from it by construction (WS-14 §3, WS-17 row 4)`);
+    }
+    // REVIEW r1, n1 — A CLOSED ALLOWLIST, not a list of refusals. §3 names `NORMA_*` literally, and a
+    // router that cannot know one host's daemon prefix should not be relying on a denylist to catch
+    // it: anything that is not a variable this branch OWNS, an auth variable for this session, a
+    // minimal OS variable or an explicitly declared extra has no business in the child at all.
+    const known =
+      runtimeVariables.includes(name) ||
+      ALL_AUTH_VARIABLES.includes(name) ||
+      MINIMAL_OS_VARIABLES.includes(name) ||
+      MINIMAL_OS_VARIABLE_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
+      declared.has(name);
+    if (!known) {
+      refuse("it is not a variable this branch owns, an auth variable for this session, a minimal OS variable, or an explicitly configured addition — the child environment is an allowlist, and anything else is a leak from somewhere (WS-14 §3)");
     }
   }
 }

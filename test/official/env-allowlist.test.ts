@@ -97,8 +97,10 @@ describe("WS-14 §3 — the child environment", () => {
     test("product/daemon variables (the brand's prefix, and the host's own)", () => {
       expect(() => assertNoForbiddenChildVariables({ [`${brand.envPrefix}HOME`]: "/x" }, { brand })).toThrow(/product\/daemon variables/);
       expect(() => assertNoForbiddenChildVariables({ NORMA_HOME: "/x" }, { brand, policy: { hostEnvPrefixes: ["NORMA_"] } })).toThrow(/product\/daemon variables/);
-      // …and a host prefix it did NOT declare is not this clause's business.
-      expect(() => assertNoForbiddenChildVariables({ NORMA_HOME: "/x" }, { brand })).not.toThrow();
+      // …and a host prefix it did NOT declare is refused anyway, by the CLOSED allowlist (review r1,
+      // n1): §3 names `NORMA_*` literally, and a router that cannot know one host's daemon prefix
+      // must not depend on a denylist to catch it.
+      expect(() => assertNoForbiddenChildVariables({ NORMA_HOME: "/x" }, { brand })).toThrow(/not a variable this branch owns/);
     });
     test("the subscription OAuth token, always", () => {
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CODE_OAUTH_TOKEN: "t" }, { brand })).toThrow(/never injected/);
@@ -110,7 +112,7 @@ describe("WS-14 §3 — the child environment", () => {
     });
     test("ANY variable whose VALUE points into the vendor's user-level home", () => {
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CONFIG_DIR: "/Users/u/.claude" }, { brand })).toThrow(/vendor's user-level home/);
-      expect(() => assertNoForbiddenChildVariables({ SOMETHING_ELSE: "/Users/u/.claude/plans" }, { brand })).toThrow(/vendor's user-level home/);
+      expect(() => assertNoForbiddenChildVariables({ HOME: "/Users/u/.claude/plans" }, { brand })).toThrow(/vendor's user-level home/);
       // the spool and the vendor's own staging root are NOT under it
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CONFIG_DIR: "/Users/u/.winter/runtimes/official-agent-spool" }, { brand })).not.toThrow();
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CONFIG_DIR: "/tmp/claude-resume-abc" }, { brand })).not.toThrow();
@@ -146,6 +148,23 @@ describe("WS-14 §12 — exactly one auth family, fetched at spawn", () => {
     const gateway = selection({ authFamily: "console-oauth", providerId: "anthropic-console" });
     expect(() => buildOfficialChildEnv(input({ selection: gateway, credentials: { ANTHROPIC_BASE_URL: "https://gw.example" } }))).toThrow(/leaves a stored subscription credential active/);
     expect(() => buildOfficialChildEnv(input({ selection: gateway, credentials: { ANTHROPIC_BASE_URL: "https://gw.example", ANTHROPIC_AUTH_TOKEN: "t" } }))).not.toThrow();
+  });
+
+  test("review r1, M1: `configuredExtras` cannot smuggle a SECOND family, or shadow a variable we own", () => {
+    // The reviewer's plant 3, verbatim: an `api-key` session whose extras carry the bearer pair. The
+    // runtime's precedence puts the token above the key, so this silently re-points the whole session.
+    expect(() =>
+      buildOfficialChildEnv(input({ credentials: { ANTHROPIC_API_KEY: "k" } }), { configuredExtras: { ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_BASE_URL: "https://gw" } }),
+    ).toThrow(/outside this session's api-key family/);
+    // Plant 4: the same door pointed at the transcript root.
+    expect(() => buildOfficialChildEnv(input(), { configuredExtras: { CLAUDE_CONFIG_DIR: "/Users/dev/elsewhere" } })).toThrow(/may not override a variable this branch owns/);
+    expect(() => buildOfficialChildEnv(input(), { configuredExtras: { CLAUDE_CODE_TMPDIR: "/tmp/elsewhere" } })).toThrow(/may not override a variable this branch owns/);
+    // A declared extra that is neither a credential nor ours is still the documented door.
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { HTTPS_PROXY: "http://corp" } })["HTTPS_PROXY"]).toBe("http://corp");
+    // …and the `custom` family is the one whose credential set is open by design.
+    expect(() =>
+      buildOfficialChildEnv(input({ selection: selection({ authFamily: "custom" }), credentials: { ANTHROPIC_API_KEY: "k", ANTHROPIC_BASE_URL: "http://127.0.0.1:1" } })),
+    ).not.toThrow();
   });
 
   test("Claude OAuth is ship-gated (D14) and injects NO variable even when approved", () => {

@@ -233,6 +233,13 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
  * objects with behaviour, that they are present and which one they are.
  */
 export function captureOptions(options: OfficialOptions): Record<string, unknown> {
+  // REVIEW r1, m2 — `env` VALUES ARE MASKED HERE, not by the caller. The committed goldens were clean
+  // only because the test happened to pass the literal `"<redacted>"` as the credential; a host that
+  // used this exported helper on real options would have written a live credential into a fixture,
+  // which is the thing §12 forbids in the same sentence as "never written to disk". Names survive
+  // (the golden is about WHICH variables the child gets), values do not.
+  const captured: OfficialOptions =
+    options.env === undefined ? options : { ...options, env: Object.fromEntries(Object.keys(options.env).map((name) => [name, "<redacted>"])) };
   const marker = (value: unknown): unknown => {
     if (typeof value === "function") return "<function>";
     if (value !== null && typeof value === "object") {
@@ -247,7 +254,7 @@ export function captureOptions(options: OfficialOptions): Record<string, unknown
     }
     return value;
   };
-  return marker(options) as Record<string, unknown>;
+  return marker(captured) as Record<string, unknown>;
 }
 
 /** The canonical name an aliased built-in resolves to — re-exported so a capture reader has one import. */

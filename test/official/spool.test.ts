@@ -67,9 +67,18 @@ describe("WS-14 §1 — launch profiles and the authoritative root", () => {
       kind: "sdk-resume-staging",
       profile: "store-backed-resume",
     });
-    // and a resume that came back spool-resident is accepted as a spool root: §1's authority rule
-    // says the OBSERVED value decides the record, so this is recorded honestly rather than refused.
-    expect(validateObservedConfigDir({ observed: "/spool", configured: "/spool", profile: "store-backed-resume", brand }).kind).toBe("official-spool");
+    // REVIEW r1, m1: …but it does have to look like ONE. Before the fix both refusals were gated on
+    // `fresh-spool`, so a store-backed resume accepted any path at all — including the vendor's own
+    // user-level home, recorded as kind `official-spool`, which is §1's exact conflation.
+    expect(() => validateObservedConfigDir({ observed: "/spool", configured: "/spool", profile: "store-backed-resume", brand })).toThrow(/not a materialization staging root/);
+    expect(() => validateObservedConfigDir({ observed: "/Users/dev/somewhere-else", configured: "/spool", profile: "store-backed-resume", brand })).toThrow(/staging root/);
+  });
+
+  test("the vendor's user-level home is refused on BOTH profiles (review r1, m1)", () => {
+    for (const profile of ["fresh-spool", "store-backed-resume"] as const) {
+      expect(() => validateObservedConfigDir({ observed: "/Users/dev/.claude", configured: "/spool", profile, brand })).toThrow(/vendor's user-level home/);
+      expect(() => validateObservedConfigDir({ observed: "/Users/dev/.claude/projects", configured: "/spool", profile, brand })).toThrow(/vendor's user-level home/);
+    }
   });
 
   test("the vendor temp root is reported HONESTLY: configured root plus the engine's own segment", () => {

@@ -109,7 +109,7 @@ describe("WS-14 §13 — the official branch's error taxonomy", () => {
 
   test("the §14 disclosure set names every vendor literal a user can meet, with its reason", () => {
     const ids = OFFICIAL_DISCLOSURES.map((d) => d.id);
-    expect(ids).toEqual(["signed-binary-identity", "spool-config-file", "nested-engine-temp", "resume-staging", "extraction-cache"]);
+    expect(ids).toEqual(["signed-binary-identity", "spool-config-file", "nested-engine-temp", "resume-staging", "vendor-telemetry-defaults", "extraction-cache"]);
     for (const disclosure of OFFICIAL_DISCLOSURES) {
       expect([disclosure.id, disclosure.literal.length > 0, disclosure.why.length > 25]).toEqual([disclosure.id, true, true]);
     }

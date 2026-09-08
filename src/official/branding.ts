@@ -30,7 +30,7 @@ export function officialBranchLabel(brand: Pick<BrandProfile, "processLabel">): 
 /** One disclosed vendor-named artifact: what it is, where it shows up, and why it cannot be renamed. */
 export interface OfficialDisclosure {
   /** A stable id so a capability matrix can key rows off it rather than off prose. */
-  id: "signed-binary-identity" | "spool-config-file" | "nested-engine-temp" | "resume-staging" | "extraction-cache";
+  id: "signed-binary-identity" | "spool-config-file" | "nested-engine-temp" | "resume-staging" | "vendor-telemetry-defaults" | "extraction-cache";
   /** The vendor literal a user or an operator will actually see. */
   literal: string;
   /** Where it appears. */
@@ -73,6 +73,12 @@ export const OFFICIAL_DISCLOSURES: readonly OfficialDisclosure[] = [
     literal: "claude-resume-<uuid>",
     where: "the OS temp directory, for a generation resumed out of the shared session store",
     why: "the prefix is fixed by the runtime; only the temp BASE is host-controllable, and only through the SDK parent's own process environment",
+  },
+  {
+    id: "vendor-telemetry-defaults",
+    literal: "the runtime's own telemetry defaults",
+    where: "inside the child, because §3's allowlist injects no telemetry variable unless the deployment configures one",
+    why: "a disable switch is a proxy/telemetry variable like any other and §3 admits none by default, so the vendor's own defaults apply — disclosed rather than silently assumed off (review r1, n2)",
   },
   {
     id: "extraction-cache",

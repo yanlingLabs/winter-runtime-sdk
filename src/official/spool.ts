@@ -30,8 +30,10 @@ import { officialBranchLabel } from "./branding.ts";
 /**
  * The spool's path segments under the brand home.
  *
- * BRAND-NEUTRAL BY CONSTRUCTION: the Winter-owned part of `~/.winter/runtimes/official-agent-spool`
- * is the home directory itself, which the caller passes in already resolved from `brand.homeDirName`.
+ * BRAND-NEUTRAL BY CONSTRUCTION: the product-owned part of the spool path is the HOME DIRECTORY
+ * itself, which the caller passes in already resolved from `brand.homeDirName` (review r1, n4: the
+ * previous sentence spelled one product's home in prose, and the brand gate's own header says a raw
+ * occurrence includes comments even where its regex cannot see one).
  * These two segments name a ROLE ("the runtimes we host", "the spool the official agent lives in"),
  * so a reuser inherits them unchanged and the brand gate has nothing to match.
  */
@@ -124,7 +126,30 @@ export function validateObservedConfigDir(args: {
       branchLabel,
     });
   }
+  // REVIEW r1, m1 — ON BOTH PROFILES. The vendor's user-level home arriving at the one place §1 calls
+  // authoritative is the isolation failure this branch exists to prevent, and the old code checked it
+  // on neither profile: a `store-backed-resume` generation observed at `~/.claude` was ACCEPTED and
+  // recorded as kind `official-spool`, which is §1's exact conflation ("conflating them breaks crash
+  // recovery"). The regex is the same one the env allowlist refuses values with.
+  if (/(^|\/)\.claude(\/|$)/.test(args.observed)) {
+    throw new OfficialConfigurationError({
+      option: "env.CLAUDE_CONFIG_DIR",
+      reason: `the child was handed ${args.observed}, which is inside the vendor's user-level home; this branch never writes there (WS-14 §1/§3, WS-17 row 4)`,
+      branchLabel,
+    });
+  }
   const observed = classifyLocalWriteRoot(args.observed);
+  // REVIEW r1, m1 — THE PROFILE-2 CHECK THIS FUNCTION'S OWN DOC ALREADY CLAIMED. Both refusals used to
+  // be gated on `fresh-spool`, so a store-backed resume accepted ANY path at all. With `sessionStore`
+  // set — which this branch always requires — a resume is materialized into the wrapper's own staging
+  // root, so anything else means the generation is writing somewhere the record will not describe.
+  if (args.profile === "store-backed-resume" && observed.kind !== "sdk-resume-staging") {
+    throw new OfficialConfigurationError({
+      option: "env.CLAUDE_CONFIG_DIR",
+      reason: `a store-backed resume was handed ${args.observed}, which is not a materialization staging root; the wrapper stages the transcript before the spawn hook runs, so any other value means this generation's transcript root is not the one the record would name`,
+      branchLabel,
+    });
+  }
   if (args.profile === "fresh-spool" && observed.kind !== "official-spool") {
     throw new OfficialConfigurationError({
       option: "env.CLAUDE_CONFIG_DIR",
