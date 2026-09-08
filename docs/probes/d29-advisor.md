@@ -7,7 +7,9 @@ account condition, is UNVERIFIED (the report has two mentions and neither answer
 official-adapter task probes it against the pinned artifact through the loopback capture harness and
 records the result before the D29 'each branch gets its own advisor' split is relied upon."*
 
-**Probed:** 2026-09-08, Lane D, on `darwin-arm64`.
+**Probed:** 2026-09-08, Lane D, on `darwin-arm64` and again on `linux-x64` in CI (run `34286200040`,
+`ubuntu-latest`), with identical observations on both — same runtime identity, same inventories, same
+verdict.
 **Reproduce:** `bun test test/selection/d29-advisor-probe.test.ts`. The test skips with a printed
 reason when the pinned runtime cannot start (no platform binary for this host, a resolved version that
 is not the pin, a launch that throws, or a run that never yields `system/init`).
@@ -122,5 +124,6 @@ In condition I the block came back to the SDK consumer **verbatim**, as an assis
   endpoint-side fact this fake cannot exercise.
 * **Nothing about behaviour after the tool fires.** The fake never returns a real advisor result; the
   probe measured what is *sent* and what is *surfaced*, not what an advisor round-trip does.
-* **One platform.** `darwin-arm64`. The test runs the same way anywhere the pinned platform binary
-  installs, and skips with a printed reason where it does not.
+* **Two platforms, not every platform.** `darwin-arm64` locally and `linux-x64` in CI, which agreed
+  exactly. The test runs the same way anywhere the pinned platform binary installs, and skips with a
+  printed reason where it does not.
