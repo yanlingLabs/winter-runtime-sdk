@@ -45,7 +45,84 @@ const _envIsReadable: Assignable<OfficialSpawnOptions["env"]["CLAUDE_CONFIG_DIR"
 // branch, so none of the six above is passing because `Assignable` is vacuous.
 const _notVacuous: Assignable<RealOptions, { thisFieldDoesNotExist: true }> extends false ? true : false = true;
 
-void [_queryFits, _userMessageFits, _optionsFit, _spawnOptionsFit, _moduleFits, _envIsReadable, _notVacuous];
+// --- ...AND THE OTHER DIRECTION, PER FIELD (review r2, NEW-2) --------------------------------------
+//
+// The assertions above ask "does what the router is HANDED fit the seam". Lane A travels the opposite
+// way: it BUILDS an `OfficialOptions` and hands it to a module that at runtime is Anthropic's. Nothing
+// checked that, and `_moduleFits` cannot — `OfficialSdkModule.query` is declared with METHOD syntax,
+// so its parameters are compared bivariantly and `real → ours` alone satisfies it.
+//
+// The whole-object direction is deliberately NOT asserted: `OfficialOptions` carries an index
+// signature (WS-14 §2 pins ~10 fields of ~200 and the seam stays out of the way of the rest), so
+// `Assignable<OfficialOptions, RealOptions>` is `false` by construction and always will be. What
+// matters is that every field the seam types PRECISELY is a value the runtime accepts — so there is
+// one line per such field, and a future widening fails `bun run typecheck` instead of a live spawn.
+type Narrower<Ours, Real> = Assignable<NonNullable<Ours>, NonNullable<Real>>;
+
+const _settingSourcesFit: Narrower<OfficialOptions["settingSources"], RealOptions["settingSources"]> = true;
+const _cwdFits: Narrower<OfficialOptions["cwd"], RealOptions["cwd"]> = true;
+const _executablePathFits: Narrower<OfficialOptions["pathToClaudeCodeExecutable"], RealOptions["pathToClaudeCodeExecutable"]> = true;
+const _strictMcpConfigFits: Narrower<OfficialOptions["strictMcpConfig"], RealOptions["strictMcpConfig"]> = true;
+const _persistSessionFits: Narrower<OfficialOptions["persistSession"], RealOptions["persistSession"]> = true;
+const _checkpointingFits: Narrower<OfficialOptions["enableFileCheckpointing"], RealOptions["enableFileCheckpointing"]> = true;
+const _forkSessionFits: Narrower<OfficialOptions["forkSession"], RealOptions["forkSession"]> = true;
+const _resumeFits: Narrower<OfficialOptions["resume"], RealOptions["resume"]> = true;
+const _toolAliasesFit: Narrower<OfficialOptions["toolAliases"], RealOptions["toolAliases"]> = true;
+const _envFits: Narrower<OfficialOptions["env"], RealOptions["env"]> = true;
+// The one that was WRONG when this block was written: `settingSources?: string[]` is wider than the
+// runtime's `('user'|'project'|'local')[]`, so this line failed until the seam was narrowed. Kept as
+// the record that the direction is checked, not assumed.
+const _settingSourcesIsNarrow: Assignable<Array<"flag">, NonNullable<OfficialOptions["settingSources"]>> extends false ? true : false = true;
+
+// --- A MEASUREMENT THIS ROUND MADE, WORTH PINNING: three fields WS-14 §2 names are NOT on the
+// pinned runtime's `Options` at all. -----------------------------------------------------------------
+//
+// `plansDirectory`, `autoMemoryEnabled` and `autoMemoryDirectory` exist in the 0.3.250 declaration on
+// `Settings` (`sdk.d.ts:5426`, lines 7693/7734/7738), NOT on `Options` — which is why the per-field
+// lines for them could not be written and why they are absent above. The seam keeps all three
+// (WS-14 §2 pins them as part of the template, and `OfficialOptions`'s index signature accepts them),
+// but CARRY FOR LANE A: which door actually delivers them to a session is unverified, and setting an
+// unknown key on `Options` is the kind of thing a runtime ignores in silence. The options-template
+// golden captures are what settle it.
+//
+// Pinned as an assertion rather than a comment so that the day a version DOES put them on `Options`,
+// this fails and the seam can be tightened instead of the fact being rediscovered.
+type IsKeyOfRealOptions<K extends string> = K extends keyof RealOptions ? true : false;
+const _plansDirectoryIsNotAnOption: IsKeyOfRealOptions<"plansDirectory"> extends false ? true : false = true;
+const _autoMemoryEnabledIsNotAnOption: IsKeyOfRealOptions<"autoMemoryEnabled"> extends false ? true : false = true;
+const _autoMemoryDirectoryIsNotAnOption: IsKeyOfRealOptions<"autoMemoryDirectory"> extends false ? true : false = true;
+// ...and the probe is not vacuous: a field that IS on `Options` takes the other branch.
+const _keyProbeWorks: IsKeyOfRealOptions<"cwd"> extends true ? true : false = true;
+//
+// NOT ASSERTED, and by design rather than drift: `Assignable<OfficialSpawnedProcess,
+// RealSpawnedProcess>` is `false`, because `stdin`/`stdout` are `unknown` here — a structural stand-in
+// for Node's `Readable`/`Writable` would reintroduce the very dependency M7 removed. Lane A holds the
+// precise types inside `src/official/**`.
+
+void [
+  _queryFits,
+  _userMessageFits,
+  _optionsFit,
+  _spawnOptionsFit,
+  _moduleFits,
+  _envIsReadable,
+  _notVacuous,
+  _settingSourcesFit,
+  _cwdFits,
+  _executablePathFits,
+  _strictMcpConfigFits,
+  _persistSessionFits,
+  _checkpointingFits,
+  _forkSessionFits,
+  _resumeFits,
+  _toolAliasesFit,
+  _envFits,
+  _settingSourcesIsNarrow,
+  _plansDirectoryIsNotAnOption,
+  _autoMemoryEnabledIsNotAnOption,
+  _autoMemoryDirectoryIsNotAnOption,
+  _keyProbeWorks,
+];
 
 describe("the official runtime's structural shapes (M7)", () => {
   test("are pinned against the real 0.3.250 declarations by `bun run typecheck`", () => {

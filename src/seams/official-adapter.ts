@@ -101,8 +101,13 @@ export interface OfficialResumePlan extends OfficialLaunchPlan {
 export interface OfficialSession {
   readonly query: OfficialQuery;
   /**
-   * The `CLAUDE_CONFIG_DIR` this generation actually got, read from `SpawnOptions.env` and durably
-   * recorded BEFORE the process was returned (WS-14 §6) — never the value that was configured.
+   * The `CLAUDE_CONFIG_DIR` this generation actually got, read from `SpawnOptions.env` — never the
+   * value that was configured (WS-14 §6 rule 2).
+   *
+   * THE DURABLE HALF OF THAT RULE IS `RuntimeDirectoryEntry.configDir`, and this field is the live
+   * copy beside it. Until fix round 2 this doc comment promised a record with no sink behind it;
+   * recording it is Lane A's spawn proxy's job, before the process is returned, and the seam that
+   * receives it is the directory store's.
    */
   readonly configDir: string;
   readonly profile: OfficialLaunchProfile;

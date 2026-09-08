@@ -32,6 +32,8 @@ const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /** The one peer this package cannot be imported without. Spelled once. */
 const REQUIRED_PEER = "@yanlinglabs/winter-agent-sdk";
+/** The peer a consumer may legitimately NOT have — the whole subject of the type-check leg below. */
+const OPTIONAL_PEER = "@anthropic-ai/claude-agent-sdk";
 
 export type SmokeRuntime = "node" | "bun";
 
@@ -117,8 +119,8 @@ async function importUnder(runtime: SmokeRuntime, specifier: string, probeDir: s
  * here would make this gate flaky for reasons it cannot fix.
  */
 async function typecheckWithoutOptionalPeer(probeDir: string, packageName: string, root: string): Promise<{ ok: boolean; output: string }> {
-  const peerDir = join(probeDir, "node_modules", "@anthropic-ai");
-  if (existsSync(peerDir)) return { ok: false, output: `the probe project has @anthropic-ai installed -- this gate is meaningless unless the OPTIONAL peer is absent` };
+  const peerDir = join(probeDir, "node_modules", ...OPTIONAL_PEER.split("/"));
+  if (existsSync(peerDir)) return { ok: false, output: `the probe project has ${OPTIONAL_PEER} installed -- this gate is meaningless unless the OPTIONAL peer is absent` };
   writeFileSync(
     join(probeDir, "probe.ts"),
     [
@@ -145,15 +147,39 @@ async function typecheckWithoutOptionalPeer(probeDir: string, packageName: strin
     )}\n`,
   );
   const proc = Bun.spawn(["bunx", "tsc", "--noEmit", "-p", join(probeDir, "tsconfig.json")], { cwd: root, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   const output = `${stdout}${stderr}`;
-  const offending = output
-    .split("\n")
-    .filter((line) => line.includes("TS2307") && line.includes("@anthropic-ai/claude-agent-sdk"));
-  if (offending.length > 0) {
-    return { ok: false, output: `the published declarations force resolution of the OPTIONAL peer:\n${offending.join("\n")}` };
+  // GREEN BECAUSE NOTHING RAN is the one failure shape this repository's gates take pains to exclude,
+  // and filtering diagnostics has exactly that hole: a `tsc` that could not launch emits none. `tsc`
+  // exits 0 (clean), 1 (diagnostics) or 2 (diagnostics with errors); anything else — a missing binary,
+  // a bad `-p`, a crash — means the check did not happen, and that is a failure of the GATE, reported
+  // as itself rather than as a passing type-check.
+  if (![0, 1, 2].includes(exitCode)) {
+    return { ok: false, output: `tsc did not run (exit ${exitCode}) -- this leg proves nothing until it does:\n${output.trim()}` };
   }
-  return { ok: true, output: `type-check against the installed declarations with NO optional peer: no unresolved-peer diagnostic` };
+  const diagnostics = output.split("\n").filter((line) => /error TS\d+:/.test(line));
+  const unresolvedPeer = diagnostics.filter((line) => line.includes("TS2307") && line.includes(OPTIONAL_PEER));
+  if (unresolvedPeer.length > 0) {
+    return { ok: false, output: `the published declarations force resolution of the OPTIONAL peer:\n${unresolvedPeer.join("\n")}` };
+  }
+  // ANY diagnostic pointing INTO this package's own installed declarations is ours, whatever its
+  // code — a consumer type-checking us must get a clean read, and "no TS2307 for the peer" alone
+  // would let a different defect in our `.d.ts` pass as success.
+  const ours = diagnostics.filter((line) => line.includes(`node_modules/${packageName}/`));
+  if (ours.length > 0) {
+    return { ok: false, output: `the published declarations do not type-check for a consumer:\n${ours.join("\n")}` };
+  }
+  // What is left comes from a DEPENDENCY's own declarations (today: one `Cannot find name 'Buffer'`
+  // out of the Winter SDK's store, because this probe deliberately installs no `@types/node`). Not
+  // this package's contract, so not this gate's failure — but reported, never swallowed.
+  const foreign = diagnostics.length;
+  return {
+    ok: true,
+    output:
+      `type-check against the installed declarations with NO optional peer: tsc exit ${exitCode}, ` +
+      `0 diagnostics in ${packageName}, ${foreign} from its dependencies` +
+      (foreign > 0 ? ` (first: ${diagnostics[0]?.trim()})` : ""),
+  };
 }
 
 export interface SmokeResult {

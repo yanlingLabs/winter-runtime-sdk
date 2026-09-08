@@ -158,6 +158,49 @@ describe("the in-memory RuntimeDirectoryStore is the real thing", () => {
     expect((await store.load()).map((e) => e.address)).toEqual(["session:b"]);
   });
 
+  test("the observed CLAUDE_CONFIG_DIR and the child's process identity round-trip (NEW-1)", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    // What Lane A's spawn proxy records BEFORE it returns the process (WS-14 §6 rule 2 / §9).
+    await store.upsert({
+      ...entry("session:a"),
+      transport: "claude-handle",
+      runtimeKind: "claude-agent",
+      configDir: "/var/folders/tmp/claude-resume-9f2c",
+      processIdentity: { pid: 4242, startedAt: new Date(1000).toISOString() },
+    });
+    const loaded = (await store.load())[0]!;
+    expect(loaded.configDir).toBe("/var/folders/tmp/claude-resume-9f2c");
+    // PID **plus** start identity -- a bare pid is a lie the moment the OS recycles it.
+    expect(loaded.processIdentity).toEqual({ pid: 4242, startedAt: new Date(1000).toISOString() });
+
+    // WS-15 §6.4 step 2's read: a previously live handle is marked unavailable until process identity
+    // revalidates -- which is only expressible because both facts survived the restart.
+    const revalidates = (e: typeof loaded, observed: { pid: number; startedAt: string }): boolean =>
+      e.processIdentity?.pid === observed.pid && e.processIdentity?.startedAt === observed.startedAt;
+    expect(revalidates(loaded, { pid: 4242, startedAt: new Date(1000).toISOString() })).toBe(true);
+    // A RECYCLED pid with a different start time does NOT revalidate. This is the whole reason the
+    // field is a pair.
+    expect(revalidates(loaded, { pid: 4242, startedAt: new Date(9999).toISOString() })).toBe(false);
+  });
+
+  test("WS-14 §6 rule 5: the recorded root is CLEARED after verified cleanup, and only then", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    const recorded = { ...entry("session:a"), runtimeKind: "claude-agent" as const, transport: "claude-handle" as const, configDir: "/tmp/claude-resume-1" };
+    await store.upsert(recorded);
+    expect((await store.load())[0]?.configDir).toBe("/tmp/claude-resume-1");
+    const { configDir: _cleared, ...afterCleanup } = recorded;
+    await store.upsert(afterCleanup);
+    expect((await store.load())[0]?.configDir).toBeUndefined();
+  });
+
+  test("both are ABSENT for an in-daemon object -- a `winter-thread` has no child at all", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    await store.upsert({ ...entry("session:a"), transport: "winter-thread" });
+    const loaded = (await store.load())[0]!;
+    expect(loaded.configDir).toBeUndefined();
+    expect(loaded.processIdentity).toBeUndefined();
+  });
+
   test("a loaded entry is a COPY -- mutating it does not edit the store behind its own back", async () => {
     const store = createInMemoryRuntimeDirectoryStore();
     await store.upsert(entry("session:a"));
@@ -167,6 +210,14 @@ describe("the in-memory RuntimeDirectoryStore is the real thing", () => {
     const again = (await store.load())[0]!;
     expect(again.status).toBe("running");
     expect(again.selection.providerId).toBe("anthropic");
+  });
+
+  test("...including the NESTED process identity (NEW-1's field is an object, not a scalar)", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    await store.upsert({ ...entry("session:a"), processIdentity: { pid: 1, startedAt: new Date(0).toISOString() } });
+    const loaded = (await store.load())[0]!;
+    loaded.processIdentity!.pid = 999;
+    expect((await store.load())[0]?.processIdentity?.pid).toBe(1);
   });
 
   test("cursors round-trip and enumerate", async () => {

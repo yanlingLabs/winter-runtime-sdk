@@ -97,8 +97,16 @@ export type OfficialSpawnClaudeCodeProcess = (options: OfficialSpawnOptions) => 
  */
 export interface OfficialOptions {
   [key: string]: unknown;
-  /** WS-14 §2: `[]` — the official branch reads no real settings file at any tier. */
-  settingSources?: string[];
+  /**
+   * WS-14 §2: `[]` — the official branch reads no real settings file at any tier.
+   *
+   * NARROWED TO THE RUNTIME'S OWN THREE VALUES (review r2, NEW-2). `string[]` was WIDER than the
+   * runtime accepts, at a field the spec pins normatively: nothing stopped a lane writing
+   * `settingSources: ["flag"]`, the compiler was happy and the runtime would not have been. The union
+   * is independently authored (three ordinary words), not an Anthropic artifact, and
+   * `official-shapes-conformance.test.ts` now pins BOTH directions on it.
+   */
+  settingSources?: Array<"user" | "project" | "local">;
   /** WS-14 §2: `{ type: "local", path: "<cwd>/<projectDir>", skipMcpDiscovery: true }`. */
   plugins?: unknown;
   /** WS-14 §2: `{ preset: "claude_code" }` — a Claude-mirroring literal, fixed (WS-01 §5 / D16). */

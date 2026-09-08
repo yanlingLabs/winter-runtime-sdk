@@ -60,6 +60,28 @@ export interface RuntimeDirectoryEntry {
   parentAddress?: SerializedRuntimeAddress;
   /** The backend (runtime-side) session id, absent while "starting". */
   backendSessionId?: string;
+  /**
+   * WS-14 §6 rule 2: the `CLAUDE_CONFIG_DIR` OBSERVED in `SpawnOptions.env` — never the value that was
+   * configured — recorded before the process is returned, because "this is the only supported way to
+   * know the `claude-resume-<uuid>` staging root, since the default spawner exposes no post-cleanup
+   * lookup". Rule 5: cleared (set back to absent) only after verified cleanup, which is why it is a
+   * field with a lifecycle rather than a write-once one.
+   *
+   * WRITTEN BY Lane A's supervised spawn proxy, before it hands the process back. READ BY Lane B's
+   * `RuntimeDirectory.recover()` (WS-15 §6.4) and by Lane A's own cleanup reconciliation. Absent for
+   * every `winter-agent` object — it is the official branch's staging root, nobody else's.
+   */
+  configDir?: string;
+  /**
+   * WS-14 §9 / WS-15 §6.4 step 2: PID **plus process start identity**, never a bare PID — an OS
+   * recycles pids, so a bare one turns "is my child still alive?" into a coin flip that occasionally
+   * answers about somebody else's process.
+   *
+   * WRITTEN BY Lane A's spawn proxy alongside `configDir`. READ BY Lane B's `recover()` step 2, which
+   * marks previously live handles `"unavailable"` until process identity revalidates. Absent for
+   * in-daemon (`winter-thread`) objects, which have no child at all.
+   */
+  processIdentity?: { pid: number; startedAt: string };
   capabilities: ListedRuntimeObject["capabilities"];
   /**
    * ISO-8601. A DELIBERATE DEPARTURE from WS-15 §6.1's `updatedAt: number`: every other timestamp on
