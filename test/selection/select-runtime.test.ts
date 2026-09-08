@@ -19,7 +19,9 @@ import {
   speaksAnthropicProtocol,
   UNKNOWN_VERSION,
 } from "../../src/selection/select-runtime.ts";
-import { isSelectionRefusal } from "../../src/selection/runtime-selection.ts";
+import { isSelectionRefusal, SelectionRefusedError } from "../../src/selection/runtime-selection.ts";
+import { createRuntimeSdk } from "../../src/sdk.ts";
+import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import type { RuntimeSelection, SelectionInput, SelectionRefusal } from "../../src/selection/runtime-selection.ts";
 import { claudeFamily, credentials, gptFamily, listing, NOW, PROVIDER_VIEWS, row, VERSIONS } from "./fixtures.ts";
 
@@ -364,6 +366,25 @@ describe("the structural rules", () => {
     if (isSelectionRefusal(bare)) throw new Error("unreachable");
     expect(bare.sdkVersion).toBe(UNKNOWN_VERSION);
     expect("engineVersion" in bare).toBe(false);
+  });
+
+  test("the handle's selectRuntime throws the refusal that the function returns", () => {
+    // The plan pins two signatures that disagree: the module function returns
+    // `RuntimeSelection | SelectionRefusal`, the `RuntimeSdk` METHOD returns `RuntimeSelection` alone.
+    // `SelectionRefusedError` is the reconciliation, and this is the test that it carries the refusal
+    // verbatim rather than collapsing it into a message.
+    const { peer } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain: createFakeKeychain() });
+    const refusing = input({ credentials: credentials([]) });
+    expect(() => sdk.selectRuntime(refusing)).toThrow(SelectionRefusedError);
+    try {
+      sdk.selectRuntime(refusing);
+    } catch (error) {
+      expect(error).toBeInstanceOf(SelectionRefusedError);
+      expect((error as SelectionRefusedError).refusal).toEqual(refused({ credentials: credentials([]) }));
+    }
+    // …and the accepted path returns the record itself.
+    expect(sdk.selectRuntime(input({ hasClaudePeer: false })).runtimeKind).toBe("winter-agent");
   });
 
   test("selectionVersionsFrom carries both peer identities out of the constructor's matrix report", () => {

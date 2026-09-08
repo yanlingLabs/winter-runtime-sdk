@@ -191,9 +191,17 @@ export interface SelectionRefusal {
   detail: string;
 }
 
-/** Narrows the union without a `"refused" in x` incantation at every call site. */
-export function isSelectionRefusal(value: RuntimeSelection | SelectionRefusal): value is SelectionRefusal {
-  return (value as SelectionRefusal).refused === true;
+/**
+ * Narrows the union without a `"refused" in x` incantation at every call site.
+ *
+ * GENERIC IN THE NON-REFUSAL HALF, because every door in `src/selection/` returns "the answer OR the
+ * same refusal": `RuntimeSelection | SelectionRefusal` from the two selectors, `ChildRuntimePairing |
+ * SelectionRefusal` from the pairing door. One guard for all of them is the point — a second guard
+ * per return type is a second place for the discriminant to be spelled, and the discriminant is the
+ * whole contract.
+ */
+export function isSelectionRefusal<T extends object>(value: T | SelectionRefusal): value is SelectionRefusal {
+  return (value as { refused?: unknown }).refused === true;
 }
 
 /**
