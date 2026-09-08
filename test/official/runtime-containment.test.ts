@@ -23,7 +23,7 @@ import type { SeamContextWithDirectory } from "../../src/seams/context.ts";
 import { stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
-import { createApprovalBridge, type OfficialPermissionMode } from "../../src/official/callbacks.ts";
+import { createApprovalBridge, type ApprovalBroker, type OfficialPermissionMode } from "../../src/official/callbacks.ts";
 import { cleanupHermetic, decoyUntouched, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
@@ -51,14 +51,23 @@ class PassthroughStore {
   }
 }
 
-async function runContainment(args: { session: HermeticSession; turns: readonly ScriptedTurn[]; mode?: OfficialPermissionMode }): Promise<{
+async function runContainment(args: {
+  session: HermeticSession;
+  turns: readonly ScriptedTurn[];
+  mode?: OfficialPermissionMode;
+  /** The host broker. Default: approve everything — see this file's header. */
+  broker?: ApprovalBroker;
+}): Promise<{
   decisions: Array<{ tool: string; behavior: string; source: string }>;
   results: ReturnType<typeof toolResults>;
+  /** The session's own `system/init`, for the surfaces §8 contains by NOT exposing them. */
+  init: { tools?: string[]; slash_commands?: string[] } | undefined;
 }> {
   /* c8 ignore next */
   if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
   const { routes, record } = scriptedLoopback(args.turns);
   const decisions: Array<{ tool: string; behavior: string; source: string }> = [];
+  let init: { tools?: string[]; slash_commands?: string[] } | undefined;
 
   await withLoopbackFake({ routes }, async (fake) => {
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore: createInMemoryRuntimeDirectoryStore() };
@@ -101,16 +110,17 @@ async function runContainment(args: { session: HermeticSession; turns: readonly 
         canUseTool: createApprovalBridge({
           brand: WINTER_BRAND,
           mode: args.mode ?? "default",
-          broker: async (request) => ({ behavior: "allow", updatedInput: request.input }),
+          broker: args.broker ?? (async (request) => ({ behavior: "allow", updatedInput: request.input })),
           onDecision: ({ request, result, source }) => decisions.push({ tool: request.toolName, behavior: result.behavior, source }),
         }),
       },
     });
-    for await (const _message of live.query) {
-      /* drained: the assertions are about the filesystem and the decisions, not the stream */
+    for await (const message of live.query) {
+      const typed = message as { type: string; subtype?: string; tools?: string[]; slash_commands?: string[] };
+      if (typed.type === "system" && typed.subtype === "init") init = { ...(typed.tools === undefined ? {} : { tools: typed.tools }), ...(typed.slash_commands === undefined ? {} : { slash_commands: typed.slash_commands }) };
     }
   });
-  return { decisions, results: toolResults(record) };
+  return { decisions, results: toolResults(record), init };
 }
 
 /**
@@ -157,13 +167,15 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
         ],
       });
 
-      // Every one of them was refused by the FLOOR (not by the broker, which said yes).
-      const floored = decisions.filter((decision) => decision.source === "containment-floor");
-      expect(floored.length).toBeGreaterThanOrEqual(9);
-      expect(floored.every((decision) => decision.behavior === "deny")).toBe(true);
+      // EVERY ONE OF THEM WAS REFUSED BY THE FLOOR, and the model was handed OUR OWN sentence — which
+      // is what distinguishes containment from a tool that happened to fail. The refusal arrives from
+      // the PreToolUse hook rather than the permission callback (the hook runs first, and is the only
+      // point every tool passes through), so the count is taken on the tool_results.
+      const denied = results.filter((entry) => JSON.stringify(entry.content).toLowerCase().includes("may not create or modify"));
+      expect(denied.length).toBeGreaterThanOrEqual(9);
+      // The broker said YES to everything and it changed nothing: no Write or Bash was ever allowed.
       expect(decisions.some((decision) => decision.source === "broker" && decision.behavior === "allow" && ["Write", "Bash"].includes(decision.tool))).toBe(false);
-      // The model was told, in each tool_result, that the call was denied.
-      expect(results.filter((entry) => JSON.stringify(entry.content).toLowerCase().includes("may not create or modify")).length).toBeGreaterThanOrEqual(9);
+      expect(decisions.every((decision) => decision.behavior === "deny" || !["Write", "Bash"].includes(decision.tool))).toBe(true);
       // The case-folded and normalized names are absent BY THEIR OWN SPELLING as well as by the
       // detector — `readdirSync` would have shown them.
       expect(readdirSync(session.cwd).sort()).toEqual([]);
@@ -175,35 +187,89 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
   );
 
   test(
-    "the native writers: durable Cron, worktrees, workflows and plan mode",
+    "the native writers: every §8 row is EXERCISED, and the tally says which containment stopped it",
     async () => {
-      const session = hermeticSession("containment-writers");
-      const { decisions, results } = await runContainment({
+      // A REAL GIT REPOSITORY and a REAL WORKFLOW NAME (review r1, M2). Without a repository the
+      // worktree writers refuse outright ("Cannot create a worktree: not in a git repository") and
+      // without a name the runtime knows, `Workflow` fails resolution — either way the test would be
+      // measuring the runtime's own unrelated failure. MEASURED with both in place and the floor
+      // removed: `EnterWorktree` CREATED `<cwd>/.claude/worktrees/feature`. That is what these
+      // assertions are the negative of.
+      const session = hermeticSession("containment-writers", { git: true });
+      const { decisions, results, init } = await runContainment({
         session,
-        mode: "plan",
+        // The broker APPROVES, and additionally asks for a DURABLE rule update — which is how a saved
+        // WebFetch approval reaches the vendor's own settings file, and the one §8 writer with no
+        // tool call of its own.
+        broker: async (request) => ({
+          behavior: "allow",
+          updatedInput: request.input,
+          updatedPermissions: [
+            { type: "addRules", rules: [{ toolName: "WebFetch", ruleContent: "domain:example.com" }], behavior: "allow", destination: "localSettings" },
+            { type: "addRules", rules: [{ toolName: "WebFetch", ruleContent: "domain:example.com" }], behavior: "allow", destination: "session" },
+          ],
+        }),
         turns: [
-          { toolUses: [{ id: "t1", name: "CronCreate", input: { durable: true, schedule: "0 * * * *", prompt: "x" } }] },
-          { toolUses: [{ id: "t2", name: "EnterWorktree", input: { name: "feature" } }] },
-          { toolUses: [{ id: "t3", name: "Workflow", input: { name: "release" } }] },
-          { toolUses: [{ id: "t4", name: "Task", input: { description: "isolated", prompt: "go", isolation: "worktree" } }] },
-          { toolUses: [{ id: "t5", name: "ExitPlanMode", input: { plan: "# the plan" } }] },
+          { toolUses: [{ id: "cron", name: "CronCreate", input: { durable: true, schedule: "0 * * * *", prompt: "x" } }] },
+          { toolUses: [{ id: "worktree", name: "EnterWorktree", input: { name: "feature" } }] },
+          { toolUses: [{ id: "workflow", name: "Workflow", input: { name: "deep-research" } }] },
+          { toolUses: [{ id: "agent", name: "Task", input: { description: "isolated", prompt: "go", isolation: "worktree", subagent_type: "general-purpose" } }] },
+          { toolUses: [{ id: "webfetch", name: "WebFetch", input: { url: "https://example.com/", prompt: "read it" } }] },
+          { toolUses: [{ id: "plan", name: "ExitPlanMode", input: { plan: "# the plan" } }] },
           { text: "done" },
         ],
       });
-      // Whatever each of them did, none of them produced a vendor-named path.
+
+      /** Which containment stopped each writer — the tally the review asked for. */
+      const tally: Record<string, string> = {};
+      const resultFor = (id: string): string => JSON.stringify(results.find((entry) => entry.tool_use_id === id)?.content ?? "").toLowerCase();
+
+      // 1. DURABLE CRON — stopped by the DENY LIST, ahead of every callback: `disallowedTools`
+      //    short-circuits before `canUseTool` AND before the hook, which is the two layers genuinely
+      //    being two.
+      expect(decisions.some((decision) => decision.tool === "CronCreate")).toBe(false);
+      expect(resultFor("cron")).toMatch(/no such tool|disabled|not allowed|denied/);
+      tally["CronCreate(durable)"] = "deny-list";
+
+      // 2/3/4. THE REDIRECT WRITERS — stopped by the PRE-TOOL-USE HOOK, and the proof is that the
+      //        model was handed OUR OWN sentence rather than one of the runtime's. None of them
+      //        reaches `canUseTool` at all on this runtime, which is why the hook exists.
+      for (const [label, id, fragment] of [
+        ["EnterWorktree", "worktree", "worktrees belong under .winter/worktrees"],
+        ["Workflow", "workflow", "workflows resolve under .winter/workflows"],
+        ["Task(isolation:worktree)", "agent", "isolated agent worktree"],
+      ] as const) {
+        expect([label, resultFor(id).includes(fragment.toLowerCase())]).toEqual([label, true]);
+        tally[label] = "pre-tool-use-hook";
+      }
+      // …and the vendor's worktree directory, which the same call created before this fix, is absent.
+      expect(existsSync(join(session.cwd, ".claude", "worktrees"))).toBe(false);
+
+      // 5. THE SAVED APPROVAL — the durable rule update is STRIPPED at the bridge and the
+      //    session-scoped one survives, which is §16 q2's `disable` disposition doing its work.
+      const webfetch = decisions.find((decision) => decision.tool === "WebFetch");
+      expect([webfetch?.source, webfetch?.behavior]).toEqual(["broker-approval-stripped", "allow"]);
+      tally["WebFetch(saved approval)"] = "approval-stripped";
+
+      // 6. PLAN MODE — `plansDirectory` is set through the settings layer and the vendor's own
+      //    user-level plans directory is never created. MEASURED AND NAMED: this runtime's SDK path
+      //    writes no plan file at all, so this leg is an absence with a recorded reason rather than a
+      //    redirect anything can point at.
+      expect(existsSync(join(session.home, ".claude", "plans"))).toBe(false);
+      tally["ExitPlanMode"] = "plansDirectory(setting); this runtime's SDK path writes no plan file";
+
+      // 7. `/init` — a slash command is user-facing surface, not a tool the model can call: the
+      //    containment is that no init-like TOOL is advertised to the model at all.
+      expect((init?.tools ?? []).some((tool) => /^init$/i.test(tool))).toBe(false);
+      expect((init?.tools ?? []).length).toBeGreaterThan(5);
+      tally["/init"] = "host-ui (not a model-callable tool)";
+
+      // Every §8 row has an entry, and nothing vendor-named exists.
+      expect(Object.keys(tally).sort()).toEqual(["/init", "CronCreate(durable)", "EnterWorktree", "ExitPlanMode", "Task(isolation:worktree)", "WebFetch(saved approval)", "Workflow"]);
       expect(vendorNamedArtifacts(session)).toEqual([]);
       expect(decoyUntouched(session)).toBe(true);
-      // THE DURABLE CRON IS REFUSED BEFORE THE CALLBACK, and that is worth recording rather than
-      // asserting around: `disallowedTools` short-circuits ahead of `canUseTool`, so the floor never
-      // sees the call at all. The name deny and the floor are therefore genuinely two layers — the
-      // first one is what fires here, and the second is what would fire for a writer no list names.
-      expect(decisions.some((decision) => decision.tool === "CronCreate")).toBe(false);
-      const cron = results.find((entry) => entry.tool_use_id === "t1");
-      expect(cron).toBeDefined();
-      expect(JSON.stringify(cron?.content).toLowerCase()).toMatch(/denied|not allowed|permission|disabled|blocked/);
-      // `plansDirectory` is what keeps plan mode out of the vendor's user-level plans directory: it
-      // resolves under the product's project directory, and the vendor's own is never created.
-      expect(existsSync(join(session.home, ".claude", "plans"))).toBe(false);
+      // eslint-disable-next-line no-console
+      console.log(`[row 14 containment tally] ${JSON.stringify(tally)}`);
     },
     TIMEOUT,
   );

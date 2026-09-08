@@ -8,6 +8,15 @@
     "CLAUDE_CONFIG_DIR": "<redacted>",
     "PATH": "<redacted>"
   },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          "<function>"
+        ]
+      }
+    ]
+  },
   "includeHookEvents": true,
   "includePartialMessages": true,
   "mcpServers": {

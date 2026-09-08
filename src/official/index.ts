@@ -10,6 +10,7 @@ export type { HandoffEligibility, OfficialAdapterHandle, OfficialAdapterPolicy, 
 export {
   ALIASED_BUILTINS,
   CANONICAL_DUPLICATE_EXPOSURE,
+  aliasDenyNames,
   NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
   NATIVE_LIST_AGENTS_SCHEMA,
   NATIVE_SEND_MESSAGE_SCHEMA,
@@ -26,14 +27,27 @@ export type { AuthCredentialPlan, AuthFamily, AuthVariableSetKey, ClaudeOauthGat
 export { OFFICIAL_DISCLOSURES, officialBranchLabel } from "./branding.ts";
 export type { OfficialDisclosure } from "./branding.ts";
 
-export { createApprovalBridge, createFirstResponseWins, revalidateResumedDecision } from "./callbacks.ts";
-export type { ApprovalBroker, ApprovalRequest, ApprovalBridgeOptions, DecisionContext, OfficialApprovalBridge, OfficialPermissionMode, ResumedDecision } from "./callbacks.ts";
+export { createApprovalBridge, createContainmentHooks, createFirstResponseWins, revalidateResumedDecision } from "./callbacks.ts";
+export type {
+  ApprovalBroker,
+  ApprovalRequest,
+  ApprovalBridgeOptions,
+  ContainmentHooksOptions,
+  DecisionContext,
+  DecisionSource,
+  OfficialApprovalBridge,
+  OfficialHookOutput,
+  OfficialPermissionMode,
+  PreToolUseHookInput,
+  ResumedDecision,
+} from "./callbacks.ts";
 
 export { FORBIDDEN_TARGETS, containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, targetsForbiddenPath } from "./containment.ts";
 export type { ContainmentDecision, ContainmentDisposition, ContainmentPaths, ContainmentPolicy, SavedApprovalDisposition } from "./containment.ts";
 
 export {
   MINIMAL_OS_VARIABLES,
+  sanitizePathListValue,
   MINIMAL_OS_VARIABLE_PREFIXES,
   OFFICIAL_RUNTIME_VARIABLES,
   PINNED_OFFICIAL_RUNTIME,
@@ -49,6 +63,7 @@ export type { EnvAllowlistSnapshot, OfficialEnvInput, OfficialEnvPolicy } from "
 
 export {
   OFFICIAL_ERROR_CODES,
+  OfficialStdoutUnterminatedError,
   OfficialAgentResultError,
   OfficialApiError,
   OfficialBranchError,
@@ -69,7 +84,7 @@ export {
 } from "./errors.ts";
 export type { OfficialCrashClass, OfficialErrorCode, WinterErrorClassName } from "./errors.ts";
 
-export { assertNoAdvisor, canonicalToolNames, materializeOfficialMcpServer, messagingToolDescriptors, officialMcpServers, winterMcpServerDescriptor } from "./mcp-descriptors.ts";
+export { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, materializeOfficialMcpServer, messagingToolDescriptors, officialMcpServers, winterMcpServerDescriptor } from "./mcp-descriptors.ts";
 export type { InputShapeFactory, JsonSchemaObject, MessagingHandlers, OfficialMcpModule, WinterMcpHandler, WinterMcpServerDescriptor, WinterMcpToolDescriptor, WinterMcpToolResult } from "./mcp-descriptors.ts";
 
 export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, brandedFlagSettings, buildOfficialOptions, captureOptions } from "./options-template.ts";

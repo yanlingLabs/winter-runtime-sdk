@@ -137,6 +137,19 @@ describe("WS-14 §2 — the Options template", () => {
     expect(buildOfficialOptions(input("code"), { advertisesHandoff: true }).sessionStoreFlush).toBe("eager");
   });
 
+  test("§8's floor is installed as a PreToolUse hook ALWAYS, ahead of the host's own (review r1, M2)", () => {
+    const bare = buildOfficialOptions(input("code"));
+    expect(Object.keys(bare.hooks as Record<string, unknown>)).toEqual(["PreToolUse"]);
+    expect((bare.hooks as { PreToolUse: unknown[] }).PreToolUse).toHaveLength(1);
+    // The host's own matchers survive, and ours run first.
+    const hostHook = { matcher: "Write", hooks: [async () => ({})] };
+    const merged = buildOfficialOptions(input("code"), { hooks: { PreToolUse: [hostHook], PostToolUse: [hostHook] } });
+    const preToolUse = (merged.hooks as { PreToolUse: unknown[]; PostToolUse: unknown[] }).PreToolUse;
+    expect(preToolUse).toHaveLength(2);
+    expect(preToolUse[1]).toBe(hostHook);
+    expect((merged.hooks as { PostToolUse: unknown[] }).PostToolUse).toEqual([hostHook]);
+  });
+
   test("the always-on fields are always on", () => {
     const options = buildOfficialOptions(input("dispatch"));
     expect([options.strictMcpConfig, options.includePartialMessages, options.includeHookEvents, options.perTaskStopAffordance]).toEqual([true, true, true, true]);

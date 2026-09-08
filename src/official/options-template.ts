@@ -28,6 +28,7 @@ import { mcpToolName, type BrandProfile, type SessionStore } from "@yanlinglabs/
 import type { OfficialOptions } from "../seams/official-sdk-shapes.ts";
 import type { OptionsTemplateInput } from "../seams/official-adapter.ts";
 import { officialToolAliases } from "./aliases.ts";
+import { createContainmentHooks } from "./callbacks.ts";
 import type { OfficialApprovalBridge } from "./callbacks.ts";
 import { containmentPaths, officialDisallowedTools, type ContainmentPolicy } from "./containment.ts";
 import { officialBranchLabel } from "./branding.ts";
@@ -101,6 +102,14 @@ export interface OptionsTemplatePolicy {
   additionalDisallowedTools?: readonly string[];
 }
 
+/** Puts the containment matchers FIRST, then whatever the host installed for the same events. */
+function mergeHooks(ours: Record<string, unknown[]>, hostHooks: unknown): Record<string, unknown[]> {
+  const host = (hostHooks ?? {}) as Record<string, unknown[]>;
+  const merged: Record<string, unknown[]> = { ...host };
+  for (const [event, matchers] of Object.entries(ours)) merged[event] = [...matchers, ...(host[event] ?? [])];
+  return merged;
+}
+
 /** The settings the flag layer must carry for this branch to behave (see this module's header). */
 export function brandedFlagSettings(args: { brand: Pick<BrandProfile, "projectDirName">; autoMemoryDirectory: string; extra?: Readonly<Record<string, unknown>> }): Record<string, unknown> {
   return {
@@ -162,7 +171,10 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     perTaskStopAffordance: true,
 
     ...(policy.canUseTool === undefined ? {} : { canUseTool: policy.canUseTool }),
-    ...(policy.hooks === undefined ? {} : { hooks: policy.hooks }),
+    // §8's floor is installed as a PreToolUse hook ALWAYS, merged ahead of the host's own matchers —
+    // see `createContainmentHooks` for the measurement that made this mandatory (the permission
+    // callback is not consulted for every tool on this runtime).
+    hooks: mergeHooks(createContainmentHooks({ brand: input.brand, ...(policy.containment === undefined ? {} : { containment: policy.containment }) }), policy.hooks),
     ...(policy.env === undefined ? {} : { env: { ...policy.env } }),
     ...(policy.sessionId === undefined ? {} : { sessionId: policy.sessionId }),
     ...(policy.resume === undefined ? {} : { resume: policy.resume }),

@@ -25,6 +25,7 @@
 //      DECOY vendor home under the temp `HOME`, so "nothing was written there" is an assertion about
 //      a directory that exists rather than about one that never could.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -127,6 +128,19 @@ function jsonSchemaToShape(schema: JsonSchemaObject, zod: { string(): ZodLike; b
 // Hermetic homes, the decoy, and the loopback script.
 // --------------------------------------------------------------------------------------------------
 
+export interface HermeticSessionOptions {
+  /**
+   * Initialize the working directory as a git repository (review r1, M2).
+   *
+   * The worktree writers — `EnterWorktree`, an `Agent`/`Task` with `isolation: "worktree"` — REFUSE
+   * OUTRIGHT outside a repository ("Cannot create a worktree: not in a git repository"). A row-14
+   * proof taken in a bare `mkdtemp` therefore proves nothing about containment: the writer never ran.
+   * With a repository they would really create `.claude/worktrees/`, which is what makes the floor's
+   * refusal a measurement rather than a coincidence.
+   */
+  git?: boolean;
+}
+
 export interface HermeticSession {
   /** A throwaway `HOME`, with a DECOY vendor home already in it (see this file's header). */
   home: string;
@@ -143,7 +157,7 @@ export interface HermeticSession {
 const roots: string[] = [];
 
 /** Creates one hermetic set of directories. Every root is removed by `cleanupHermetic()`. */
-export function hermeticSession(prefix = "official"): HermeticSession {
+export function hermeticSession(prefix = "official", options: HermeticSessionOptions = {}): HermeticSession {
   const root = mkdtempSync(join(tmpdir(), `winter-rt-${prefix}-`));
   roots.push(root);
   const home = join(root, "home");
@@ -154,6 +168,19 @@ export function hermeticSession(prefix = "official"): HermeticSession {
   for (const dir of [home, brandHome, spool, cwd, decoyVendorHome]) mkdirSync(dir, { recursive: true });
   // The decoy carries a file, so "unchanged" is checkable rather than vacuous.
   writeFileSync(join(decoyVendorHome, "decoy.json"), DECOY_CONTENT);
+  if (options.git === true) {
+    // A real repository, with an identity so nothing reads the developer's own git config.
+    const run = (args: string[]): void => {
+      const result = spawnSync("git", args, { cwd, env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } });
+      if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed in the hermetic session: ${String(result.stderr)}`);
+    };
+    run(["init", "-q", "-b", "main"]);
+    run(["config", "user.email", "bed@example.invalid"]);
+    run(["config", "user.name", "the test bed"]);
+    writeFileSync(join(cwd, "seed.txt"), "the repository needs one commit for a worktree\n");
+    run(["add", "seed.txt"]);
+    run(["commit", "-qm", "seed"]);
+  }
   return { home, spool, cwd, brandHome, decoyVendorHome };
 }
 

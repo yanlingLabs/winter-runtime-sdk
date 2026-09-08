@@ -19,7 +19,7 @@ import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { createOfficialAdapter, officialHandoffEligibility, type OfficialSessionHandle } from "../../src/official/index.ts";
 import { OfficialConfigurationError, OfficialInvalidResumeError, OfficialMcpError } from "../../src/official/errors.ts";
 import { buildOfficialOptions } from "../../src/official/options-template.ts";
-import { assertNoAdvisor, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
+import { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
 import type { SpawnedChildProcess } from "../../src/official/spawn-proxy.ts";
 
 const SPOOL = "/home/.winter/runtimes/official-agent-spool";
@@ -300,5 +300,8 @@ describe("WS-14 §11 — the standing MCP server on the official branch", () => 
     expect(registered[0]?.schema).toEqual({ shapeOf: ["to", "message", "summary", "notify_when_idle"] });
 
     expect(() => officialMcpServers({ descriptor, module: {}, toInputShape: () => ({}), branchLabel })).toThrow(/no in-process MCP server constructor/);
+    // review r1, n3: what the vendor's constructor cannot carry is named, not implied.
+    expect(OFFICIAL_MATERIALIZATION_DROPS).toEqual(["outputSchema", "exposure"]);
+    expect(descriptor.tools[1]?.outputSchema).toBeDefined();
   });
 });

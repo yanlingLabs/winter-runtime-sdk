@@ -127,6 +127,62 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
   };
 }
 
+// --------------------------------------------------------------------------------------------------
+// §8's enforcement point: the PreToolUse hook.
+// --------------------------------------------------------------------------------------------------
+//
+// MEASURED, AND IT IS WHY THIS EXISTS (review r1, M2, and a finding beyond it). In a real git
+// repository, a model-emitted `EnterWorktree` CREATED `.claude/worktrees/feature` — and `canUseTool`
+// WAS NEVER CALLED FOR IT. The same is true of `Workflow` and of an `Agent`/`Task` with
+// `isolation: "worktree"`. The permission callback is not consulted for every tool on this runtime,
+// so a floor that lives only there cannot make row 14 true.
+//
+// §10 says exactly where must-see-every-call logic goes: "`dontAsk` never invokes the callback;
+// PreToolUse hooks are the enforcement point for must-see-every-call logic." So the containment floor
+// is installed as a PreToolUse hook as well as in the bridge — the same decision function, at the one
+// point every call passes through.
+
+/** The subset of the hook contract this needs, declared structurally (the peer is never imported). */
+export interface PreToolUseHookInput {
+  hook_event_name?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+}
+
+export type OfficialHookOutput = {
+  hookSpecificOutput?: { hookEventName: "PreToolUse"; permissionDecision?: "allow" | "deny" | "ask" | "defer"; permissionDecisionReason?: string };
+  decision?: "block";
+  stopReason?: string;
+};
+
+export interface ContainmentHooksOptions {
+  brand: Pick<BrandProfile, "projectDirName">;
+  containment?: ContainmentPolicy;
+  onDecision?: (decision: { tool: string; target: string; reason: string }) => void;
+}
+
+/**
+ * The `hooks` value §8's containment needs: one `PreToolUse` matcher applying the same floor.
+ *
+ * A DENY HERE IS THE STRONGEST ONE THE RUNTIME OFFERS: `permissionDecision: "deny"` stops the call
+ * before it runs and returns the reason to the model, and unlike the callback it is invoked for every
+ * tool — including the ones that skip `canUseTool` entirely.
+ */
+export function createContainmentHooks(options: ContainmentHooksOptions): Record<string, Array<{ hooks: Array<(input: unknown) => Promise<OfficialHookOutput>> }>> {
+  const policy: ContainmentPolicy = { projectDirName: options.brand.projectDirName, ...options.containment };
+  const guard = async (raw: unknown): Promise<OfficialHookOutput> => {
+    const input = (raw ?? {}) as PreToolUseHookInput;
+    const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
+    const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+    if (toolName === "") return {};
+    const decision = containmentDecisionFor(toolName, toolInput, policy);
+    if (decision.allow) return {};
+    options.onDecision?.({ tool: toolName, target: decision.target, reason: decision.reason });
+    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } };
+  };
+  return { PreToolUse: [{ hooks: [guard] }] };
+}
+
 /** A decision that was made before a restart, replayed against the session it was made for. */
 export interface ResumedDecision {
   requestId: string;

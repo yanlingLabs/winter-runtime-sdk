@@ -189,6 +189,13 @@ export function materializeOfficialMcpServer(args: {
       branchLabel: args.branchLabel,
     });
   }
+  // WHAT THE VENDOR'S CONSTRUCTOR CANNOT CARRY (review r1, n3), disclosed rather than left looking
+  // authoritative on the descriptor: `outputSchema` and `exposure` have no parameter on the
+  // in-process server's tool registration, so on THIS branch the output shape is unvalidated and the
+  // canonical twins' deferral is the runtime's own decision (which, measured, it does not implement —
+  // see `aliases.ts`'s note). §11's "identical schema and result shape on both branches" therefore
+  // holds for the INPUT schema, the description, the annotations and the handler; the two dropped
+  // fields are a vendor limitation with the same standing as §7's Tool-Search finding.
   const tools = args.descriptor.tools.map((descriptor) =>
     tool(
       descriptor.tool,
@@ -202,6 +209,9 @@ export function materializeOfficialMcpServer(args: {
 }
 
 /** `Options.mcpServers` for this branch: one entry, keyed by the brand's own server name. */
+/** The descriptor fields the official branch's registration cannot carry (review r1, n3). */
+export const OFFICIAL_MATERIALIZATION_DROPS: readonly string[] = ["outputSchema", "exposure"];
+
 export function officialMcpServers(args: { descriptor: WinterMcpServerDescriptor; module: OfficialMcpModule; toInputShape: InputShapeFactory; branchLabel: string }): Record<string, unknown> {
   return { [args.descriptor.name]: materializeOfficialMcpServer(args) };
 }
