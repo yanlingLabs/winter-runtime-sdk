@@ -1,0 +1,66 @@
+{
+  "pinnedRuntime": "0.3.250",
+  "runtimeVariables": [
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_PROJECT_DIR_NAME",
+    "CLAUDE_CODE_TMPDIR"
+  ],
+  "minimalOsVariables": [
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "TERM",
+    "LANG"
+  ],
+  "minimalOsVariablePrefixes": [
+    "LC_"
+  ],
+  "authFamilies": {
+    "api-key": [
+      "ANTHROPIC_API_KEY"
+    ],
+    "console-oauth": [
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_BASE_URL"
+    ],
+    "bedrock": [
+      "CLAUDE_CODE_USE_BEDROCK",
+      "AWS_REGION",
+      "AWS_PROFILE",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "ANTHROPIC_BEDROCK_BASE_URL"
+    ],
+    "vertex": [
+      "CLAUDE_CODE_USE_VERTEX",
+      "ANTHROPIC_VERTEX_PROJECT_ID",
+      "CLOUD_ML_REGION",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "ANTHROPIC_VERTEX_BASE_URL"
+    ],
+    "claude-oauth": [],
+    "local-none": []
+  },
+  "neverInjected": [
+    "CLAUDE_CODE_OAUTH_TOKEN"
+  ],
+  "refusedProxyTelemetry": [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "DISABLE_TELEMETRY",
+    "DISABLE_ERROR_REPORTING"
+  ],
+  "refusedProxyTelemetryPrefixes": [
+    "OTEL_"
+  ]
+}
