@@ -1,0 +1,179 @@
+// THE INSTALL-FROM-TARBALL SMOKE — what a consumer actually gets, under Node AND Bun.
+//
+// WS-02 §9 item 3: "a dry-run pack + install-from-tarball smoke test (Node 18 and Bun) gates every
+// publish". This script packs fresh (running the tarball scan — a violation aborts before anything is
+// installed), installs into a throwaway directory OUTSIDE the repo, and imports every declared
+// `exports` entry under each requested runtime, failing loudly on the first import error.
+//
+// THE PEER IS PROVIDED, NOT PUBLISHED — and this is the one place this script differs from the SDK
+// repository's own smoke, deliberately. `@yanlinglabs/winter-agent-sdk` is a REQUIRED PEER: the
+// router's `dist/index.js` opens with `export * from "@yanlinglabs/winter-agent-sdk"`, so importing
+// the package without a resolvable peer is not a failure of the tarball, it is the documented
+// consequence of not installing a peer. Until that peer is published (R-7b-5), the smoke satisfies it
+// by SYMLINKING the same checkout `pnpm` linked into this repo — which is exactly what a host with
+// both packages vendored will have — and asserts the ROUTER's tarball is the dist-only thing under
+// test. At the close-out the pin becomes `^0.0.2` and this step becomes an ordinary registry install.
+//
+// WHAT THIS PROVES, precisely: the packed manifest resolves, the compiled `default` entry runs under
+// Node (which cannot execute TypeScript), the `bun` condition is gone from the published manifest,
+// and no `src/` shipped.
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { peerPackageDir } from "./build-packages.ts";
+import { releasePack } from "./release-pack.ts";
+
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/** The one peer this package cannot be imported without. Spelled once. */
+const REQUIRED_PEER = "@yanlinglabs/winter-agent-sdk";
+
+export type SmokeRuntime = "node" | "bun";
+
+export interface ImportTarget {
+  specifier: string;
+  runtimes: SmokeRuntime[];
+}
+
+interface ManifestShape {
+  name: string;
+  exports?: Record<string, unknown> | string;
+  engines?: Record<string, string>;
+}
+
+/**
+ * Which runtimes a target must import under, from the package's OWN `engines`.
+ *
+ * `engines.node` means "a Node consumer may import this" and the Node leg asserts it; `engines.bun`
+ * alone means Bun-only. A package declaring NEITHER is required under both — fail closed, so a new
+ * package cannot opt out of the gate by omission.
+ */
+export function runtimesFor(manifest: ManifestShape): SmokeRuntime[] {
+  const engines = manifest.engines ?? {};
+  const out: SmokeRuntime[] = [];
+  if (engines["node"] !== undefined || (engines["node"] === undefined && engines["bun"] === undefined)) out.push("node");
+  out.push("bun"); // Bun runs everything this repository produces, declared or not
+  return out;
+}
+
+/** Every declared `exports` entry, derived from the manifest — never hand-maintained. */
+export function deriveImportTargets(root: string = REPO_ROOT): ImportTarget[] {
+  const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as ManifestShape;
+  const runtimes = runtimesFor(manifest);
+  const field = manifest.exports;
+  if (field === undefined || typeof field === "string") return [{ specifier: manifest.name, runtimes }];
+  return Object.keys(field)
+    .map((key) => ({ specifier: key === "." ? manifest.name : `${manifest.name}/${key.replace(/^\.\//, "")}`, runtimes }))
+    .sort((a, b) => a.specifier.localeCompare(b.specifier));
+}
+
+/**
+ * Every violation of the dist-only contract in an INSTALLED tree.
+ *
+ * The tarball scan reads the archive; this reads what the installer actually WROTE — the same fact
+ * one step further along, and the step a consumer lives in. Exported so its test can drive it against
+ * a synthetic tree: a check that has never been shown failing is a check nobody can trust.
+ */
+export function assertInstalledTreeIsDistOnly(probeDir: string, packageName: string): string[] {
+  const violations: string[] = [];
+  const pkgDir = join(probeDir, "node_modules", ...packageName.split("/"));
+  if (existsSync(join(pkgDir, "src"))) violations.push(`  ${packageName}: node_modules/${packageName}/src exists — a published package ships compiled output only`);
+  const manifestPath = join(pkgDir, "package.json");
+  if (!existsSync(manifestPath)) {
+    violations.push(`  ${packageName}: installed but has no package.json`);
+    return violations;
+  }
+  const field = (JSON.parse(readFileSync(manifestPath, "utf8")) as { exports?: Record<string, unknown> | string }).exports;
+  if (typeof field !== "object" || field === null) return violations;
+  for (const [subpath, conditions] of Object.entries(field)) {
+    const targets = typeof conditions === "string" ? { default: conditions } : (conditions as Record<string, unknown>);
+    for (const [condition, target] of Object.entries(targets)) {
+      if (condition === "bun") violations.push(`  ${packageName}: installed exports["${subpath}"] still carries a \`bun\` condition (${String(target)}), which points outside a dist-only package`);
+      if (typeof target === "string" && target.startsWith("./src/")) violations.push(`  ${packageName}: installed exports["${subpath}"].${condition} names ${target}`);
+    }
+  }
+  return violations;
+}
+
+async function importUnder(runtime: SmokeRuntime, specifier: string, probeDir: string): Promise<{ ok: boolean; output: string }> {
+  const code = `import(${JSON.stringify(specifier)}).then((m) => { const n = Object.keys(m).length; if (n < 10) { console.error(${JSON.stringify(`${runtime}: ${specifier} imported but exported`)}, n, "names"); process.exit(1); } console.log(${JSON.stringify(`${runtime}: ${specifier} OK`)}, n, "exports"); }).catch((e) => { console.error(${JSON.stringify(`${runtime}: ${specifier} FAILED:`)}, e && e.message ? e.message : e); process.exit(1); });`;
+  const proc = Bun.spawn([runtime, "-e", code], { cwd: probeDir, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  return { ok: exitCode === 0, output: (stdout + stderr).trim() };
+}
+
+export interface SmokeResult {
+  ok: boolean;
+  results: Array<{ specifier: string; runtime: SmokeRuntime; ok: boolean; output: string }>;
+  targets: ImportTarget[];
+}
+
+export async function runSmoke(opts: { runtimes?: readonly SmokeRuntime[]; root?: string } = {}): Promise<SmokeResult> {
+  const root = opts.root ?? REPO_ROOT;
+  const runtimes = opts.runtimes ?? (["node", "bun"] as const);
+  const outDir = mkdtempSync(join(tmpdir(), "winter-runtime-sdk-smoke-pack-"));
+  const probeDir = mkdtempSync(join(tmpdir(), "winter-runtime-sdk-smoke-probe-"));
+  const results: SmokeResult["results"] = [];
+  try {
+    const packed = await releasePack({ outDir, root });
+    if (packed.violations.length > 0) throw new Error(`release-pack found violations, refusing to smoke-test:\n${packed.violations.join("\n")}`);
+    const targets = deriveImportTargets(root);
+
+    // Outside the repository on purpose: a fresh mkdtemp, no workspace file, no lockfile, no
+    // committed .npmrc in scope. The only thing that can make this succeed is the tarball itself.
+    writeFileSync(join(probeDir, "package.json"), `${JSON.stringify({ name: "winter-runtime-sdk-smoke-probe", private: true, version: "0.0.0" }, null, 2)}\n`);
+    // `--legacy-peer-deps`: npm 7+ tries to INSTALL peer dependencies, and both of this package's
+    // peers are unpublished or deliberately absent here (see the header). The peer is provided below.
+    const install = Bun.spawnSync(["npm", "install", "--offline", "--legacy-peer-deps", packed.packed.tarballPath], { cwd: probeDir, stdout: "pipe", stderr: "pipe" });
+    if (install.exitCode !== 0) {
+      throw new Error(`npm install --offline failed (exit ${install.exitCode}):\n${new TextDecoder().decode(install.stdout)}${new TextDecoder().decode(install.stderr)}`);
+    }
+
+    const peerDir = peerPackageDir(REQUIRED_PEER, root);
+    if (peerDir === undefined) throw new Error(`smoke-installed: the required peer ${REQUIRED_PEER} is not resolvable from this repository — run \`pnpm install\``);
+    // Every path segment is DERIVED from the package name, never re-spelled: the product token is
+    // exactly what the brand gate keeps out of source, and a second spelling here is a second thing
+    // to update.
+    const peerSegments = REQUIRED_PEER.split("/");
+    const peerLink = join(probeDir, "node_modules", ...peerSegments);
+    mkdirSync(dirname(peerLink), { recursive: true });
+    symlinkSync(peerDir, peerLink, "dir");
+
+    const distOnly = assertInstalledTreeIsDistOnly(probeDir, packed.packed.name);
+    if (distOnly.length > 0) throw new Error(`the installed tree is not dist-only:\n${distOnly.join("\n")}`);
+
+    for (const runtime of runtimes) {
+      for (const target of targets) {
+        if (!target.runtimes.includes(runtime)) {
+          console.log(`smoke-installed SKIP: ${runtime} import of "${target.specifier}" — that package declares no \`engines.${runtime}\``);
+          continue;
+        }
+        const result = await importUnder(runtime, target.specifier, probeDir);
+        results.push({ specifier: target.specifier, runtime, ok: result.ok, output: result.output });
+        if (!result.ok) {
+          console.error(`smoke-installed FAILED: ${runtime} import of "${target.specifier}"\n${result.output}`);
+          return { ok: false, results, targets };
+        }
+        console.log(`smoke-installed OK: ${result.output}`);
+      }
+    }
+    return { ok: true, results, targets };
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+if (import.meta.main) {
+  const runtimeArg = process.argv.find((a) => a.startsWith("--runtime="))?.split("=")[1];
+  if (runtimeArg !== undefined && runtimeArg !== "node" && runtimeArg !== "bun") {
+    console.error(`smoke-installed: --runtime must be "node" or "bun", got "${runtimeArg}"`);
+    process.exit(1);
+  }
+  const { ok, targets } = await runSmoke(runtimeArg ? { runtimes: [runtimeArg] } : {});
+  console.log(`smoke-installed: ${targets.length} target(s) across every declared exports entry`);
+  if (!ok) process.exitCode = 1;
+  else console.log("smoke-installed OK — every target imports cleanly under every requested runtime");
+}

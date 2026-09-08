@@ -1,0 +1,105 @@
+name: ci
+# P7b Task 1 (the spine). Every gate this repository has, on every push and pull request. NOTHING in
+# this file publishes anything — `release.yml` is the only workflow that can, and it fires only on a
+# `v*` tag or a `workflow_dispatch` (`scripts/release-gates.test.ts` pins that trigger set and
+# asserts no other workflow in this repository contains the word `publish`).
+#
+# TWO CHECKOUTS, and this is the temporary shape (R-7b-5). Until the Winter SDK's first publish, this
+# package consumes it by `link:` onto a SIBLING CHECKOUT — `link:../winter-agent-sdk/packages/sdk` and
+# the two conformance harnesses beside it. So CI reproduces that layout literally: this repository at
+# `winter-runtime-sdk/`, the SDK repository at `winter-agent-sdk/`, both under the workspace, and
+# every step runs with an explicit `working-directory`.
+#
+#   AT THE CLOSE-OUT this all collapses: the three `link:` dependencies become `^0.0.2` from the
+#   registries, the second checkout and the two steps that build it disappear, and the only change to
+#   the jobs below is that `pnpm install --frozen-lockfile` resolves from npm instead of from `../`.
+#   `WINTER_AGENT_SDK_REF` is pinned to `main` in the meantime and becomes `v0.0.2` if a lane needs a
+#   fixed ref before then.
+#
+# WHY THE SDK CHECKOUT IS BUILT (`bun run build:packages` over there): this package's own declaration
+# emit sets `paths: {}` — it must, because the repo-wide `paths` point at the sibling's `src`, and
+# files outside `rootDir` break a declaration emit outright. So `tsc` resolves the peer the ordinary
+# way, through node_modules to its `types` condition, i.e. to ITS `dist`, which is gitignored there
+# and absent on a fresh checkout. `scripts/build-packages.ts` says exactly this if the step is missing.
+on: [push, pull_request]
+env:
+  WINTER_AGENT_SDK_REF: main
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: winter-runtime-sdk
+      # The SDK repository is public, so the default token is enough; no secret is involved in this
+      # checkout and none should be added — a cross-repo PAT in CI is exactly the thing the close-out
+      # removes the need for.
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: ${{ env.WINTER_AGENT_SDK_REF }}
+          path: winter-agent-sdk
+      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-agent-sdk
+      - run: bun run build:packages
+        working-directory: winter-agent-sdk
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-runtime-sdk
+      - run: bun run build:packages          # FIRST, and explicitly: two steps below resolve through
+                                             # `types`, i.e. `./dist/*.d.ts`. Never a side effect of
+                                             # some earlier step.
+        working-directory: winter-runtime-sdk
+      - run: bun test                        # the whole suite: the contract re-export gate, the
+                                             # version matrix, the door's pass-through, the seams, the
+                                             # two harness smokes, AND the two source gates —
+                                             # `test/gates/source-hygiene.test.ts` (no raw control
+                                             # bytes) and `test/gates/brand-gate.test.ts` (the ported
+                                             # brand-literal rules 1-10 plus the brand-less call-site
+                                             # allowlist). They are `bun test` files on purpose: a
+                                             # gate that needs its own CI step is a gate a developer
+                                             # only meets after pushing.
+        working-directory: winter-runtime-sdk
+      - run: bun run typecheck               # whole-repo `tsc --noEmit` including test files and
+                                             # scripts — `bun test` only type-strips, so this is the
+                                             # repository's one real tsc gate, and it is what enforces
+                                             # every type-level assertion in the test suite.
+        working-directory: winter-runtime-sdk
+
+  pack-smoke:
+    # WS-02 §9 item 3: proves a consumer can INSTALL and IMPORT what `release-pack.ts` packs, under
+    # Node 18 AND Bun, both BLOCKING. This job never publishes; it packs into a temp directory outside
+    # the repository, installs there, and imports every declared `exports` entry.
+    #
+    # `scripts/smoke-installed.ts` provides the REQUIRED PEER by symlinking the same checkout this
+    # workflow already has — see that script's own header for why that is the honest test of the
+    # router's tarball rather than a workaround.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: winter-runtime-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: ${{ env.WINTER_AGENT_SDK_REF }}
+          path: winter-agent-sdk
+      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 18 }
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-agent-sdk
+      - run: bun run build:packages
+        working-directory: winter-agent-sdk
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-runtime-sdk
+      - name: "smoke (Node 18) — BLOCKING"
+        run: bun run scripts/smoke-installed.ts --runtime=node
+        working-directory: winter-runtime-sdk
+      - name: "smoke (Bun) — BLOCKING"
+        run: bun run scripts/smoke-installed.ts --runtime=bun
+        working-directory: winter-runtime-sdk

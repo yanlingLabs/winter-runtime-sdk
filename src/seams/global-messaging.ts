@@ -4,7 +4,9 @@
 // TWO DOORS, and the difference matters:
 //   * `send()` takes the model-facing shape (a `to` STRING that still has to be resolved) and runs
 //     the whole pipeline: resolution (WS-10 §11) → inbound policy (WS-15 §6.3, "in the router BEFORE
-//     any adapter delivery") → the adapter. This is what `mcp__winter__send_message` reaches.
+//     any adapter delivery") → the adapter. This is the door the aliased send-message tool on the
+//     Winter MCP server reaches (WS-14 §7's `toolAliases`; the tool's own name is brand-derived and
+//     is never spelled outside the brand module).
 //   * `deliver()` takes an already-addressed envelope. This is the internal door: a held message
 //     being released after a restart, a reply being routed back.
 // Both answer with the same ten-arm `DeliveryOutcome`. WS-10 §12: a crash between invoking and
