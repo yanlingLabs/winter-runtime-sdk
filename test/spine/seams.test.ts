@@ -125,10 +125,36 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     expect(await laneOfThrow(() => decorator.decorate({} as never))).toBe("lane-c");
   });
 
-  test("selection is Lane D's, through the handle as well as the function", async () => {
+  // LANE D HAS LANDED, so this seam no longer throws `NotImplementedYet` — it answers. The stub
+  // assertion that stood here is replaced by the one property of the seam this file still owns: the
+  // handle's `selectRuntime` is wired to the real selector rather than to a stub. The selector's own
+  // behaviour (the D13/D28 table, the refusals, the persisted choice) is proven in
+  // `test/selection/select-runtime.test.ts`, and the handle's throw-on-refusal contract in that same
+  // file's "the handle's selectRuntime throws the refusal that the function returns".
+  test("selection is Lane D's, and the handle now reaches the landed selector", () => {
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
-    expect(await laneOfThrow(() => sdk.selectRuntime({} as never))).toBe("lane-d");
+    const decided = sdk.selectRuntime({
+      mode: "code",
+      requested: { model: "m-1" },
+      families: {
+        active: undefined,
+        families: [
+          {
+            id: "other",
+            displayName: "other",
+            vendor: "(various)",
+            slots: [],
+            models: [{ canonicalModelId: "m-1", displayName: "m-1", rows: [{ key: "local/m-1", providerId: "local", status: "candidate", pricingBasis: "free", servable: "present" }] }],
+          },
+        ],
+      },
+      credentials: { byProvider: { local: "none" } },
+      hasClaudePeer: false,
+      claudeOauthApproved: false,
+    });
+    expect(decided.runtimeKind).toBe("winter-agent");
+    expect(decided.providerId).toBe("local");
   });
 
   test("the handle's handoff() reaches Lane C's barrier", async () => {
