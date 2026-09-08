@@ -75,6 +75,7 @@ async function runSpoolSession(args: {
   address: string;
   turns?: readonly ScriptedTurn[];
   resume?: string;
+  forkSession?: boolean;
   sharedTempRoot?: string;
 }): Promise<SpoolRun> {
   /* c8 ignore next */
@@ -123,7 +124,8 @@ async function runSpoolSession(args: {
       configDir: args.session.spool,
     });
     const plan = { selection, prompt: `hello from ${args.projectKey}`, cwd: args.session.cwd, profile, configDir: args.session.spool, options: { ...options, env } };
-    const live = args.resume === undefined ? adapter.launch(plan) : adapter.resume({ ...plan, resume: args.resume });
+    const live =
+      args.resume === undefined ? adapter.launch(plan) : adapter.resume({ ...plan, resume: args.resume, ...(args.forkSession === undefined ? {} : { forkSession: args.forkSession }) });
     for await (const message of live.query) {
       const typed = message as { type: string; subtype?: string; session_id?: string };
       if (typed.type === "system" && typed.subtype === "init") sessionId = typed.session_id;
@@ -219,6 +221,37 @@ describeRuntime("WS-17 row 4 + row 15 — the spool, the staging root and the ve
       expect(existsSync(resumed.observedConfigDir)).toBe(false);
       expect(resumed.recordedEntry?.configDir).toBeUndefined();
       expect(resumed.recordedEntry?.processIdentity).toBeUndefined();
+      expect(decoyUntouched(session)).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "§5.1: a FORK is a new backend record — it never inherits the source's identity",
+    async () => {
+      const session = hermeticSession("spool-fork");
+      const winterHome = join(session.brandHome);
+      const store = new WinterCompatibilitySessionStore({ winterHome });
+
+      const source = await runSpoolSession({ session, store, winterHome, projectKey: "project-fork", address: "claude:session:fork-source" });
+      expect(source.sessionId).toBeDefined();
+      const forked = await runSpoolSession({
+        session,
+        store,
+        winterHome,
+        projectKey: "project-fork",
+        address: "claude:session:fork-child",
+        ...(source.sessionId === undefined ? {} : { resume: source.sessionId }),
+        forkSession: true,
+      });
+
+      // "The resulting new backend UUID registers as a NEW record; a fork never inherits the source's
+      // handoff certification" — so the two ids differ and BOTH transcripts exist.
+      expect(forked.sessionId).toBeDefined();
+      expect(forked.sessionId).not.toBe(source.sessionId);
+      const canonical = treeOf(winterHome).filter((path) => path.endsWith(".jsonl"));
+      expect(canonical.some((path) => path.includes(source.sessionId ?? "?"))).toBe(true);
+      expect(canonical.some((path) => path.includes(forked.sessionId ?? "?"))).toBe(true);
       expect(decoyUntouched(session)).toBe(true);
     },
     TIMEOUT,

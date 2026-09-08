@@ -200,7 +200,10 @@ export interface ScriptedToolUse {
 }
 
 /** One scripted assistant turn: either text, or one or more tool_use blocks. */
-export type ScriptedTurn = { text: string } | { toolUses: ScriptedToolUse[] };
+export type ScriptedTurn = ({ text: string } | { toolUses: ScriptedToolUse[] }) & {
+  /** Hold the response back this long — what makes a turn long enough to interrupt. */
+  delayMs?: number;
+};
 
 const MODEL_ID = "claude-sonnet-4-5-20250929";
 
@@ -233,7 +236,7 @@ export interface LoopbackRecord {
  * standard public Messages-API shapes, independently authored — never a vendor artifact (WS-02 §2).
  */
 export function scriptedLoopback(turns: readonly ScriptedTurn[]): {
-  routes: Array<{ path: string; method?: string; handler: (req: Request, recorded: { method: string; path: string; body: string }) => Response }>;
+  routes: Array<{ path: string; method?: string; handler: (req: Request, recorded: { method: string; path: string; body: string }) => Response | Promise<Response> }>;
   record: LoopbackRecord;
 } {
   const record: LoopbackRecord = { requests: [], paths: [] };
@@ -246,7 +249,7 @@ export function scriptedLoopback(turns: readonly ScriptedTurn[]): {
         // the stream to record it, so a second read yields "" — which is silent: every assertion
         // about "what the model was asked" then passes vacuously against an empty object. Found the
         // first time this bed drove the real runtime.
-        handler: (req: Request, recorded: { method: string; path: string; body: string }) => {
+        handler: async (req: Request, recorded: { method: string; path: string; body: string }) => {
           record.paths.push(recorded.path);
           if (recorded.path === "/v1/messages" && recorded.method === "POST") {
             let body: Record<string, unknown> = {};
@@ -261,6 +264,7 @@ export function scriptedLoopback(turns: readonly ScriptedTurn[]): {
             // scripted tool_use to one of those and the real turn to the next line of the script.
             const index = Math.min(countToolResults(body), turns.length - 1);
             const turn = turns[Math.max(index, 0)] ?? { text: "ok" };
+            if (turn.delayMs !== undefined) await new Promise<void>((resolve) => setTimeout(resolve, turn.delayMs));
             return new Response(JSON.stringify(messageFor(turn, index + 1)), { status: 200, headers: { "content-type": "application/json" } });
           }
           return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
