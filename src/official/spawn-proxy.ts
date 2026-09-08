@@ -134,6 +134,15 @@ export interface SupervisedSpawnProxyOptions {
 const DEFAULT_STDERR_TAIL_BYTES = 16 * 1024;
 
 /**
+ * How long rule 5's post-exit cleanup watch waits, in total ~1.5 s across six attempts.
+ *
+ * The wrapper's own cleanup runs when it observes the exit we have just forwarded, so the first
+ * attempt is almost always the one that succeeds; the tail exists so a slow unlink does not leave a
+ * stale root recorded forever.
+ */
+const CLEANUP_WATCH_DELAYS_MS = [10, 25, 50, 100, 400, 900] as const;
+
+/**
  * The default child starter: Node's own `spawn`, with the product label as argv0 (§6 rule 1).
  *
  * `node:child_process` is imported LAZILY — this module must stay importable where the module is not
@@ -295,11 +304,12 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
         // failure is reported as a crash class so the projector sees it.
         options.onCrash?.(new OfficialConnectionError({ reason: `transcript reconciliation failed for ${thisObservation.root.configDir}`, branchLabel, cause: error }));
       }
-      try {
-        const cleaned = (await options.verifyCleanup?.(thisObservation)) ?? true;
-        if (cleaned) await options.sink.clear?.(thisObservation);
-      } catch (error) {
-        options.onCrash?.(new OfficialConnectionError({ reason: `verifying cleanup of ${thisObservation.root.configDir} failed`, branchLabel, cause: error }));
+      // RULE 5, FIRST ATTEMPT — before the exit is forwarded. It succeeds for a spool-resident
+      // generation (nothing to clean up) and fails for a store-backed one, because THE WRAPPER
+      // DELETES `claude-resume-*` ON OBSERVING THE EXIT, which has not happened yet. That ordering is
+      // the whole reason rule 5 says "only after VERIFIED cleanup" rather than "after the exit".
+      if (await tryClear()) {
+        /* cleared */
       }
       gateOpen = true;
       if (exit.code !== null && exit.code !== 0) {
@@ -309,7 +319,32 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
       }
       stdout.end();
       for (const listener of exitListeners) listener(exit.code, exit.signal);
+
+      // RULE 5, AFTER THE EXIT — a bounded watch for the cleanup we just enabled. Bounded rather than
+      // open-ended: an unclean root is a legitimate end state (it is what a crash leaves behind, and
+      // what reconciliation needs the record FOR), so this gives the wrapper a moment and then leaves
+      // the record standing rather than clearing a root that is still on disk.
+      for (const delay of CLEANUP_WATCH_DELAYS_MS) {
+        if (cleared) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        if (await tryClear()) break;
+      }
       thisSettleGate.resolve();
+    };
+
+    let cleared = false;
+    const tryClear = async (): Promise<boolean> => {
+      if (cleared) return true;
+      try {
+        const clean = (await options.verifyCleanup?.(thisObservation)) ?? true;
+        if (!clean) return false;
+        await options.sink.clear?.(thisObservation);
+        cleared = true;
+        return true;
+      } catch (error) {
+        options.onCrash?.(new OfficialConnectionError({ reason: `verifying cleanup of ${thisObservation.root.configDir} failed`, branchLabel, cause: error }));
+        return false;
+      }
     };
 
     function maybeOpenGate(): void {

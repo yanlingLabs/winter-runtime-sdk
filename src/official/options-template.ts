@@ -155,7 +155,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     sessionStoreFlush: policy.advertisesHandoff === true ? "eager" : "batched",
 
     toolAliases: officialToolAliases(input.brand),
-    disallowedTools: [...officialDisallowedTools(policy.containment ?? {}), ...(policy.additionalDisallowedTools ?? [])],
+    disallowedTools: [...officialDisallowedTools(policy.containment ?? {}, input.brand), ...(policy.additionalDisallowedTools ?? [])],
 
     includePartialMessages: true,
     includeHookEvents: true,

@@ -175,3 +175,22 @@ export function acceptNativeListAgentsArgs(input: unknown): NativeArgsResult<Nat
  * than asserting what we wish it did.
  */
 export const CANONICAL_DUPLICATE_EXPOSURE = "deferred" as const;
+
+/**
+ * BOTH NAMES A DENY RULE MUST CARRY — and this is a MEASUREMENT, not a belt-and-braces habit.
+ *
+ * Driven against the pinned 0.3.250 runtime (`test/official/runtime-aliases.test.ts`, row 3):
+ *
+ *   `disallowedTools: ["SendMessage"]`                       → the model emits `SendMessage`, the
+ *                                                              alias resolves, AND THE HANDLER RUNS.
+ *   `disallowedTools: [<the canonical target>]`              → the call is blocked.
+ *
+ * So the deny check happens AFTER alias resolution, against the resolved name. A host that denied
+ * only the built-in — the obvious reading of "deny `SendMessage`" — would have a deny rule that does
+ * nothing at all, silently, on this branch only. §7's "aliases are NOT a security boundary" is
+ * exactly this fact, and this function is how a caller stops tripping over it: one built-in in, both
+ * names out.
+ */
+export function aliasDenyNames(builtin: AliasedBuiltin, brand: Pick<BrandProfile, "mcpServerName">): readonly string[] {
+  return [builtin, aliasTargetFor(builtin, brand)];
+}

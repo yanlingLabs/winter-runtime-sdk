@@ -23,6 +23,8 @@
 // tools would be one rename away from a hole.
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
+import { aliasDenyNames, type AliasedBuiltin } from "./aliases.ts";
+
 /** The three vendor-named targets nothing may create (WS-17 row 14). */
 export const FORBIDDEN_TARGETS = {
   instructionsFile: "CLAUDE.md",
@@ -74,6 +76,14 @@ export type SavedApprovalDisposition = "disable" | "redirect";
 
 export interface ContainmentPolicy {
   savedWebFetchApprovals?: SavedApprovalDisposition;
+  /**
+   * Aliased built-ins this deployment denies.
+   *
+   * Each expands to BOTH names, because the pinned runtime checks the deny list AFTER alias
+   * resolution — see `aliasDenyNames` for the measurement. A host that listed only the built-in would
+   * have a rule that does nothing.
+   */
+  deniedAliasedBuiltins?: readonly AliasedBuiltin[];
 }
 
 export function containmentDispositions(brand: Pick<BrandProfile, "projectDirName" | "productName">, policy: ContainmentPolicy = {}): readonly ContainmentDisposition[] {
@@ -132,11 +142,13 @@ export function containmentDispositions(brand: Pick<BrandProfile, "projectDirNam
  * mechanism: the floor below is what actually holds. What is listed here are the writers whose whole
  * PURPOSE is a vendor-named path and which have no redirected equivalent on this branch.
  */
-export function officialDisallowedTools(policy: ContainmentPolicy = {}): readonly string[] {
+export function officialDisallowedTools(policy: ContainmentPolicy = {}, brand?: Pick<BrandProfile, "mcpServerName">): readonly string[] {
   const denied = ["CronCreate"];
-  if ((policy.savedWebFetchApprovals ?? "disable") === "disable") {
-    // Nothing extra: WebFetch itself stays available; only the DURABLE approval write is refused, and
-    // that refusal is the floor's business (a name-level deny here would remove the tool entirely).
+  // WebFetch itself stays available whatever the saved-approval disposition is: only the DURABLE
+  // approval write is refused, and that refusal is the floor's business — a name-level deny here
+  // would remove the tool entirely rather than remove its ability to persist an approval.
+  if (policy.deniedAliasedBuiltins !== undefined && brand !== undefined) {
+    for (const builtin of policy.deniedAliasedBuiltins) denied.push(...aliasDenyNames(builtin, brand));
   }
   return denied;
 }

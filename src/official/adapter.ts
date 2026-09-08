@@ -18,7 +18,7 @@
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
 import type { SeamContextWithDirectory } from "../seams/context.ts";
-import type { EnvInput, OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialResumePlan, OfficialSession, OptionsTemplateInput } from "../seams/official-adapter.ts";
+import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialResumePlan, OfficialSession, OptionsTemplateInput } from "../seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, OfficialSpawnOptions, OfficialSpawnedProcess } from "../seams/official-sdk-shapes.ts";
 import { officialBranchLabel } from "./branding.ts";
 import { buildOfficialChildEnv, type OfficialEnvInput, type OfficialEnvPolicy } from "./env-allowlist.ts";
@@ -66,6 +66,15 @@ export interface OfficialSessionHandle extends OfficialSession {
 export interface OfficialAdapterHandle extends OfficialAdapter {
   launch(plan: OfficialLaunchPlan): OfficialSessionHandle;
   resume(plan: OfficialResumePlan): OfficialSessionHandle;
+  /**
+   * The seam's `buildChildEnv`, widened to the input the env builder actually accepts.
+   *
+   * `OfficialEnvInput` extends the spine's `EnvInput` with §3's two per-session vendor variables
+   * (the transcript project key and the shared temp root), which the seam does not name. Method
+   * parameters are bivariant, so this stays assignable to the seam while letting a caller that HAS
+   * those values pass them without a cast.
+   */
+  buildChildEnv(input: OfficialEnvInput): Record<string, string>;
   /** Prepares the default child starter. Idempotent; a test injecting `spawnChild` never needs it. */
   ready(): Promise<void>;
 }
@@ -207,7 +216,7 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     spawnProxy: dispatcher,
     ready: prepareDefaultSpawn,
     buildOptions: (input: OptionsTemplateInput) => buildOfficialOptions(input, optionsPolicyFor(input)),
-    buildChildEnv: (input: EnvInput) => buildOfficialChildEnv(input as OfficialEnvInput, policy.env ?? {}),
+    buildChildEnv: (input: OfficialEnvInput) => buildOfficialChildEnv(input, policy.env ?? {}),
     launch: (plan: OfficialLaunchPlan) => start(plan, undefined),
     resume: (plan: OfficialResumePlan) => start(plan, { resume: plan.resume, ...(plan.forkSession === undefined ? {} : { forkSession: plan.forkSession }) }),
     /** The supervisor of the most recent spawn that went through the dispatcher rather than a launch. */

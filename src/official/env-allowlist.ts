@@ -68,6 +68,29 @@ export const PROXY_AND_TELEMETRY_PREFIXES: readonly string[] = ["OTEL_"];
 const VENDOR_HOME_SEGMENT_RE = /(^|\/)\.claude(\/|$)/;
 
 /**
+ * Variables whose value is a LIST of paths, sanitized entry by entry rather than refused whole.
+ *
+ * FOUND BY THE RULE ITSELF, on its first real-runtime run: a developer's `PATH` contained
+ * `~/.claude/plugins/cache/…/bin` entries, and the "no value points into the vendor home" rule
+ * refused the whole variable. Both halves of that outcome are wrong to keep — the child MUST NOT be
+ * handed executables from the user's real vendor home (that is the leak the rule is about), and a
+ * child with no `PATH` cannot run a shell command at all (so §8's containment proof would pass for
+ * the wrong reason). Dropping the offending ENTRIES is the answer that keeps both properties.
+ *
+ * POSIX separator only: this branch's hosts are macOS and Linux (WS-14's own launch profiles are
+ * `~/…` paths), and a Windows host would need its own entry here rather than a guessed split.
+ */
+const PATH_LIST_VARIABLES: readonly string[] = ["PATH"];
+
+/** Drops the entries of a path-list value that reach into the vendor's user-level home. */
+export function sanitizePathListValue(value: string): string {
+  return value
+    .split(":")
+    .filter((entry) => entry.length > 0 && !VENDOR_HOME_SEGMENT_RE.test(entry))
+    .join(":");
+}
+
+/**
  * What `buildChildEnv` needs beyond the spine's `EnvInput`.
  *
  * TWO FIELDS THE SEAM DOES NOT NAME, and both are per-SESSION rather than per-adapter, so neither
@@ -145,7 +168,7 @@ export function buildOfficialChildEnv(input: OfficialEnvInput, policy: OfficialE
     // that passes a whole `process.env` by mistake should get a correct child rather than a crash —
     // the allowlist is the mechanism, and the validator below is what catches a DELIBERATE addition
     // that was never declared.
-    if (wanted) env[name] = value;
+    if (wanted) env[name] = PATH_LIST_VARIABLES.includes(name) ? sanitizePathListValue(value) : value;
   }
   for (const [name, value] of Object.entries(policy.configuredExtras ?? {})) env[name] = value;
 
