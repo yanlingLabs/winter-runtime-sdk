@@ -20,4 +20,9 @@ Decision record: WS-00 D19 (2026-09-05). Boundaries that do not move:
   official runtime and no SDK is ever instantiated twice.
 - A `brand` profile flows through unchanged (Winter defaults); Claude Code's own literals stay fixed.
 
-Status: repository created ahead of Phase 7 of the Winter arc; no code yet.
+Status: Phase 7b in progress. The spine (the package scaffold, the contract re-export, the
+`createRuntimeSdk` constructor with its version matrix, the seams, the test harness and CI) has
+landed; the four lanes behind those seams — the official adapter, the runtime directory and messaging
+router, the store wiring and handoff barrier, and runtime selection — are next. See
+`docs/architecture.md` for the ownership map, the pinned interfaces and how this package consumes the
+Winter SDK before its first publish.
