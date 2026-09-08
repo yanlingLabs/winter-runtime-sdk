@@ -117,6 +117,7 @@ async function runScenario(args: {
       configDir: session.spool,
     });
     const live = adapter.launch({
+      address: "claude:session:scenario",
       selection,
       prompt: args.prompt ?? "run the scenario",
       cwd: session.cwd,

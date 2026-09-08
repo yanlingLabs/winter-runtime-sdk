@@ -31,6 +31,7 @@ import {
   OfficialProtocolError,
   OfficialSessionNotFoundError,
   OfficialSessionStoreError,
+  OfficialStdoutUnterminatedError,
   OfficialToolError,
   isOfficialBranchError,
 } from "../../src/official/errors.ts";
@@ -54,6 +55,7 @@ const every = (): OfficialBranchError[] => [
   new OfficialSessionNotFoundError({ sessionId: "abc", reason: "ambiguous", branchLabel }),
   new OfficialInvalidResumeError({ reason: "fork of a fork", branchLabel }),
   new OfficialInterruptedError({ gesture: "interrupt-turn", branchLabel }),
+  new OfficialStdoutUnterminatedError({ graceMs: 2000, branchLabel }),
 ];
 
 describe("WS-14 §13 — the official branch's error taxonomy", () => {
@@ -91,6 +93,8 @@ describe("WS-14 §13 — the official branch's error taxonomy", () => {
       ["official_malformed_protocol", "malformed-protocol"],
       ["official_nonzero_exit", "nonzero-exit"],
       ["official_killed", "killed"],
+      // review r1, M4: the sixth class, beyond §9's five — an exit whose stdout never closed.
+      ["official_stdout_unterminated", "stdout-unterminated"],
     ]);
     expect(new OfficialAgentResultError({ subtype: "error_max_turns", branchLabel }).crashClass).toBeUndefined();
   });

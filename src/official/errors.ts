@@ -43,7 +43,7 @@ export type WinterErrorClassName =
  * supervised teardown kills the child on purpose, and the class exists so the projector can tell
  * "we ended it" from "it died".
  */
-export type OfficialCrashClass = "executable-not-found" | "connection-failure" | "malformed-protocol" | "nonzero-exit" | "killed";
+export type OfficialCrashClass = "executable-not-found" | "connection-failure" | "malformed-protocol" | "nonzero-exit" | "killed" | "stdout-unterminated";
 
 /** Every code in this taxonomy, in WS-14 §13's own order. Exported so a test can assert completeness. */
 export const OFFICIAL_ERROR_CODES = [
@@ -62,6 +62,16 @@ export const OFFICIAL_ERROR_CODES = [
   "official_session_not_found",
   "official_invalid_resume",
   "official_interrupted",
+  /**
+   * A SIXTH crash class, beyond §9's five (review r1, M4).
+   *
+   * §9 enumerates its classes by example ("executable-not-found, connection failure, malformed
+   * protocol, nonzero exit, killed"), and this is the one the supervised proxy can produce that none
+   * of them names: the child EXITED but its stdout pipe never closed, so the gate that waits for both
+   * would wait forever — reconciliation never running, `whenSettled()` never resolving, and the
+   * generation silently alive from the host's point of view.
+   */
+  "official_stdout_unterminated",
 ] as const;
 
 export type OfficialErrorCode = (typeof OFFICIAL_ERROR_CODES)[number];
@@ -161,6 +171,18 @@ export class OfficialKilledError extends OfficialBranchError {
   constructor(args: { signal: string; reason: string; branchLabel: string }) {
     super(`${args.branchLabel}: the runtime was killed with ${args.signal} — ${args.reason}`, args.branchLabel);
     this.signal = args.signal;
+  }
+}
+
+/** M4's sixth crash class: the child exited and its stdout never closed. See `OFFICIAL_ERROR_CODES`. */
+export class OfficialStdoutUnterminatedError extends OfficialBranchError {
+  readonly code = "official_stdout_unterminated";
+  readonly winterClass = "ProcessError";
+  override readonly crashClass = "stdout-unterminated" as const;
+  readonly graceMs: number;
+  constructor(args: { graceMs: number; branchLabel: string }) {
+    super(`${args.branchLabel}: the runtime exited but its stdout did not close within ${args.graceMs}ms; the exit was forwarded on the grace timer`, args.branchLabel);
+    this.graceMs = args.graceMs;
   }
 }
 

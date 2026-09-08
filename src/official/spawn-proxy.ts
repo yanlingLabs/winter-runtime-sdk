@@ -30,6 +30,7 @@
 // the 0.3.250 artifact, not inferred. This proxy therefore reports `exitCode: null`, `signalCode:
 // null` and `killed: false` until the reconciliation gate opens, and reveals all three in the same
 // tick it emits `exit` and ends stdout.
+import { createRequire } from "node:module";
 import { PassThrough } from "node:stream";
 import type { Readable, Writable } from "node:stream";
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
@@ -39,7 +40,7 @@ import type { SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import type { OfficialLaunchProfile } from "../seams/official-adapter.ts";
 import type { OfficialSpawnClaudeCodeProcess, OfficialSpawnOptions, OfficialSpawnedProcess } from "../seams/official-sdk-shapes.ts";
 import { officialBranchLabel } from "./branding.ts";
-import { OfficialConnectionError, OfficialExecutableNotFoundError, OfficialKilledError, OfficialNonzeroExitError, type OfficialBranchError } from "./errors.ts";
+import { OfficialConnectionError, OfficialExecutableNotFoundError, OfficialKilledError, OfficialNonzeroExitError, OfficialStdoutUnterminatedError, type OfficialBranchError } from "./errors.ts";
 import { validateObservedConfigDir, type ObservedLocalWriteRoot } from "./spool.ts";
 
 /** WS-14 §9: "PID **plus process start identity** (never bare PID)" — an OS recycles pids. */
@@ -128,10 +129,29 @@ export interface SupervisedSpawnProxyOptions {
   onCrash?: (error: OfficialBranchError) => void;
   /** Bound on the retained stderr (a runaway child must not turn a message into a leak). */
   stderrTailBytes?: number;
+  /**
+   * How long §6 rule 2's record may take to settle before the generation is ended (review r1, M4).
+   *
+   * The module always handled a record that FAILS; it did not handle one that HANGS, and a hanging
+   * sink left the child alive, silent and unobservable forever — no bytes, no exit, no error. Every
+   * wait in a supervisor is bounded or it is a hang with better manners.
+   */
+  recordTimeoutMs?: number;
+  /**
+   * How long after the child's exit the gate waits for stdout to close (review r1, M4).
+   *
+   * The gate needs BOTH the exit and the stdout end, because a transcript's last frames arrive on the
+   * way out. A child that exits with its pipe held open (a surviving grandchild inherits it) would
+   * otherwise stall the gate forever: reconciliation never running, `whenSettled()` never resolving.
+   * After this grace the exit is forwarded anyway and the `stdout-unterminated` crash class says so.
+   */
+  stdoutGraceMs?: number;
   now?: () => Date;
 }
 
 const DEFAULT_STDERR_TAIL_BYTES = 16 * 1024;
+const DEFAULT_RECORD_TIMEOUT_MS = 10_000;
+const DEFAULT_STDOUT_GRACE_MS = 2_000;
 
 /**
  * How long rule 5's post-exit cleanup watch waits, in total ~1.5 s across six attempts.
@@ -153,16 +173,38 @@ const CLEANUP_WATCH_DELAYS_MS = [10, 25, 50, 100, 400, 900] as const;
  */
 let cachedSpawn: SpawnChild | undefined;
 
-export async function prepareDefaultSpawn(): Promise<void> {
-  if (cachedSpawn !== undefined) return;
-  const { spawn } = await import("node:child_process");
+/**
+ * Resolves the default child starter SYNCHRONOUSLY, on first use (review r1, M3).
+ *
+ * The first version used a dynamic `import()` and therefore needed an explicit `await ready()` before
+ * the first spawn — which nothing in the router called, so a wired adapter would have thrown "the
+ * default child starter was not prepared" on its first real spawn, invisibly, because every test
+ * called `ready()` itself. `createRequire` gives the same lazy load with none of that: the module
+ * stays importable where `node:child_process` is not (the require happens inside the hook), and no
+ * caller has to remember an initialization step.
+ */
+function defaultSpawn(): SpawnChild {
+  if (cachedSpawn !== undefined) return cachedSpawn;
+  const require_ = createRequire(import.meta.url);
+  const { spawn } = require_("node:child_process") as { spawn: (command: string, args: string[], options: Record<string, unknown>) => SpawnedChildProcess };
   cachedSpawn = (options) =>
     spawn(options.command, options.args, {
       argv0: options.argv0,
       env: options.env,
       stdio: ["pipe", "pipe", "pipe"],
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-    }) as unknown as SpawnedChildProcess;
+    });
+  return cachedSpawn;
+}
+
+/**
+ * Kept as a no-op-safe warm-up so an existing caller keeps working; nothing REQUIRES it any more.
+ *
+ * A host that wants the resolution cost paid at construction rather than at the first spawn can still
+ * call it, and the adapter does.
+ */
+export async function prepareDefaultSpawn(): Promise<void> {
+  defaultSpawn();
 }
 
 type ExitListener = (code: number | null, signal: NodeJS.Signals | null) => void;
@@ -185,14 +227,9 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
   const branchLabel = officialBranchLabel(options.brand);
   const now = options.now ?? (() => new Date());
   const tailLimit = options.stderrTailBytes ?? DEFAULT_STDERR_TAIL_BYTES;
-  const spawnChild: SpawnChild =
-    options.spawnChild ??
-    ((opts) => {
-      if (cachedSpawn === undefined) {
-        throw new OfficialConnectionError({ reason: "the default child starter was not prepared; call prepareDefaultSpawn() before the first spawn or inject `spawnChild`", branchLabel });
-      }
-      return cachedSpawn(opts);
-    });
+  const recordTimeoutMs = options.recordTimeoutMs ?? DEFAULT_RECORD_TIMEOUT_MS;
+  const stdoutGraceMs = options.stdoutGraceMs ?? DEFAULT_STDOUT_GRACE_MS;
+  const spawnChild: SpawnChild = options.spawnChild ?? ((opts) => defaultSpawn()(opts));
 
   let observation: SpawnObservation | undefined;
   let stderrTail = "";
@@ -245,7 +282,21 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
     // asynchronous, and that is what the stdout gate below covers. A sink that throws synchronously
     // (a malformed address, a closed store) fails the spawn outright rather than starting a child
     // whose transcript root nothing will ever know.
-    recorded = Promise.resolve(options.sink.record(thisObservation)).then(() => undefined);
+    //
+    // BOUNDED (review r1, M4). A sink that never settles is indistinguishable, from the outside, from
+    // a child that never speaks — so the wait has a deadline and the deadline has a typed class.
+    let recordTimer: ReturnType<typeof setTimeout> | undefined;
+    recorded = Promise.race([
+      Promise.resolve(options.sink.record(thisObservation)).then(() => undefined),
+      new Promise<never>((_resolve, reject) => {
+        recordTimer = setTimeout(
+          () => reject(new OfficialConnectionError({ reason: `the durable record of ${root.configDir} did not settle within ${recordTimeoutMs}ms, so this generation would run with a transcript root nothing can find (WS-14 §6 rule 2)`, branchLabel })),
+          recordTimeoutMs,
+        );
+      }),
+    ]).finally(() => {
+      if (recordTimer !== undefined) clearTimeout(recordTimer);
+    });
 
     const stdout = new PassThrough();
     let childStdoutEnded = false;
@@ -355,6 +406,19 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
     child.on("exit", (code, signal) => {
       exitReported = { code, signal };
       maybeOpenGate();
+      // THE GRACE (review r1, M4). If stdout has not closed by now the gate would wait forever; after
+      // this timer it opens anyway, and the crash class names what happened rather than leaving a
+      // silent stall.
+      if (!childStdoutEnded && !gateOpen) {
+        const graceTimer = setTimeout(() => {
+          if (childStdoutEnded || gateOpen) return;
+          options.onCrash?.(new OfficialStdoutUnterminatedError({ graceMs: stdoutGraceMs, branchLabel }));
+          childStdoutEnded = true;
+          maybeOpenGate();
+        }, stdoutGraceMs);
+        // Never hold the process open on this timer alone.
+        (graceTimer as unknown as { unref?: () => void }).unref?.();
+      }
     });
     child.on("error", (error: Error) => {
       // ENOENT here is the vendored runtime not being where the host said it was — §13's own class,
@@ -369,17 +433,18 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
 
     // RULE 6 — forward the abort signal. The SDK's own signal is already graceful (it fires after
     // stdin EOF plus a grace window), so this is the last resort rather than the first.
-    spawnOptions.signal.addEventListener(
-      "abort",
-      () => {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          /* already gone */
-        }
-      },
-      { once: true },
-    );
+    const killOnAbort = (): void => {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    };
+    // ALREADY-ABORTED IS STILL ABORTED (review r1, M4). `addEventListener("abort", …)` on a signal
+    // that has already fired never runs, so a generation started under an aborted controller was
+    // measured spawning a child nothing would ever kill.
+    if (spawnOptions.signal.aborted) killOnAbort();
+    else spawnOptions.signal.addEventListener("abort", killOnAbort, { once: true });
 
     const handle = {
       get stdin(): unknown {
@@ -451,12 +516,18 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
  * entry that is not there means the caller recorded the session under a different address and the
  * root would be written nowhere.
  */
-export function directoryRecordSink(args: { store: RuntimeDirectoryStore; address: SerializedRuntimeAddress }): SpawnRecordSink {
+export function directoryRecordSink(args: { store: RuntimeDirectoryStore; address: SerializedRuntimeAddress; seed?: () => RuntimeDirectoryEntry }): SpawnRecordSink {
   const patch = async (mutate: (entry: RuntimeDirectoryEntry) => RuntimeDirectoryEntry): Promise<void> => {
     const entries = await args.store.load();
     const existing = entries.find((entry) => entry.address === args.address);
-    if (existing === undefined) throw new Error(`winter-runtime-sdk: no directory entry for ${args.address}; the spawn record has nowhere to go (WS-14 §6 rule 2)`);
-    await args.store.upsert(mutate(existing));
+    // A SEED RATHER THAN A THROW WHEN THE HOST HAS NOT REGISTERED THE SESSION YET (review r1, M3).
+    // §6 rule 2's record must exist from the first generation, and a launch can legitimately happen
+    // before the directory has an entry (the directory is another lane's, and a host may create its
+    // entry after the query starts). The seed is the minimal entry that makes the record possible;
+    // when the real entry arrives, its own upsert owns every other field.
+    const base = existing ?? args.seed?.();
+    if (base === undefined) throw new Error(`winter-runtime-sdk: no directory entry for ${args.address} and no seed; the spawn record has nowhere to go (WS-14 §6 rule 2)`);
+    await args.store.upsert(mutate(base));
   };
   return {
     async record(observation) {

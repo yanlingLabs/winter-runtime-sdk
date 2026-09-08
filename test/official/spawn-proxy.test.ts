@@ -385,6 +385,69 @@ describe("WS-14 §6 — the supervised spawn proxy", () => {
     expect(child.killed).toEqual(["SIGTERM"]);
   });
 
+  test("review r1, M4: a record that HANGS ends the generation on a deadline", async () => {
+    const child = fakeChild();
+    const crashes: OfficialBranchError[] = [];
+    const proxy = createSupervisedSpawnProxy({
+      brand: WINTER_BRAND,
+      profile: "fresh-spool",
+      configuredConfigDir: SPOOL,
+      // The plant: a sink that neither resolves nor rejects. Before the fix the child stayed alive,
+      // silent and unobservable forever — no bytes, no exit, no error.
+      sink: { record: () => new Promise<void>(() => undefined) },
+      onCrash: (error) => crashes.push(error),
+      spawnChild: () => child,
+      recordTimeoutMs: 25,
+    });
+    const process_ = proxy.spawn(spawnOptions());
+    (process_.stdout as PassThrough).on("error", () => undefined);
+    await expect(proxy.whenRecorded()).rejects.toThrow(/did not settle within 25ms/);
+    await tick();
+    expect(child.killed).toEqual(["SIGTERM"]);
+  });
+
+  test("review r1, M4: an exit whose stdout never closes forwards on a grace timer, typed", async () => {
+    const child = fakeChild();
+    const crashes: OfficialBranchError[] = [];
+    const proxy = createSupervisedSpawnProxy({
+      brand: WINTER_BRAND,
+      profile: "fresh-spool",
+      configuredConfigDir: SPOOL,
+      sink: { record: () => undefined },
+      onCrash: (error) => crashes.push(error),
+      spawnChild: () => child,
+      stdoutGraceMs: 20,
+    });
+    const process_ = proxy.spawn(spawnOptions());
+    const exits: Array<[number | null, string | null]> = [];
+    process_.on("exit", (code, signal) => exits.push([code, signal]));
+    await proxy.whenRecorded();
+
+    // The child exits; its stdout is NEVER ended (a surviving grandchild holds the pipe).
+    child.emitExit(0);
+    await tick();
+    // Before the fix: the gate required both, so this stayed empty forever.
+    await proxy.whenSettled();
+    expect(exits).toEqual([[0, null]]);
+    expect(crashes.map((crash) => [crash.code, crash.crashClass])).toContainEqual(["official_stdout_unterminated", "stdout-unterminated"]);
+    expect(process_.exitCode).toBe(0);
+  });
+
+  test("review r1, M4: a signal that is ALREADY aborted still kills the child", () => {
+    const child = fakeChild();
+    const controller = new AbortController();
+    controller.abort();
+    const proxy = createSupervisedSpawnProxy({
+      brand: WINTER_BRAND,
+      profile: "fresh-spool",
+      configuredConfigDir: SPOOL,
+      sink: { record: () => undefined },
+      spawnChild: () => child,
+    });
+    proxy.spawn(spawnOptions({ signal: controller.signal }));
+    expect(child.killed).toEqual(["SIGTERM"]);
+  });
+
   test("§9: identity is the PAIR — a recycled pid with a different start time does not revalidate", () => {
     const recorded = { pid: 4711, startedAt: "2026-09-08T10:00:00.000Z" };
     expect(revalidateProcessIdentity(recorded, { ...recorded })).toBe(true);

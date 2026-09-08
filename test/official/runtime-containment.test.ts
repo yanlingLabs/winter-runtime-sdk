@@ -87,6 +87,7 @@ async function runContainment(args: { session: HermeticSession; turns: readonly 
     });
     const options = adapter.buildOptions(templateInput);
     const live = adapter.launch({
+      address: "claude:session:containment",
       selection,
       prompt: "do the thing",
       cwd: args.session.cwd,

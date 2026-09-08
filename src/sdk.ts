@@ -38,7 +38,8 @@ import type { OfficialAdapter } from "./seams/official-adapter.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryStore } from "./seams/directory-store.ts";
 import { createInMemoryRuntimeDirectoryStore } from "./seams/directory-store.ts";
-import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubOfficialAdapter, stubRuntimeDirectory } from "./seams/stubs.ts";
+import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubRuntimeDirectory } from "./seams/stubs.ts";
+import { createOfficialAdapter } from "./official/adapter.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
@@ -214,7 +215,11 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
   // ONE WIRING LINE PER SEAM. A lane replaces the right-hand side and nothing else in this file
   // moves; see `seams/stubs.ts`'s own header for why the indirection exists.
   const internals: RuntimeSdkInternals = {
-    official: stubOfficialAdapter(context),
+    // LANE A IS LANDED (P7b fix round 1, review r1 M3 — the wiring the lane owed, made usable):
+    // `createOfficialAdapter` needs no initialization call (its child starter resolves synchronously
+    // on first use) and defaults §6 rule 2's durable record to the directory store in `context`,
+    // addressed by `OfficialLaunchPlan.address`.
+    official: createOfficialAdapter(context),
     barrier: stubHandoffBarrier(context),
     decorator: stubMaterializedResumeDecorator(context),
     context,

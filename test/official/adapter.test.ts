@@ -15,7 +15,8 @@ import { stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { OfficialLaunchPlan, OptionsTemplateInput } from "../../src/seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions } from "../../src/seams/official-sdk-shapes.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import { createOfficialAdapter, officialHandoffEligibility } from "../../src/official/index.ts";
+import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
+import { createOfficialAdapter, officialHandoffEligibility, type OfficialSessionHandle } from "../../src/official/index.ts";
 import { OfficialConfigurationError, OfficialInvalidResumeError, OfficialMcpError } from "../../src/official/errors.ts";
 import { buildOfficialOptions } from "../../src/official/options-template.ts";
 import { assertNoAdvisor, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
@@ -95,6 +96,7 @@ const templateInput = (spawnProxy: OptionsTemplateInput["spawnProxy"]): OptionsT
 });
 
 const plan = (options: OfficialOptions): OfficialLaunchPlan => ({
+  address: "claude:session:test",
   selection,
   prompt: "hi",
   options,
@@ -188,6 +190,43 @@ describe("the official adapter", () => {
     const adapter = createOfficialAdapter(context(module));
     const env = adapter.buildChildEnv({ selection, configDir: SPOOL, brand: WINTER_BRAND, credentials: { ANTHROPIC_API_KEY: "k" }, base: { PATH: "/usr/bin", EDITOR: "vim" } });
     expect(env).toEqual({ ANTHROPIC_API_KEY: "k", CLAUDE_CONFIG_DIR: SPOOL, PATH: "/usr/bin" });
+  });
+});
+
+describe("review r1, M3 — the wiring through the router's own door", () => {
+  test("`createRuntimeSdk` hands back a REAL adapter that needs no initialization call", async () => {
+    const { peer } = createFakeWinterPeer();
+    const { module } = fakeClaudeModule();
+    const directoryStore = createInMemoryRuntimeDirectoryStore();
+    const sdk = createRuntimeSdk({ peers: { winter: peer, claude: module }, keychain: createFakeKeychain(), directoryStore });
+    const official = runtimeSdkInternals(sdk)?.official;
+    expect(official).toBeDefined();
+
+    // NOT the stub: the stub throws `NotImplementedYet` from every member.
+    const options = official?.buildOptions(templateInput(official.spawnProxy));
+    expect(options?.strictMcpConfig).toBe(true);
+
+    // …and §6 rule 2's record lands in the store the SPINE handed the adapter, with no explicit sink
+    // and no `ready()` — the two things the owed wiring would have got wrong.
+    // The seam's return type is `OfficialSession`; the supervisor rides on the handle Lane A returns.
+    const session = official?.launch({ ...plan(options as OfficialOptions), address: "claude:session:wired" }) as unknown as OfficialSessionHandle;
+    // A REAL SPAWN, through the REAL default child starter and with no `ready()` call anywhere: that
+    // is the half of M3 a fake `spawnChild` cannot prove. `/bin/cat` is a process that starts, has a
+    // pid, and waits — which is all the record needs.
+    // `cwd` must EXIST for a real spawn — a nonexistent one yields a child with no pid, which is the
+    // supervisor's own refusal and not the thing under test here.
+    const child = session.supervisor.spawn({ ...spawnOptions(), command: "/bin/cat", args: [], cwd: process.cwd() });
+    try {
+      await session.supervisor.whenRecorded();
+    } finally {
+      child.kill("SIGTERM");
+    }
+    const recorded = (await directoryStore.load()).find((entry) => entry.address === "claude:session:wired");
+    expect(recorded?.configDir).toBe(SPOOL);
+    expect(recorded?.processIdentity?.pid).toBeGreaterThan(0);
+    // The seeded entry is a MINIMAL one — the real directory entry, when the host records it, owns
+    // every other field.
+    expect([recorded?.runtimeKind, recorded?.objectKind, recorded?.mode]).toEqual(["claude-agent", "session", "code"]);
   });
 });
 

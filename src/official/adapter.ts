@@ -27,6 +27,7 @@ import { assertOptionsInvariants, buildOfficialOptions, type OptionsTemplatePoli
 import { classifyLocalWriteRoot } from "./spool.ts";
 import {
   createSupervisedSpawnProxy,
+  directoryRecordSink,
   prepareDefaultSpawn,
   type SpawnChild,
   type SpawnObservation,
@@ -124,9 +125,43 @@ export function officialHandoffEligibility(health: OfficialSessionHealth): Hando
 export function createOfficialAdapter(context: SeamContextWithDirectory, policy: OfficialAdapterPolicy = {}): OfficialAdapterHandle {
   const brand: BrandProfile = context.brand;
   const branchLabel = officialBranchLabel(brand);
-  const sink: SpawnRecordSink = policy.sink ?? { record: () => undefined };
+  // Pay the child-starter resolution at construction rather than at the first spawn. Nothing depends
+  // on it any more (review r1, M3: the hook resolves synchronously on first use), so a rejection here
+  // would be noise — the first spawn reports the real failure with its own typed class.
+  void prepareDefaultSpawn().catch(() => undefined);
 
-  const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string): SupervisedSpawnProxy =>
+  /**
+   * §6 rule 2's DEFAULT SINK — the spine's own directory store, addressed by the launch (review r1, M3).
+   *
+   * The first version defaulted to `{ record: () => undefined }`, so `createOfficialAdapter(context)`
+   * — the exact call the owed spine wiring makes — recorded nothing durable at all, and the doc
+   * comment's promise that "launch says so if it matters" was not implemented. The address now
+   * travels on the plan, so the default is the real store, and a host that wants its own record
+   * passes `policy.sink` as before.
+   */
+  const sinkFor = (plan: OfficialLaunchPlan): SpawnRecordSink =>
+    policy.sink ??
+    directoryRecordSink({
+      store: context.directoryStore,
+      address: plan.address,
+      seed: () => ({
+        address: plan.address,
+        parsed: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: plan.address },
+        runtimeKind: "claude-agent",
+        objectKind: "session",
+        // WS-14's own preamble: "every claude-agent session is a child process", Code mode only.
+        transport: "claude-handle",
+        status: "running",
+        mode: "code",
+        generation: 1,
+        selection: plan.selection,
+        capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+        updatedAt: new Date().toISOString(),
+        ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }),
+      }),
+    });
+
+  const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string, sink: SpawnRecordSink): SupervisedSpawnProxy =>
     createSupervisedSpawnProxy({
       brand,
       profile,
@@ -155,7 +190,7 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
       throw new OfficialConfigurationError({ option: "env.CLAUDE_CONFIG_DIR", reason: "a spawn with no config dir has no recoverable transcript root (WS-14 §1/§6)", branchLabel });
     }
     const classified = classifyLocalWriteRoot(observed);
-    lastDispatched = makeProxy(classified.profile, observed);
+    lastDispatched = makeProxy(classified.profile, observed, policy.sink ?? { record: () => undefined });
     return lastDispatched.spawn(spawnOptions);
   };
   let lastDispatched: SupervisedSpawnProxy | undefined;
@@ -181,7 +216,7 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
 
     // ONE SUPERVISOR PER GENERATION, bound into the options this generation is started with. A copy,
     // because the caller's plan is theirs — and the ONLY field changed is the spawn hook.
-    const supervisor = makeProxy(plan.profile, plan.configDir);
+    const supervisor = makeProxy(plan.profile, plan.configDir, sinkFor(plan));
     const options: OfficialOptions = {
       ...plan.options,
       ...(resume === undefined ? {} : { resume: resume.resume, ...(resume.forkSession === undefined ? {} : { forkSession: resume.forkSession }) }),

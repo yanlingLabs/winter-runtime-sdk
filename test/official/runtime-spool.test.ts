@@ -123,7 +123,7 @@ async function runSpoolSession(args: {
       profile,
       configDir: args.session.spool,
     });
-    const plan = { selection, prompt: `hello from ${args.projectKey}`, cwd: args.session.cwd, profile, configDir: args.session.spool, options: { ...options, env } };
+    const plan = { address: args.address, selection, prompt: `hello from ${args.projectKey}`, cwd: args.session.cwd, profile, configDir: args.session.spool, options: { ...options, env } };
     const live =
       args.resume === undefined ? adapter.launch(plan) : adapter.resume({ ...plan, resume: args.resume, ...(args.forkSession === undefined ? {} : { forkSession: args.forkSession }) });
     for await (const message of live.query) {
