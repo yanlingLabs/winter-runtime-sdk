@@ -1,0 +1,159 @@
+name: release
+# Cloned from the SDK repository's own `release.yml` and reduced to one package.
+#
+# NOTHING HAS EVER RUN THIS WORKFLOW, AND NOTHING IN PHASE 7b DOES. The first publish is the user's
+# decision (R-7b-5), and it happens at the close-out, after the `link:` dependencies become registry
+# pins. `scripts/release-gates.test.ts` parses this file and asserts the trigger set below is EXACTLY
+# `v*` + `workflow_dispatch` — no `phase-*` tag, no `push: branches` — and that no other workflow in
+# this repository contains the word `publish`.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+env:
+  WINTER_AGENT_SDK_REF: main
+jobs:
+  # --- TWO REGISTRIES, TWO JOBS ---------------------------------------------------------------------
+  #
+  # GitHub Packages first, npm second, SEPARATE jobs on purpose: the npm leg needs a secret this
+  # repository may not have, and a missing `NPM_TOKEN` must never block the GitHub Packages publish.
+  # `needs:` makes the dependency explicit — npm runs only if GitHub Packages SUCCEEDED, so the two
+  # registries can never disagree about which versions exist because the first leg failed halfway.
+  publish:
+    runs-on: ubuntu-latest
+    # `packages: write` is the one elevated grant a publish needs and the only reason this job's token
+    # differs from every job in `ci.yml`.
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: winter-runtime-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: ${{ env.WINTER_AGENT_SDK_REF }}
+          path: winter-agent-sdk
+      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      # `registry-url` + `scope` make setup-node write a throwaway userconfig (`$RUNNER_TEMP/.npmrc`,
+      # pointed at by `NPM_CONFIG_USERCONFIG`) carrying BOTH `@yanlinglabs:registry=<url>` and
+      # `//<url>/:_authToken=${NODE_AUTH_TOKEN}` — one mechanism choosing the registry and the
+      # credential together, per job. That is why the committed `.npmrc` pins neither: a committed pin
+      # is global, and there are two registries.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@yanlinglabs"
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-agent-sdk
+      - run: bun run build:packages
+        working-directory: winter-agent-sdk
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-runtime-sdk
+
+      # --- the gates: the same sequence ci.yml runs on every push, repeated here so a tag pushed out
+      # of step with CI history (or a `workflow_dispatch` on an arbitrary ref) is never published
+      # unverified. Kept in sync by hand, matching the SDK repository's own convention. ---
+      - run: bun run build:packages
+        working-directory: winter-runtime-sdk
+      - run: bun test
+        working-directory: winter-runtime-sdk
+      - run: bun run typecheck
+        working-directory: winter-runtime-sdk
+      - run: bun run scripts/smoke-installed.ts --runtime=node   # BLOCKING
+        working-directory: winter-runtime-sdk
+      - run: bun run scripts/smoke-installed.ts --runtime=bun    # BLOCKING
+        working-directory: winter-runtime-sdk
+
+      # THE VERSION/TAG CONSISTENCY GATE. A publish is triggered by pushing `v<version>` and what
+      # ships is whatever the manifest says at that commit — equal only because a human ran the bump
+      # before tagging. Diverging does not fail the publish, it SUCCEEDS at publishing the wrong
+      # number, to registries where a version can never be re-published.
+      - run: bun run scripts/check-release-version.ts
+        working-directory: winter-runtime-sdk
+
+      # Built AGAIN immediately before the publish: several steps run in between, and the bytes that
+      # SHIP must be built by a step adjacent to the one that publishes them. Relying on an earlier
+      # step's leftovers is a dependency nothing states and nothing checks, and the failure mode is
+      # silent — a `default` condition naming a file that is simply absent from the tarball.
+      - run: bun run build:packages
+        working-directory: winter-runtime-sdk
+      - name: "report whether this registry already has this version"
+        run: bun run scripts/check-already-published.ts --registry https://npm.pkg.github.com
+        working-directory: winter-runtime-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # `--no-git-checks` because the tag ref is a detached HEAD. pnpm (not npm) is what applies the
+      # dist-only `publishConfig.exports` override at pack time — the `prepack` guard in package.json
+      # refuses a non-pnpm pack for exactly that reason.
+      - run: pnpm publish --no-git-checks
+        working-directory: winter-runtime-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # --- THE npm LEG ----------------------------------------------------------------------------------
+  #
+  # `needs: publish` — it runs only after GitHub Packages succeeded, so a half-published pair is not
+  # possible in the direction that matters (npm is the registry a version can never be taken back
+  # from). A missing `NPM_TOKEN` SKIPS this job's publish step and leaves the GitHub Packages publish
+  # untouched, which is why this is a separate job rather than two steps in one.
+  #
+  # `--provenance` attaches a signed npm provenance statement, which is why this job — and only this
+  # job — carries `id-token: write`. `scripts/publish-npm.ts` packs through `releasePack()` (pnpm, so
+  # the dist-only overrides apply) and publishes the resulting TARBALL with `npm publish`, which is
+  # the only combination that gets both the overrides and `--provenance`.
+  #
+  # RUNBOOK when this job fails after job 1 succeeded:
+  #   1. DO NOT bump the version. Both registries refuse a version they already hold, so a bump would
+  #      leave the tag naming something other than what shipped. Re-drive instead: `workflow_dispatch`
+  #      at the SAME tag ref. Both jobs skip what their own registry already has.
+  #   2. `NPM_TOKEN` must exist BEFORE the tag is pushed. Without it this job's publish step is
+  #      SKIPPED and the workflow goes green with GitHub Packages published and npm empty.
+  #   3. NEVER pack or publish this package with plain `npm` by hand — see the `prepack` guard.
+  publish-npm:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: winter-runtime-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: ${{ env.WINTER_AGENT_SDK_REF }}
+          path: winter-agent-sdk
+      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+          scope: "@yanlinglabs"
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-agent-sdk
+      - run: bun run build:packages
+        working-directory: winter-agent-sdk
+      - run: pnpm install --frozen-lockfile
+        working-directory: winter-runtime-sdk
+      - run: bun run scripts/check-release-version.ts
+        working-directory: winter-runtime-sdk
+      - run: bun run build:packages
+        working-directory: winter-runtime-sdk
+      # TOKEN-GATED. `if:` cannot read `secrets` in a job-level condition, so the secret is lifted into
+      # `env` on the step and the condition tests THAT. With no token the step is SKIPPED (green), the
+      # workflow succeeds, and GitHub Packages has already published.
+      - name: "publish to npm (skipped when NPM_TOKEN is absent)"
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: bun run scripts/publish-npm.ts
+        working-directory: winter-runtime-sdk
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

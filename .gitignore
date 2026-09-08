@@ -1,0 +1,8 @@
+node_modules
+dist
+*.tgz
+
+# The router repo MUST NOT commit any Anthropic artifact (WS-02 §2). The pinned official SDK is a
+# dev/optional-peer dependency installed into node_modules at 0.3.250 with lockfile integrity --
+# never vendored, never in fixtures. `node_modules` above is what keeps it out of the tree; this
+# comment is here so nobody "fixes" a missing type by copying the package in.
