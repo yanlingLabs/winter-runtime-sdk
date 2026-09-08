@@ -112,11 +112,18 @@ async function runContainment(args: { session: HermeticSession; turns: readonly 
   return { decisions, results: toolResults(record) };
 }
 
-/** Every vendor-named target row 14 names, checked against a session's own directories. */
+/**
+ * Every vendor-named target row 14 names, checked against a session's own directories.
+ *
+ * CASE-FOLDED (review r1, C1). `readdirSync` returns the ON-DISK spelling, so a case-exact detector
+ * could not see `.Claude/` or `claude.md` even when the model had just created them — the first
+ * version of this file could not see its own hole.
+ */
 function vendorNamedArtifacts(session: HermeticSession): string[] {
   const found: string[] = [];
   for (const path of treeOf(session.cwd)) {
-    if (path.endsWith("/CLAUDE.md") || path.includes("/.claude/") || path.endsWith("/.claude")) found.push(path);
+    const folded = path.normalize("NFC").toLowerCase();
+    if (folded.endsWith("/claude.md") || folded.includes("/.claude/") || folded.endsWith("/.claude")) found.push(path);
   }
   if (existsSync(join(session.home, ".claude", "plans"))) found.push(join(session.home, ".claude", "plans"));
   for (const entry of readdirSync(session.decoyVendorHome)) if (entry !== "decoy.json") found.push(join(session.decoyVendorHome, entry));
@@ -137,17 +144,28 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
           { toolUses: [{ id: "t2", name: "Write", input: { file_path: join(session.cwd, ".claude", "settings.json"), content: "{}" } }] },
           { toolUses: [{ id: "t3", name: "Bash", input: { command: `mkdir -p ${join(session.home, ".claude", "plans")} && echo x > ${join(session.home, ".claude", "plans", "p.md")}` } }] },
           { toolUses: [{ id: "t4", name: "Bash", input: { command: `echo "# hijacked" > ${join(session.cwd, "CLAUDE.md")}` } }] },
+          // REVIEW r1, C1's OWN PLANTS — every one of these created a real file before the fix, on a
+          // case-insensitive volume, through this same approving broker.
+          { toolUses: [{ id: "c1", name: "Write", input: { file_path: join(session.cwd, "claude.md"), content: "# folded\n" } }] },
+          { toolUses: [{ id: "c2", name: "Write", input: { file_path: join(session.cwd, ".Claude", "settings.json"), content: "{}" } }] },
+          { toolUses: [{ id: "c3", name: "Bash", input: { command: "D=.claude; mkdir -p $PWD/$D && echo x > $PWD/$D/leak.txt" } }] },
+          // …and the Unicode-normalized spellings of the same two names.
+          { toolUses: [{ id: "c4", name: "Write", input: { file_path: join(session.cwd, "CLAUDE.md").normalize("NFD"), content: "# nfd\n" } }] },
+          { toolUses: [{ id: "c5", name: "Write", input: { file_path: join(session.cwd, ".claude", "nfd.json").normalize("NFD"), content: "{}" } }] },
           { text: "done" },
         ],
       });
 
       // Every one of them was refused by the FLOOR (not by the broker, which said yes).
       const floored = decisions.filter((decision) => decision.source === "containment-floor");
-      expect(floored.length).toBeGreaterThanOrEqual(4);
+      expect(floored.length).toBeGreaterThanOrEqual(9);
       expect(floored.every((decision) => decision.behavior === "deny")).toBe(true);
       expect(decisions.some((decision) => decision.source === "broker" && decision.behavior === "allow" && ["Write", "Bash"].includes(decision.tool))).toBe(false);
       // The model was told, in each tool_result, that the call was denied.
-      expect(results.filter((entry) => JSON.stringify(entry.content).toLowerCase().includes("may not create or modify")).length).toBeGreaterThanOrEqual(4);
+      expect(results.filter((entry) => JSON.stringify(entry.content).toLowerCase().includes("may not create or modify")).length).toBeGreaterThanOrEqual(9);
+      // The case-folded and normalized names are absent BY THEIR OWN SPELLING as well as by the
+      // detector — `readdirSync` would have shown them.
+      expect(readdirSync(session.cwd).sort()).toEqual([]);
       // And nothing exists.
       expect(vendorNamedArtifacts(session)).toEqual([]);
       expect(decoyUntouched(session)).toBe(true);

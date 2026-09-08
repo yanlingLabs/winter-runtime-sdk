@@ -90,6 +90,17 @@ describe("WS-14 §8 — builtin-path containment", () => {
     });
     const rows = containmentDispositions(brand);
     expect(rows.map((row) => row.disposition)).toEqual(["redirect", "disable", "redirect", "disable", "owned-by-product", "deny"]);
+    // review r1, M2: what the row SAYS and what this package DOES are two fields, because they were
+    // two different things — three rows said "redirect" while nothing redirected.
+    expect(rows.map((row) => row.enforcement)).toEqual(["floor-deny", "deny-list", "floor-deny", "approval-stripped", "host-ui", "floor-deny"]);
+    expect(containmentDispositions(brand, { worktrees: "host-replacement", workflows: "host-replacement" }).map((row) => row.enforcement)).toEqual([
+      "host-implementation",
+      "deny-list",
+      "host-implementation",
+      "approval-stripped",
+      "host-ui",
+      "floor-deny",
+    ]);
     // §16 q2 is FIXED as `disable`, with the host able to choose the other answer explicitly.
     expect(containmentDispositions(brand, { savedWebFetchApprovals: "redirect" })[3]).toMatchObject({ disposition: "redirect", target: ".winter/settings.local.json" });
     expect(officialDisallowedTools()).toEqual(["CronCreate"]);
@@ -99,7 +110,29 @@ describe("WS-14 §8 — builtin-path containment", () => {
     expect(targetsForbiddenPath("/w/CLAUDE.md")).toEqual({ forbidden: true, target: "CLAUDE.md" });
     expect(targetsForbiddenPath("/w/.claude/settings.json")).toEqual({ forbidden: true, target: ".claude" });
     expect(targetsForbiddenPath("/Users/u/.claude/plans/p.md")).toEqual({ forbidden: true, target: ".claude/plans" });
-    for (const near of ["/w/MY_CLAUDE.mdx", "/w/CLAUDE.md.bak", "/w/.claude-backup/x", "/w/claude/x", "/w/notes/claude.md"]) {
+    for (const near of ["/w/MY_CLAUDE.mdx", "/w/CLAUDE.md.bak", "/w/.claude-backup/x", "/w/claude/x"]) {
+      expect([near, targetsForbiddenPath(near).forbidden]).toEqual([near, false]);
+    }
+  });
+
+  test("…and every comparison is CASE-FOLDED and Unicode-normalized (review r1, C1)", () => {
+    // Every one of these was ALLOWED before the fix, and the first two were measured creating real
+    // files through the real runtime on a case-insensitive volume — with `existsSync("CLAUDE.md")`
+    // and `existsSync(".claude")`, row 14's own predicates, both true afterwards.
+    for (const folded of [
+      "/w/claude.md",
+      "/w/Claude.MD",
+      "/w/notes/claude.md",
+      "/w/.Claude/settings.json",
+      "/w/.CLAUDE/settings.json",
+      "/Users/u/.Claude/plans/p.md",
+      "/w/CLAUDE.md".normalize("NFD"),
+      "/w/.claude/x".normalize("NFD"),
+    ]) {
+      expect([folded, targetsForbiddenPath(folded).forbidden]).toEqual([folded, true]);
+    }
+    // The near misses stay near misses in every casing.
+    for (const near of ["/w/my_claude.mdx", "/w/claude.md.bak", "/w/.Claude-backup/x", "/w/Claude/x"]) {
       expect([near, targetsForbiddenPath(near).forbidden]).toEqual([near, false]);
     }
   });
@@ -111,10 +144,30 @@ describe("WS-14 §8 — builtin-path containment", () => {
     expect(containmentDecisionFor("Bash", { command: "mkdir -p ~/.claude/plans" }).allow).toBe(false);
     expect(containmentDecisionFor("Bash", { command: "echo hi > CLAUDE.md" }).allow).toBe(false);
     expect(containmentDecisionFor("CronCreate", { durable: true, schedule: "* * * * *" }).allow).toBe(false);
+    // review r1, m4: a camelCase path field, and a truthy-but-not-`true` durable flag.
+    expect(containmentDecisionFor("Write", { filePath: "/w/CLAUDE.md" }).allow).toBe(false);
+    expect(containmentDecisionFor("Write", { file: "/w/.claude/x" }).allow).toBe(false);
+    expect(containmentDecisionFor("CronCreate", { durable: "true" }).allow).toBe(false);
+    expect(containmentDecisionFor("CronCreate", { durable: 1 }).allow).toBe(false);
+    // review r1, C1/m5: the shell-variable form that was measured writing a real file, and the case
+    // variants — all in the COMMAND scan rather than the path fields.
+    expect(containmentDecisionFor("Bash", { command: "D=.claude; mkdir -p $PWD/$D && echo x > $PWD/$D/leak.txt" }).allow).toBe(false);
+    expect(containmentDecisionFor("Bash", { command: "F=CLAUDE.md; printf x > $F" }).allow).toBe(false);
+    expect(containmentDecisionFor("Bash", { command: "mkdir .Claude" }).allow).toBe(false);
+    expect(containmentDecisionFor("Bash", { command: "touch claude.md" }).allow).toBe(false);
+    // …and the §8 writers with no path argument at all (review r1, M2).
+    expect(containmentDecisionFor("EnterWorktree", { name: "feature" }).allow).toBe(false);
+    expect(containmentDecisionFor("Task", { isolation: "worktree", prompt: "x" }).allow).toBe(false);
+    expect(containmentDecisionFor("Workflow", { name: "release" }).allow).toBe(false);
+    // A host that HAS installed the schema-compatible replacements says so, and the floor steps back.
+    expect(containmentDecisionFor("EnterWorktree", { name: "f" }, { worktrees: "host-replacement" }).allow).toBe(true);
+    expect(containmentDecisionFor("Workflow", { name: "r" }, { workflows: "host-replacement" }).allow).toBe(true);
     // …and it does not deny the ordinary work of the session
     expect(containmentDecisionFor("Write", { file_path: "/w/.winter/plans/p.md", content: "x" }).allow).toBe(true);
     expect(containmentDecisionFor("Bash", { command: "ls -la" }).allow).toBe(true);
+    expect(containmentDecisionFor("Bash", { command: "git status && echo claudette" }).allow).toBe(true);
     expect(containmentDecisionFor("CronCreate", { durable: false }).allow).toBe(true);
+    expect(containmentDecisionFor("Task", { prompt: "an ordinary subagent" }).allow).toBe(true);
   });
 });
 

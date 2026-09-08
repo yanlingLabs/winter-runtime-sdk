@@ -25,7 +25,7 @@
 // it means "do not ask", and the floor still denies.
 import type { BrandProfile, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
 
-import { containmentDecisionFor } from "./containment.ts";
+import { containmentDecisionFor, type ContainmentPolicy } from "./containment.ts";
 
 /** The permission modes a host session can be in. Mirrors the pinned runtime's own vocabulary. */
 export type OfficialPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk";
@@ -58,9 +58,22 @@ export interface ApprovalBridgeOptions {
   brand: Pick<BrandProfile, "projectDirName">;
   /** The session's mode. `dontAsk` never reaches the broker (§10). */
   mode: OfficialPermissionMode;
+  /** §8's dispositions. The floor reads them; `projectDirName` is filled from `brand` if absent. */
+  containment?: ContainmentPolicy;
   /** Called with every decision, so a host can log or count without wrapping the broker. */
-  onDecision?: (decision: { request: ApprovalRequest; result: PermissionResult; source: "containment-floor" | "broker" | "dont-ask" }) => void;
+  onDecision?: (decision: { request: ApprovalRequest; result: PermissionResult; source: DecisionSource }) => void;
 }
+
+/** Where a decision came from — what a row-14 tally is built out of. */
+export type DecisionSource = "containment-floor" | "broker" | "dont-ask" | "broker-approval-stripped";
+
+/**
+ * The destinations a DURABLE approval would be written to (§8's saved-`WebFetch` row).
+ *
+ * `session` and `cliArg` are not durable — they live and die with this generation — so they are the
+ * two a stripped result keeps.
+ */
+const DURABLE_APPROVAL_DESTINATIONS: readonly string[] = ["userSettings", "projectSettings", "localSettings"];
 
 /**
  * Builds `Options.canUseTool` for the official branch.
@@ -69,11 +82,13 @@ export interface ApprovalBridgeOptions {
  * return type is what guarantees it.
  */
 export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialApprovalBridge {
+  const containmentPolicy: ContainmentPolicy = { projectDirName: options.brand.projectDirName, ...options.containment };
+  const savedApprovals = containmentPolicy.savedWebFetchApprovals ?? "disable";
   return async (toolName, input, rest) => {
     const request: ApprovalRequest = { toolName, input, ...rest };
 
     // 1. THE FLOOR. Not a user decision, and not skippable by mode.
-    const containment = containmentDecisionFor(toolName, input);
+    const containment = containmentDecisionFor(toolName, input, containmentPolicy);
     if (!containment.allow) {
       const result: PermissionResult = { behavior: "deny", message: containment.reason, toolUseID: request.toolUseID };
       options.onDecision?.({ request, result, source: "containment-floor" });
@@ -88,10 +103,25 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
       return result;
     }
 
-    // 3. THE BROKER. Its answer is carried back verbatim — including `updatedInput` (the transformed
-    //    input §10 requires end to end) and `updatedPermissions` (the suggestions, echoed as the
-    //    host's own rule updates).
+    // 3. THE BROKER. Its answer is carried back — including `updatedInput` (the transformed input §10
+    //    requires end to end) and `updatedPermissions` (the suggestions, echoed as the host's own rule
+    //    updates) — with ONE exception, below.
     const result = await options.broker(request);
+
+    // 4. §8's SAVED-APPROVAL ROW, enforced where the write is actually requested (review r1, M2).
+    //    A durable `updatedPermissions` entry is exactly how a saved approval reaches the vendor's own
+    //    settings file, and it is the only §8 writer with no tool call of its own — so it has to be
+    //    contained here or nowhere. Under the `disable` disposition the durable entries are STRIPPED
+    //    and the session-scoped ones survive: the approval still applies for this generation, and
+    //    WS-07 keeps its open question (WS-14 §16 q2).
+    if (savedApprovals === "disable" && result.behavior === "allow" && result.updatedPermissions !== undefined) {
+      const kept = result.updatedPermissions.filter((update) => !DURABLE_APPROVAL_DESTINATIONS.includes(update.destination));
+      if (kept.length !== result.updatedPermissions.length) {
+        const stripped: PermissionResult = { ...result, updatedPermissions: kept };
+        options.onDecision?.({ request, result: stripped, source: "broker-approval-stripped" });
+        return stripped;
+      }
+    }
     options.onDecision?.({ request, result, source: "broker" });
     return result;
   };
