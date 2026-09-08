@@ -40,6 +40,12 @@ export type { PeerVersionIdentity, PeerVersionSource, VersionMatrixReport } from
 // --- D13/D28: selection and its persisted choice ---------------------------------------------------
 export { isSelectionRefusal, selectChildRuntime, selectRuntime, SelectionRefusedError } from "./selection/runtime-selection.ts";
 export type { ChildSelectionInput, CredentialPresence, RuntimeKind, RuntimeSelection, SelectionInput, SelectionRefusal } from "./selection/runtime-selection.ts";
+// Lane D's three doors and the vocabulary they speak (review r1 N1's trimmed set; controller-applied at merge).
+export { CHILD_PROVIDER_UNAVAILABLE, resumeChildSelection, selectChildRuntimePairing } from "./selection/child-runtime.ts";
+export type { ChildResumeOutcome, ChildRuntimePairing } from "./selection/child-runtime.ts";
+export type { ProviderAuthView, SelectionAuthFamily, SelectionVersions } from "./selection/runtime-selection.ts";
+export { D14_CLAUDE_OAUTH_APPROVED_DEFAULT, SELECTION_RULES, UNKNOWN_VERSION, reviewPersistedSelection, ruleIdOf, selectionVersionsFrom } from "./selection/select-runtime.ts";
+export type { SelectionReview, SelectionRuleId } from "./selection/select-runtime.ts";
 
 // --- the seams (interfaces the four lanes implement behind) ----------------------------------------
 export * from "./seams/index.ts";
