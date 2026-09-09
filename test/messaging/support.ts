@@ -18,6 +18,7 @@ import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts"
 import type { AttachedOfficialSession, AttachedWinterSession, LiveSessionStatus } from "../../src/messaging/index.ts";
 import { WINTER_BRAND, type SdkMessage, type SessionMessagingFacet } from "@yanlinglabs/winter-agent-sdk";
 import type { MessagingIdleNoticePayload, MessagingNotificationsPage } from "@yanlinglabs/winter-agent-sdk";
+import type { NotificationRecord } from "@yanlinglabs/winter-agent-sdk/messaging";
 
 export const selection = (over: Partial<RuntimeSelection> = {}): RuntimeSelection => ({
   runtimeKind: "winter-agent",
@@ -128,6 +129,10 @@ export interface FakeFacet {
   setDeliverOutcome(outcome: (message: GlobalAgentMessage) => DeliveryOutcome): void;
   setSenderClass(label: PermissionClassLabel): void;
   setChildOutcome(outcome: (id: string, message: GlobalAgentMessage) => DeliveryOutcome): void;
+  /** Queue a notice for the DRAIN half of the return path (what a host missed while away). */
+  queueNotice(record: NotificationRecord): void;
+  /** Every `readNotifications` the router made — so "drained once at attach" is checkable. */
+  readonly drains: number[];
 }
 
 /**
@@ -143,6 +148,8 @@ export function createFakeFacet(): FakeFacet {
   const resumed: Array<{ id: string; message: GlobalAgentMessage }> = [];
   const subscribes: Array<{ id: string; messageId: string }> = [];
   const notices: Array<(payload: MessagingIdleNoticePayload) => void> = [];
+  const queued: NotificationRecord[] = [];
+  const drains: number[] = [];
   let deliverOutcome: (message: GlobalAgentMessage) => DeliveryOutcome = (message) => ({ status: "queued", messageId: message.messageId });
   let childOutcome: (id: string, message: GlobalAgentMessage) => DeliveryOutcome = (_id, message) => ({ status: "queued", messageId: message.messageId });
   let senderClass: PermissionClassLabel = "prompts";
@@ -171,7 +178,9 @@ export function createFakeFacet(): FakeFacet {
       return senderClass;
     },
     async readNotifications(): Promise<MessagingNotificationsPage> {
-      return { notifications: [], remaining: 0 };
+      drains.push(queued.length);
+      const notifications = queued.splice(0, queued.length);
+      return { notifications, remaining: 0 };
     },
     onIdleNotice(handler) {
       notices.push(handler);
@@ -188,6 +197,10 @@ export function createFakeFacet(): FakeFacet {
     steered,
     resumed,
     subscribes,
+    drains,
+    queueNotice(record) {
+      queued.push(record);
+    },
     fireIdle(payload) {
       for (const handler of [...notices]) handler(payload);
     },

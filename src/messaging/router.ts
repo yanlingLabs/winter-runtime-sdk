@@ -302,6 +302,29 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
     return outcome;
   }
 
+  /**
+   * Drain the notices a session queued while this host was not listening, and fire each one.
+   *
+   * BOUNDED BY PAGES, not by a `while (remaining > 0)`: `remaining` comes from the far side of a wire,
+   * and a loop that trusted it would spin forever against a runtime that answered wrongly. Ten pages
+   * is far past any real backlog (a subscription is one-shot and expires in twelve hours), and the
+   * unread remainder stays queued rather than being dropped.
+   */
+  async function drainMissedNotices(address: SerializedRuntimeAddress, facet: NonNullable<AttachedWinterSession["messaging"]>): Promise<void> {
+    for (let page = 0; page < 10; page += 1) {
+      let drained: { notifications: NotificationRecord[]; remaining: number };
+      try {
+        drained = await facet.readNotifications();
+      } catch {
+        return; // a facet that cannot answer is not an error the attach should raise
+      }
+      for (const record of drained.notifications) {
+        await handle.noteIdle(address, { notificationId: record.notification_id, content: record.content });
+      }
+      if (drained.remaining === 0 || drained.notifications.length === 0) return;
+    }
+  }
+
   const handle: GlobalMessagingHandle = {
     winterAdapter,
     officialAdapter,
@@ -316,13 +339,20 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
     attachWinterSession(address, session) {
       const detachHandle = winterSessions.attach(address, session);
       if (session.messaging === undefined) return detachHandle;
-      // THE IDLE RETURN PATH (Task 0's addendum): the live `idle_notice` frame and the durable
-      // `read_notifications` drain are DELIBERATELY THE SAME NOTICE, correlated by `notification_id`,
-      // so a host that missed the frame still collects it and a host that got both dedupes. This is
-      // the deduping half.
-      const unsubscribe = session.messaging.onIdleNotice((payload) => {
+      const facet = session.messaging;
+      // THE IDLE RETURN PATH (Task 0's addendum), both halves. The live `idle_notice` frame and the
+      // durable `read_notifications` drain are DELIBERATELY THE SAME NOTICE, correlated by
+      // `notification_id`: a host that missed the frame (it crashed, it restarted, it had not
+      // connected yet) still collects it, and a host that got both dedupes on the id. `noteIdle` is
+      // that dedupe, so both halves can feed it without either having to know about the other.
+      const unsubscribe = facet.onIdleNotice((payload) => {
         void handle.noteIdle(address, { notificationId: payload.notice.notification_id, content: payload.notice.content });
       });
+      // THE CATCH-UP HALF, run once at attach: whatever was queued while nothing was listening. A
+      // DRAIN IS THE ACKNOWLEDGEMENT (it removes), which is why it happens here and not on a timer —
+      // draining repeatedly would take notices away from a host that had not acted on them, and
+      // draining never would leave WS-15 §6.4's restart recovery with a queue nobody reads.
+      void drainMissedNotices(address, facet);
       return () => {
         unsubscribe();
         detachHandle();

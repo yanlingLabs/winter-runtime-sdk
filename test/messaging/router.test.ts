@@ -372,6 +372,28 @@ describe("row 7 — notify_when_idle, end to end", () => {
     expect(world.messaging.readNotifications("watcher").notifications.length).toBe(1);
   });
 
+  test("a notice queued while nothing was listening is CAUGHT UP at attach, and drained exactly once", async () => {
+    const world = bedWith();
+    const targetFacet = createFakeFacet();
+    await world.directory.record(sessionEntry("watcher"));
+    await world.directory.record(sessionEntry("target"));
+    // Subscribe first, THEN attach: the shape of a host that reconnects to a session it had
+    // subscribed to before it went away (WS-15 §6.4's restart recovery).
+    world.messaging.attachWinterSession("session:target", winterHandle(targetFacet));
+    await world.messaging.notifyWhenIdle(sessionAddress("target"), { from: sessionAddress("watcher"), messageId: "sub-1" });
+
+    targetFacet.queueNotice({ notification_id: "note-missed", origin: "session:target", queued_at: "t", content: "session:target is now idle" });
+    const detach = world.messaging.attachWinterSession("session:target", winterHandle(targetFacet));
+    await Bun.sleep(0);
+
+    expect(world.messaging.readNotifications("watcher").notifications.length).toBe(1);
+    // …and the live frame carrying the SAME notice adds nothing: one notice, two transports.
+    targetFacet.fireIdle({ subscriberSessionId: "host:target", notice: { notification_id: "note-missed", origin: "session:target", queued_at: "t", content: "session:target is now idle" } });
+    await Bun.sleep(0);
+    expect(world.messaging.readNotifications("watcher").notifications.length).toBe(0);
+    detach();
+  });
+
   test("a subscription for a PREVIOUS generation of the target fires nothing", async () => {
     const world = bedWith();
     await world.directory.record(sessionEntry("watcher"));
