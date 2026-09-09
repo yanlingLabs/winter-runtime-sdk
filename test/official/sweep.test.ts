@@ -22,8 +22,8 @@ afterEach(() => {
 
 const pre = (sweep: ReturnType<typeof createContainmentSweep>, toolUseId: string, toolName = "Bash"): Promise<unknown> =>
   (sweep.hooks["PreToolUse"] ?? [])[0]!.hooks[0]!({ hook_event_name: "PreToolUse", tool_name: toolName, tool_use_id: toolUseId });
-const post = (sweep: ReturnType<typeof createContainmentSweep>, toolUseId: string, toolName = "Bash"): Promise<Record<string, unknown>> =>
-  (sweep.hooks["PostToolUse"] ?? [])[0]!.hooks[0]!({ hook_event_name: "PostToolUse", tool_name: toolName, tool_use_id: toolUseId }) as Promise<Record<string, unknown>>;
+const post = (sweep: ReturnType<typeof createContainmentSweep>, toolUseId: string, toolName = "Bash", event = "PostToolUse"): Promise<Record<string, unknown>> =>
+  (sweep.hooks[event] ?? [])[0]!.hooks[0]!({ hook_event_name: event, tool_name: toolName, tool_use_id: toolUseId }) as Promise<Record<string, unknown>>;
 
 describe("the post-hoc containment sweep", () => {
   test("finds the three forbidden names under a root, folded, and does not walk into them", () => {
@@ -63,6 +63,32 @@ describe("the post-hoc containment sweep", () => {
     expect(sweep.breaches).toHaveLength(1);
   });
 
+  test("review r3, NEW-9: a FAILING call is swept too — `PostToolUseFailure`, and the batch event", async () => {
+    const cwd = workspace();
+    const sweep = createContainmentSweep({ cwd });
+    // The measured hole: a command with a side effect and a nonzero exit fires PostToolUseFailure and
+    // no PostToolUse at all, so the baseline was taken and never consumed.
+    await pre(sweep, "failing");
+    mkdirSync(join(cwd, ".claude"), { recursive: true });
+    writeFileSync(join(cwd, ".claude", "leak.txt"), "x");
+    const failure = await post(sweep, "failing", "Bash", "PostToolUseFailure");
+    expect(existsSync(join(cwd, ".claude"))).toBe(false);
+    expect(sweep.breaches).toHaveLength(1);
+    // The turn-ending half is not honoured on this event (measured) — the removal is the guarantee.
+    expect(failure["decision"]).toBe("block");
+
+    // …and the batch event, whose input carries `tool_calls[]` rather than one id.
+    await pre(sweep, "batched");
+    writeFileSync(join(cwd, "CLAUDE.md"), "x");
+    const batch = (await (sweep.hooks["PostToolBatch"] ?? [])[0]!.hooks[0]!({
+      hook_event_name: "PostToolBatch",
+      tool_calls: [{ tool_name: "Read", tool_use_id: "other" }, { tool_name: "Write", tool_use_id: "batched" }],
+    })) as Record<string, unknown>;
+    expect(existsSync(join(cwd, "CLAUDE.md"))).toBe(false);
+    expect(batch["decision"]).toBe("block");
+    expect(sweep.breaches).toHaveLength(2);
+  });
+
   test("a call that creates nothing forbidden is invisible to it", async () => {
     const cwd = workspace();
     const sweep = createContainmentSweep({ cwd });
@@ -95,8 +121,14 @@ describe("the post-hoc containment sweep", () => {
     writeFileSync(join(cwd, "CLAUDE.md"), "x");
     expect(await post(sweep, "t4", "Read")).toEqual({});
     expect(existsSync(join(cwd, "CLAUDE.md"))).toBe(true);
-    // …and a post with no matching pre treats everything present as pre-existing rather than deleting
-    // a tree it never saw appear.
-    expect(await post(sweep, "never-seen")).toMatchObject({ continue: false });
+    // …and a post with NO MATCHING PRE deletes nothing at all (review r3, NEW-12): with no snapshot
+    // nothing is attributable to the call, and the previous behaviour — treat everything present as
+    // newly created and `rmSync` it recursively — pointed an `rm -rf` at the user's real home in
+    // production. The comment used to describe the safe behaviour while the assertion pinned the
+    // destructive one.
+    writeFileSync(join(cwd, "CLAUDE.md"), "planted, and not this call's doing");
+    expect(await post(sweep, "never-seen")).toEqual({});
+    expect(existsSync(join(cwd, "CLAUDE.md"))).toBe(true);
+    expect(sweep.breaches).toEqual([]);
   });
 });

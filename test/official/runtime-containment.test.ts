@@ -101,8 +101,16 @@ async function runContainment(args: {
       credentials: { ANTHROPIC_BASE_URL: fake.url.replace(/\/$/, ""), ANTHROPIC_API_KEY: "sk-ant-loopback" },
       base: { HOME: args.session.home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
     });
-    const built = adapter.buildOptions(templateInput);
-    const options = args.mutateOptions === undefined ? built : args.mutateOptions(built);
+    const withBridge: OfficialOptions = {
+      ...adapter.buildOptions(templateInput),
+      canUseTool: createApprovalBridge({
+        brand: WINTER_BRAND,
+        mode: args.mode ?? "default",
+        broker: args.broker ?? (async (request) => ({ behavior: "allow", updatedInput: request.input })),
+        onDecision: ({ request, result, source }) => decisions.push({ tool: request.toolName, behavior: result.behavior, source }),
+      }),
+    };
+    const options = args.mutateOptions === undefined ? withBridge : args.mutateOptions(withBridge);
     const live = adapter.launch({
       address: "claude:session:containment",
       selection,
@@ -114,13 +122,6 @@ async function runContainment(args: {
         ...options,
         env,
         ...(args.mode === undefined ? {} : { permissionMode: args.mode }),
-        // A BROKER THAT SAYS YES TO EVERYTHING — see this file's header.
-        canUseTool: createApprovalBridge({
-          brand: WINTER_BRAND,
-          mode: args.mode ?? "default",
-          broker: args.broker ?? (async (request) => ({ behavior: "allow", updatedInput: request.input })),
-          onDecision: ({ request, result, source }) => decisions.push({ tool: request.toolName, behavior: result.behavior, source }),
-        }),
       },
     });
     for await (const message of live.query) {
@@ -356,6 +357,60 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
       expect(results.some((entry) => entry.tool_use_id === "s1")).toBe(false);
 
       // ROW 14'S OWN PREDICATE, after a command the scanner could not read.
+      expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
+      expect(vendorNamedArtifacts(session)).toEqual([]);
+      expect(decoyUntouched(session)).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "review r3, NEW-9: a command whose side effect precedes a FAILURE is swept too",
+    async () => {
+      const session = hermeticSession("containment-failure");
+      const { breaches } = await runContainment({
+        session,
+        turns: [
+          // The measured hole: a constructed name (unreadable pre-hoc) followed by a nonzero exit, so
+          // the runtime fires `PostToolUseFailure` and no `PostToolUse` at all. `<cwd>/.claude`
+          // survived the whole session before this round.
+          { toolUses: [{ id: "f1", name: "Bash", input: { command: 'D="$(printf %s .cla)$(printf %s ude)"; mkdir -p "$D" && echo x > "$D/leak.txt"; exit 1' } }] },
+          { text: "done" },
+        ],
+      });
+      expect(breaches.length).toBeGreaterThanOrEqual(1);
+      expect(breaches[0]?.created.some((path) => path.toLowerCase().endsWith("/.claude"))).toBe(true);
+      expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
+      expect(vendorNamedArtifacts(session)).toEqual([]);
+      expect(decoyUntouched(session)).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "review r3, NEW-11: the saved-approval path, for real — the durable update is stripped and no vendor settings file appears",
+    async () => {
+      const session = hermeticSession("containment-approval");
+      const { decisions } = await runContainment({
+        session,
+        // An ordinary host broker that approves AND asks for a durable rule update — which is exactly
+        // how a saved WebFetch approval reaches the vendor's own settings file.
+        broker: async (request) => ({
+          behavior: "allow",
+          updatedInput: request.input,
+          updatedPermissions: [
+            { type: "addRules", rules: [{ toolName: "WebFetch", ruleContent: "domain:example.com" }], behavior: "allow", destination: "localSettings" },
+            { type: "addRules", rules: [{ toolName: "WebFetch", ruleContent: "domain:example.com" }], behavior: "allow", destination: "projectSettings" },
+            { type: "addRules", rules: [{ toolName: "WebFetch", ruleContent: "domain:example.com" }], behavior: "allow", destination: "session" },
+          ],
+        }),
+        turns: [{ toolUses: [{ id: "w1", name: "WebFetch", input: { url: "https://example.com/", prompt: "read it" } }] }, { text: "done" }],
+      });
+      const webfetch = decisions.find((decision) => decision.tool === "WebFetch");
+      expect([webfetch?.source, webfetch?.behavior]).toEqual(["broker-approval-stripped", "allow"]);
+      // The file the runtime writes for a durable approval — measured being created when the update
+      // passes through — is absent, and so is the product's own (nothing routes one).
+      expect(existsSync(join(session.cwd, ".claude", "settings.local.json"))).toBe(false);
       expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
       expect(vendorNamedArtifacts(session)).toEqual([]);
       expect(decoyUntouched(session)).toBe(true);

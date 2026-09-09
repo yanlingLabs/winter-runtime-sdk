@@ -23,7 +23,7 @@ import type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, Of
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
 
 import { officialBranchLabel } from "./branding.ts";
-import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createContainmentHooks, type OfficialApprovalBridge, type OfficialPermissionMode } from "./callbacks.ts";
+import { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, isOurApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./callbacks.ts";
 import type { ContainmentPolicy } from "./containment.ts";
 import { createContainmentSweep, type ContainmentBreach, type ContainmentSweep } from "./sweep.ts";
 import { mergeHooks } from "./options-template.ts";
@@ -228,19 +228,26 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     const sweep = createContainmentSweep({
       cwd: plan.cwd,
       ...(home === undefined ? {} : { home }),
-      onBreach: (breach, error) => {
-        breaches.push(breach);
-        policy.onContainmentBreach?.(breach, error);
-      },
+      branchLabel,
+      onBreach: (breach, error) => policy.onContainmentBreach?.(breach, error),
     });
-    const floorHooks = createContainmentHooks({ brand, containment });
-    const merged = mergeHooks(mergeHooks(floorHooks as Record<string, unknown[]>, sweep.hooks as unknown), plan.options.hooks);
+    // A SECOND COPY OF THE FLOOR IS HARMLESS AND UNTIDY (review r3, NEW-15): options built by
+    // `buildOfficialOptions` already carry it, so merging unconditionally stacked two identical pure
+    // decisions. Merge ours only when the caller's do not already carry the mark.
+    const hostHooks = (plan.options.hooks ?? {}) as Record<string, Array<{ hooks?: unknown[] }>>;
+    const alreadyFloored = (hostHooks["PreToolUse"] ?? []).some((matcher) => (matcher.hooks ?? []).some((hook) => carriesMark(hook, CONTAINMENT_FLOOR_MARK)));
+    const floorHooks = alreadyFloored ? {} : (createContainmentHooks({ brand, containment }) as Record<string, unknown[]>);
+    const merged = mergeHooks(mergeHooks(floorHooks, sweep.hooks as unknown), plan.options.hooks);
     const existing = plan.options.canUseTool;
     // A CALLER'S OWN CALLBACK IS WRAPPED, NEVER DROPPED: it becomes the broker behind our bridge, so
     // the floor runs first and their decision still decides everything the floor allows. `null` — the
     // transport escape §10 forbids on this bridge — becomes a typed deny rather than an indefinite
     // wait.
-    const canUseTool = carriesMark(existing, APPROVAL_BRIDGE_MARK)
+    // IDENTITY, NOT A FORGEABLE MARK (review r3, NEW-11). `APPROVAL_BRIDGE_MARK` is exported and a
+    // `Symbol.for` key, so any caller can stamp it — and a stamped always-allow callback was measured
+    // being taken verbatim, which skipped the saved-approval strip and wrote the vendor's settings
+    // file. A bridge this package MADE is recognised by identity; anything else is wrapped.
+    const canUseTool = isOurApprovalBridge(existing)
       ? (existing as OfficialApprovalBridge)
       : createApprovalBridge({
           brand,
@@ -262,7 +269,6 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     sweeps.set(options, sweep);
     return options;
   };
-  const breaches: ContainmentBreach[] = [];
 
   const start = (plan: OfficialLaunchPlan, resume: { resume: string; forkSession?: boolean } | undefined): OfficialSessionHandle => {
     const claude = context.peers.claude;

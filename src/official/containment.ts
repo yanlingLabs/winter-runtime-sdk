@@ -24,6 +24,7 @@
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
 import { aliasDenyNames, type AliasedBuiltin } from "./aliases.ts";
+import { OfficialConfigurationError } from "./errors.ts";
 
 /** The three vendor-named targets nothing may create (WS-17 row 14). */
 export const FORBIDDEN_TARGETS = {
@@ -76,12 +77,15 @@ export interface ContainmentDisposition {
  * durable approvals on this branch share the product's rules store or the project settings file;
  * either way the `.claude/` write is denied."
  *
- * The default is `disable`, and the argument is that a REDIRECT is the option that cannot be taken
- * back: a durable approval written into the product's own settings file is a rule the WINTER branch
- * will also honour, so choosing redirect here silently decides WS-07's open question in favour of
- * "shared store" for every host that never revisits the default. Disabling denies the vendor-named
- * write (which is all §8 requires), keeps the session working (approvals still apply for its
- * lifetime), and leaves WS-07 free to decide. A host that has already made that decision flips it.
+ * `disable` IS THE ONLY VALUE THIS BRANCH CAN HONOUR, and that is a measurement rather than a
+ * preference (review r3, NEW-11). `redirect` was documented as "durable approvals are routed into the
+ * product's own project settings file" — and nothing routed them: the branch has no way to make the
+ * runtime write elsewhere, so passing the durable update through means the RUNTIME writes
+ * `<cwd>/.claude/settings.local.json`. Measured, with an ordinary host broker and no forgery: that
+ * file was created and the product's own never was. §8's own sentence is "either way the `.claude/`
+ * write is denied", so the value that cannot deny it is refused with a typed error until a host
+ * replacement exists — `disable` still keeps the approval for the session's lifetime and leaves
+ * WS-07's open question open.
  */
 export type SavedApprovalDisposition = "disable" | "redirect";
 
@@ -112,6 +116,26 @@ export interface ContainmentPolicy {
    * have a rule that does nothing.
    */
   deniedAliasedBuiltins?: readonly AliasedBuiltin[];
+}
+
+/**
+ * The saved-approval disposition, refusing the value the branch cannot honour (review r3, NEW-11).
+ *
+ * A typed refusal rather than a silent downgrade: a host that asked for `redirect` asked for a
+ * behaviour, and quietly giving it `disable` would leave it believing durable approvals are being
+ * persisted somewhere.
+ */
+export function resolveSavedApprovalDisposition(policy: ContainmentPolicy, branchLabel: string): SavedApprovalDisposition {
+  const disposition = policy.savedWebFetchApprovals ?? "disable";
+  if (disposition === "redirect") {
+    throw new OfficialConfigurationError({
+      option: "containment.savedWebFetchApprovals",
+      reason:
+        "`redirect` cannot be honoured on this branch: nothing routes a durable approval anywhere, so passing it through means the RUNTIME writes its own project settings file — measured, with an ordinary broker. §8 denies that write either way, so this branch supports `disable` until a host replacement exists (WS-14 §8/§16 q2)",
+      branchLabel,
+    });
+  }
+  return disposition;
 }
 
 export function containmentDispositions(brand: Pick<BrandProfile, "projectDirName" | "productName">, policy: ContainmentPolicy = {}): readonly ContainmentDisposition[] {

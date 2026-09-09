@@ -19,8 +19,8 @@ import {
   aliasTargetFor,
   officialToolAliases,
 } from "../../src/official/aliases.ts";
-import { containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, targetsForbiddenPath } from "../../src/official/containment.ts";
-import { createApprovalBridge, createFirstResponseWins, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
+import { containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, resolveSavedApprovalDisposition, targetsForbiddenPath } from "../../src/official/containment.ts";
+import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
 
 const brand = WINTER_BRAND;
 
@@ -101,8 +101,14 @@ describe("WS-14 §8 — builtin-path containment", () => {
       "host-ui",
       "floor-deny",
     ]);
-    // §16 q2 is FIXED as `disable`, with the host able to choose the other answer explicitly.
+    // §16 q2 is FIXED as `disable`, and `redirect` is REFUSED rather than silently downgraded (review
+    // r3, NEW-11): measured, it makes the RUNTIME write its own project settings file, which §8 denies
+    // "either way". The disposition table still renders the row a host asked about; the resolver is
+    // what a session goes through.
     expect(containmentDispositions(brand, { savedWebFetchApprovals: "redirect" })[3]).toMatchObject({ disposition: "redirect", target: ".winter/settings.local.json" });
+    expect(() => resolveSavedApprovalDisposition({ savedWebFetchApprovals: "redirect" }, "winter-claude-agent")).toThrow(/cannot be honoured on this branch/);
+    expect(resolveSavedApprovalDisposition({}, "winter-claude-agent")).toBe("disable");
+    expect(() => createApprovalBridge({ brand, mode: "default", containment: { savedWebFetchApprovals: "redirect" }, broker: async () => ({ behavior: "allow" }) })).toThrow(/cannot be honoured/);
     expect(officialDisallowedTools()).toEqual(["CronCreate"]);
   });
 
@@ -232,6 +238,18 @@ describe("WS-14 §10 — callback bridging", () => {
     }
     expect(called).toBe(0);
     expect(sources).toEqual(["containment-floor", "containment-floor", "containment-floor"]);
+  });
+
+  test("review r3, NEW-11: a COUNTERFEIT-marked bridge is wrapped, not trusted", async () => {
+    // The mark is an exported `Symbol.for` key, so anyone can stamp it — and a stamped always-allow
+    // callback was measured being taken verbatim, skipping the saved-approval strip. Identity is the
+    // question the adapter asks now.
+    const counterfeit = (async () => ({ behavior: "allow" as const })) as unknown as Record<symbol, unknown>;
+    counterfeit[APPROVAL_BRIDGE_MARK] = true;
+    expect(carriesMark(counterfeit, APPROVAL_BRIDGE_MARK)).toBe(true);
+    expect(isOurApprovalBridge(counterfeit)).toBe(false);
+    const genuine = createApprovalBridge({ brand, mode: "default", broker: async () => ({ behavior: "allow" }) });
+    expect(isOurApprovalBridge(genuine)).toBe(true);
   });
 
   test("a resumed decision revalidates all FIVE facts, and first response wins", () => {

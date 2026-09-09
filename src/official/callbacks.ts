@@ -25,7 +25,8 @@
 // it means "do not ask", and the floor still denies.
 import type { BrandProfile, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
 
-import { containmentDecisionFor, type ContainmentPolicy } from "./containment.ts";
+import { containmentDecisionFor, resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
+import { officialBranchLabel } from "./branding.ts";
 
 /** The permission modes a host session can be in. Mirrors the pinned runtime's own vocabulary. */
 export type OfficialPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk";
@@ -55,7 +56,7 @@ export type OfficialApprovalBridge = (toolName: string, input: Record<string, un
 
 export interface ApprovalBridgeOptions {
   broker: ApprovalBroker;
-  brand: Pick<BrandProfile, "projectDirName">;
+  brand: Pick<BrandProfile, "projectDirName" | "processLabel">;
   /** The session's mode. `dontAsk` never reaches the broker (§10). */
   mode: OfficialPermissionMode;
   /** §8's dispositions. The floor reads them; `projectDirName` is filled from `brand` if absent. */
@@ -83,7 +84,8 @@ const DURABLE_APPROVAL_DESTINATIONS: readonly string[] = ["userSettings", "proje
  */
 export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialApprovalBridge {
   const containmentPolicy: ContainmentPolicy = { projectDirName: options.brand.projectDirName, ...options.containment };
-  const savedApprovals = containmentPolicy.savedWebFetchApprovals ?? "disable";
+  // Refuses `redirect` outright — see `resolveSavedApprovalDisposition` (review r3, NEW-11).
+  const savedApprovals = resolveSavedApprovalDisposition(containmentPolicy, officialBranchLabel(options.brand));
   const bridge: OfficialApprovalBridge = async (toolName, input, rest) => {
     const request: ApprovalRequest = { toolName, input, ...rest };
 
@@ -126,6 +128,7 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
     return result;
   };
   (bridge as unknown as Record<symbol, unknown>)[APPROVAL_BRIDGE_MARK] = true;
+  OUR_BRIDGES.add(bridge as unknown as object);
   return bridge;
 }
 
@@ -165,6 +168,22 @@ export const APPROVAL_BRIDGE_MARK = Symbol.for("winter-runtime-sdk.official.appr
 /** True when this function is one of ours — the floor's hook or the approval bridge. */
 export function carriesMark(value: unknown, mark: symbol): boolean {
   return typeof value === "function" && (value as unknown as Record<symbol, unknown>)[mark] === true;
+}
+
+/**
+ * THE IDENTITY CHECK (review r3, NEW-11) — for the one decision where a forgery has consequences.
+ *
+ * The marks make the floor CHECKABLE for an options object we did not build, which is what the
+ * invariant needs; they are also `Symbol.for` keys on an exported symbol, so any caller can stamp
+ * one. For the hook that costs nothing (the adapter merges the genuine floor anyway), but a stamped
+ * `canUseTool` was measured being taken VERBATIM — skipping the saved-approval strip and letting the
+ * vendor's settings file be written. So the adapter asks a different question of the bridge: not "is
+ * it marked" but "did WE make it", which a `WeakSet` answers and nobody can counterfeit.
+ */
+const OUR_BRIDGES = new WeakSet<object>();
+
+export function isOurApprovalBridge(value: unknown): value is OfficialApprovalBridge {
+  return typeof value === "function" && OUR_BRIDGES.has(value as unknown as object);
 }
 
 /** The subset of the hook contract this needs, declared structurally (the peer is never imported). */

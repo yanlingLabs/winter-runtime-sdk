@@ -185,6 +185,13 @@ describe("WS-14 §5.1 — the withheld options, as refusals", () => {
     expect(() => assertOptionsInvariants(buildOfficialOptions(input("code"), { appendSystemPromptFile: "/w/.acme/ACME.md" }), branchLabel)).not.toThrow();
   });
 
+  test("review r3, NEW-13: `bypassPermissions` is refused — it shadows the bridge the branch owns", () => {
+    expect(() => assertOptionsInvariants({ ...base(), permissionMode: "bypassPermissions" }, branchLabel)).toThrow(/shadows `canUseTool`|auto-approves every tool call/);
+    for (const mode of ["default", "plan", "acceptEdits", "dontAsk"]) {
+      expect([mode, (() => { try { assertOptionsInvariants({ ...base(), permissionMode: mode }, branchLabel); return "ok"; } catch { return "refused"; } })()]).toEqual([mode, "ok"]);
+    }
+  });
+
   test("discovery stays off and the host stays the sole MCP owner", () => {
     expect(() => assertOptionsInvariants({ ...base(), settingSources: ["project"] }, branchLabel)).toThrow(/no vendor-named settings source/);
     expect(() => assertOptionsInvariants({ ...base(), strictMcpConfig: false }, branchLabel)).toThrow(/sole owner/);

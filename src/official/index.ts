@@ -30,7 +30,7 @@ export type { AuthCredentialPlan, AuthFamily, AuthVariableSetKey, ClaudeOauthGat
 export { OFFICIAL_DISCLOSURES, officialBranchLabel } from "./branding.ts";
 export type { OfficialDisclosure } from "./branding.ts";
 
-export { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, createFirstResponseWins, revalidateResumedDecision } from "./callbacks.ts";
+export { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision } from "./callbacks.ts";
 export type {
   ApprovalBroker,
   ApprovalRequest,
@@ -45,7 +45,7 @@ export type {
   ResumedDecision,
 } from "./callbacks.ts";
 
-export { FORBIDDEN_TARGETS, VENDOR_HOME_SEGMENT_RE, containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, targetsForbiddenPath } from "./containment.ts";
+export { FORBIDDEN_TARGETS, VENDOR_HOME_SEGMENT_RE, containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, resolveSavedApprovalDisposition, targetsForbiddenPath } from "./containment.ts";
 export type { ContainmentDecision, ContainmentDisposition, ContainmentPaths, ContainmentPolicy, SavedApprovalDisposition } from "./containment.ts";
 
 export {
@@ -99,7 +99,7 @@ export type { LocalWriteRootKind, ObservedLocalWriteRoot, VendorTempRootReport }
 export { createSupervisedSpawnProxy, directoryRecordSink, prepareDefaultSpawn } from "./spawn-proxy.ts";
 export type { ProcessIdentity, SpawnChild, SpawnObservation, SpawnRecordSink, SpawnedChildProcess, SupervisedSpawnProxy, SupervisedSpawnProxyOptions, TranscriptReconcile } from "./spawn-proxy.ts";
 
-export { SWEPT_TARGETS, SWEPT_TOOLS, createContainmentSweep, forbiddenArtifactsUnder } from "./sweep.ts";
+export { POST_TOOL_EVENTS, SWEPT_TARGETS, SWEPT_TOOLS, createContainmentSweep, forbiddenArtifactsUnder } from "./sweep.ts";
 export type { ContainmentBreach, ContainmentSweep, ContainmentSweepOptions } from "./sweep.ts";
 
 export { CANCELLATION_MAPPINGS, DEFAULT_SESSION_QUOTAS, cancellationMappingFor, crashClassOf, interruptionFor, isProcessCrash, revalidateProcessIdentity } from "./supervision.ts";

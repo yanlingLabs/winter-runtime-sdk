@@ -33,8 +33,29 @@ import { join } from "node:path";
 import { FORBIDDEN_TARGETS, targetsForbiddenPath } from "./containment.ts";
 import { OfficialContainmentBreachError } from "./errors.ts";
 
-/** Tools whose effect is a filesystem write, and therefore worth a snapshot pair. */
-export const SWEPT_TOOLS: readonly string[] = ["Bash", "BashOutput", "Write", "Edit", "MultiEdit", "NotebookEdit", "FileWrite", "FileEdit"];
+/**
+ * Tools whose effect is a filesystem write, and therefore worth a snapshot pair.
+ *
+ * `WebFetch` is here for a reason that is not a file write (review r3, NEW-11): a saved WebFetch
+ * approval is §8's one writer with no tool call of its own, and its durable rule update lands in the
+ * vendor's own settings file. Watching the call it rides on is the only post-hoc cover it can have.
+ */
+export const SWEPT_TOOLS: readonly string[] = ["Bash", "BashOutput", "Write", "Edit", "MultiEdit", "NotebookEdit", "FileWrite", "FileEdit", "WebFetch", "Task", "Agent", "Skill", "Workflow", "EnterWorktree", "ExitWorktree"];
+
+/**
+ * THE HOOK EVENTS A TOOL'S FILESYSTEM EFFECT CAN BE FOLLOWED BY (review r3, NEW-9).
+ *
+ * Enumerated from the pinned union rather than guessed: `HOOK_EVENTS` in the 0.3.250 declarations
+ * carries `PostToolUse`, `PostToolUseFailure` and `PostToolBatch` as the three events that follow a
+ * tool call, and the sweep registered only the first. MEASURED: a command with a side effect and a
+ * nonzero exit (`mkdir …; exit 1`) fires `PostToolUseFailure` and NO `PostToolUse`, so the baseline
+ * taken in `pre` was never consumed, the artifact survived the session, and `existsSync(<cwd>/.claude)`
+ * — row 14's own predicate — was true with both containment layers installed.
+ *
+ * `PostToolBatch` carries `tool_calls[]` rather than one `tool_use_id`, so the handler reads both
+ * shapes.
+ */
+export const POST_TOOL_EVENTS: readonly string[] = ["PostToolUse", "PostToolUseFailure", "PostToolBatch"];
 
 /** How deep the walk goes below a root, and what it never descends into. */
 const MAX_DEPTH = 6;
@@ -53,8 +74,8 @@ export interface ContainmentBreach {
 }
 
 /** Every forbidden-named path under `root`, folded-compared, bounded. */
-export function forbiddenArtifactsUnder(root: string, depth = 0): string[] {
-  if (depth > MAX_DEPTH || !existsSync(root)) return [];
+export function forbiddenArtifactsUnder(root: string, depth = 0, maxDepth: number = MAX_DEPTH): string[] {
+  if (depth > maxDepth || !existsSync(root)) return [];
   const found: string[] = [];
   let entries: string[];
   try {
@@ -75,7 +96,7 @@ export function forbiddenArtifactsUnder(root: string, depth = 0): string[] {
     } catch {
       continue;
     }
-    if (isDirectory) found.push(...forbiddenArtifactsUnder(full, depth + 1));
+    if (isDirectory) found.push(...forbiddenArtifactsUnder(full, depth + 1, maxDepth));
   }
   return found;
 }
@@ -83,6 +104,10 @@ export function forbiddenArtifactsUnder(root: string, depth = 0): string[] {
 export interface ContainmentSweepOptions {
   /** The session's working directory. */
   cwd: string;
+  /** WS-14 §14's diagnostics label, so a breach error reads like every other error in the package. */
+  branchLabel?: string;
+  /** How deep below each root the walk goes. Default 6; see `MAX_DEPTH`'s own note. */
+  maxDepth?: number;
   /** The session's home, so `~/.claude/plans` is covered as well as the project (WS-17 row 14). */
   home?: string;
   /** Where a breach is reported. The adapter forwards it to the host and keeps it on the session. */
@@ -101,33 +126,50 @@ interface SweepHookInput {
   hook_event_name?: string;
   tool_name?: string;
   tool_use_id?: string;
+  /** `PostToolBatch`'s own shape (review r3, NEW-9). */
+  tool_calls?: Array<{ tool_name?: string; tool_use_id?: string }>;
 }
 
 /** Builds the sweep's two hooks. One sweep per SESSION: the snapshots are keyed by tool-use id. */
 export function createContainmentSweep(options: ContainmentSweepOptions): ContainmentSweep {
   const now = options.now ?? (() => new Date());
   const roots = [options.cwd, ...(options.home === undefined ? [] : [options.home])];
-  const before = new Map<string, Set<string>>();
+  // Two maps: one records that a call was SEEN (so it can be retired), the other its snapshot.
+  const before = new Set<string>();
+  const beforeSnapshots = new Map<string, Set<string>>();
   const breaches: ContainmentBreach[] = [];
 
-  const snapshot = (): Set<string> => new Set(roots.flatMap((root) => forbiddenArtifactsUnder(root)));
+  const maxDepth = options.maxDepth ?? MAX_DEPTH;
+  const snapshot = (): Set<string> => new Set(roots.flatMap((root) => forbiddenArtifactsUnder(root, 0, maxDepth)));
 
   const pre = async (raw: unknown): Promise<Record<string, never>> => {
     const input = (raw ?? {}) as SweepHookInput;
     const toolName = input.tool_name ?? "";
     const toolUseId = input.tool_use_id ?? "";
     if (!SWEPT_TOOLS.includes(toolName) || toolUseId === "") return {};
-    before.set(toolUseId, snapshot());
+    before.add(toolUseId);
+    beforeSnapshots.set(toolUseId, snapshot());
     return {};
   };
 
   const post = async (raw: unknown): Promise<Record<string, unknown>> => {
     const input = (raw ?? {}) as SweepHookInput;
-    const toolName = input.tool_name ?? "";
-    const toolUseId = input.tool_use_id ?? "";
+    // A batch reports several calls at once; any of them may be the one that wrote.
+    const calls = input.tool_calls ?? [{ tool_name: input.tool_name, tool_use_id: input.tool_use_id }];
+    const call = calls.find((entry) => SWEPT_TOOLS.includes(entry.tool_name ?? "") && before.has(entry.tool_use_id ?? "")) ?? calls[0];
+    const toolName = call?.tool_name ?? "";
+    const toolUseId = call?.tool_use_id ?? "";
+    // Every call this handler sees is retired from the baseline map, swept or not, so a floor-denied
+    // or unswept call cannot leave an entry behind (review r3, NEW-15).
+    for (const entry of calls) if (entry.tool_use_id !== undefined) before.delete(entry.tool_use_id);
     if (!SWEPT_TOOLS.includes(toolName) || toolUseId === "") return {};
-    const baseline = before.get(toolUseId) ?? new Set<string>();
-    before.delete(toolUseId);
+    const baseline = beforeSnapshots.get(toolUseId);
+    beforeSnapshots.delete(toolUseId);
+    // THE FAIL-SAFE POINTS THE OTHER WAY NOW (review r3, NEW-12). With no baseline, NOTHING is
+    // attributable to this call — and the previous code treated every forbidden path under `cwd` and
+    // `HOME` as newly created and `rmSync`'d it recursively. In production `HOME` is the user's real
+    // home, whose vendor directory holds their own credentials. No snapshot means no deletion.
+    if (baseline === undefined) return {};
     const created = [...snapshot()].filter((path) => !baseline.has(path));
     if (created.length === 0) return {};
 
@@ -145,7 +187,7 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
     }
     const breach: ContainmentBreach = { toolName, toolUseId, created, removed, retained, at: now().toISOString() };
     breaches.push(breach);
-    const error = new OfficialContainmentBreachError({ toolName, created, removed, retained, branchLabel: "" });
+    const error = new OfficialContainmentBreachError({ toolName, created, removed, retained, branchLabel: options.branchLabel ?? "" });
     options.onBreach?.(breach, error);
 
     const reason =
@@ -164,6 +206,11 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
     // a rewrite, the model gets the sentence; on this pin it gets no result for a call whose effect was
     // undone, and the host gets the typed breach. A silent success — the call "working" while its
     // effect is deleted underneath it — is the one outcome that is not acceptable.
+    // AND THE TURN-ENDING HALF IS NOT AVAILABLE ON EVERY EVENT (review r3, NEW-9): a probe returning
+    // `continue: false` from `PostToolUseFailure` did NOT end the turn — the next scripted tool ran.
+    // So the guarantee this sweep makes is the one it can keep everywhere: THE ARTIFACT DOES NOT
+    // SURVIVE THE CALL. The turn additionally ends for a call that SUCCEEDS, which is where
+    // `continue: false` is honoured.
     return {
       continue: false,
       stopReason: reason,
@@ -175,7 +222,7 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
   };
 
   return {
-    hooks: { PreToolUse: [{ hooks: [pre] }], PostToolUse: [{ hooks: [post] }] },
+    hooks: { PreToolUse: [{ hooks: [pre] }], ...Object.fromEntries(POST_TOOL_EVENTS.map((event) => [event, [{ hooks: [post] }]])) },
     get breaches() {
       return breaches;
     },

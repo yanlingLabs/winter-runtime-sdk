@@ -266,6 +266,20 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
     );
   }
 
+  // REVIEW r3, NEW-13 — `bypassPermissions` IS REFUSED, and the runtime says why itself. Measured:
+  // in that mode a session with the template's own fail-closed bridge ran `Write` and `Bash` anyway,
+  // and the runtime emitted `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` — "canUseTool will not be invoked:
+  // permissionMode 'bypassPermissions' auto-approves every tool call … To gate every tool call, use a
+  // PreToolUse hook instead." This branch owns permissions (its `settingSources` is empty), so a mode
+  // that shadows the owner is not a mode it can offer. Containment is unaffected either way — the
+  // floor is a hook and it holds in that mode — but the bridge's claim to decide would be false.
+  if (options["permissionMode"] === "bypassPermissions") {
+    refuse(
+      "permissionMode",
+      "`bypassPermissions` auto-approves every tool call and shadows `canUseTool` (the runtime warns `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED`), so the broker this branch bridges to would never be asked — this branch owns permissions and cannot offer a mode that removes its own owner (WS-14 §10)",
+    );
+  }
+
   const extraArgs = options["extraArgs"];
   if (extraArgs !== undefined) {
     const keys = Object.keys(extraArgs as Record<string, unknown>);
