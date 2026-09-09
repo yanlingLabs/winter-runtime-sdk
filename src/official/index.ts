@@ -21,7 +21,7 @@ export {
 } from "./aliases.ts";
 export type { AliasedBuiltin, NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } from "./aliases.ts";
 
-export { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, authVariableSetKey, fetchAuthCredentials, validateAuthEnvironment } from "./auth.ts";
+export { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, AUTH_SHAPED_RE, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, authVariableSetKey, fetchAuthCredentials, isAuthShapedVariable, validateAuthEnvironment } from "./auth.ts";
 export type { AuthCredentialPlan, AuthFamily, AuthVariableSetKey, ClaudeOauthGate } from "./auth.ts";
 
 export { OFFICIAL_DISCLOSURES, officialBranchLabel } from "./branding.ts";

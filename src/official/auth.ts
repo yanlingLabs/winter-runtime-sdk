@@ -64,6 +64,31 @@ export const AUTH_FAMILY_VARIABLES = {
 
 export type AuthVariableSetKey = keyof typeof AUTH_FAMILY_VARIABLES;
 
+/**
+ * WHAT "CREDENTIAL-BEARING" MEANS, as a SHAPE rather than as a list (review r2, NEW-2).
+ *
+ * The family tables above are sixteen names. The pinned runtime reads thirty-odd, and eight of the
+ * ones it reads were measured travelling through `configuredExtras` into an `api-key` session —
+ * including a complete second provider family (`CLAUDE_CODE_USE_FOUNDRY` + `ANTHROPIC_FOUNDRY_API_KEY`),
+ * an `Authorization: Bearer` header injected wholesale through `ANTHROPIC_CUSTOM_HEADERS`, and
+ * `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, which walks around D14's "the Claude OAuth family injects NO
+ * credential variable" because `NEVER_INJECTED_AUTH_VARIABLES` names exactly one variable.
+ *
+ * A list can only ever refuse what someone already thought of; the runtime's own precedence order is
+ * what makes that fatal (cloud-provider credentials resolve ABOVE the token and the key, so one
+ * variable re-points billing, rate-limits and audit at an account the persisted selection does not
+ * name). So the universe is a SHAPE: every vendor/cloud auth prefix the artifact uses, plus the
+ * generic credential suffixes. Anything matching it is refused from the extras door unless it is a
+ * variable this session's own family sets.
+ */
+export const AUTH_SHAPED_RE =
+  /^(?:ANTHROPIC_|AWS_|GOOGLE_|GCP_|AZURE_|CLOUD_ML_|VERTEX_|BEDROCK_|CLAUDE_(?:CODE_)?(?:USE_|SKIP_|HOST_|OAUTH_|SESSION_|BRIDGE_|LOCAL_|SECURESTORAGE_|IDENTITY_))|_(?:API_KEY|AUTH_TOKEN|TOKEN|SECRET|CREDENTIALS|CREDS|PASSWORD|PASSWD)$/;
+
+/** True when a name is credential-bearing by shape, whatever table it is or is not in. */
+export function isAuthShapedVariable(name: string): boolean {
+  return AUTH_SHAPED_RE.test(name) || /_(?:API_KEY|AUTH_TOKEN|TOKEN|SECRET|CREDENTIALS|CREDS|PASSWORD|PASSWD)$/.test(name);
+}
+
 /** Every credential-shaped name any family may set — the env allowlist's auth section. */
 export const ALL_AUTH_VARIABLES: readonly string[] = Object.values(AUTH_FAMILY_VARIABLES).flat().filter((name, index, all) => all.indexOf(name) === index);
 

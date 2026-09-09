@@ -29,7 +29,7 @@ import {
   sanitizePathListValue,
   type OfficialEnvInput,
 } from "../../src/official/env-allowlist.ts";
-import { fetchAuthCredentials, validateAuthEnvironment, authVariableSetKey, allowedAuthVariables } from "../../src/official/auth.ts";
+import { fetchAuthCredentials, isAuthShapedVariable, validateAuthEnvironment, authVariableSetKey, allowedAuthVariables } from "../../src/official/auth.ts";
 import { createFakeKeychain } from "../../src/testing/index.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 
@@ -173,6 +173,36 @@ describe("WS-14 §12 — exactly one auth family, fetched at spawn", () => {
     ).not.toThrow();
   });
 
+  test("review r2, NEW-2: the extras door refuses every credential-SHAPED variable, whatever the tables list", () => {
+    const vectors: Array<[string, Record<string, string>]> = [
+      ["r1 plant 3 (the bearer pair)", { ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_BASE_URL: "https://gw" }],
+      ["an Authorization header, wholesale", { ANTHROPIC_CUSTOM_HEADERS: "Authorization: Bearer sk-ant-oat01-SECOND-ACCOUNT" }],
+      ["a whole Foundry family", { CLAUDE_CODE_USE_FOUNDRY: "1", ANTHROPIC_FOUNDRY_API_KEY: "k", ANTHROPIC_FOUNDRY_BASE_URL: "https://f" }],
+      ["Mantle", { CLAUDE_CODE_USE_MANTLE: "1", ANTHROPIC_BEDROCK_MANTLE_BASE_URL: "https://m" }],
+      ["the identity tier", { ANTHROPIC_IDENTITY_TOKEN: "t", ANTHROPIC_PROFILE: "p", ANTHROPIC_SCOPE: "s" }],
+      ["host creds", { CLAUDE_CODE_HOST_CREDS_FILE: "/creds.json" }],
+      ["an OAuth refresh pair (around D14)", { CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "t", CLAUDE_CODE_OAUTH_CLIENT_ID: "c" }],
+      ["the gateway switch", { CLAUDE_CODE_USE_GATEWAY: "1" }],
+      ["the sibling config dirs", { ANTHROPIC_CONFIG_DIR: "/d", CLAUDE_SECURESTORAGE_CONFIG_DIR: "/d" }],
+    ];
+    for (const [label, extras] of vectors) {
+      let refused = false;
+      try {
+        buildOfficialChildEnv(input({ credentials: { ANTHROPIC_API_KEY: "k" } }), { configuredExtras: extras });
+      } catch {
+        refused = true;
+      }
+      expect([label, refused]).toEqual([label, true]);
+    }
+    // The SELECTED family's own variable rides the door, and so does an ordinary non-credential one.
+    expect(buildOfficialChildEnv(input({ credentials: {} }), { configuredExtras: { ANTHROPIC_API_KEY: "k" } })["ANTHROPIC_API_KEY"]).toBe("k");
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { HTTPS_PROXY: "http://corp" } })["HTTPS_PROXY"]).toBe("http://corp");
+    // …and a deployment that has REVIEWED one names it, which is §12's reviewed compatibility event.
+    expect(
+      buildOfficialChildEnv(input(), { configuredExtras: { ANTHROPIC_BEDROCK_REGION_PREFIX: "eu" }, reviewedCredentialShapedExtras: ["ANTHROPIC_BEDROCK_REGION_PREFIX"] })["ANTHROPIC_BEDROCK_REGION_PREFIX"],
+    ).toBe("eu");
+  });
+
   test("Claude OAuth is ship-gated (D14) and injects NO variable even when approved", () => {
     const oauth = selection({ authFamily: "claude-oauth" });
     expect(() => buildOfficialChildEnv(input({ selection: oauth, credentials: {} }))).toThrow(/ship-gated/);
@@ -209,6 +239,30 @@ describe("WS-17's drift gate — the allowlist snapshot", () => {
     const serialized = JSON.stringify(officialEnvAllowlistSnapshot());
     expect(serialized).not.toContain("sk-");
     for (const name of officialEnvAllowlistNames()) expect(serialized).toContain(name);
+  });
+
+  test("review r2, NEW-2: the REVERSE scan — no auth-shaped name in the artifact can ride the extras door", () => {
+    // §12's capture rule read in the other direction. The forward scan proves every name we inject
+    // still exists upstream; nothing proved that a credential-bearing name the artifact reads and our
+    // tables do not list is refused — and eight such names were measured going straight through. This
+    // asserts the property that matters (none of them rides the door) rather than curating a taxonomy
+    // of the ~160 auth-shaped names the artifact mentions, which no one would maintain.
+    const officialPkg = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk/package.json");
+    const artifact = readFileSync(join(dirname(officialPkg), "sdk.mjs"), "utf8");
+    const names = new Set<string>();
+    for (const match of artifact.matchAll(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,6}\b/g)) names.add(match[0]);
+    const authShaped = [...names].filter((name) => isAuthShapedVariable(name) && !["ANTHROPIC_API_KEY"].includes(name));
+    expect(authShaped.length).toBeGreaterThan(50); // non-vacuity: the scan really found them
+    const accepted: string[] = [];
+    for (const name of authShaped) {
+      try {
+        buildOfficialChildEnv(input({ credentials: { ANTHROPIC_API_KEY: "k" } }), { configuredExtras: { [name]: "x" } });
+        accepted.push(name);
+      } catch {
+        /* refused, which is the point */
+      }
+    }
+    expect(accepted).toEqual([]);
   });
 
   test("every injected name still exists in the PINNED runtime artifact (§12's capture rule)", () => {

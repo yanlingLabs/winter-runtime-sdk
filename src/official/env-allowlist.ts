@@ -23,7 +23,7 @@ import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
 import type { EnvInput } from "../seams/official-adapter.ts";
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
-import { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, validateAuthEnvironment, type ClaudeOauthGate } from "./auth.ts";
+import { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, isAuthShapedVariable, validateAuthEnvironment, type ClaudeOauthGate } from "./auth.ts";
 import { officialBranchLabel } from "./branding.ts";
 import { VENDOR_HOME_SEGMENT_RE } from "./containment.ts";
 import { OfficialConfigurationError } from "./errors.ts";
@@ -127,6 +127,15 @@ export interface OfficialEnvPolicy {
   configuredExtras?: Readonly<Record<string, string>>;
   /** Additional env prefixes the HOST owns (its daemon's own product prefix). The brand's is always refused. */
   hostEnvPrefixes?: readonly string[];
+  /**
+   * Auth-SHAPED variables this deployment has reviewed and needs anyway (review r2, NEW-2).
+   *
+   * The extras door is closed to credential-bearing shapes by default, because the pinned runtime
+   * reads far more of them than any table lists and one of them re-points the whole session. A host
+   * with a real need — a cloud tuning variable its family table does not carry — names it here, which
+   * is §12's own "reviewed compatibility event" rather than a silent addition.
+   */
+  reviewedCredentialShapedExtras?: readonly string[];
   /** D14's ship gate, threaded to the auth validator. Default: closed. */
   claudeOauth?: ClaudeOauthGate;
 }
@@ -198,6 +207,7 @@ export function assertNoForbiddenChildVariables(
 ): void {
   const branchLabel = args.branchLabel ?? officialBranchLabel(args.brand);
   const declared = new Set(Object.keys(args.policy?.configuredExtras ?? {}));
+  const reviewedExtras = args.policy?.reviewedCredentialShapedExtras ?? [];
   const prefixes = [args.brand.envPrefix, ...(args.policy?.hostEnvPrefixes ?? [])];
   const runtimeVariables: readonly string[] = Object.values(OFFICIAL_RUNTIME_VARIABLES);
   const familyVariables = args.selection === undefined ? undefined : allowedAuthVariables(args.selection);
@@ -221,6 +231,19 @@ export function assertNoForbiddenChildVariables(
     if (familyVariables !== undefined && ALL_AUTH_VARIABLES.includes(name) && !familyVariables.includes(name)) {
       refuse(
         `it is a credential variable outside this session's ${args.selection?.authFamily} family (${familyVariables.length === 0 ? "which injects nothing" : familyVariables.join(", ")}); the runtime resolves two families by its own precedence order, not by the host's selection (WS-14 §12)`,
+      );
+    }
+    // REVIEW r2, NEW-2 — THE EXTRAS DOOR IS FOR NON-CREDENTIAL VARIABLES ONLY. The M1 fix refused an
+    // out-of-family name only when it was in the sixteen-name table; the runtime reads thirty-odd, and
+    // eight vectors went straight through this door (a whole Foundry family, a bearer header, an OAuth
+    // refresh token). A name that is credential-bearing BY SHAPE may ride the extras door only when it
+    // is a variable this session's own family sets — and for the `custom` family, whose credential set
+    // is open by design, that means never through EXTRAS (its own credentials still go through
+    // `credentials`, where the family check governs them).
+    if (declared.has(name) && isAuthShapedVariable(name) && !runtimeVariables.includes(name) && !(familyVariables ?? []).includes(name) && !reviewedExtras.includes(name)) {
+      refuse(
+        "it is credential-bearing by shape, and the configured-extras door carries non-credential variables only: the runtime resolves credentials by its own precedence order, so one of these re-points billing, rate limits and audit at an account this session's persisted selection does not name (WS-14 §12). " +
+          "A deployment that has REVIEWED a specific auth-shaped variable and needs it names it in `reviewedCredentialShapedExtras` — a reviewed compatibility event under WS-17's drift gate, never a silent addition",
       );
     }
     // REVIEW r1, M1 (the same hatch, the other target): a declared extra may not SHADOW a variable
