@@ -524,9 +524,18 @@ async function probeNoWashBack(context: SeamContext, deps: MaterializedResumeDep
         const canonicalAfterResume = readFileSync(canonicalPath);
         const prefixIntact = canonicalAfterResume.subarray(0, canonicalBeforeResume.length).equals(canonicalBeforeResume);
         const stillNoDecoration = ((await shared.store.load(PROBE_KEY)) ?? []).every((entry) => entry["uuid"] !== decoration["uuid"]);
+        // DUPLICATE UUIDS ARE THE FAILURE MODE THIS LEG IS FOR (round 3, NEW-I). A mirror that re-sends
+        // what it READ appends the entries it was given back onto the canonical file — AFTER the
+        // prefix, so the prefix check cannot see it, and the decoration is dropped by the router's own
+        // gate on every write, so its absence measures the ROUTER rather than the vendor. What such a
+        // re-send leaves behind is a second copy of an existing uuid, which is exactly what step 5's
+        // uuid-uniqueness check refuses the next handoff on. Measured 0 on this pin — which is why the
+        // clause is cheap to add now and expensive to add after a pin bump has opened the door.
+        const uuids = ((await shared.store.load(PROBE_KEY)) ?? []).map((entry) => entry["uuid"]).filter((uuid): uuid is string => typeof uuid === "string");
+        const duplicateUuids = uuids.length - new Set(uuids).size;
         return {
-          passed: prefixIntact && stillNoDecoration,
-          evidence: `after a resume from the decorated copy that mirrored ${after - before} entr(y|ies): canonical prefix intact=${prefixIntact}; decoration still absent=${stillNoDecoration}`,
+          passed: prefixIntact && stillNoDecoration && duplicateUuids === 0,
+          evidence: `after a resume from the decorated copy that mirrored ${after - before} entr(y|ies): canonical prefix intact=${prefixIntact}; decoration still absent=${stillNoDecoration}; duplicate uuids=${duplicateUuids}`,
         };
       }),
     );
@@ -609,7 +618,16 @@ async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedRes
           break;
         }
         const uuid = uuidOf(line);
-        if (typeof uuid === "string") seenUuids.add(uuid);
+        if (typeof uuid !== "string") continue;
+        // BOTH of `validateChain`'s clauses, not one (round 3, NEW-I). The first version copied the
+        // reachability half and left the uniqueness half behind, so a re-sent entry whose parent
+        // appears earlier passed a probe whose stated purpose is to catch exactly that. Step 5 refuses
+        // a duplicate uuid; a probe that opens the PREFERRED door has to hold the same line.
+        if (seenUuids.has(uuid)) {
+          orderIntact = false;
+          break;
+        }
+        seenUuids.add(uuid);
       }
       const summary = await shared.canonical.readSessionSummary(key);
       return {

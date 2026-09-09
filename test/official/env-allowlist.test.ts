@@ -344,43 +344,100 @@ describe("WS-17's drift gate — the allowlist snapshot", () => {
 // could pass it — but the README told hosts the door refused what it admitted, and a false
 // host-facing security claim is the one state that must not ship.
 // ====================================================================================================
-describe("item 22 — the execution/indirection names are refused BY NAME", () => {
+describe("item 22 / NEW-H — the execution/indirection class is refused BY NAME, and the set is the artifact's own", () => {
   const planted = (name: string) => ({ configuredExtras: { [name]: "/tmp/planted" } });
-
-  test("every name in the set is refused, whoever declares it", () => {
-    for (const name of EXECUTION_INDIRECTION_ENV_NAMES) {
-      expect(() => buildOfficialChildEnv(input(), planted(name))).toThrow(/refused explicitly/);
+  const refusalFor = (name: string, policy = planted(name)): string => {
+    try {
+      buildOfficialChildEnv(input(), policy);
+      return "ADMITTED";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
     }
-    // NOT VACUOUS: the set really contains the five the review measured as ADMITTED.
-    for (const name of ["BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "NODE_OPTIONS", "GIT_ASKPASS", "CLAUDE_CODE_GIT_BASH_PATH"]) {
-      expect(EXECUTION_INDIRECTION_ENV_NAMES).toContain(name);
+  };
+
+  // ==================================================================================================
+  // THE CLASS, AS A NAME PATTERN — the drift gate's own predicate.
+  //
+  // It is deliberately WIDER than the refused set and is not used by the door: its job is to select
+  // the registry names a human must have CLASSIFIED, so that a pin bump adding
+  // `CLAUDE_CODE_NEW_SHELL_THING` fails here until someone decides which side it is on. A name it
+  // selects must either be refused (by any rule) or appear in the acknowledged list below WITH a
+  // reason. That is the difference between a set that was right once and a set that stays right.
+  // ==================================================================================================
+  const EXECUTION_CLASS_PATTERN =
+    /(^|_)(SHELL|ENV_FILE|ASKPASS|PRELOAD|OPTIONS|OPTS)$|SHELL_|_SHELL$|ENV_FILE|ASKPASS|PRELOAD|_OPTIONS$|_OPTS$|CONFIG_FILE|USERCONFIG|GLOBALCONFIG|SETTINGS_PATH|_BIN$|_BINARY$|PLUGIN_.*DIR|^GIT_|^LD_|^DYLD_|^PYTHON|^PERL5|^RUBY|^LUA_|^DOTNET_|^COMPLUS_|^COR_|^CORECLR_|^APPDOMAIN_MANAGER_|^BASH_FUNC|_PATH$|^CLASSPATH$|^IFS$|^CDPATH$|^FPATH$|^ZDOTDIR$|^COMSPEC$|^PS4$|CONFIG$|^ENV$|SETTINGS$/;
+
+  /** Registry names the pattern selects that are NOT of this class, each with the reason it is not. */
+  const ACKNOWLEDGED_NOT_EXECUTION: ReadonlyArray<{ name: string; because: string }> = [
+    { name: "CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP", because: "a boolean toggle for background-shell reaping; it names no file and no program" },
+    { name: "CLAUDE_CODE_POWERSHELL_RESPECT_EXECUTION_POLICY", because: "a boolean; it changes how the runtime treats an OS policy, not what it executes" },
+    { name: "CLAUDE_CODE_USE_POWERSHELL_TOOL", because: "a boolean feature flag selecting a built-in tool, not a program path" },
+    { name: "CLAUDE_SUBAGENT_BG_SHELL_MAX_MS", because: "a duration in milliseconds" },
+    { name: "EMPTY_PATH", because: "the runtime's own sentinel for an empty search path; it is read, never executed" },
+    { name: "GITHUB_ACTION_PATH", because: "a CI-provided data path the runtime reads for context; the runner sets it, and it names no interpreter" },
+    { name: "GITHUB_EVENT_PATH", because: "a CI-provided JSON event file the runtime reads as data" },
+  ];
+
+  test("every registry name of this class is REFUSED, or is acknowledged with a reason", () => {
+    const acknowledged = new Set(ACKNOWLEDGED_NOT_EXECUTION.map((entry) => entry.name));
+    const selected = NON_CREDENTIAL_ENV_REGISTRY.filter((name) => EXECUTION_CLASS_PATTERN.test(name.toUpperCase()));
+    // NOT VACUOUS: the pattern really selects a substantial slice of the registry.
+    expect(selected.length).toBeGreaterThan(20);
+    const unclassified = selected.filter((name) => refusalFor(name) === "ADMITTED" && !acknowledged.has(name));
+    // A pin bump that adds a shell/loader/askpass/config-file name fails HERE until it is classified.
+    expect(unclassified).toEqual([]);
+    // …and the acknowledgements are live: every one is still in the registry and still admitted, so a
+    // name that quietly became refused (or vanished) does not sit here forever as dead prose.
+    for (const entry of ACKNOWLEDGED_NOT_EXECUTION) {
+      expect({ name: entry.name, inRegistry: NON_CREDENTIAL_ENV_REGISTRY.includes(entry.name) }).toEqual({ name: entry.name, inRegistry: true });
+      expect(entry.because.length).toBeGreaterThan(20);
+    }
+  });
+
+  test("the whole `registry ∩ refused set` is planted, one name at a time, and every one is refused explicitly", () => {
+    const intersection = NON_CREDENTIAL_ENV_REGISTRY.filter((name) => isExecutionIndirectionVariable(name)).sort();
+    // The two the review MEASURED on the pin are in it — the plants that made this finding.
+    expect(intersection).toContain("CLAUDE_CODE_SHELL");
+    expect(intersection).toContain("CLAUDE_ENV_FILE");
+    expect(intersection.length).toBeGreaterThan(25);
+    const admitted = intersection.filter((name) => !refusalFor(name).includes("refused explicitly"));
+    expect(admitted).toEqual([]);
+  });
+
+  test("the two names measured on the pin do not reach the child — the planted program must NOT run", () => {
+    // MEASURED on 0.3.250 before this set was widened, through this exact door:
+    //   * `CLAUDE_CODE_SHELL=<a path containing "bash">` → the runtime ran the planted program as the
+    //     Bash tool's shell, 114 times in one session, and its marker appeared in the tool result the
+    //     model was shown (`shell=/bin/bash` where the control shows `/bin/zsh`).
+    //   * `CLAUDE_ENV_FILE=<a script>` → the script was sourced into the Bash tool's environment on
+    //     every call, i.e. `BASH_ENV` through a different name — which is why refusing `BASH_ENV`
+    //     while admitting this one refused nothing at all.
+    // The assertion is the negative that makes those measurements impossible: the value never reaches
+    // the built environment, because building it throws.
+    for (const name of ["CLAUDE_CODE_SHELL", "CLAUDE_ENV_FILE"]) {
+      expect(refusalFor(name)).toContain("refused explicitly");
+      expect(() => buildOfficialChildEnv(input(), planted(name))).toThrow(/EXECUTES code/);
     }
   });
 
   test("the loader PREFIXES are refused too, because no closed list can enumerate them", () => {
-    for (const name of ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH"]) {
-      expect(() => buildOfficialChildEnv(input(), planted(name))).toThrow(/refused explicitly/);
+    for (const name of ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH", "PYTHONSTARTUP", "PERL5OPT", "GIT_CONFIG_GLOBAL", "BASH_FUNC_x%%"]) {
+      expect(refusalFor(name)).toContain("refused explicitly");
       expect(isExecutionIndirectionVariable(name)).toBe(true);
     }
   });
 
   test("matching is case-insensitive, because a differently-cased spelling is the same program", () => {
-    expect(() => buildOfficialChildEnv(input(), planted("bash_env"))).toThrow(/refused explicitly/);
-    expect(() => buildOfficialChildEnv(input(), planted("ld_preload"))).toThrow(/refused explicitly/);
+    expect(refusalFor("bash_env")).toContain("refused explicitly");
+    expect(refusalFor("ld_preload")).toContain("refused explicitly");
+    expect(refusalFor("claude_env_file")).toContain("refused explicitly");
   });
 
   test("the check runs BEFORE the registry rule — which is the whole fix", () => {
     // `BASH_ENV` is IN the pinned artifact's own non-credential registry, so a check placed after the
     // positive-allowlist rule would never fire. This is the assertion that pins the ORDER.
     expect(NON_CREDENTIAL_ENV_REGISTRY.map((name) => name.toUpperCase())).toContain("BASH_ENV");
-    const refusal = (() => {
-      try {
-        buildOfficialChildEnv(input(), planted("BASH_ENV"));
-        return "";
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    })();
+    const refusal = refusalFor("BASH_ENV");
     expect(refusal).toContain("refused explicitly");
     expect(refusal).toContain("EXECUTES code");
     // …and it is not the positive-allowlist refusal wearing a different hat.
@@ -390,10 +447,14 @@ describe("item 22 — the execution/indirection names are refused BY NAME", () =
   test("a REVIEWED name still gets through, one name at a time — it is a door, not a wall", () => {
     expect(buildOfficialChildEnv(input(), { configuredExtras: { NODE_OPTIONS: "--max-old-space-size=4096" }, reviewedExecutionExtras: ["NODE_OPTIONS"] })["NODE_OPTIONS"]).toBe("--max-old-space-size=4096");
     // Reviewing one does NOT review its neighbours.
-    expect(() => buildOfficialChildEnv(input(), { configuredExtras: { NODE_OPTIONS: "-r /tmp/x", BASH_ENV: "/tmp/y" }, reviewedExecutionExtras: ["NODE_OPTIONS"] })).toThrow(/refused explicitly/);
+    expect(() => buildOfficialChildEnv(input(), { configuredExtras: { NODE_OPTIONS: "-r /tmp/x", CLAUDE_ENV_FILE: "/tmp/y" }, reviewedExecutionExtras: ["NODE_OPTIONS"] })).toThrow(/refused explicitly/);
+    // …and the two hatches do not leak into each other.
+    expect(() => buildOfficialChildEnv(input(), { configuredExtras: { BASH_ENV: "/tmp/x" }, reviewedCredentialShapedExtras: ["BASH_ENV"] })).toThrow(/refused explicitly/);
   });
 
   test("an ordinary non-credential extra is unaffected", () => {
     expect(buildOfficialChildEnv(input(), { configuredExtras: { NO_COLOR: "1" } })["NO_COLOR"]).toBe("1");
+    // …including the four traffic opt-outs every hermetic bed rides through this same door.
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { DISABLE_TELEMETRY: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" } })["DISABLE_TELEMETRY"]).toBe("1");
   });
 });

@@ -36,17 +36,26 @@ which is what produced the table below.
 
 ## Verdict
 
-# **The PREFERRED door is CLOSED. The FALLBACK door is what ships today.**
+# **PREFERRED is MEASURED OPEN on this pin. The SHIPPED door is still FALLBACK.**
 
-Not because a probe failed — **no probe leg failed** — but because three of the four probes name the
-**pinned official runtime**, and this run had no bed to drive it in. An unexercised leg is recorded as
-*not proven*, and a probe with an unproven leg is not a pass. `MaterializedResumeDecorator.door`
-therefore reports `"fallback"`, the handoff barrier stages an undecorated copy and appends one
-**explicitly labeled** entry to the canonical file, and nothing in this package claims the canonical
-file stays byte-pure across a Claude leg.
+Two statements, and keeping them apart is the whole point:
 
-That is the outcome WS-17 §8 itself anticipates: *"failing (b) demotes that leg to the barrier-append
-fallback, it does not block release."*
+* **Measured:** all four of WS-17 §8's probes pass against the pinned 0.3.250 — every pinned leg
+  exercised, on `darwin-arm64` and on `linux-x64` in CI — and `probe()` returns `door: "preferred"`.
+  Nothing is unexercised, nothing is simulated, no leg is a hardcoded pass.
+* **Shipped:** `createMaterializedResumeDecorator` reports `"fallback"` until it is GIVEN a report or
+  told to probe, and the handoff barrier builds it with neither. So the barrier stages an undecorated
+  copy and appends one **explicitly labeled** entry to the canonical file, exactly as before. Keying
+  the decorator to this pin's report is Task 6b's, under R-7b-12 — a deliberate act with a name, not
+  a side effect of this file turning green.
+
+The two therefore CAN disagree today, and do. That is not a discrepancy to reconcile: a measurement
+taken here is not the host's measurement, and the door is designed to follow the second.
+
+Round 1 of the fix wave recorded a different verdict — "CLOSED … no probe leg failed … this run had
+no bed" — which was true when written and is superseded twice over: the bed arrived (items 11/23),
+and probe (c)'s subsequent failure turned out to be the probe's own (round 2, NEW-F). Both earlier
+readings are withdrawn.
 
 ## The pinned run (2026-09-09, the fix wave)
 
@@ -187,6 +196,14 @@ repeated the claim. Three things changed, and the verdict did not:
 
 ## Re-running this record
 
-A future run with the real bed replaces the table above. The verdict line is the only thing a reader
-should have to check: it says which door is open, and the door in the code is computed from the same
-report, so the two cannot disagree.
+A future run replaces the tables above; `bun test test/joint/materialized-resume-probes.test.ts` is the
+run. Read the verdict as TWO lines, not one — what was measured, and what ships — because they are
+computed from different things: the measurement is this file's, and the shipped door is whatever
+report a host hands the decorator (today: none, hence `fallback`). A reader who checks only one of
+them will be wrong about the other.
+
+**What would make a future run FAIL, and can now be seen:** probe (b)'s pinned leg counts duplicate
+uuids in the canonical store after a resume from the decorated copy, and probe (c) applies BOTH of the
+barrier's step-5 clauses (parent reachability AND uuid uniqueness). A pin whose dual-write mirror
+re-sent the entries it read would leave a second copy of an existing uuid — which the prefix check
+cannot see, and which step 5 refuses the next handoff on. Measured on 0.3.250: `duplicate uuids=0`.

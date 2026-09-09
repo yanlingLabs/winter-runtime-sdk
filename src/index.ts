@@ -56,6 +56,9 @@ export type { SelectionReview, SelectionRuleId } from "./selection/select-runtim
 // neither sits on a lane barrel; `test/spine/barrel-exports.test.ts` pins that no name is exported by
 // two of them again.
 export { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "./vendor-paths.ts";
+// The README tells a host to READ this set rather than trust a description of it (round 3, NEW-H), so
+// it has to be reachable from the package a host installs — not only from the official lane's barrel.
+export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./official/env-allowlist.ts";
 export {
   LIST_AGENTS_FIELD_MAX,
   NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,

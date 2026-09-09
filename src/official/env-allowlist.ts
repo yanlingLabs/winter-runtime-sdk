@@ -173,6 +173,18 @@ export interface OfficialEnvPolicy {
  *   * `GIT_ASKPASS` / `SSH_ASKPASS` / `SUDO_ASKPASS` / `GIT_SSH*` / `GIT_CREDENTIAL_HELPER` — programs
  *     the child EXECUTES to obtain credentials. Not credential-shaped; credential-producing.
  *
+ * THE SET IS THE ARTIFACT'S OWN, NOT OURS (round 3, NEW-H). The first version named five measured
+ * headline variables and the README described the CLASS — which was wider than the set: nineteen more
+ * registry names of exactly that class rode the door, and two were then measured doing what the class
+ * describes. `CLAUDE_CODE_SHELL` made the runtime run a planted program as the Bash tool's shell (114
+ * invocations in one session, the marker visible in the tool result the model was shown), and
+ * `CLAUDE_ENV_FILE` was sourced into every Bash call — `BASH_ENV` by another door, which made the
+ * `BASH_ENV` refusal decorative. So the list below is the PINNED ARTIFACT'S OWN scrub list (the
+ * environment it strips before running its policy helper — the vendor's definition of this class, and
+ * therefore the pin's rather than our taste) plus the runtime-specific doors that are not on it. The
+ * drift gate in `test/official/env-allowlist.test.ts` fails when a pin bump adds a registry name of
+ * this shape that nothing classifies.
+ *
  * The exposure was bounded (the `base` door drops these silently, so only a host naming one itself
  * could pass it), which is why this is a scheduled hardening rather than an incident — but "the
  * README claims a refusal the code does not make" is the one state that must not ship.
@@ -182,37 +194,118 @@ export interface OfficialEnvPolicy {
  * reviewed compatibility event rather than a silent addition.
  */
 export const EXECUTION_INDIRECTION_ENV_NAMES: readonly string[] = [
-  // shells: a file sourced on every non-interactive start, or a prefix around every command
+  // ---- THE ARTIFACT'S OWN SCRUB LIST (the vendor's definition of this class, so it is the PIN's) ----
+  // shells and shell startup
   "BASH_ENV",
   "ENV",
   "SHELLOPTS",
   "BASHOPTS",
+  "PS4",
+  "IFS",
+  "CDPATH",
+  "FPATH",
+  "ZDOTDIR",
+  "COMSPEC",
+  "PATH",
+  "PSMODULEPATH",
   "PROMPT_COMMAND",
-  "CLAUDE_CODE_SHELL_PREFIX",
-  "CLAUDE_CODE_GIT_BASH_PATH",
-  // loader and runtime hooks
+  // interpreters and loaders (the prefix list below covers PYTHON*/PERL5*/RUBY*/LUA_*/DOTNET_* etc.)
   "NODE_OPTIONS",
+  "NODE_PATH",
   "NODE_REPL_EXTERNAL_MODULE",
+  "PERLLIB",
+  "GEM_PATH",
+  "GEM_HOME",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "IBM_JAVA_OPTIONS",
+  "OPENJ9_JAVA_OPTIONS",
+  "CLASSPATH",
+  "BUN_OPTIONS",
   "BUN_INSPECT",
-  "PYTHONSTARTUP",
-  "PERL5OPT",
-  "RUBYOPT",
+  "MONO_PATH",
+  "R_PROFILE_USER",
+  "DEVPATH",
+  "GCONV_PATH",
+  "PHPRC",
+  "PHP_INI_SCAN_DIR",
+  // libraries and modules a loader consults
+  "OPENSSL_CONF",
+  "OPENSSL_MODULES",
+  "OPENSSL_ENGINES",
+  "KRB5_CONFIG",
+  "GTK_PATH",
+  "QT_PLUGIN_PATH",
+  "GIO_MODULE_DIR",
+  "SASL_PATH",
+  "XDG_CONFIG_HOME",
   // askpass / credential helpers: programs the child RUNS to obtain a credential
-  "GIT_ASKPASS",
   "SSH_ASKPASS",
+  "SSH_ASKPASS_REQUIRE",
   "SUDO_ASKPASS",
-  "GIT_SSH",
-  "GIT_SSH_COMMAND",
-  "GIT_CREDENTIAL_HELPER",
-  "GIT_EXTERNAL_DIFF",
-  "GIT_PAGER",
+  "VSCODE_GIT_ASKPASS_MAIN",
   "PAGER",
   "EDITOR",
   "VISUAL",
+
+  // ---- THE PINNED RUNTIME'S OWN DOORS (measured on 0.3.250; not on the vendor's scrub list) --------
+  // MEASURED: with `CLAUDE_CODE_SHELL` planted through this door the runtime ran the planted program
+  // as the Bash tool's shell — 114 invocations in one session, and the marker appeared in the tool
+  // result the model was shown.
+  "CLAUDE_CODE_SHELL",
+  "CLAUDE_CODE_SHELL_PREFIX",
+  "CLAUDE_CODE_GIT_BASH_PATH",
+  // MEASURED: `CLAUDE_ENV_FILE` is read and sourced into the Bash tool's environment on every call —
+  // `BASH_ENV` by another door, which is why refusing one while admitting the other refused nothing.
+  "CLAUDE_ENV_FILE",
+  // settings files carry `hooks`, `apiKeyHelper` and `env`: a settings path is a code path
+  "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
+  "CLAUDE_CODE_REMOTE_SETTINGS_PATH",
+  "CLAUDE_CODE_MOCK_REMOTE_SETTINGS",
+  // plugins are code the runtime loads
+  "CLAUDE_CODE_PLUGIN_SEED_DIR",
+  "CLAUDE_CODE_PLUGIN_CACHE_DIR",
+  // package-manager and toolchain configuration files (a config file names scripts and registries)
+  "BUN_CONFIG_FILE",
+  "NPM_CONFIG_USERCONFIG",
+  "NPM_CONFIG_GLOBALCONFIG",
+  "PIP_CONFIG_FILE",
+  "CLOUDSDK_CONFIG",
+  "DOCKER_CONFIG",
+  // binaries and browser paths the runtime executes
+  "VITALS_EMITTER_BIN",
+  "CLAUDE_SSH_LOCAL_BINARY",
+  "SDK_NATIVE_BIN",
+  "BUN_CHROME_PATH",
+  "PLAYWRIGHT_BROWSERS_PATH",
 ];
 
-/** The loader-hook PREFIXES, which no closed list can enumerate (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, …). */
-export const EXECUTION_INDIRECTION_ENV_PREFIXES: readonly string[] = ["LD_", "DYLD_"];
+/**
+ * The PREFIXES, which no closed list can enumerate — the artifact's own scrub prefixes plus `DYLD_`.
+ *
+ * `GIT_` IS A WHOLE PREFIX, and that is the vendor's call rather than ours: the artifact scrubs it
+ * entirely before running its policy helper, because `GIT_CONFIG_GLOBAL`/`_SYSTEM`/`_COUNT` name files
+ * git reads for a `credential.helper`, `GIT_SSH_COMMAND`/`GIT_EXTERNAL_DIFF`/`GIT_PAGER` name programs
+ * git RUNS, and `GIT_ASKPASS` supplies credentials. A host that needs one names it in
+ * `reviewedExecutionExtras`.
+ */
+export const EXECUTION_INDIRECTION_ENV_PREFIXES: readonly string[] = [
+  "LD_",
+  "DYLD_",
+  "BASH_FUNC_",
+  "__BASH_FUNC",
+  "PYTHON",
+  "PERL5",
+  "RUBY",
+  "LUA_",
+  "DOTNET_",
+  "COMPLUS_",
+  "COR_",
+  "CORECLR_",
+  "APPDOMAIN_MANAGER_",
+  "GIT_",
+];
 
 const EXECUTION_INDIRECTION_FOLDED: ReadonlySet<string> = new Set(EXECUTION_INDIRECTION_ENV_NAMES.map((name) => name.toUpperCase()));
 

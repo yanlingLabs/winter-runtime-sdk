@@ -70,7 +70,7 @@ const CONDITION_TIMEOUT_MS = 60_000;
  * unset it records `CONNECT api.anthropic.com:443`. So an empty recording is a real observation rather
  * than a listener that was never wired.
  */
-async function withEgressProxy<T>(fn: (proxy: { env: Record<string, string>; port: number; lines: string[] }) => Promise<T>): Promise<T> {
+async function withEgressProxy<T>(fn: (proxy: { env: Record<string, string>; envWithoutNoProxy: Record<string, string>; port: number; lines: string[] }) => Promise<T>): Promise<T> {
   const lines: string[] = [];
   const server = Bun.listen<undefined>({
     hostname: "127.0.0.1",
@@ -88,7 +88,11 @@ async function withEgressProxy<T>(fn: (proxy: { env: Record<string, string>; por
   });
   try {
     const url = `http://127.0.0.1:${server.port}`;
-    return await fn({ env: { HTTPS_PROXY: url, HTTP_PROXY: url, NO_PROXY: "127.0.0.1,localhost" }, port: server.port, lines });
+    // `NO_PROXY` keeps the MODEL endpoint direct so the session still runs. `withoutNoProxy` drops it,
+    // which points even the fake through this listener — the positive control that proves the child
+    // OBEYS the variables at all (round 3, nit c). It is hermetic and costs about a second.
+    const base = { HTTPS_PROXY: url, HTTP_PROXY: url };
+    return await fn({ env: { ...base, NO_PROXY: "127.0.0.1,localhost" }, envWithoutNoProxy: base, port: server.port, lines });
   } finally {
     server.stop(true);
   }
@@ -147,6 +151,8 @@ interface ConditionResult {
   egress: string[];
   /** Whether a deliberate self-connection was recorded — an empty `egress` means nothing without it. */
   selfCheckRecorded?: boolean;
+  /** Whether the CHILD itself was seen using the proxy when `NO_PROXY` was removed. */
+  obeysProxy?: boolean;
 }
 
 type Probe = { ok: true; sdkVersion: string; binary: string; results: ConditionResult[]; remote: ConditionResult[]; egressControl?: ConditionResult } | { ok: false; reason: string };
@@ -353,7 +359,14 @@ async function prepareProbe(): Promise<Probe> {
         // The child's own answer is captured; now prove the listener could have captured one.
         const before = proxy.lines.length;
         await proveEgressListenerRecords(proxy.port);
-        return { ...result, egress: [...result.egress], selfCheckRecorded: proxy.lines.length > before };
+        const selfCheckRecorded = proxy.lines.length > before;
+        // THE POSITIVE CONTROL (nit c): the same condition with `NO_PROXY` removed, so the child's own
+        // MODEL request is routed through the listener too. If it records nothing here, the child is
+        // ignoring the proxy variables and the negative above proves nothing.
+        const beforeObedience = proxy.lines.length;
+        await runCondition(sdk, binary, eSpec, false, { ...proxy, env: proxy.envWithoutNoProxy }).catch(() => undefined);
+        const obeysProxy = proxy.lines.length > beforeObedience;
+        return { ...result, egress: [...result.egress], selfCheckRecorded, obeysProxy };
       });
     } catch (error) {
       return { ok: false, reason: `the egress control could not run: ${error instanceof Error ? error.message : String(error)}` };
@@ -472,6 +485,10 @@ describe("D29 — does the pinned official runtime expose an advisor server tool
     // other way on this pin too: with the opt-outs removed the same listener records
     // `CONNECT api.anthropic.com:443` — that run is non-hermetic and is not part of the suite.)
     expect(control?.selfCheckRecorded).toBe(true);
+    // …AND THE CHILD OBEYS THE PROXY: with `NO_PROXY` removed, the same condition drives even the model
+    // request through the listener, and it records. Without this the negative would also be satisfied
+    // by a child that ignored `HTTPS_PROXY` entirely.
+    expect(control?.obeysProxy).toBe(true);
     expect(control?.egress).toEqual([]);
     expect(control?.wireTools.filter((name) => ADVISOR.test(name))).toEqual([]);
   });

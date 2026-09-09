@@ -223,7 +223,16 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
       // THE EVENT IS THE ONE THAT FIRED (review r4, NEW-20). The sweep is registered on three events
       // and every block used to report `PostToolUse`, so a breach caught on `PostToolUseFailure` or
       // `PostToolBatch` named the wrong hook in the one field a host reads to find it.
-      hookSpecificOutput: { hookEventName: event, updatedToolOutput: reason, additionalContext: reason },
+      //
+      // …AND ONLY THE FIELDS THAT EVENT DECLARES (round 3, nit a). On this pin `updatedToolOutput`
+      // exists on `PostToolUseHookSpecificOutput` alone; `PostToolUseFailureHookSpecificOutput` and
+      // `PostToolBatchHookSpecificOutput` declare `additionalContext` and nothing else. Sending a key
+      // the shape does not have was never measured to break anything — the sweep's own REMOVAL is the
+      // guarantee, and the real-runtime test asserts the removal rather than the report — but a hook
+      // output that does not match the pinned declaration is drift waiting to be discovered by a
+      // runtime that starts validating.
+      hookSpecificOutput:
+        event === "PostToolUse" ? { hookEventName: event, updatedToolOutput: reason, additionalContext: reason } : { hookEventName: event, additionalContext: reason },
     };
   };
 

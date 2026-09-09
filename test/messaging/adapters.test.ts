@@ -490,3 +490,35 @@ describe("NEW-12 — a host permission-class hook that raises", () => {
     expect(outcome.status).toBe("delivered");
   });
 });
+
+// ====================================================================================================
+// THE `reply()` REFUSAL NAMES THE HALF THAT IS MALFORMED (round 3, nit b).
+//
+// One message served both halves, so a malformed TARGET was reported as "the envelope's sender is not
+// a canonical address" — which sends a host to the wrong field. NEW-11 pinned that the door ANSWERS;
+// this pins that the answer is usable.
+// ====================================================================================================
+describe("reply() — the refusal names sender or target, whichever is malformed", () => {
+  test("a malformed TARGET is reported as the target", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("sender"));
+    // `reply`'s target is the ORIGINAL's `from`, so a malformed one lands in that half.
+    const outcome = await world.messaging.reply({
+      original: { ...envelope({ messageId: "m-1" }), from: { objectKind: "agent", runtimeKind: "winter-agent", winterSessionId: "x" } as never, to: sessionAddress("sender") },
+      body: "answering",
+    });
+    expect(outcome.status).toBe("refused");
+    expect("reason" in outcome ? outcome.reason : "").toContain("target");
+  });
+
+  test("a malformed SENDER is still reported as the sender", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("peer"));
+    const outcome = await world.messaging.reply({
+      original: { ...envelope({ messageId: "m-2" }), from: sessionAddress("peer"), to: { objectKind: "agent", runtimeKind: "winter-agent", winterSessionId: "y" } as never },
+      body: "answering",
+    });
+    expect(outcome.status).toBe("refused");
+    expect("reason" in outcome ? outcome.reason : "").toContain("sender");
+  });
+});

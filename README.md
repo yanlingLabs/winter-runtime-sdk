@@ -64,7 +64,10 @@ whose ARGUMENTS name a forbidden target (`CLAUDE.md`, `.claude/`, `~/.claude/pla
 NFKC-normalized for path fields and quote-stripped for command text. **Shell-escape and constructed
 name spellings are caught POST-HOC**, by a sweep registered on `PostToolUse`, `PostToolUseFailure`
 and `PostToolBatch` that snapshots the forbidden names under the session's cwd and the child's HOME,
-removes exactly what the call created, records a typed breach and ends the turn. The sweep walks both
+removes what APPEARED under its roots during the call, records a typed breach and ends the turn — its
+diff is TIME-BASED rather than causal, so under the child's HOME a vendor home created by something
+else during a long call is removed and attributed to that call (narrow: an existing one is in every
+baseline and is never touched). The sweep walks both
 roots to a bounded depth (6 by default) around every filesystem-touching call, so **it costs a walk
 per call**: on a large tree that is the dominant cost of the floor, and an incremental/fs-events
 design is the follow-up. It sees the synchronously-visible effects of the call it brackets; a
@@ -80,14 +83,26 @@ classifies as non-credential; anything auth-shaped is refused with a sentence na
 deployment that has REVIEWED a specific credential-shaped variable names it in
 `reviewedCredentialShapedExtras` — one name at a time, never a wildcard.
 
-A second class is refused **by name**: variables that change how the child EXECUTES code or
-authenticates — `BASH_ENV`, `ENV` and `CLAUDE_CODE_SHELL_PREFIX` (a file the shell sources on every
-non-interactive start, or a prefix around every command), `NODE_OPTIONS` and `LD_*`/`DYLD_*` (loader
-and runtime hooks), `GIT_ASKPASS`, `SSH_ASKPASS` and the credential helpers (programs the child RUNS
-to obtain a credential). Neither of the other two rules can see them: they are not credential-SHAPED,
-and the pinned artifact's registry legitimately declares several of them, because the runtime really
-does read them — which is why "the registry declares it" cannot be the whole test. The reviewed door
-for this class is `reviewedExecutionExtras`, again one name at a time.
+A second class is refused **by name**, and the set is exported so you can read it rather than trust a
+description: `EXECUTION_INDIRECTION_ENV_NAMES` and `EXECUTION_INDIRECTION_ENV_PREFIXES`
+(`src/official/`). It is the **pinned artifact's own scrub list** — the environment the runtime strips
+before running its policy helper, so the definition of "changes how the child executes code" is the
+vendor's rather than ours — plus that runtime's own doors: `CLAUDE_CODE_SHELL` (the Bash tool's
+shell), `CLAUDE_ENV_FILE` (sourced into every Bash call), the settings paths and plugin directories
+(settings carry `hooks`, `apiKeyHelper` and `env`; plugins are code), the package-manager config files,
+and the binary paths it executes. Whole prefixes are refused where a closed list cannot work:
+`LD_*`, `DYLD_*`, `BASH_FUNC_*`, `PYTHON*`, `PERL5*`, `RUBY*`, `LUA_*`, `DOTNET_*`, `COR*`,
+`APPDOMAIN_MANAGER_*` and **all of `GIT_*`** (git reads `GIT_CONFIG_*` for a `credential.helper` and
+runs `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF` and `GIT_ASKPASS`).
+
+Neither of the other two rules can see this class: these names are not credential-SHAPED, and the
+pinned registry legitimately declares many of them, because the runtime really does read them — which
+is why "the registry declares it" cannot be the whole test. Two of them were measured on the pin doing
+exactly what the class describes before they were refused (a planted `CLAUDE_CODE_SHELL` ran as the
+Bash tool's shell 114 times in one session; a planted `CLAUDE_ENV_FILE` was sourced into every Bash
+call — `BASH_ENV` by another door). The reviewed door for this class is `reviewedExecutionExtras`,
+again one name at a time, and a drift gate fails the suite when a pin bump adds a registry name of
+this shape that nothing has classified.
 
 **The approval bridge is fail-closed when no broker is configured.** A host MUST supply a broker: with
 none, every call that reaches the bridge is denied. That is deliberate — the alternative is a session

@@ -458,3 +458,35 @@ describe("NEW-13 — the directory refuses a row nothing could address", () => {
     }
   });
 });
+
+// ====================================================================================================
+// NEW-17's OWN CASE — the arm that only fires when SEVERAL holders are all unnameable (round 3, nit b).
+//
+// The existing "NOTHING nameable is left" test has ONE holder, so it exercises the singular sentence
+// and would pass with the old code too. This is the case NEW-17 was actually about: `holders.length >
+// 1` (rule 5's own fact, which still counts archived holders) with `nameable.length === 0`, where the
+// old code told the caller to "address the one you mean by its canonical address from the listing"
+// and the listing contained none of them.
+// ====================================================================================================
+describe("NEW-17 — several holders, none of them nameable", () => {
+  test("the refusal says the object is gone rather than pointing at an empty listing", async () => {
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now });
+    await directory.record(sessionEntry("caller"));
+    // Two holders of one name, BOTH archived — so rule 5 still counts two, and neither may be named.
+    for (const id of ["ghost-a", "ghost-b"]) {
+      await directory.record(sessionEntry(id, { displayName: "ghost" }));
+      await directory.record(sessionEntry(id, { displayName: "ghost", status: "archived", generation: 2 }));
+    }
+
+    const resolved = await directory.resolve("ghost", { from: sessionAddress("caller") });
+    expect(resolved.kind).toBe("stale-name");
+    const reason = "reason" in resolved ? String(resolved.reason) : "";
+    expect(reason).toContain("no longer reachable");
+    // THE DEAD ADVICE IS GONE: nothing to address, so the caller is not told to address one.
+    expect(reason).not.toContain("address the one you mean");
+    // …and no archived address is quoted (NEW-8's rule, still holding).
+    expect(reason).not.toContain("session:ghost-a");
+    expect(reason).not.toContain("session:ghost-b");
+  });
+});
