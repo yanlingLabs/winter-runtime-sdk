@@ -4,10 +4,11 @@
 // through the one door. Nothing in this file calls a lane factory: if the door composed the lanes
 // wrongly, these tests are what notices.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WinterCompatibilitySessionStore, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { WINTER_BRAND, WinterCompatibilitySessionStore, envName, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { resolveEngineTempLayout } from "../../src/store/index.ts";
 
 import { createRuntimeSdk, RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery, runtimeSdkInternals, type RuntimeSdkPeers } from "../../src/index.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
@@ -283,6 +284,16 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
             participants: { destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: true }) }) },
             leaseRoot: join(bed.session.brandHome, "runtimes", "handoff-leases"),
             stagingRootFor: (uuid: string) => join(bed.session.brandHome, "staging", `claude-resume-${uuid}`),
+            // PINNED, like every other barrier test (review r3, L-1). Step 7 materializes WS-05 §9's
+            // temp continuity, and the DEFAULT layout is D18's real per-user scratch root
+            // (`/private/tmp/<brand>-<uid>/…`) — the one non-hermetic write this suite had. The REAL
+            // resolver over a temp base, not a hand-rolled shape: it realpaths the base, so the base
+            // has to exist before it is asked.
+            tempLayoutFor: (_entry: unknown, key: { projectKey: string; sessionId: string }) => {
+              const tempBase = join(bed.session.home, "temp");
+              mkdirSync(tempBase, { recursive: true });
+              return resolveEngineTempLayout({ brand: WINTER_BRAND, tempProjectKey: key.projectKey, backendUuid: key.sessionId, uid: 4242, env: { [envName(WINTER_BRAND, "TMPDIR")]: tempBase } });
+            },
           },
         });
 
