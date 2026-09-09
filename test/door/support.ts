@@ -17,7 +17,7 @@
 // this bed passes no policy at all, which is the point.
 import { WinterCompatibilitySessionStore, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 
-import { createRuntimeSdk, type RuntimeSdk, type RuntimeSdkPeers } from "../../src/index.ts";
+import { createRuntimeSdk, type RouterOfficialPolicy, type RuntimeSdk, type RuntimeSdkPeers } from "../../src/index.ts";
 import type { RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createInMemoryRuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
@@ -65,6 +65,8 @@ export interface DoorBed {
   projectKey: string;
   /** The options a `sdk.query()` needs for the official leg, ready to spread. */
   officialOptions(over?: { sessionId?: string; withMessagingTools?: boolean }): Record<string, unknown>;
+  /** A SECOND handle over the same peers/home, with extra constructor options (a deployment policy). */
+  sdkWith(extra: { official?: RouterOfficialPolicy }): RuntimeSdk;
 }
 
 export interface DoorBedOptions {
@@ -112,18 +114,22 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
   return withLoopbackFake({ routes }, async (fake) => {
     const directoryStore = options.directoryStore ?? createInMemoryRuntimeDirectoryStore();
     const declared = declaredClasses();
-    const sdk = createRuntimeSdk({
-      peers: doorPeers(runtime.module),
-      keychain: createFakeKeychain([{ ref: DOOR_CREDENTIAL, material: "sk-ant-loopback" }]),
-      directoryStore,
-      vendoredOfficialRuntime: runtime.executable,
-      // ONE HOME for the shared store, the spool and every seam that resolves through the context.
-      handoff: { winterHome: session.brandHome },
-      messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
-    });
+    const build = (extra: { official?: RouterOfficialPolicy } = {}): RuntimeSdk =>
+      createRuntimeSdk({
+        peers: doorPeers(runtime.module),
+        keychain: createFakeKeychain([{ ref: DOOR_CREDENTIAL, material: "sk-ant-loopback" }]),
+        directoryStore,
+        vendoredOfficialRuntime: runtime.executable,
+        // ONE HOME for the shared store, the spool and every seam that resolves through the context.
+        handoff: { winterHome: session.brandHome },
+        messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
+        ...(extra.official === undefined ? {} : { official: extra.official }),
+      });
+    const sdk = build();
 
     const bed: DoorBed = {
       sdk,
+      sdkWith: build,
       session,
       directoryStore,
       record,

@@ -225,6 +225,45 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
   );
 
   test(
+    "a per-query template policy wins over the deployment-wide one (review r1, L-1)",
+    async () => {
+      await withDoorBed({ turns: [{ text: "appended" }], sessionId: "door-policy" }, async (bed) => {
+        // The handle carries a deployment default; this query says something else for ITSELF. The
+        // spreads used to be the other way round, so the deployment silently overrode the caller —
+        // inconsistent with `remoteConfig`, whose per-query value has always won.
+        const options = bed.officialOptions() as Record<string, unknown>;
+        (options["runtime"] as { official: Record<string, unknown> }).official["options"] = { systemPromptAppend: "PER-QUERY" };
+        await drain(bed.sdkWith({ official: { options: { systemPromptAppend: "DEPLOYMENT" } } }).query({ prompt: "hi", options }));
+        const system = JSON.stringify(bed.record.requests.at(-1)?.["system"] ?? "");
+        expect(system).toContain("PER-QUERY");
+        expect(system).not.toContain("DEPLOYMENT");
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
+  test(
+    "a resume bumps the row's generation (review r1, L-2)",
+    async () => {
+      await withDoorBed({ turns: [{ text: "one" }], sessionId: "door-generation" }, async (bed) => {
+        const first = await drain(bed.sdk.query({ prompt: "hi", options: bed.officialOptions() }));
+        const init = first.find((message) => message.type === "system" && message.subtype === "init") as { session_id?: string } | undefined;
+        expect((await bed.sdk.directory.get(bed.address))?.generation).toBe(1);
+
+        // A plain `options.resume` is a REPLACEMENT PROCESS, and WS-15 §6.1 stamps deliveries with the
+        // target generation so "a stale send cannot reach a replacement process". The row used to be
+        // re-written `generation: 1` for every one of them.
+        const options = bed.officialOptions() as Record<string, unknown>;
+        options["resume"] = init?.session_id;
+        (options["runtime"] as { official: Record<string, unknown> }).official["stagingRoot"] = bed.session.spool;
+        await drain(bed.sdk.query({ prompt: "again", options }));
+        expect((await bed.sdk.directory.get(bed.address))?.generation).toBe(2);
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
+  test(
     "a mid-session runtime change is refused against the DURABLE row, before anything launches",
     async () => {
       await withDoorBed({ turns: [{ text: "unused" }], sessionId: "door-persisted" }, async (bed) => {
