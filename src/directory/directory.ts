@@ -171,8 +171,13 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     // WHICH ADDRESSES appear is decided by how many of them may be named. Deciding the sentence from
     // the nameable count instead would tell a caller that a LIVE holder is "no longer reachable" as
     // soon as an archived sibling was redacted out.
-    if (holders.length > 1) return `"${to}" has been used by more than one runtime object${nameable.length > 0 ? ` (${nameable.join(", ")})` : ""}; ${tail}`;
-    return nameable.length === 1 ? `"${to}" referred to ${nameable.join(", ")}, which is no longer reachable; ${tail}` : `"${to}" referred to an object that is no longer reachable; ${tail}`;
+    // …AND WHEN NOTHING NAMEABLE IS LEFT, THE COUNT DOES NOT CHANGE THE ADVICE (review r4, NEW-17).
+    // "address the one you mean by its canonical address from the listing" is dead advice when the
+    // listing contains none of them: the caller is told to pick from an empty set. The preceding
+    // paragraph's rule still holds wherever there IS something to name.
+    if (nameable.length === 0) return `"${to}" referred to an object that is no longer reachable`;
+    if (holders.length > 1) return `"${to}" has been used by more than one runtime object (${nameable.join(", ")}); ${tail}`;
+    return `"${to}" referred to ${nameable.join(", ")}, which is no longer reachable; ${tail}`;
   }
 
   /**

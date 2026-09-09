@@ -98,6 +98,13 @@ like "allow".
 what a projector (Phase 8) must expect: an interrupted session's stream terminates with an error
 rather than a result.
 
+**A handoff will not check that the destination can serve the session unless you give it a catalog.**
+`HandoffPlan.selection` reports `unreviewed` by default, because only the host holds the model catalog
+and the credential map. Passing `createRuntimeSdk({ handoff: { selectionInputFor } })` turns it on:
+`plan()` then asks the selector whether the RECORDED row is still servable and whether the destination
+branch can serve it, and a plan that cannot be served carries a typed refusal instead — `execute()`
+offers the lossy fork before the lease is taken, rather than after the drain and the staged copy.
+
 **A handoff can deliberately leak one staging directory.** If the destination confirms init and the
 producer record then fails to write, or if the destination throws while starting against the copy it
 was handed, the `claude-resume-<uuid>` staging root SURVIVES — the destination may be reading it, and

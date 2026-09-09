@@ -536,7 +536,11 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       // a hand-built malformed address used to come out of the router as an unhandled throw. It is the
       // same refusal D1 and NEW-4 established for the other two doors, and it is host-only: a model
       // never builds an address.
-      const malformed = unaddressableSender(from) ?? unaddressableSender(to);
+      // …AND IT SAYS WHICH HALF (review r4's nit). One message for both halves reported a malformed
+      // TARGET as "the envelope's sender is not a canonical address", which sends a host looking at the
+      // wrong field. `from` is the original's `to` and vice versa, so the roles are named explicitly.
+      const malformedSender = unaddressableSender(from);
+      const malformed = malformedSender ?? unaddressableSender(to)?.replace("the envelope's sender", "the envelope's target");
       if (malformed !== undefined) return refused(deriveMessageId(original.messageId, "reply"), malformed);
       const snapshot = await snapshotFor(from);
       const targetKey = serializeRuntimeAddress(to);

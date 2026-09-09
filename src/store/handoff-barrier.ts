@@ -140,7 +140,13 @@ export interface HandoffSourceOwner {
 
 /** What step 8 hands the destination runtime. */
 export interface HandoffResumeTarget {
-  address?: SerializedRuntimeAddress;
+  /**
+   * REQUIRED (review r4, Lane C nit 1). It was optional because an early draft could build a target
+   * before the directory row was read; `execute()` has read it since step 1 for several rounds, every
+   * construction site sets it, and a destination that cannot be told WHICH row it now owns cannot
+   * record anything against it.
+   */
+  address: SerializedRuntimeAddress;
   runtimeKind: RuntimeKind;
   /** §12 step 8: "resume the SAME backend UUID and project key". */
   backendSessionId: string;
@@ -736,7 +742,10 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         await unwind();
         return lossy(6, `the handoff could not be staged: ${error instanceof Error ? error.message : String(error)}`);
       }
-      record(6, true, `the owner is closed, the writer lease is this process's, and a pending handoff to ${plan.to} at level ${level} is recorded — ownership has NOT moved`);
+      // "WAS GRANTED TO" and not "is this process's" (review r4, Lane C nit 3): the store's writer
+      // lease is re-entrant per pid, so claiming ownership of it in a host-visible report overstates
+      // exactly the guarantee the close-out says is unenforced.
+      record(6, true, `the owner is closed, the writer lease was granted to this process, and a pending handoff to ${plan.to} at level ${level} is recorded — ownership has NOT moved`);
 
       // ---- step 7: temp continuity ---------------------------------------------------------------------
       at = 7;
@@ -829,12 +838,16 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // told only "the producer record could not be written" has no way to find the directory it now
         // owns. Naming it is the difference between a documented leak and an orphan.
         const reason = `the destination confirmed init but the producer record could not be written: ${error instanceof Error ? error.message : String(error)}`;
-        record(8, false, reason);
+        // THE STEP TRAIL GETS THE ENRICHED SENTENCE TOO (review r4, Lane C nit 5). A host that reads
+        // `steps` rather than `detail` — a renderer walking the eight steps — was told the record
+        // failed and never told where the directory it now owns is.
+        const enriched = target?.stagingRoot === undefined ? reason : `${reason}. The destination is reading ${target.stagingRoot}; that staging copy is retained deliberately and belongs to the host's retention pass.`;
+        record(8, false, enriched);
         return {
           kind: "lossy-fork-offered",
           reason,
           step: 8,
-          detail: target?.stagingRoot === undefined ? reason : `${reason}. The destination is reading ${target.stagingRoot}; that staging copy is retained deliberately and belongs to the host's retention pass.`,
+          detail: enriched,
           ...(target === undefined ? {} : { target }),
           steps: trail,
         };

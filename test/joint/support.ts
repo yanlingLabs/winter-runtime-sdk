@@ -67,6 +67,10 @@ export interface JointResult {
   /** The address the official session was launched under. */
   address: string;
   configDir: string;
+  /** The `system/init` session id this generation reported — what a restart must hand back. */
+  backendSessionId: string | undefined;
+  /** This generation's own hermetic directories, so a later generation can resume INTO them. */
+  session: { home: string; spool: string; cwd: string; brandHome: string };
   /** The root the child was OBSERVED to get, or undefined if the proxy never saw a spawn. */
   observedRoot: string | undefined;
 }
@@ -81,6 +85,15 @@ export interface JointSessionOptions {
   during?: (live: { messaging: GlobalMessagingHandle; directory: RuntimeDirectoryHandle }) => Promise<void>;
   /** Share one directory store across sessions (row 4's two-session isolation). */
   store?: RuntimeDirectoryStore;
+  /**
+   * RESUME generation one instead of launching a fresh session (NEW-B).
+   *
+   * A "restart" that launches a second fresh session under a second spool proves nothing about
+   * resume: it is two unrelated generations that happen to share a directory row. A real one reuses
+   * the SAME spool (that is what survives a process death) and hands the runtime the backend session
+   * id its first generation reported, through `adapter.resume()` — WS-14 §1's profile 2.
+   */
+  resumeFrom?: { spool: string; home: string; cwd: string; brandHome: string; backendSessionId: string };
   /**
    * Override the DECLARED permission classes.
    *
@@ -105,7 +118,10 @@ export async function runJointSession(options: JointSessionOptions): Promise<Joi
   /* c8 ignore next */
   if (bed === undefined) throw new Error("unreachable: the joint suite is skipped without a bed");
   const officialId = options.officialId ?? "joint";
-  const session = hermeticSession(`joint-${officialId}`);
+  // A RESUME REUSES GENERATION ONE'S DIRECTORIES (NEW-B). The spool is `CLAUDE_CONFIG_DIR`, i.e. where
+  // the transcript of the session being resumed actually lives; a fresh `mkdtemp` would be a different
+  // machine as far as the runtime is concerned.
+  const session = options.resumeFrom ?? hermeticSession(`joint-${officialId}`);
   const { routes, record } = scriptedLoopback(options.turns);
   const messages: Array<{ type: string; subtype?: string }> = [];
 
@@ -142,14 +158,18 @@ export async function runJointSession(options: JointSessionOptions): Promise<Joi
     // -------------------------------------------------------------------------------------------------
 
     const context: SeamContextWithDirectory = { ...base, directory };
-    // THE RECORD SINK IS EXPLICIT, and that is a finding rather than a preference. `buildOptions`
-    // takes `spawnProxy: adapter.spawnProxy` — the DISPATCHER, for a host that builds its own options
-    // — and the dispatcher's sink is `policy.sink ?? a no-op`, so the adapter's DEFAULT directory sink
-    // (the one `createOfficialAdapter(context)` installs) never runs on that path. `launch()` binds
-    // its own supervisor with the default sink, but the options already carry the dispatcher, so the
-    // dispatcher is what spawns. Lane A's own `runtime-spool.test.ts` passes the sink explicitly for
-    // the same reason; this bed does too, so §6 rule 2's record is written on the path a host that
-    // follows the template actually takes.
+    // THE RECORD SINK IS EXPLICIT HERE AS A CHOICE, NOT A NECESSITY (fix-wave re-review, NEW-E). An
+    // earlier version of this comment said `launch()`'s options "already carry the dispatcher, so the
+    // dispatcher is what spawns" — measurably wrong: `start()` binds `spawnClaudeCodeProcess:
+    // supervisor.spawn` LAST, overriding the dispatcher `buildOptions` put there, and that
+    // supervisor's sink is `sinkFor(plan)`, i.e. the adapter's DEFAULT directory sink. This bed's own
+    // `observedRoot` assertions read `live.supervisor.observation`, which is that supervisor.
+    //
+    // What IS true: the dispatcher's sink is `policy.sink ?? a no-op`, so §6 rule 2's record is
+    // silently absent on exactly one path — a host that builds options with `spawnProxy:
+    // adapter.spawnProxy` and calls the vendor's `query()` ITSELF. The dispatcher cannot default to
+    // the directory sink because it has no plan and therefore no address. Naming the sink here keeps
+    // this bed independent of that question.
     const adapter = createOfficialAdapter(context, {
       ...hermeticEnvPolicy(),
       sink: directoryRecordSink({ store: directoryStore, address }),
@@ -181,23 +201,43 @@ export async function runJointSession(options: JointSessionOptions): Promise<Joi
       credentials: { ANTHROPIC_BASE_URL: fake.url.replace(/\/$/, ""), ANTHROPIC_API_KEY: "sk-ant-loopback" },
       base: { HOME: session.home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
     });
-    const live = adapter.launch({
+    const launchOptions = {
+      ...options_,
+      env,
+      mcpServers: officialMcpServers({ descriptor, module: bed.mcpModule, toInputShape: bed.toInputShape, branchLabel: "winter-claude-agent" }),
+      canUseTool: createApprovalBridge({ brand: WINTER_BRAND, mode: "default", broker: async (request) => ({ behavior: "allow", updatedInput: request.input }) }),
+    };
+    const plan = {
       address,
       selection: jointSelection,
       prompt: "do the thing",
       cwd: session.cwd,
-      profile: "fresh-spool",
+      profile: "fresh-spool" as const,
       configDir: session.spool,
-      options: {
-        ...options_,
-        env,
-        mcpServers: officialMcpServers({ descriptor, module: bed.mcpModule, toInputShape: bed.toInputShape, branchLabel: "winter-claude-agent" }),
-        canUseTool: createApprovalBridge({ brand: WINTER_BRAND, mode: "default", broker: async (request) => ({ behavior: "allow", updatedInput: request.input }) }),
-      },
-    });
+      options: launchOptions,
+    };
+    // `resume()` AND NOT `launch()` when a restart is being modelled — a different door on the seam,
+    // a different launch profile, and the only one that hands the runtime a backend session id.
+    const live =
+      options.resumeFrom === undefined ? adapter.launch(plan) : adapter.resume({ ...plan, resume: options.resumeFrom.backendSessionId });
     if (options.during !== undefined) await options.during({ messaging, directory });
     for await (const message of live.query) messages.push(message as { type: string; subtype?: string });
     const pushed = [...targets.values()].flatMap((writer) => writer.pushed);
-    return { messages, record, pushed, directory, messaging, store: directoryStore, address, configDir: live.configDir, observedRoot: live.supervisor.observation?.root.configDir };
+    // The id the runtime itself reported at `system/init` — the identity a restart has to carry.
+    const init = messages.find((message) => message.type === "system" && message.subtype === "init") as { session_id?: unknown } | undefined;
+    const backendSessionId = typeof init?.session_id === "string" ? init.session_id : undefined;
+    return {
+      messages,
+      record,
+      pushed,
+      directory,
+      messaging,
+      store: directoryStore,
+      address,
+      configDir: live.configDir,
+      observedRoot: live.supervisor.observation?.root.configDir,
+      backendSessionId,
+      session: { home: session.home, spool: session.spool, cwd: session.cwd, brandHome: session.brandHome },
+    };
   });
 }

@@ -168,29 +168,30 @@ describeRuntime("WS-17 row 4, real-runtime half: two official sessions under the
   );
 });
 
-describeRuntime("WS-17 row 5, real-runtime half: an official parent resumed after a restart", () => {
+describeRuntime("WS-17 row 5, real-runtime half: an official parent RESUMED after a restart", () => {
   afterAll(cleanupHermetic);
 
   test(
-    "the children recorded before the restart are still addressable through the resumed parent",
+    "generation two is a real `resume()` of generation one's backend session, and the completed children are addressable through it",
     async () => {
       const store = createInMemoryRuntimeDirectoryStore();
-      // GENERATION ONE: the parent runs and its children are recorded durably, as a real session's
-      // would be. The children are `completed` — row 5's own subject is the COMPLETED ones.
+      // GENERATION ONE. Its children are recorded durably as a real session's would be, `exited` —
+      // this seam's word for a child that has finished, which is row 5's "completed".
       const first = await runJointSession({ turns: [{ text: "parent generation one" }], officialId: "parent", store });
-      // `exited` is this seam's word for a child that has finished — WS-15 §6.1's status vocabulary
-      // has no `completed`, and row 5's "completed children" are exactly these rows.
+      expect(first.messages.at(-1)?.type).toBe("result");
+      // THE IDENTITY A RESTART HAS TO CARRY, reported by the runtime itself rather than chosen by us.
+      expect(first.backendSessionId).toBeDefined();
       await store.upsert(childEntry("parent", "child-a", { runtimeKind: "claude-agent", status: "exited" }));
       await store.upsert(childEntry("parent", "child-b", { runtimeKind: "claude-agent", status: "exited" }));
-      expect(first.messages.at(-1)?.type).toBe("result");
 
-      // THE RESTART: a second real generation of the same address, over the same durable store — which
-      // is the only thing that survives a restart, and therefore the only thing row 5 can be about.
+      // THE RESTART: `resume()`, not a second `launch()`, into generation one's OWN spool — the
+      // directory that survives a process death and holds the transcript being resumed.
       const delivered: string[] = [];
       const second = await runJointSession({
         turns: [{ toolUses: [{ id: "toolu_row5_list", name: "ListAgents", input: {} }] }, { text: "listed" }],
         officialId: "parent",
         store,
+        resumeFrom: { ...first.session, backendSessionId: first.backendSessionId! },
         during: async ({ messaging }) => {
           messaging.attachOfficialSession("session:parent", {
             status: () => "idle",
@@ -201,21 +202,30 @@ describeRuntime("WS-17 row 5, real-runtime half: an official parent resumed afte
         },
       });
 
-      // The children are BACK — restored from the durable record, addressed through their owning
-      // parent (WS-10 §11 rule 2: "a child is only addressable within its owning parent").
+      // THE SAME BACKEND SESSION came back — the assertion that makes this a resume rather than a
+      // second session that happens to share a directory row.
+      expect(second.backendSessionId).toBe(first.backendSessionId);
+      expect(second.observedRoot).toBe(first.observedRoot);
+      expect(second.messages.at(-1)?.type).toBe("result");
+
+      // The children are BACK, addressed through their owning parent (WS-10 §11 rule 2).
       const listing = JSON.stringify(toolResults(second.record).find((entry) => entry.tool_use_id === "toolu_row5_list")?.content);
       expect(listing).toContain("agent:parent:child-a");
       expect(listing).toContain("agent:parent:child-b");
 
-      // …and a message addressed to one of them resolves to the CHILD, delivered through the owning
-      // parent's own stream, which is the only route a completed official child has.
+      // …and a native SendMessage to one of them is DELIVERED through the resumed parent's own
+      // stream, which is the only route a completed official child has. Asserted positively: the
+      // previous version closed on `not.toBe("not_found")`, which `unavailable` and `held` satisfy too.
       const outcome = await second.messaging.send({
         from: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: "parent" },
         to: "agent:parent:child-a",
         body: "what did you find?",
         originToolCallId: "toolu_row5_child",
       });
-      expect(outcome.status).not.toBe("not_found");
+      expect(["delivered", "queued"]).toContain(outcome.status);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toContain("child-a");
+      expect(delivered[0]).toContain("what did you find?");
     },
     JOINT_TIMEOUT,
   );

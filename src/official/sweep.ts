@@ -152,7 +152,10 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
     return {};
   };
 
-  const post = async (raw: unknown): Promise<Record<string, unknown>> => {
+  // `event` IS THE HOOK THIS INVOCATION CAME FROM (review r4, NEW-20). The runtime does not tell the
+  // hook which event fired it, so the registration closes over the name — the alternative was the
+  // constant `"PostToolUse"` on all three, which named the wrong hook in the one field a host reads.
+  const post = async (raw: unknown, event: string = POST_TOOL_EVENTS[0] as string): Promise<Record<string, unknown>> => {
     const input = (raw ?? {}) as SweepHookInput;
     // A batch reports several calls at once; any of them may be the one that wrote.
     const calls = input.tool_calls ?? [{ tool_name: input.tool_name, tool_use_id: input.tool_use_id }];
@@ -217,12 +220,15 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
       systemMessage: reason,
       decision: "block",
       reason,
-      hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput: reason, additionalContext: reason },
+      // THE EVENT IS THE ONE THAT FIRED (review r4, NEW-20). The sweep is registered on three events
+      // and every block used to report `PostToolUse`, so a breach caught on `PostToolUseFailure` or
+      // `PostToolBatch` named the wrong hook in the one field a host reads to find it.
+      hookSpecificOutput: { hookEventName: event, updatedToolOutput: reason, additionalContext: reason },
     };
   };
 
   return {
-    hooks: { PreToolUse: [{ hooks: [pre] }], ...Object.fromEntries(POST_TOOL_EVENTS.map((event) => [event, [{ hooks: [post] }]])) },
+    hooks: { PreToolUse: [{ hooks: [pre] }], ...Object.fromEntries(POST_TOOL_EVENTS.map((event) => [event, [{ hooks: [(input: unknown) => post(input, event)] }]])) },
     get breaches() {
       return breaches;
     },
