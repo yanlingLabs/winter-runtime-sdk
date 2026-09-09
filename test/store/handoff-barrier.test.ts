@@ -22,6 +22,9 @@ import {
   type HandoffSourceOwner,
   type HandoffStepReport,
 } from "../../src/store/index.ts";
+import { SharedStoreUnavailableError } from "../../src/store/index.ts";
+import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
+import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { selectionFor, sidecarPathFor, withStoreBed, type StoreBed } from "./support.ts";
 
 const OK: HandoffStepReport = { ok: true };
@@ -68,6 +71,28 @@ function confirmingDestination(seen: { target?: unknown }, report: HandoffStepRe
     },
   };
 }
+
+describe("the wiring the spine will do in one line", () => {
+  test("both factories construct with the spine's OWN fake peer, and only a real handoff needs a store", async () => {
+    // The exact call `src/sdk.ts` will make: `stubHandoffBarrier(context)` -> `createHandoffBarrier(context)`,
+    // for EVERY `createRuntimeSdk` — including every spine test, whose peer exports five members and
+    // neither a store class nor `resolveWinterHome`. If either factory resolved a store eagerly, this
+    // line would throw there, and the "one-line swap" would not be one.
+    const { peer } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain: createFakeKeychain() });
+    const context = runtimeSdkInternals(sdk)!.context;
+
+    const barrier = createHandoffBarrier(context);
+    const decorator = createMaterializedResumeDecorator(context);
+    // The decorator still ANSWERS the one question it can answer without a store (WS-13 §8.2 makes
+    // FALLBACK the always-available door).
+    expect(decorator.door).toBe("fallback");
+    // A plan for an unknown session fails on the DIRECTORY, not on a missing store.
+    await expect(barrier.plan({ projectKey: "p", sessionId: "s" }, "claude-agent")).rejects.toThrow(HandoffPlanError);
+    // And the store is demanded only when a handoff actually runs.
+    expect(() => barrier.shared).toThrow(SharedStoreUnavailableError);
+  });
+});
 
 describe("plan() (R-7b-3: what the host renders)", () => {
   test("names WS-05 §12's eight steps in order, with the door and the continuity mode", async () => {

@@ -44,7 +44,7 @@ import type { RuntimeKind, RuntimeSelection } from "../selection/runtime-selecti
 import { createMaterializedResumeDecorator, materializedTranscriptPath, resumeStagingRoot } from "./materialized-resume.ts";
 import { canonicalTranscriptPath, reconcileLocalWriteRoot, compareTranscriptTail } from "./reconcile.ts";
 import { materializeTempContinuity, resolveEngineTempLayout, tempContinuityModeFor, type EngineTempLayout } from "./temp-continuity.ts";
-import { createSharedSessionStore, type SharedSessionStore } from "./wiring.ts";
+import { lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";
 
 /** WS-05 §5.4's advertised levels. "Never silently downgrade an advertised level." */
 export type CompatibilityLevel = "conversation" | "agent-state" | "full-filesystem";
@@ -192,10 +192,14 @@ export interface HandoffBarrierHandle extends HandoffBarrier {
  */
 export function createHandoffBarrier(context: SeamContextWithDirectory, deps: HandoffBarrierDeps = {}): HandoffBarrierHandle {
   const now = deps.now ?? (() => new Date());
-  const winterHome = deps.winterHome ?? (context.peers.winter as unknown as { resolveWinterHome: () => string }).resolveWinterHome();
-  const shared = deps.shared ?? createSharedSessionStore({ peers: context.peers, winterHome });
-  const decorator = deps.decorator ?? createMaterializedResumeDecorator(context, { shared, now });
-  const leaseRoot = deps.leaseRoot ?? join(winterHome, "runtimes", "handoff-leases");
+  // EVERYTHING THE STORE TOUCHES IS RESOLVED ON FIRST USE. The spine's wiring line calls this factory
+  // for every `createRuntimeSdk`, most of which never hand a session off and some of which (every
+  // `test/spine/*` case) inject a peer with no store class at all. See `lazySharedSessionStore`.
+  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, ...(deps.winterHome === undefined ? {} : { winterHome: deps.winterHome }) }) : () => deps.shared!;
+  const homeOf = (): string => deps.winterHome ?? sharedOf().identity.winterHome;
+  let decorator: MaterializedResumeDecorator | undefined = deps.decorator;
+  const decoratorOf = (): MaterializedResumeDecorator => (decorator ??= createMaterializedResumeDecorator(context, { shared: sharedOf, now }));
+  const leaseRootOf = (): string => deps.leaseRoot ?? join(homeOf(), "runtimes", "handoff-leases");
   const stagingRootFor = deps.stagingRootFor ?? ((uuid: string) => resumeStagingRoot(uuid));
 
   const findEntry = async (session: SessionKey): Promise<RuntimeDirectoryEntry> => {
@@ -239,7 +243,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       from,
       to,
       steps,
-      decorationDoor: decorator.door,
+      decorationDoor: decoratorOf().door,
       tempContinuity: tempContinuityModeFor(to),
     };
   };
@@ -263,9 +267,11 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     const owner = (await deps.participants?.source?.(session, plan.from)) ?? undefined;
 
     // ---- step 1: the handoff lease, and no new turns ------------------------------------------------
+    const shared = sharedOf();
+    const winterHome = homeOf();
     let lease: HandoffLease;
     try {
-      lease = acquireHandoffLease(leaseRoot, session);
+      lease = acquireHandoffLease(leaseRootOf(), session);
     } catch (error) {
       return blocked(1, "lease-held", error instanceof Error ? error.message : String(error));
     }
@@ -356,7 +362,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
 
       // ---- step 8: the destination, on the same backend uuid and project key ---------------------------
       const stagingRoot = plan.to === "claude-agent" ? stagingRootFor(commit.stagingUuid) : undefined;
-      const decorated = await decorator.decorate({
+      const decorated = await decoratorOf().decorate({
         session,
         to: plan.to,
         materializedPath: stagingRoot === undefined ? canonicalTranscriptPath(winterHome, session) : materializedTranscriptPath(stagingRoot, session),
@@ -400,7 +406,13 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     }
   };
 
-  return { plan, execute, shared };
+  return {
+    plan,
+    execute,
+    get shared() {
+      return sharedOf();
+    },
+  };
 }
 
 function defaultNoteText(args: { from: RuntimeKind; to: RuntimeKind; session: SessionKey }): string {

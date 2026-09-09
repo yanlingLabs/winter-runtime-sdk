@@ -607,6 +607,35 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
 }
 
 /**
+ * A shared store resolved on FIRST USE, from the injected peer's own `resolveWinterHome()`.
+ *
+ * WHY LAZY MATTERS, and it is not a micro-optimisation. The spine's wiring line is
+ * `stubHandoffBarrier(context)` becoming `createHandoffBarrier(context)`, called for EVERY
+ * `createRuntimeSdk` — including the ones in `test/spine/*`, whose fake peer exports five members and
+ * neither a store class nor `resolveWinterHome`. A factory that built its store eagerly would throw at
+ * construction for every host that never hands a session off, and would break every spine test the day
+ * it was wired in. Resolved on the first `plan()`/`execute()`, it costs nothing until a handoff exists,
+ * and a host that already has a store passes it and never reaches this at all.
+ */
+export function lazySharedSessionStore(input: { peers: RuntimeSdkPeers; winterHome?: string; policy?: Partial<MirrorPolicy> }): () => SharedSessionStore {
+  let resolved: SharedSessionStore | undefined;
+  return () => {
+    if (resolved !== undefined) return resolved;
+    const winterHome =
+      input.winterHome ??
+      (() => {
+        const resolveWinterHome = (input.peers.winter as unknown as { resolveWinterHome?: () => string }).resolveWinterHome;
+        if (typeof resolveWinterHome !== "function") {
+          throw new SharedStoreUnavailableError();
+        }
+        return resolveWinterHome();
+      })();
+    resolved = createSharedSessionStore({ peers: input.peers, winterHome, ...(input.policy === undefined ? {} : { policy: input.policy }) });
+    return resolved;
+  };
+}
+
+/**
  * The peer's own version identity, for the shared identity record.
  *
  * BEST EFFORT AND NEVER FATAL: `assertVersionMatrix` is the gate that refuses an unsupported peer, and

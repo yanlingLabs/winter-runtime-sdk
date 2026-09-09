@@ -47,7 +47,7 @@ import type {
 } from "../seams/materialized-resume.ts";
 import { canonicalTranscriptPath } from "./reconcile.ts";
 import { reconcileLocalWriteRoot } from "./reconcile.ts";
-import { createSharedSessionStore, type SharedSessionStore } from "./wiring.ts";
+import { createSharedSessionStore, lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";
 
 /** The vendor's own staging prefix (WS-14 §1, WS-05 §9). A Claude-mirroring literal, never rebranded. */
 export const RESUME_STAGING_PREFIX = "claude-resume-";
@@ -101,7 +101,8 @@ export interface PinnedRuntimeProbeLegs {
 }
 
 export interface MaterializedResumeDeps {
-  shared: SharedSessionStore;
+  /** The one shared store. Omitted = resolved on first use from the peer (see `lazySharedSessionStore`). */
+  shared?: SharedSessionStore | (() => SharedSessionStore);
   /** A report recorded on a previous run — `docs/probes/materialized-resume.md`'s content. */
   report?: MaterializedResumeProbeReport;
   /** The pinned runtime's legs, when a bed can supply them. */
@@ -117,14 +118,16 @@ export interface MaterializedResumeDecoratorHandle extends MaterializedResumeDec
 }
 
 /** WS-13 §8.2's doors. Lane C's implementation of the spine's seam. */
-export function createMaterializedResumeDecorator(context: SeamContext, deps: MaterializedResumeDeps): MaterializedResumeDecoratorHandle {
+export function createMaterializedResumeDecorator(context: SeamContext, deps: MaterializedResumeDeps = {}): MaterializedResumeDecoratorHandle {
   const now = deps.now ?? (() => new Date());
+  const sharedOf: () => SharedSessionStore =
+    typeof deps.shared === "function" ? deps.shared : deps.shared !== undefined ? () => deps.shared as SharedSessionStore : lazySharedSessionStore({ peers: context.peers });
   let report: MaterializedResumeProbeReport | undefined = deps.report;
 
   const doorOf = (): MaterializedResumeDoor => (report !== undefined && report.results.length > 0 && report.results.every((r) => r.passed) ? "preferred" : "fallback");
 
   const decorate = async (input: MaterializedResumeInput): Promise<MaterializedResumeResult> => {
-    const shared = deps.shared;
+    const shared = sharedOf();
     const key = input.session;
     const canonicalPath = canonicalTranscriptPath(shared.identity.winterHome, key);
     const door = doorOf();
