@@ -128,6 +128,10 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
     const key = input.session;
     const canonicalPath = canonicalTranscriptPath(shared.identity.winterHome, key);
     const door = doorOf();
+    // Captured BEFORE anything this call might write, so `canonicalUntouched` is a measurement of
+    // THIS call rather than of the two lines that follow it. (The first version read it after the
+    // FALLBACK append and reported `true` for the one door that is defined by writing there.)
+    const canonicalAtEntry = readIfExists(canonicalPath);
 
     // A WINTER DESTINATION GETS NOTHING WRITTEN. §8.2's two doors exist because "the official runtime
     // builds its own requests, so render-time decoration is impossible there". The Winter leg renders
@@ -155,9 +159,9 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
     // THE COPY IS STAGED FOR BOTH DOORS. A `store-backed-resume` launch profile has no transcript to
     // read without one — the staging root IS its `CLAUDE_CONFIG_DIR` — so the door decides only WHERE
     // the note goes, never whether a copy exists.
-    const canonicalBefore = readIfExists(canonicalPath);
+    const canonicalNow = readIfExists(canonicalPath);
     mkdirSync(dirname(materializedPath), { recursive: true, mode: 0o700 });
-    if (canonicalBefore === undefined) {
+    if (canonicalNow === undefined) {
       writeFile(materializedPath, Buffer.alloc(0));
     } else {
       copyFileSync(canonicalPath, materializedPath);
@@ -174,7 +178,7 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
       door,
       resumePath: materializedPath,
       // Measured, not asserted: the canonical file's bytes before and after this call.
-      canonicalUntouched: canonicalBefore === undefined ? canonicalAfter === undefined : canonicalAfter !== undefined && canonicalBefore.equals(canonicalAfter),
+      canonicalUntouched: canonicalAtEntry === undefined ? canonicalAfter === undefined : canonicalAfter !== undefined && canonicalAtEntry.equals(canonicalAfter),
     };
   };
 
