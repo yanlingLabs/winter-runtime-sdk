@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { ACCEPTED_QUEUE_CAP, DEFAULT_HOLD_EXPIRY_MS, HELD_INBOX_CAP } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { createRuntimeMessaging, renderAttributedTurn } from "../../src/messaging/index.ts";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { createBed, createFakeFacet, envelope, sessionAddress, sessionEntry, winterHandle } from "./support.ts";
+import { createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle } from "./support.ts";
 
 function bedWith(options: GlobalMessagingOptions = {}) {
   const bed = createBed();
@@ -107,6 +107,96 @@ describe("row 12 — the permission-class matrix (WS-10 §13)", () => {
     const acceptingFacets = await twoSessions(accepting, "bypasses", "prompts"); // the matrix would hold
     expect((await accepting.messaging.send({ from: sessionAddress("sender"), to: "session:receiver", body: "hi", originToolCallId: "t1" })).status).toBe("queued");
     expect(acceptingFacets.receiverFacet.delivered.length).toBe(1);
+  });
+});
+
+describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
+  // WS-10 §13's matrix has no `unknown` RECEIVER row — `unknown` is a sender-side value, for "an
+  // authenticated route that cannot prove sender class". The lane used to substitute `prompts`, which
+  // fails OPEN on the one row that matters: if the receiver was launched in `bypassPermissions`,
+  // `bypasses x prompts -> hold` (the row that exists to stop a prompting sender's mail landing
+  // unreviewed in a bypassing session) never runs. A hold is visible, releasable and reversible; a
+  // delivery into a bypassing session is not.
+
+  test("an official receiver with no class hook HOLDS, and the reason names exactly why", async () => {
+    const world = bedWith(); // this file's bed declares NO classes: its subject is the policy
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+
+    const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" });
+    expect(outcome.status).toBe("held");
+    if (outcome.status === "held") expect(outcome.reason).toContain("receiver class unknown");
+    expect(official.pushed.length).toBe(0);
+    expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(1);
+  });
+
+  test("the host says what it launched, and the same message is delivered", async () => {
+    const world = bedWith({ official: { permissionClass: () => "prompts" } });
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+
+    expect((await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" })).status).toBe("queued");
+    expect(official.pushed.length).toBe(1);
+  });
+
+  test("a BYPASSING receiver the host declares still holds a prompting sender — the row the substitution skipped", async () => {
+    const world = bedWith({ official: { permissionClass: () => "bypasses" } });
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+
+    const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" });
+    expect(outcome.status).toBe("held");
+    expect(official.pushed.length).toBe(0);
+  });
+
+  test("an EXPLICIT setting still wins over an unknown class, in both directions", async () => {
+    const accepting = bedWith({ explicitSetting: () => "accept" });
+    const official = createFakeOfficialSession("running");
+    await accepting.directory.record(sessionEntry("sender"));
+    await accepting.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    accepting.messaging.attachOfficialSession("session:claude", official.handle);
+    expect((await accepting.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" })).status).toBe("queued");
+
+    const refusing = bedWith({ explicitSetting: () => "refuse" });
+    await refusing.directory.record(sessionEntry("sender"));
+    await refusing.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    refusing.messaging.attachOfficialSession("session:claude", createFakeOfficialSession().handle);
+    expect((await refusing.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" })).status).toBe("refused");
+  });
+
+  test("the unknown-class hold is CLASS-DRIVEN, so it is released the moment the class is known", async () => {
+    // It is a default-kind hold, not an explicit one, and that is the point: `reevaluate` never
+    // auto-promotes an explicit hold, so an unknown-class message parked as "explicit" could not be
+    // released BY LEARNING THE CLASS — which is the one thing that should release it.
+    let known = false;
+    const world = bedWith({ official: { permissionClass: () => (known ? "prompts" : "unknown") } });
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+    expect((await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "waiting", originToolCallId: "t1" })).status).toBe("held");
+
+    known = true;
+    const released = await world.messaging.releaseHeld("session:claude");
+    expect(released.map((outcome) => outcome.status)).toEqual(["queued"]);
+    expect(official.pushed.length).toBe(1);
+    expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(0);
+  });
+
+  test("a Winter session driven through a plain WRITER can be declared too", async () => {
+    const world = bedWith({ winter: { permissionClass: () => "prompts" } });
+    const writer = winterWriterHandle(() => "idle");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("receiver"));
+    world.messaging.attachWinterSession("session:receiver", writer.handle);
+    expect((await world.messaging.send({ from: sessionAddress("sender"), to: "session:receiver", body: "hi", originToolCallId: "t1" })).status).toBe("delivered");
+    expect(writer.pushed.length).toBe(1);
   });
 });
 

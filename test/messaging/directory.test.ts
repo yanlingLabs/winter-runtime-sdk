@@ -157,6 +157,124 @@ describe("resolution: WS-10 §11's rules, in order", () => {
   });
 });
 
+describe("rule 5 is scoped to the CALLER'S CONVERSATION (review r1, M2)", () => {
+  // WS-10 §11 rule 5 and WS-15 §6.1 rule 5 both say "a name previously used by a different child IN
+  // THE SAME CONVERSATION". The directory-level preflight this lane adds — which exists to remember a
+  // name across a restart or after a `forget()`, which the shared core cannot — was reading the whole
+  // lease table, with two harms: a live unique name in ANOTHER conversation was refused, and the
+  // refusal text and candidate rows carried another conversation's canonical child address to the
+  // model, in a shape that told a hit from a miss.
+
+  test("B1 — one conversation's exited child does not poison another conversation's live unique name", async () => {
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(childEntry("a", "c1", { displayName: "reviewer" }));
+    await directory.record(childEntry("a", "c1", { displayName: "reviewer", status: "exited" }));
+    await directory.record(sessionEntry("b"));
+    await directory.record(sessionEntry("r", { displayName: "reviewer" })); // B's own live, unique holder
+
+    const resolved = await directory.resolve("reviewer", { from: sessionAddress("b") });
+    expect(resolved.kind).toBe("resolved");
+    if (resolved.kind !== "resolved") return;
+    expect(resolved.entry.address).toBe("session:r");
+  });
+
+  test("B2 — the same after the foreign child is FORGOTTEN: no refusal, and no foreign address in any answer", async () => {
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(childEntry("a", "c1", { displayName: "reviewer" }));
+    await directory.forget("agent:a:c1");
+    await directory.record(sessionEntry("b"));
+
+    const resolved = await directory.resolve("reviewer", { from: sessionAddress("b") });
+    // Nothing of A's is reachable OR nameable from B, so the honest answer is "no such name" — the
+    // same answer a name nobody ever used gets.
+    expect(resolved.kind).toBe("not-found");
+    expect(JSON.stringify(resolved)).not.toContain("agent:a:c1");
+
+    // …and A's OWN caller still gets rule 5's refusal, which is the half that must not be lost.
+    const fromOwner = await directory.resolve("reviewer", { from: sessionAddress("a") });
+    expect(fromOwner.kind).toBe("stale-name");
+  });
+
+  test("B4 — a LIVE foreign child's name is not an oracle: a hit and a miss are the same answer", async () => {
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(childEntry("a", "c1", { displayName: "kid" })); // live, lease never released
+    await directory.record(sessionEntry("b"));
+
+    const hit = await directory.resolve("kid", { from: sessionAddress("b") });
+    const miss = await directory.resolve("nosuchname", { from: sessionAddress("b") });
+    expect(hit.kind).toBe("not-found");
+    expect(miss.kind).toBe("not-found");
+    if (hit.kind !== "not-found" || miss.kind !== "not-found") return;
+    // The two answers differ only in the name the caller itself supplied — nothing about A leaks.
+    expect(hit.reason.replace("kid", "NAME")).toBe(miss.reason.replace("nosuchname", "NAME"));
+  });
+
+  test("B3 (control) — reuse INSIDE one conversation is still refused as stale", async () => {
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(childEntry("a", "c1", { displayName: "scout" }));
+    await directory.forget("agent:a:c1");
+    await directory.record(childEntry("a", "c2", { displayName: "scout" }));
+
+    const resolved = await directory.resolve("scout", { from: sessionAddress("a") });
+    expect(resolved.kind).toBe("stale-name");
+    if (resolved.kind !== "stale-name") return;
+    expect(resolved.reason).toContain("more than one");
+  });
+
+  test("a SESSION name stays global — a session that is gone is still remembered for every caller", async () => {
+    // A top-level session's name is global by construction (every caller resolves session names from
+    // the same peer set), so remembering that one is gone discloses nothing a listing would not — and
+    // "that name referred to something that has since exited" is a better answer than "no such agent".
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(sessionEntry("peer", { displayName: "reviewer" }));
+    await directory.forget("session:peer");
+    expect((await directory.resolve("reviewer", { from: sessionAddress("a") })).kind).toBe("stale-name");
+  });
+
+  test("a candidate row is rendered only through the CALLER's own eligibility, never out of the raw store", async () => {
+    // The other half of M2: `candidatesFor` used to read `snap.byAddress` — every entry in the store,
+    // unfiltered. An ARCHIVED session is remembered by its lease but is not resolvable by anyone, so
+    // it is exactly the row that must be named in the REASON (the caller asked about that name) and
+    // absent from the CANDIDATES (the caller cannot address it).
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(sessionEntry("filed", { displayName: "reviewer" }));
+    await directory.record(sessionEntry("filed", { displayName: "reviewer", status: "archived" }));
+
+    const resolved = await directory.resolve("reviewer", { from: sessionAddress("a") });
+    expect(resolved.kind).toBe("stale-name");
+    if (resolved.kind !== "stale-name") return;
+    expect(resolved.reason).toContain("session:filed");
+    expect(resolved.candidates).toEqual([]);
+  });
+
+  test("an ambiguous answer's candidates never include a row the caller could not address", async () => {
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(childEntry("a", "c1", { displayName: "reviewer" }));
+    await directory.record(sessionEntry("b"));
+    await directory.record(sessionEntry("r1", { displayName: "reviewer" }));
+    await directory.record(sessionEntry("r2", { displayName: "reviewer" }));
+
+    const resolved = await directory.resolve("reviewer", { from: sessionAddress("b") });
+    expect(resolved.kind).toBe("ambiguous");
+    if (resolved.kind !== "ambiguous") return;
+    expect(resolved.candidates.map((row) => row.address).sort()).toEqual(["session:r1", "session:r2"]);
+  });
+});
+
 describe("record(): the row two lanes write", () => {
   test("recording a status change PRESERVES the spawn proxy's configDir and process identity", async () => {
     // THE CROSS-LANE HAZARD, pinned: Lane A's supervised spawn proxy records WS-14 §6 rule 2's

@@ -230,6 +230,79 @@ describe("the official adapter", () => {
   });
 });
 
+describe("one envelope, one answer: attribution before any push (review r1, D1)", () => {
+  // THE DEFECT: `renderAttributedTurn`'s owner check — a claimed `agent:` sender the receiving session
+  // does not own (WS-10 §10.3) — was evaluated in three different places on three delivery paths. The
+  // Winter WRITER evaluated it INSIDE the `try` whose `catch` returns `delivery_uncertain`, so a
+  // refusal that provably pushed NOTHING was recorded as "the delivery may have occurred" — and
+  // WS-10 §12 then forbids retrying it, so a clean side-effect-free "no" became a permanently
+  // ambiguous record. The OFFICIAL path did not evaluate it at all and delivered the envelope. The
+  // FACET path refused. Same input, three answers, chosen by which handle shape the host attached.
+
+  /** An envelope claiming to come from a child of a DIFFERENT session than the receiver. */
+  const foreign = (to: ReturnType<typeof sessionAddress>) => envelope({ messageId: "m-foreign", from: childAddress("stranger", "c1"), to });
+
+  test("all three delivery paths answer `refused`, and none of them pushes anything", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("stranger"));
+    // The sender is a REAL child of a real other session, so the route is authenticated and the
+    // inbound matrix accepts it: the attribution fence is then the only thing that can refuse, which
+    // is what makes this a test of the fence rather than of the authentication gate.
+    await world.directory.record(childEntry("stranger", "c1"));
+    await world.directory.record(sessionEntry("writer"));
+    await world.directory.record(sessionEntry("faceted"));
+    await world.directory.record(sessionEntry("official", { runtimeKind: "claude-agent" }));
+    const writer = winterWriterHandle(() => "running");
+    const facet = createFakeFacet();
+    const official = createFakeOfficialSession("running");
+    world.messaging.attachWinterSession("session:writer", writer.handle);
+    world.messaging.attachWinterSession("session:faceted", winterHandle(facet));
+    world.messaging.attachOfficialSession("session:official", official.handle);
+
+    const paths = [
+      { name: "winter writer", outcome: await world.messaging.deliver(foreign(sessionAddress("writer"))), pushed: writer.pushed.length },
+      { name: "winter facet", outcome: await world.messaging.deliver({ ...foreign(sessionAddress("faceted")), messageId: "m-foreign-2" }), pushed: facet.delivered.length },
+      { name: "official", outcome: await world.messaging.deliver({ ...foreign(sessionAddress("official")), messageId: "m-foreign-3" }), pushed: official.pushed.length },
+    ];
+
+    for (const path of paths) {
+      expect([path.name, path.outcome.status]).toEqual([path.name, "refused"]);
+      expect([path.name, path.pushed]).toEqual([path.name, 0]);
+      if (path.outcome.status === "refused") expect(path.outcome.reason).toContain("does not own");
+    }
+  });
+
+  test("the owner's OWN child is still delivered on every path — the fence refuses, it does not block", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("parent"));
+    await world.directory.record(childEntry("parent", "c1"));
+    const writer = winterWriterHandle(() => "idle");
+    world.messaging.attachWinterSession("session:parent", writer.handle);
+
+    const outcome = await world.messaging.deliver(envelope({ messageId: "m-own", from: childAddress("parent", "c1"), to: sessionAddress("parent") }));
+    expect(outcome.status).toBe("delivered");
+    expect(writer.pushed[0]).toContain('from="agent:parent:c1"');
+  });
+
+  test("the official OWNER-QUALIFIED child relay keeps its deliberate absence of an owner", async () => {
+    // A message FOR a child is handed to the parent that owns the child but NOT the sender — the one
+    // place the owner check must not run, and the reason `renderOwnerQualifiedTurn` takes no owner.
+    const world = bedWith();
+    const parent = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("stranger"));
+    await world.directory.record(childEntry("stranger", "c1"));
+    await world.directory.record(sessionEntry("claude-parent", { runtimeKind: "claude-agent" }));
+    await world.directory.record(childEntry("claude-parent", "sub-1", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:claude-parent", parent.handle);
+
+    const outcome = await world.messaging.deliver(
+      envelope({ messageId: "m-relay", from: childAddress("stranger", "c1"), to: { objectKind: "agent", runtimeKind: "claude-agent", winterSessionId: "claude-parent", parentWinterSessionId: "claude-parent", childId: "sub-1" } }),
+    );
+    expect(outcome.status).toBe("queued");
+    expect(parent.pushed[0]).toContain('for="agent:claude-parent:sub-1"');
+  });
+});
+
 describe("WS13c-SM1/SM2/SM3 — the cross-family pairs, routed by the CHILD's own record", () => {
   test("SM1 — a `gpt` Winter parent's `claude` child is reached on the OFFICIAL runtime, and the parent switching changes nothing", async () => {
     const world = bedWith();
