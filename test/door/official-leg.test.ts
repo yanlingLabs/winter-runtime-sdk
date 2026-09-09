@@ -263,6 +263,50 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
     DOOR_TIMEOUT,
   );
 
+  // ==================================================================================================
+  // RE-REVIEW, N-1 — THE REMEDY LOOP CLOSES.
+  //
+  // The door's refusal says "a runtime change mid-session is `sdk.handoff(session, "<to>")`". Taking it
+  // literally used to complete and then not take effect: `handoff()` wrote the ledger under
+  // `session:<backend uuid>` (a `SessionKey`'s `sessionId` IS the backend uuid) while `query()` reads
+  // it under `session:<winterSessionId>`, so the very next Winter query on the same handle was still
+  // refused `from=claude-agent`. It healed only after bouncing off the official leg, or a new handle.
+  // ==================================================================================================
+  test(
+    "after a certified `resumed`, the Winter query the refusal asked for is SERVED",
+    async () => {
+      await withDoorBed({ turns: [{ text: "before the handoff" }], sessionId: "door-remedy" }, async (bed) => {
+        const sdk = bed.sdkWith({
+          handoff: {
+            // A CONFIRMING DESTINATION: step 8 refuses a plan without one rather than running seven
+            // steps to reach the same answer, so a test about the transfer has to supply it.
+            participants: { destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: true }) }) },
+            leaseRoot: join(bed.session.brandHome, "runtimes", "handoff-leases"),
+            stagingRootFor: (uuid: string) => join(bed.session.brandHome, "staging", `claude-resume-${uuid}`),
+          },
+        });
+
+        // 1. the official leg runs.
+        const messages = await drain(sdk.query({ prompt: "hi", options: bed.officialOptions() }));
+        const init = messages.find((message) => message.type === "system" && message.subtype === "init") as { session_id?: string } | undefined;
+        const backendSessionId = (await sdk.directory.get(bed.address))?.backendSessionId;
+        expect(backendSessionId).toBe(init?.session_id as string);
+
+        // 2. the refusal, verbatim: this session is on claude-agent and a change is a handoff.
+        expect(() => sdk.query({ prompt: "switch", options: { runtime: { sessionId: bed.sessionId, selection: { ...doorSelection, runtimeKind: "winter-agent" } } } })).toThrow(RuntimeHandoffRequiredError);
+
+        // 3. the remedy the refusal names, through the `SessionKey` the README documents.
+        const outcome = await sdk.handoff({ projectKey: bed.projectKey, sessionId: backendSessionId as string }, "winter-agent");
+        expect(outcome.kind).toBe("resumed");
+        expect((await sdk.directory.get(bed.address))?.runtimeKind).toBe("winter-agent");
+
+        // 4. …and NOW the Winter query goes, on the same handle, with no bounce off the wrong leg.
+        for await (const _ of sdk.query({ prompt: "carry on", options: { runtime: { sessionId: bed.sessionId, selection: { ...doorSelection, runtimeKind: "winter-agent" } } } }) as AsyncIterable<unknown>) void _;
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
   test(
     "a mid-session runtime change is refused against the DURABLE row, before anything launches",
     async () => {

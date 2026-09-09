@@ -17,7 +17,7 @@
 // this bed passes no policy at all, which is the point.
 import { WinterCompatibilitySessionStore, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 
-import { createRuntimeSdk, type RouterOfficialPolicy, type RuntimeSdk, type RuntimeSdkPeers } from "../../src/index.ts";
+import { createRuntimeSdk, type RouterOfficialPolicy, type RuntimeSdk, type RuntimeSdkOptions, type RuntimeSdkPeers } from "../../src/index.ts";
 import type { RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createInMemoryRuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
@@ -65,8 +65,14 @@ export interface DoorBed {
   projectKey: string;
   /** The options a `sdk.query()` needs for the official leg, ready to spread. */
   officialOptions(over?: { sessionId?: string; withMessagingTools?: boolean }): Record<string, unknown>;
-  /** A SECOND handle over the same peers/home, with extra constructor options (a deployment policy). */
-  sdkWith(extra: { official?: RouterOfficialPolicy }): RuntimeSdk;
+  /**
+   * A SECOND handle over the same peers/home/store, with extra constructor options.
+   *
+   * `handoff` is MERGED over the bed's own (which pins `winterHome`), never spread over it: a second
+   * handle that resolved a different home would be a different shared store, which is the one wiring
+   * mistake the barrier refuses outright.
+   */
+  sdkWith(extra: { official?: RouterOfficialPolicy; handoff?: Omit<RuntimeSdkOptions["handoff"] & object, "winterHome"> }): RuntimeSdk;
 }
 
 export interface DoorBedOptions {
@@ -114,14 +120,14 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
   return withLoopbackFake({ routes }, async (fake) => {
     const directoryStore = options.directoryStore ?? createInMemoryRuntimeDirectoryStore();
     const declared = declaredClasses();
-    const build = (extra: { official?: RouterOfficialPolicy } = {}): RuntimeSdk =>
+    const build = (extra: { official?: RouterOfficialPolicy; handoff?: Omit<RuntimeSdkOptions["handoff"] & object, "winterHome"> } = {}): RuntimeSdk =>
       createRuntimeSdk({
         peers: doorPeers(runtime.module),
         keychain: createFakeKeychain([{ ref: DOOR_CREDENTIAL, material: "sk-ant-loopback" }]),
         directoryStore,
         vendoredOfficialRuntime: runtime.executable,
         // ONE HOME for the shared store, the spool and every seam that resolves through the context.
-        handoff: { winterHome: session.brandHome },
+        handoff: { winterHome: session.brandHome, ...(extra.handoff ?? {}) },
         messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
         ...(extra.official === undefined ? {} : { official: extra.official }),
       });

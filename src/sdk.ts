@@ -454,13 +454,24 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     },
     async handoff(session, to) {
       assertLive("handoff");
-      const plan = await internals.barrier.plan(session, to);
-      const outcome = await internals.barrier.execute(plan);
+      // THE LOCAL `barrier`, not `internals.barrier`, and the difference is load-bearing: the handle's
+      // `execute()` returns a `DetailedHandoffOutcome`, which carries the ROW the transfer moved. The
+      // seam's narrower `HandoffOutcome` does not, and that is what forced the wrong key below.
+      const plan = await barrier.plan(session, to);
+      const outcome = await barrier.execute(plan);
       // THE LEDGER FOLLOWS THE CERTIFIED TRANSFER, and only it. A handoff that ended in a lossy fork
       // offer or a refusal did NOT move the session, so the door must go on refusing the new runtime —
       // updating the ledger on anything but `resumed` would turn a failed handoff into the silent
       // switch the ledger exists to prevent.
-      if (outcome.kind === "resumed") persistedRuntime.set(sessionLedgerKey(session.sessionId), to);
+      //
+      // KEYED BY THE ROW THE BARRIER MOVED (re-review, N-1). `SessionKey.sessionId` is the BACKEND
+      // uuid — the README says so, and I-2 is what made a host able to obtain it — while `query()`
+      // keys the same session by its WINTER session id. So a certified `resumed` wrote
+      // `session:<backend uuid>` and the very next Winter query, on the same handle, was still refused
+      // `from=claude-agent`: the door's own remedy ("a runtime change mid-session is
+      // `sdk.handoff(session, …)`") named a route that completed and then did not take effect. Step 8
+      // already knows which row it transferred, so the ledger uses that address.
+      if (outcome.kind === "resumed") persistedRuntime.set(outcome.target?.address ?? sessionLedgerKey(session.sessionId), to);
       return outcome;
     },
     async dispose() {
