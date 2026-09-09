@@ -30,7 +30,7 @@ import type { BrandProfile, Options, Query, SessionKey } from "@yanlinglabs/wint
 import { RuntimeSdkDisposedError } from "./errors.ts";
 import type { SeamContext, SeamContextWithDirectory } from "./seams/context.ts";
 import type { OfficialSdkModule } from "./seams/official-sdk-shapes.ts";
-import type { GlobalMessaging } from "./seams/global-messaging.ts";
+import type { GlobalMessagingHandle } from "./messaging/router.ts";
 import type { HandoffBarrier, HandoffOutcome } from "./seams/handoff.ts";
 import type { KeychainSeam } from "./seams/keychain.ts";
 import type { MaterializedResumeDecorator } from "./seams/materialized-resume.ts";
@@ -39,7 +39,9 @@ import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryStore } from "./seams/directory-store.ts";
 import { createInMemoryRuntimeDirectoryStore } from "./seams/directory-store.ts";
 import { createRuntimeMessaging } from "./messaging/index.ts";
+import type { GlobalMessagingOptions, RuntimeDirectoryOptions } from "./messaging/index.ts";
 import { createHandoffBarrier } from "./store/index.ts";
+import type { HandoffBarrierDeps } from "./store/index.ts";
 import { createOfficialAdapter } from "./official/adapter.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
@@ -91,15 +93,32 @@ export interface RuntimeSdkOptions {
    */
   brand?: Partial<BrandProfile>;
   /**
-   * The Winter home the shared session store resolves under (Lane C's seam field, given its producer
-   * in the fix wave).
+   * The handoff barrier's collaborators (whole-branch review, F-3).
    *
-   * ABSENT IS THE PRODUCTION ANSWER: the store resolves the peer's own `resolveWinterHome()` under
-   * the resolved brand, on first use. A host passes this when it owns the layout — a test on an
-   * `mkdtemp` home, or a harness that runs several isolated products out of one process — and it
-   * reaches the barrier and its decorator through `SeamContext.winterHome`.
+   * WITHOUT THIS FIELD THE HANDLE'S `handoff()` COULD NEVER RETURN `resumed`. `HandoffBarrierDeps`
+   * carries `participants` — the source owner to drain and the destination to confirm — and the
+   * factory was called with no options at all, so `markersFor` set step 8 "no destination runtime was
+   * supplied" and every `sdk.handoff()` ended in a lossy fork. The spine's promise was one wiring
+   * line per seam; keeping it meant the lane factories were CONSTRUCTED but never CONFIGURABLE.
+   *
+   * `shared` AND `decorator` ARE NOT OFFERED, on purpose: the barrier builds both so that one store,
+   * one decoration registry and one door are structural (see `createHandoffBarrier`'s own F2 note).
+   * A host that injected a second store would get the wash-back that check exists to refuse.
+   *
+   * `winterHome` here is what fills `SeamContext.winterHome`, so the barrier, its decorator and any
+   * later seam that reads the context all resolve under the same home.
    */
-  winterHome?: string;
+  handoff?: Omit<HandoffBarrierDeps, "shared" | "decorator">;
+  /**
+   * The directory's and the router's own options (whole-branch review, F-3).
+   *
+   * WITHOUT THIS FIELD EVERY OFFICIAL RECEIVER WAS HELD FOREVER. `official.permissionClass` is the
+   * ONLY way an official session's permission class can be known — there is no facet to ask — and
+   * since D2 an unknown class fails closed, so a host that could not pass it had a `messaging` that
+   * held every message to every official session and never released it. The README sentence item 19
+   * owes ("fail-closed until `official.permissionClass` is wired") had no field to name.
+   */
+  messaging?: { directory?: RuntimeDirectoryOptions; messaging?: GlobalMessagingOptions };
 }
 
 /** Options members this package OWNS. Never forwarded to either SDK — see `query()`. */
@@ -131,8 +150,16 @@ export interface RuntimeSdk {
   selectRuntime(input: SelectionInput): RuntimeSelection;
   /** WS-15 §6.1. */
   directory: RuntimeDirectory;
-  /** WS-15 §6.2–6.4. */
-  messaging: GlobalMessaging;
+  /**
+   * WS-15 §6.2–6.4 — the HANDLE, which is the seam plus the two doors a host cannot work without.
+   *
+   * WIDENED, NEVER NARROWED (F-3). The plan pins `GlobalMessaging`, and `GlobalMessagingHandle`
+   * extends it: every pinned member is present with its pinned signature, and what is added is
+   * `attachWinterSession`/`attachOfficialSession` — without which a host can configure a receiver's
+   * permission class and still have nothing live to deliver to. Typing the field as the seam meant
+   * the one door the package exists for could be reached only through a cast.
+   */
+  messaging: GlobalMessagingHandle;
   /** WS-05 §12's mechanics; the host renders the outcome (R-7b-3). */
   handoff(session: SessionKey, to: RuntimeKind): Promise<HandoffOutcome>;
   readonly versions: VersionMatrixReport;
@@ -219,16 +246,18 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     brand,
     directoryStore,
     ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
-    ...(opts.winterHome === undefined ? {} : { winterHome: opts.winterHome }),
+    // The barrier's home IS the context's home (F-3): one field, so the store the barrier resolves and
+    // the store any later seam resolves through the context cannot end up being two.
+    ...(opts.handoff?.winterHome === undefined ? {} : { winterHome: opts.handoff.winterHome }),
   };
   // LANES B AND C ARE LANDED (controller wiring, one commit): the directory and the messaging router
   // come from ONE factory (the directory's child view delivers through the router while the router
   // resolves through the directory -- a real circularity closed by a late binding inside
   // `createRuntimeMessaging`); the barrier OWNS its decorator so one store, one decoration registry
   // and one door are structural (`decorator: barrier.decorator` is load-bearing, not a shortcut).
-  const { directory, messaging } = createRuntimeMessaging(base);
+  const { directory, messaging } = createRuntimeMessaging(base, opts.messaging ?? {});
   const context: SeamContextWithDirectory = { ...base, directory };
-  const barrier = createHandoffBarrier(context);
+  const barrier = createHandoffBarrier(context, opts.handoff ?? {});
 
   // ONE WIRING LINE PER SEAM. A lane replaces the right-hand side and nothing else in this file
   // moves; see `seams/stubs.ts`'s own header for why the indirection exists.

@@ -5,20 +5,20 @@
 // `NotImplementedYet` naming its own lane, and the in-memory `RuntimeDirectoryStore` — the default,
 // and the store every hermetic test uses — behaves like a store rather than like a placeholder.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { NotImplementedYet } from "../../src/errors.ts";
-import { HandoffPlanError, type HandoffBarrierHandle } from "../../src/store/index.ts";
+import { HandoffPlanError, createSharedSessionStore, resolveEngineTempLayout, type HandoffBarrierHandle } from "../../src/store/index.ts";
 import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubOfficialAdapter, stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { SeamContext, SeamContextWithDirectory } from "../../src/seams/context.ts";
 import type { DeliveryRecord, IdleSubscriptionRecord, NameLeaseRecord, RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 import type { GlobalAgentMessage } from "../../src/seams/messaging-contract.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import { WinterCompatibilitySessionStore, WINTER_BRAND, type SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import { WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
 const keychain = createFakeKeychain();
 
@@ -200,7 +200,7 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
           throw new Error("a hermetic test must never resolve the real Winter home");
         },
       } as unknown as typeof peer;
-      const sdk = createRuntimeSdk({ peers: { winter }, keychain, winterHome: home });
+      const sdk = createRuntimeSdk({ peers: { winter }, keychain, handoff: { winterHome: home } });
       const internals = runtimeSdkInternals(sdk)!;
       expect(internals.context.winterHome).toBe(home);
       // `internals.barrier` is typed as the SEAM (deliberately -- the seam is the contract), so
@@ -218,6 +218,115 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     expect(runtimeSdkInternals(sdk)?.context.winterHome).toBeUndefined();
+  });
+
+  // ==================================================================================================
+  // F-3 — WIRED FOR CONSTRUCTION IS NOT WIRED FOR CONFIGURATION.
+  //
+  // Every lane factory was CALLED from `createRuntimeSdk` — the spine's promise, kept — and none of
+  // them could be given its own options, because `RuntimeSdkOptions` had no field for them. The two
+  // consequences were not subtle and neither had a test: `handoff()` could never return `resumed`
+  // (no `participants` means step 8 is "no destination runtime was supplied", so every handoff ended
+  // in a lossy fork), and `messaging` could never deliver to an official session (no
+  // `official.permissionClass` means an unknown class, which since D2 fails closed and HOLDS). The
+  // README sentence item 19 owes had no constructor field to name.
+  // ==================================================================================================
+  test("F-3 — a handoff through the HANDLE reaches `resumed` when the host supplies participants", async () => {
+    const home = mkdtempSync(join(tmpdir(), "runtime-sdk-f3-"));
+    try {
+      const { peer } = createFakeWinterPeer();
+      const winter = {
+        ...peer,
+        WinterCompatibilitySessionStore,
+        resolveWinterHome: () => {
+          throw new Error("a hermetic test must never resolve the real Winter home");
+        },
+      } as unknown as typeof peer;
+      const directoryStore = createInMemoryRuntimeDirectoryStore();
+      const ok = { ok: true as const, detail: "the fixture confirms" };
+      const sdk = createRuntimeSdk({
+        peers: { winter },
+        keychain,
+        directoryStore,
+        handoff: {
+          winterHome: home,
+          participants: {
+            source: () => ({ runtimeKind: "winter-agent" as const, drainToIdleBoundary: () => ok, drainStream: () => ok, close: () => ok }) as never,
+            destination: () => ({ runtimeKind: "claude-agent" as const, confirmInit: () => ok }),
+          },
+          stagingRootFor: (uuid) => join(home, "staging", uuid),
+          // The REAL layout resolver over a temp root, not a hand-rolled shape: step 7 materializes
+          // against it, and a fixture that merely looks like the type fails there.
+          tempLayoutFor: () => {
+            const tempBase = join(home, "temp");
+            mkdirSync(tempBase, { recursive: true });
+            return resolveEngineTempLayout({ brand: WINTER_BRAND, tempProjectKey: key.projectKey, backendUuid: key.sessionId, uid: 4242, env: { [envName(WINTER_BRAND, "TMPDIR")]: tempBase } });
+          },
+        },
+      });
+      const key: SessionKey = { projectKey: "-f3", sessionId: "11111111-2222-4333-8444-555555555555" };
+      const address = `session:${key.sessionId}`;
+      await directoryStore.upsert({ ...entry(address), backendSessionId: key.sessionId });
+      // A real store under a real (temp) home, so this is the handle's own path end to end.
+      const shared = createSharedSessionStore({ peers: { winter }, winterHome: home });
+      await shared.store.append(key, [
+        {
+          type: "user",
+          uuid: "11111111-1111-4111-8111-111111111111",
+          parentUuid: null,
+          sessionId: key.sessionId,
+          timestamp: new Date(0).toISOString(),
+          cwd: "/f3",
+          version: "0.0.0",
+          isSidechain: false,
+          message: { role: "user", content: "hi" },
+        } as never,
+      ]);
+      await shared.settle(key);
+
+      const outcome = await sdk.handoff(key, "claude-agent");
+      // BEFORE F-3 this was ALWAYS `lossy-fork-offered` at step 8, for every host, with no way to fix it.
+      expect(outcome.kind).toBe("resumed");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("F-3 — an official receiver with a DECLARED class is delivered to, not held", async () => {
+    const { peer } = createFakeWinterPeer();
+    const directoryStore = createInMemoryRuntimeDirectoryStore();
+    const officialRow = { ...entry("session:official-receiver"), runtimeKind: "claude-agent" as const, transport: "claude-handle" as const, status: "idle" as const };
+    officialRow.parsed = { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: "official-receiver" };
+    const sdk = createRuntimeSdk({
+      peers: { winter: peer },
+      keychain,
+      directoryStore,
+      messaging: {
+        messaging: {
+          // The hook that had no door. Without it every message to an official session is HELD.
+          official: { permissionClass: () => "prompts" as const },
+          winter: { permissionClass: () => "prompts" as const },
+        },
+      },
+    });
+    await directoryStore.upsert(entry("session:sender"));
+    await directoryStore.upsert(officialRow);
+    const delivered: string[] = [];
+    sdk.messaging.attachOfficialSession("session:official-receiver", {
+      status: () => "idle",
+      push: async (text: string) => {
+        delivered.push(text);
+      },
+    } as never);
+
+    const outcome = await sdk.messaging.send({
+      from: { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: "sender" },
+      to: "session:official-receiver",
+      body: "hi",
+      originToolCallId: "toolu-f3",
+    });
+    expect(outcome.status).not.toBe("held");
+    expect(delivered.length).toBeGreaterThan(0);
   });
 
   test("a NotImplementedYet says what it is about, not just that it is missing", () => {
