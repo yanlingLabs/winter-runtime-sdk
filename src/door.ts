@@ -738,6 +738,7 @@ function deferredOfficialQuery({ start, onClose, onMessage, onEnd }: DeferredQue
   const target: OfficialQuery & { close(): void } = {
     async *[Symbol.asyncIterator]() {
       const query = await ready();
+      let faulted = false;
       try {
         for await (const message of query) {
           await onMessage?.(message);
@@ -746,10 +747,19 @@ function deferredOfficialQuery({ start, onClose, onMessage, onEnd }: DeferredQue
       } catch (error) {
         // A generation that ENDED IN A FAULT is `unavailable`, not `exited`: the two are different
         // answers to "can this be resumed", and WS-15 §6.4's restart recovery reads the difference.
+        faulted = true;
         await onEnd?.("unavailable");
         throw error;
+      } finally {
+        // A `finally`, BECAUSE A HOST'S `break` IS NOT AN ERROR AND IS NOT THE END OF THE LOOP
+        // (re-review, N-2). `for await (const m of query) { if (m.type === "result") break; }` — the
+        // shape the vendor's own examples use — calls this generator's `return()`, which runs neither
+        // the code after the loop nor the `catch`. So the row stayed `running`, a streaming session
+        // stayed attached and listed, and a delivery into that stale handle blocked on the input
+        // stream's backpressure instead of answering. `markEnded` is idempotent, so the fault arm
+        // above still wins the reason.
+        if (!faulted) await onEnd?.("exited");
       }
-      await onEnd?.("exited");
     },
     interrupt: async () => (await ready()).interrupt(),
     close: () => {
