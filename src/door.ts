@@ -37,7 +37,7 @@
 //   5. NOTHING HERE CACHES A CREDENTIAL. `fetchAuthCredentials` returns material to one caller, this
 //      module puts it in the child environment, and the object is dropped when the launch returns.
 import type { BrandProfile, CredentialRef, Options, ProviderSelection, Query } from "@yanlinglabs/winter-agent-sdk";
-import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
+import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "./errors.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
@@ -50,6 +50,7 @@ import { buildOfficialOptions, type OptionsTemplatePolicy } from "./official/opt
 import { officialSpoolRoot } from "./official/spool.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryEntry } from "./seams/directory-store.ts";
+import type { RuntimeAddress } from "./seams/messaging-contract.ts";
 import type { OfficialLaunchPlan, OfficialLaunchProfile, OfficialSession, RemoteConfigPolicy } from "./seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialUserMessage } from "./seams/official-sdk-shapes.ts";
 import type { RuntimeSelection } from "./selection/runtime-selection.ts";
@@ -96,6 +97,19 @@ export interface RouterOfficialInput {
    * send to is worse than no listing at all (`UnaddressableEntryError`'s own note).
    */
   sessionId: string;
+  /**
+   * R-7b-1: this session is a CHILD of `parentSessionId`, on its own runtime.
+   *
+   * "A child runs on the runtime its OWN slot's family selects at spawn time, independent of the
+   * parent's runtime" — so a `claude`-family child of a Winter parent is not a native subagent inside
+   * another official process, it is an official session in its own right, addressed as
+   * `agent:<parent>:<sessionId>` with `transport: "claude-handle"`. That transport is the field WS-15
+   * §6.1 uses to tell the two apart, and Lane B's official adapter branches on it: a `claude-handle`
+   * child is delivered to DIRECTLY, a `claude-child` only through its owning parent.
+   *
+   * Absent = a top-level session, addressed `session:<sessionId>`.
+   */
+  parentSessionId?: string;
   /**
    * Secret variables for families whose mapping this module cannot derive — a cloud credential chain,
    * or a `custom` family, whose set is open by design (WS-14 §12).
@@ -291,7 +305,8 @@ export interface OfficialLegRequest {
  */
 export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegRequest): OfficialQuery {
   const branchLabel = officialBranchLabel(deps.brand);
-  const address = serializeRuntimeAddress(buildSessionAddress(request.input.sessionId));
+  const parsed = request.input.parentSessionId === undefined ? buildSessionAddress(request.input.sessionId) : buildChildAddress(request.input.parentSessionId, request.input.sessionId);
+  const address = serializeRuntimeAddress(parsed);
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
   const stream = typeof request.prompt === "string" ? undefined : createOfficialInputStream();
   let detach: (() => void) | undefined;
@@ -414,7 +429,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // PERSISTED SELECTION (D13), and a host asking `messaging.listReachable()` between the launch and
     // the first message must not be told the session does not exist. `record()` merges rather than
     // replaces, so the sink's later write lands on top of this one.
-    await deps.directory.record(directoryRowFor({ address, selection: request.selection, cwd, input: request.input, remoteConfig }));
+    await deps.directory.record(directoryRowFor({ address, parsed, selection: request.selection, cwd, input: request.input, remoteConfig }));
 
     // THE PUMP STARTS WITH THE LAUNCH, NOT WITH THE CALL. `query()` promises the Winter leg that a
     // caller's iterable is "never drained on the way past"; the official leg must drain it (the vendor
@@ -440,13 +455,15 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
 }
 
 /** The launch's own directory row: identity, persisted selection (D13), and R-7b-11's recorded choice. */
-function directoryRowFor(args: { address: string; selection: RuntimeSelection; cwd: string; input: RouterOfficialInput; remoteConfig: RemoteConfigPolicy }): RuntimeDirectoryEntry {
+function directoryRowFor(args: { address: string; parsed: RuntimeAddress; selection: RuntimeSelection; cwd: string; input: RouterOfficialInput; remoteConfig: RemoteConfigPolicy }): RuntimeDirectoryEntry {
   return {
     address: args.address,
-    parsed: buildSessionAddress(args.input.sessionId),
+    parsed: args.parsed,
     runtimeKind: "claude-agent",
-    objectKind: "session",
-    // WS-14's own preamble: "every claude-agent session is a child process".
+    objectKind: args.parsed.objectKind,
+    // WS-14's own preamble: "every claude-agent session is a child process" — and R-7b-1's
+    // cross-runtime CHILD is one of those in its own right, which is what `claude-handle` says (a
+    // native subagent living inside another official session would be `claude-child`).
     transport: "claude-handle",
     status: "running",
     mode: "code",
@@ -454,6 +471,7 @@ function directoryRowFor(args: { address: string; selection: RuntimeSelection; c
     selection: args.selection,
     remoteConfig: args.remoteConfig,
     cwd: args.cwd,
+    ...(args.input.parentSessionId === undefined ? {} : { parentAddress: serializeRuntimeAddress(buildSessionAddress(args.input.parentSessionId)) }),
     ...(args.input.displayName === undefined ? {} : { displayName: args.input.displayName }),
     capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
     updatedAt: new Date().toISOString(),
