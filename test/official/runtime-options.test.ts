@@ -20,7 +20,7 @@ import type { SeamContextWithDirectory } from "../../src/seams/context.ts";
 import { stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
-import { cleanupHermetic, hermeticSession, officialRuntimeBed, scriptedLoopback } from "./support.ts";
+import { cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -65,7 +65,7 @@ describeRuntime("WS-14 §2 — the settings layer is the door (review r1, m3)", 
         const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
         // The template policy rides on the ADAPTER (the seam's `buildOptions` takes one argument), so
         // this is also how a host would set it.
-        const adapter = createOfficialAdapter(context, { options: { settings: { model: FLAG_LAYER_MODEL } } });
+        const adapter = createOfficialAdapter(context, { ...hermeticEnvPolicy(), options: { settings: { model: FLAG_LAYER_MODEL } } });
         const env = adapter.buildChildEnv({
           selection,
           configDir: session.spool,

@@ -7,13 +7,29 @@
 // upon." `docs/probes/d29-advisor.md` is that record; this file is what produces it, so the record
 // can be re-derived rather than believed.
 //
-// HERMETIC, AND THE FAKE IS THE PROOF (R-7b-6). The runtime is handed a REPLACEMENT environment of
-// exactly four variables (`officialCaptureEnv`): `ANTHROPIC_BASE_URL` pointing at a `127.0.0.1` fake
+// HERMETIC — AND THE FAKE ALONE WAS NOT ENOUGH (whole-branch review, F-1). The runtime is handed a
+// REPLACEMENT environment (`officialCaptureEnv`): `ANTHROPIC_BASE_URL` pointing at a `127.0.0.1` fake
 // from `@yanlinglabs/winter-provider-conformance`, an obviously-fake key, a fresh `CLAUDE_CONFIG_DIR`
 // and a fresh `HOME` — the last one because `os.homedir()` falls back to the OS user database and
-// would otherwise reach the real user's home regardless of the config dir. Every working directory is
-// an `mkdtemp` removed in a `finally`, `settingSources: []` reads no settings file at any level, and
-// every request the runtime makes is recorded on the fake. No real key, no real endpoint, no network.
+// would otherwise reach the real user's home regardless of the config dir — PLUS the artifact's four
+// traffic opt-outs. Every working directory is an `mkdtemp` removed in a `finally`, `settingSources:
+// []` reads no settings file at any level, and every request the runtime makes is recorded on the
+// fake.
+//
+// THE OPT-OUTS ARE NOT HYGIENE, THEY ARE THE MEASUREMENT. This probe's first version set four
+// variables and claimed "no network"; the claim was false for the CHILD, which fetches remote feature
+// configuration from its own CDN over a connection the fake never sees. Measured, same binary, same
+// options, same fake, nine runs: with the fetch allowed the request carries 25 tools INCLUDING
+// `advisor_20260301:advisor`; with the opt-outs set it carries 21 and no advisor. So the original
+// verdict — "the advisor appears on the wire exactly when the session configures an advisor model" —
+// was a statement about a CDN's answer that minute, not about the pinned artifact; it also made the
+// suite red whenever the fetch timed out (the "flake seen twice in ~20 runs").
+//
+// SO THERE ARE TWO LEGS, AND ONLY ONE OF THEM RUNS BY DEFAULT. The hermetic leg is the ruling's
+// evidence: what 0.3.250 does when it is only itself. The remote-configuration leg is kept, labelled,
+// and gated behind `WINTER_D29_ALLOW_REMOTE_CONFIG=1`, because "a remotely-flagged capability" is
+// itself a finding worth being able to re-derive — it is just not a property of the pin. D29's own
+// split is unaffected either way: there is nothing client-side to alias under either condition.
 //
 // THE PINNED ARTIFACT, NOT WHATEVER IS ON PATH. `pathToClaudeCodeExecutable` is set explicitly to the
 // platform binary inside THIS repository's `node_modules` (WS-14 §5.1: "the vendored runtime — never
@@ -58,7 +74,17 @@ interface ConditionResult {
   userAgent: string;
 }
 
-type Probe = { ok: true; sdkVersion: string; binary: string; results: ConditionResult[] } | { ok: false; reason: string };
+type Probe = { ok: true; sdkVersion: string; binary: string; results: ConditionResult[]; remote: ConditionResult[] } | { ok: false; reason: string };
+
+/**
+ * The ONE non-hermetic leg, off by default (F-1).
+ *
+ * `WINTER_D29_ALLOW_REMOTE_CONFIG=1` re-runs the three advisor-configuring conditions with the
+ * traffic opt-outs removed, so the remote-configuration observation can be re-derived on demand. It
+ * is never on in CI or in an ordinary `bun test`: a leg that reaches a CDN is a leg whose result
+ * depends on someone else's deployment, and the ruling may not rest on that.
+ */
+const ALLOW_REMOTE_CONFIG = process.env["WINTER_D29_ALLOW_REMOTE_CONFIG"] === "1";
 
 /** The platform package that carries the runtime binary, resolved FROM the SDK package's own dir. */
 function resolvePinnedBinary(sdkPackageDir: string): string | undefined {
@@ -138,7 +164,12 @@ const CONDITIONS: ConditionSpec[] = [
   },
 ];
 
-async function runCondition(sdk: { query: (args: { prompt: string; options: Record<string, unknown> }) => AsyncIterable<Record<string, unknown>> }, binary: string, spec: ConditionSpec): Promise<ConditionResult> {
+async function runCondition(
+  sdk: { query: (args: { prompt: string; options: Record<string, unknown> }) => AsyncIterable<Record<string, unknown>> },
+  binary: string,
+  spec: ConditionSpec,
+  allowRemoteConfig = false,
+): Promise<ConditionResult> {
   const root = mkdtempSync(join(tmpdir(), "winter-d29-"));
   try {
     const home = mkdtempSync(join(root, "home-"));
@@ -160,7 +191,7 @@ async function runCondition(sdk: { query: (args: { prompt: string; options: Reco
               // WS-14 §5.1 / R-7b-6: the package's own bundled runtime, never the user's.
               pathToClaudeCodeExecutable: binary,
               abortController,
-              env: { ...officialCaptureEnv({ baseUrl: fake.url, claudeConfigDir, home }), ...spec.env },
+              env: { ...officialCaptureEnv({ baseUrl: fake.url, claudeConfigDir, home, allowRemoteConfig }), ...spec.env },
               ...spec.options,
             },
           });
@@ -189,7 +220,7 @@ async function runCondition(sdk: { query: (args: { prompt: string; options: Reco
         }
         const messagesRequest = fake.requests.find((request) => request.path === "/v1/messages");
         return {
-          label: spec.label,
+          label: allowRemoteConfig ? `${spec.label} [REMOTE CONFIG ALLOWED]` : spec.label,
           conditions: spec.conditions,
           userAgent: messagesRequest?.headers["user-agent"] ?? "(none observed)",
           initTools,
@@ -234,7 +265,17 @@ async function prepareProbe(): Promise<Probe> {
       return { ok: false, reason: `condition ${spec.label} could not run: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
-  return { ok: true, sdkVersion, binary, results };
+  const remote: ConditionResult[] = [];
+  if (ALLOW_REMOTE_CONFIG) {
+    for (const spec of CONDITIONS.filter((candidate) => ["E ", "F ", "G "].some((prefix) => candidate.label.startsWith(prefix)))) {
+      try {
+        remote.push(await runCondition(sdk, binary, spec, true));
+      } catch (error) {
+        return { ok: false, reason: `the remote-config leg for ${spec.label} could not run: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+  }
+  return { ok: true, sdkVersion, binary, results, remote };
 }
 
 const probe = await prepareProbe();
@@ -294,24 +335,48 @@ describe("D29 — does the pinned official runtime expose an advisor server tool
     }
   });
 
-  test("D29 — configuring an advisor model adds a SERVER-tool schema to the endpoint request", () => {
+  test("D29 — configuring an advisor model puts NOTHING advisor-shaped on the wire (the pinned artifact, alone)", () => {
+    // THE CORRECTED VERDICT (F-1). The first version of this test asserted the opposite and was
+    // measuring the artifact PLUS its remote feature configuration; with the traffic opt-outs set,
+    // `settings.advisorModel`, `tools: []` beside it and the `--advisor` CLI flag all put no advisor
+    // entry on the endpoint request at all. The advisor is a REMOTELY-FLAGGED capability, not a
+    // property of the pin.
     for (const prefix of ["E ", "F ", "G "]) {
       const result = byLabel(prefix);
-      const advisor = result.wireTools.filter((name) => ADVISOR.test(name));
-      expect({ label: result.label, count: advisor.length }).toEqual({ label: result.label, count: 1 });
-      // A versioned server-tool `type` beside the bare `name` — the shape of an API-side tool, not of
-      // a client tool the host could implement, alias or deny.
-      expect(advisor[0]).toMatch(/^advisor_\d+:advisor$/);
+      expect({ label: result.label, advisor: result.wireTools.filter((name) => ADVISOR.test(name)) }).toEqual({ label: result.label, advisor: [] });
       expect(result.initTools.filter((name) => ADVISOR.test(name))).toEqual([]);
     }
+    // NOT VACUOUS: conditions E and G really did reach the endpoint with a full ordinary tool set —
+    // it is the advisor that is missing, not the request.
+    expect(byLabel("E ").wireTools.length).toBeGreaterThan(0);
+    expect(byLabel("G ").wireTools.length).toBeGreaterThan(0);
   });
 
-  test("D29 — the advisor server tool is independent of the client tool set entirely", () => {
-    // `tools: []` turns every builtin off. The advisor entry survives, and in that condition it is the
-    // ONLY tool on the wire — so no allow/deny surface the host controls can remove it.
-    const result = byLabel("F ");
-    expect(result.initTools.length).toBe(0);
-    expect(result.wireTools).toEqual([expect.stringMatching(/^advisor_\d+:advisor$/)]);
+  test("D29 — no advisor appears in ANY hermetic condition, on the wire or in the inventory", () => {
+    // The single sentence the ruling rests on, asserted over all nine conditions at once rather than
+    // per-prefix, so a condition added later cannot slip past the set this file happens to name.
+    const offenders = probe.results.filter((result) => [...result.wireTools, ...result.initTools].some((name) => ADVISOR.test(name)));
+    expect(offenders.map((result) => result.label)).toEqual([]);
+    expect(probe.results.length).toBe(CONDITIONS.length);
+  });
+
+  test("the remote-configuration leg, when it is explicitly enabled, shows what the CDN adds", () => {
+    if (!ALLOW_REMOTE_CONFIG) {
+      console.log("[d29] the remote-config leg is OFF (set WINTER_D29_ALLOW_REMOTE_CONFIG=1 to re-derive it); the hermetic legs above are the ruling's evidence");
+      expect(probe.remote).toEqual([]);
+      return;
+    }
+    for (const result of probe.remote) {
+      console.log(`[d29] ${result.label}\n        wire tools (${result.wireTools.length}): ${result.wireTools.join(", ")}\n        advisor on the wire: ${JSON.stringify(result.wireTools.filter((name) => ADVISOR.test(name)))}`);
+    }
+    // NOT ASSERTED AS A FACT ABOUT THE PIN. The leg reaches a live CDN, so its result is somebody
+    // else's deployment state: what is asserted is only that it RAN and that its inventory differs
+    // from the hermetic one — the finding being "the tool surface is remotely mutable under one pin".
+    expect(probe.remote.length).toBe(3);
+    const hermeticE = byLabel("E ");
+    const remoteE = probe.remote.find((result) => result.label.startsWith("E "));
+    expect(remoteE).toBeDefined();
+    console.log(`[d29] hermetic E had ${hermeticE.wireTools.length} wire tools; the remote-config leg had ${remoteE?.wireTools.length ?? 0}`);
   });
 
   test("D29 — an advisor server_tool_use in the response reaches the SDK consumer verbatim", () => {

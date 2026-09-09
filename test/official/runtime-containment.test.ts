@@ -27,7 +27,7 @@ import { CONTAINMENT_FLOOR_MARK, createApprovalBridge, type ApprovalBroker, type
 import type { ContainmentPolicy } from "../../src/official/containment.ts";
 import type { ContainmentBreach } from "../../src/official/sweep.ts";
 import type { OfficialOptions } from "../../src/seams/official-sdk-shapes.ts";
-import { cleanupHermetic, decoyUntouched, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
+import { cleanupHermetic, decoyUntouched, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -84,7 +84,7 @@ async function runContainment(args: {
   await withLoopbackFake({ routes }, async (fake) => {
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore: createInMemoryRuntimeDirectoryStore() };
     const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
-    const adapter = createOfficialAdapter(context, args.adapterPolicy ?? {});
+    const adapter = createOfficialAdapter(context, { ...hermeticEnvPolicy(), ...(args.adapterPolicy ?? {}) });
     await adapter.ready();
 
     const templateInput = {

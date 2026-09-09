@@ -25,7 +25,7 @@ import { createOfficialAdapter, type OfficialSessionHandle } from "../../src/off
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
 import { buildOfficialChildEnv } from "../../src/official/env-allowlist.ts";
 import { AUTH_FAMILY_VARIABLES } from "../../src/official/auth.ts";
-import { cleanupHermetic, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type HermeticSession, type ScriptedTurn } from "./support.ts";
+import { cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -95,7 +95,7 @@ async function runScenario(args: {
   await withLoopbackFake({ routes }, async (fake) => {
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore: createInMemoryRuntimeDirectoryStore() };
     const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
-    const adapter = createOfficialAdapter(context);
+    const adapter = createOfficialAdapter(context, hermeticEnvPolicy());
     await adapter.ready();
     const env = adapter.buildChildEnv({
       selection,

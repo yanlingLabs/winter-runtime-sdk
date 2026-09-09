@@ -23,7 +23,7 @@ import { acceptNativeSendMessageArgs, aliasDenyNames, officialToolAliases } from
 import { officialDisallowedTools } from "../../src/official/containment.ts";
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
 import { officialMcpServers, winterMcpServerDescriptor, type WinterMcpHandler } from "../../src/official/mcp-descriptors.ts";
-import { advertisedToolNames, cleanupHermetic, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type ScriptedTurn } from "./support.ts";
+import { advertisedToolNames, cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -82,7 +82,7 @@ async function runSession(args: {
     const directoryStore = createInMemoryRuntimeDirectoryStore();
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore };
     const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
-    const adapter = createOfficialAdapter(context);
+    const adapter = createOfficialAdapter(context, hermeticEnvPolicy());
     await adapter.ready();
 
     const descriptor = winterMcpServerDescriptor({

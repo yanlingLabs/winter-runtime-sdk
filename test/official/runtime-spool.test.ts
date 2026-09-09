@@ -27,7 +27,7 @@ import { createOfficialAdapter } from "../../src/official/index.ts";
 import { directoryRecordSink, type SpawnObservation } from "../../src/official/spawn-proxy.ts";
 import { vendorTempRootReport } from "../../src/official/spool.ts";
 import { isResumeStagingRoot } from "../../src/vendor-paths.ts";
-import { cleanupHermetic, decoyUntouched, hermeticSession, officialRuntimeBed, scriptedLoopback, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
+import { cleanupHermetic, decoyUntouched, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -91,6 +91,7 @@ async function runSpoolSession(args: {
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore };
     const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
     const adapter = createOfficialAdapter(context, {
+      ...hermeticEnvPolicy(),
       sink: directoryRecordSink({ store: directoryStore, address: args.address }),
       // §6 RULE 3's COLLABORATOR, and the assertion row 15 is about: the recorded root must still be
       // on disk when reconciliation runs, because the wrapper deletes `claude-resume-*` on observing
