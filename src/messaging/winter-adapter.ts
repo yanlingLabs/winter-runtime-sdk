@@ -192,11 +192,26 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
     return deliveryUncertain(message.messageId, "the resumed session ended without producing a turn, so whether the message was delivered cannot be established");
   }
 
+  /**
+   * WS-10 §14, per address: can THIS session's idleness actually be subscribed to?
+   *
+   * A top-level session with a live FACET can — the runtime pushes the notice and the router routes
+   * it. A facet-less one (a session driven through a plain input-stream writer, or one with a record
+   * and no handle) cannot, and neither can a child. The dispatcher reads this to clear the row's
+   * capability flag BEFORE the core checks it, so the refusal covers the whole call.
+   */
+  function canSubscribeIdle(address: RuntimeAddress): boolean {
+    if (address.objectKind !== "session") return false;
+    return deps.sessions.get(serializeRuntimeAddress(address))?.messaging !== undefined;
+  }
+
   return {
     sessions: deps.sessions,
     // The engine IS the session-status event source (Task 0's self-peer registers with
-    // `hasReliableIdleSignal: true`), so this branch can honestly back a subscription.
+    // `hasReliableIdleSignal: true`), so this branch can honestly back a subscription — for a session
+    // it holds a FACET for. `canSubscribeIdle` is that qualification, per address (review r2, NEW-2).
     supportsIdleSubscriptions: true,
+    canSubscribeIdle,
 
     /**
      * The LIVE view this adapter owns: status for the addresses it actually holds a handle for.
@@ -240,13 +255,14 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
       if (address.objectKind !== "session") {
         return refused(request.messageId, "notify_when_idle targets a top-level session only; a subagent is never a valid target (WS-10 §14)");
       }
-      const handle = deps.sessions.get(key);
-      if (handle?.messaging === undefined) {
-        // "Adapters without a reliable idle signal MUST refuse the ENTIRE call" (WS-10 §14). A session
-        // this process holds no facet for has no idle signal at all, and a `subscribed` here would be
-        // a promise with no mechanism behind it.
+      // THE SAME PREDICATE the dispatcher clears the row's capability flag with, so the two can never
+      // disagree — which is what let a body be delivered and only the subscription refused (NEW-2).
+      if (!canSubscribeIdle(address)) {
         return refused(request.messageId, `${key} is not live in this process, so there is no idle signal to subscribe to (WS-10 §14)`);
       }
+      const handle = deps.sessions.get(key);
+      /* c8 ignore next */
+      if (handle?.messaging === undefined) return refused(request.messageId, `${key} is not live in this process, so there is no idle signal to subscribe to (WS-10 §14)`); // unreachable: canSubscribeIdle just checked it
       return handle.messaging.subscribeIdle(key, { messageId: request.messageId });
     },
 

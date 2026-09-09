@@ -284,6 +284,24 @@ describe("one envelope, one answer: attribution before any push (review r1, D1)"
     expect(writer.pushed[0]).toContain('from="agent:parent:c1"');
   });
 
+  test("NEW-4 — a sender address the router cannot even NAME is a refusal, not a crash window", async () => {
+    // D1's shape for the OTHER malformation: an `agent:` sender with no `childId` cannot be serialized
+    // at all, and the throw used to land in `dispatchEnvelope`'s catch as `delivery_uncertain` — "the
+    // delivery may have occurred" about an envelope that never reached an adapter. Reachable only
+    // through the host's `deliver()`/`reply()` doors with a hand-built address, never by a model.
+    const world = bedWith();
+    const writer = winterWriterHandle(() => "idle");
+    await world.directory.record(sessionEntry("receiver"));
+    world.messaging.attachWinterSession("session:receiver", writer.handle);
+
+    const outcome = await world.messaging.deliver(
+      envelope({ messageId: "m-malformed", from: { objectKind: "agent", runtimeKind: "winter-agent", winterSessionId: "s", parentWinterSessionId: "s" }, to: sessionAddress("receiver") }),
+    );
+    expect(outcome.status).toBe("refused");
+    if (outcome.status === "refused") expect(outcome.reason).toContain("not a canonical address");
+    expect(writer.pushed.length).toBe(0);
+  });
+
   test("the official OWNER-QUALIFIED child relay keeps its deliberate absence of an owner", async () => {
     // A message FOR a child is handed to the parent that owns the child but NOT the sender — the one
     // place the owner check must not run, and the reason `renderOwnerQualifiedTurn` takes no owner.

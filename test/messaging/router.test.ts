@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { MAX_GLOBAL_MESSAGE_SIZE, MAX_HOP_COUNT, RAPID_REPEAT_WINDOW_MS, NOTIFY_IDLE_EXPIRY_MS } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { childEntry, createBed, createFakeFacet, envelope, sessionAddress, sessionEntry, winterHandle, declaredClasses } from "./support.ts";
+import { childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
 
 function bedWith(options: GlobalMessagingOptions = {}) {
   const bed = createBed();
@@ -410,15 +410,74 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     expect(restarted.messaging.readNotifications("watcher").notifications.length).toBe(1);
   });
 
-  test("a REFUSED model-facing subscribe leaves no durable record, and refuses the whole call", async () => {
+  test("NEW-2 — a facet-less Winter target refuses the WHOLE call: nothing is pushed", async () => {
+    // WS-10 §14: "adapters without a reliable idle signal MUST refuse the ENTIRE call (including any
+    // attached message) so the sender can retry without the flag." The capability truth used to be
+    // per RUNTIME, and the Winter runtime declares an idle signal in general — but its own
+    // `subscribeIdle` refuses per SESSION, so a row a host wrote `notifyWhenIdle: true` on, attached
+    // through a plain input-stream writer, passed the core's eligibility check, had its BODY
+    // DELIVERED, and got only the subscription refused. Two facts, read from two places.
     const world = bedWith();
+    const writer = winterWriterHandle(() => "idle");
+    await world.directory.record(sessionEntry("watcher"));
+    await world.directory.record(sessionEntry("target")); // capabilities.notifyWhenIdle: true, as a host writes it
+    world.messaging.attachWinterSession("session:target", writer.handle);
+    const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_5" });
+
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "ping", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    expect(payload["status"]).toBe("refused");
+    expect(payload["notify"]).toBeUndefined();
+    expect(writer.pushed.length).toBe(0);
+    expect((await world.store.subscriptions.list()).length).toBe(0);
+
+    // …and the sender's retry WITHOUT the flag goes through, which is what §14's sentence is for —
+    // with ONE constraint this test exists to record rather than hide: the shared core checks its
+    // rapid-repeat loop guard BEFORE the target-side eligibility check, so the refused call has
+    // already recorded the (from, to, body) triple. An IDENTICAL body retried inside the 5-second
+    // window is therefore suppressed as a duplicate. A sender retries with a different body, or after
+    // the window; the clock moves here to prove the path itself is open.
+    world.clock.advance(RAPID_REPEAT_WINDOW_MS + 1);
+    const retry = JSON.parse((await createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_6" }).sendMessage({ to: "session:target", message: "ping" })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    expect(retry["status"]).toBe("delivered");
+    expect(writer.pushed.length).toBe(1);
+  });
+
+  test("an official target refuses the whole call the same way", async () => {
+    const world = bedWith();
+    const official = createFakeOfficialSession("running");
     await world.directory.record(sessionEntry("watcher"));
     await world.directory.record(sessionEntry("official", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:official", { push: () => undefined, status: () => "running" });
+    world.messaging.attachOfficialSession("session:official", official.handle);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_4" });
 
     const payload = JSON.parse((await handlers.sendMessage({ to: "session:official", message: "hi", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
     expect(payload["status"]).toBe("refused");
+    expect(official.pushed.length).toBe(0);
+    expect((await world.store.subscriptions.list()).length).toBe(0);
+  });
+
+  test("NEW-3 — the ROLLBACK is real: an adapter that refuses after the record is written leaves none", async () => {
+    // The record is written BEFORE the adapter is asked, because §6.3 wants it durable — so the branch
+    // that removes it again on a refusal has to be exercised by something. A host-REGISTERED adapter
+    // is the case that reaches it: it declares no `canSubscribeIdle`, so the row keeps its capability
+    // and the core's eligibility check passes, and then its own `subscribeIdle` says no.
+    const world = bedWith();
+    await world.directory.record(sessionEntry("watcher"));
+    await world.directory.record(sessionEntry("target"));
+    world.messaging.registerAdapter("winter-agent", {
+      listReachable: async () => [],
+      steerChild: async () => ({ status: "not_found", messageId: "x", reason: "n/a" }),
+      resumeChild: async () => ({ status: "not_found", messageId: "x", reason: "n/a" }),
+      deliverToSession: async (_address, message) => ({ status: "queued", messageId: message.messageId }),
+      subscribeIdle: async (_address, request) => ({ status: "refused", messageId: request.messageId, reason: "this host's own adapter declines idle subscriptions" }),
+      senderPermissionClass: async () => "prompts",
+    });
+
+    const outcome = await world.messaging.notifyWhenIdle(sessionAddress("target"), { from: sessionAddress("watcher"), messageId: "sub-rollback" });
+    expect(outcome.status).toBe("refused");
+    if (outcome.status === "refused") expect(outcome.reason).toContain("declines idle subscriptions");
+    // THE ROLLBACK: a durable record with no runtime subscription behind it would fire nothing and
+    // expire silently twelve hours later.
     expect((await world.store.subscriptions.list()).length).toBe(0);
   });
 });

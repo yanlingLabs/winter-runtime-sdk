@@ -241,21 +241,51 @@ describe("rule 5 is scoped to the CALLER'S CONVERSATION (review r1, M2)", () => 
     expect((await directory.resolve("reviewer", { from: sessionAddress("a") })).kind).toBe("stale-name");
   });
 
-  test("a candidate row is rendered only through the CALLER's own eligibility, never out of the raw store", async () => {
-    // The other half of M2: `candidatesFor` used to read `snap.byAddress` — every entry in the store,
-    // unfiltered. An ARCHIVED session is remembered by its lease but is not resolvable by anyone, so
-    // it is exactly the row that must be named in the REASON (the caller asked about that name) and
-    // absent from the CANDIDATES (the caller cannot address it).
+  test("NEW-7 — an ARCHIVED holder's address is not echoed at all: the name answers as unknown", async () => {
+    // The session-lease exception rests on "remembering that a session is gone discloses nothing plain
+    // resolution would not" — which is exactly untrue of an ARCHIVED session: canonical addressing
+    // refuses it outright and no listing shows it, so its address would leak only through this reason.
+    // The stated cost: an archived object's old name now answers "no such agent".
     const bed = createBed();
     const directory = directoryOver(bed);
     await directory.record(sessionEntry("a"));
-    await directory.record(sessionEntry("filed", { displayName: "reviewer" }));
-    await directory.record(sessionEntry("filed", { displayName: "reviewer", status: "archived" }));
+    await directory.record(sessionEntry("filed", { displayName: "archivist" }));
+    await directory.record(sessionEntry("filed", { displayName: "archivist", status: "archived" }));
+
+    const byName = await directory.resolve("archivist", { from: sessionAddress("a") });
+    expect(byName.kind).toBe("not-found");
+    expect(JSON.stringify(byName)).not.toContain("session:filed");
+    // …and canonical addressing already refused it, which is the answer this one now matches.
+    expect((await directory.resolve("session:filed", { from: sessionAddress("a") })).kind).toBe("not-found");
+  });
+
+  test("NEW-6 — a lease whose address does not parse is dropped, never quoted back", async () => {
+    // `syncLeases` always writes `entry.address`, so this is unreachable through this package — but a
+    // host writing the store directly could put anything there, and the reason text reaches the model.
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await bed.store.names.claim({ name: "ghost", address: "not-an-address", generation: 1, claimedAt: "t" });
+
+    const resolved = await directory.resolve("ghost", { from: sessionAddress("a") });
+    expect(resolved.kind).toBe("not-found");
+    expect(JSON.stringify(resolved)).not.toContain("not-an-address");
+  });
+
+  test("a candidate row is rendered only for a holder the caller can still address", async () => {
+    // The remembered holder has been FORGOTTEN, so there is no row to render: the reason names the
+    // address (the caller asked about that name, and it is the caller's own conversation) and the
+    // candidate list is empty rather than carrying a row nobody can address.
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(sessionEntry("peer", { displayName: "reviewer" }));
+    await directory.forget("session:peer");
 
     const resolved = await directory.resolve("reviewer", { from: sessionAddress("a") });
     expect(resolved.kind).toBe("stale-name");
     if (resolved.kind !== "stale-name") return;
-    expect(resolved.reason).toContain("session:filed");
+    expect(resolved.reason).toContain("session:peer");
     expect(resolved.candidates).toEqual([]);
   });
 

@@ -159,6 +159,8 @@ export function createOfficialMessagingAdapter(deps: OfficialMessagingAdapterDep
     // WHOLE call, not of the subscription alone. The dispatcher clears `notifyWhenIdle` on every row
     // of this runtime so the refusal happens BEFORE the attached message is delivered.
     supportsIdleSubscriptions: false,
+    // Per address as well, so a reader of either field gets the same answer (review r2, NEW-2).
+    canSubscribeIdle: () => false,
 
     /** Live status for the addresses this adapter holds a handle for. It never invents a row. */
     async listReachable(scope) {

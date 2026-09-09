@@ -43,6 +43,21 @@ import type { InboundPolicy } from "./inbound.ts";
  */
 export interface RouterMessagingAdapter extends RuntimeMessagingAdapter {
   readonly supportsIdleSubscriptions?: boolean;
+  /**
+   * PER ADDRESS, where `supportsIdleSubscriptions` is per RUNTIME (review r2, NEW-2).
+   *
+   * The runtime-wide flag is not fine enough: the Winter branch genuinely has a reliable idle signal
+   * (its engine is the session-status event source), but only for a session this process holds a
+   * FACET for — its own `subscribeIdle` refuses a facet-less one by address. So a row whose
+   * `capabilities.notifyWhenIdle` a host wrote `true` (the ordinary case) attached through a plain
+   * input-stream writer passed the core's eligibility check, the body was DELIVERED, and only the
+   * subscription came back refused — which is exactly what WS-10 §14's "refuse the ENTIRE call
+   * (including any attached message) so the sender can retry without the flag" forbids.
+   *
+   * Absent means "the runtime-wide flag is the whole answer", which is the honest default for a
+   * host-registered adapter this package cannot see inside.
+   */
+  canSubscribeIdle?(address: RuntimeAddress): Promise<boolean> | boolean;
 }
 
 export interface DispatchDeps {
@@ -100,10 +115,23 @@ export function createDispatchingAdapter(deps: DispatchDeps): RuntimeMessagingAd
     return deps.adapters.get(entry.runtimeKind);
   }
 
-  /** WS-10 §14's target-side truth, applied to the row the core reads it from. */
-  function withIdleTruth(row: ListedRuntimeObject): ListedRuntimeObject {
-    if (deps.adapters.get(row.runtimeKind)?.supportsIdleSubscriptions !== false) return row;
-    return { ...row, capabilities: { ...row.capabilities, notifyWhenIdle: false } };
+  /**
+   * WS-10 §14's target-side truth, applied to the row the core reads it from — per RUNTIME and then
+   * PER ADDRESS (review r2, NEW-2).
+   *
+   * The core checks `capabilities.notifyWhenIdle` BEFORE it delivers anything, which is the only
+   * position from which §14's whole-call refusal is possible. So the row it reads has to carry what
+   * the adapter would actually answer, not what a host optimistically wrote.
+   */
+  async function withIdleTruth(row: ListedRuntimeObject): Promise<ListedRuntimeObject> {
+    if (!row.capabilities.notifyWhenIdle) return row;
+    const adapter = deps.adapters.get(row.runtimeKind);
+    const cleared = { ...row, capabilities: { ...row.capabilities, notifyWhenIdle: false } };
+    if (adapter === undefined || adapter.supportsIdleSubscriptions === false) return adapter === undefined ? row : cleared;
+    if (adapter.canSubscribeIdle === undefined) return row;
+    const parsed = deps.snapshot.byAddress.get(row.address)?.parsed;
+    if (parsed === undefined) return row;
+    return (await adapter.canSubscribeIdle(parsed)) ? row : cleared;
   }
 
   function noAdapter(entry: RuntimeDirectoryEntry, messageId: string): DeliveryOutcome {
@@ -133,7 +161,7 @@ export function createDispatchingAdapter(deps: DispatchDeps): RuntimeMessagingAd
 
   return {
     async listReachable(scope) {
-      const rows: readonly ListedRuntimeObject[] = (deps.view === "list" ? deps.snapshot.listable : deps.snapshot.resolvable).map(withIdleTruth);
+      const rows: readonly ListedRuntimeObject[] = await Promise.all((deps.view === "list" ? deps.snapshot.listable : deps.snapshot.resolvable).map(withIdleTruth));
       if (scope.parent === undefined) return [...rows];
       // The snapshot is already scoped to the caller (its children are its own), so `parent` narrows
       // nothing further here; it is honoured rather than ignored so a caller passing it gets what it

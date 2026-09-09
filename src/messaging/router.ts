@@ -263,7 +263,24 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
    * Deliver an ALREADY-ADDRESSED envelope through the dispatcher, with no id allocation and no
    * resolution. The internal half of `deliver()`, and the path a released hold and a reply both take.
    */
+  /** The `from` this router could not name at all — WS-10 §15: "the daemon authors canonical addresses". */
+  function unaddressableSender(from: RuntimeAddress): string | undefined {
+    try {
+      serializeRuntimeAddress(from);
+      return undefined;
+    } catch (error) {
+      return `the envelope's sender is not a canonical address (${error instanceof Error ? error.message : String(error)}); nothing was delivered`;
+    }
+  }
+
   async function dispatchEnvelope(message: GlobalAgentMessage, dispatchOptions: { inboundDecided?: boolean } = {}): Promise<DeliveryOutcome> {
+    // D1's shape, for the OTHER malformation (review r2, NEW-4): an `agent:` sender with no `childId`
+    // cannot be serialized at all, and the throw used to land in this function's own catch as
+    // `delivery_uncertain` — "the delivery may have occurred" about an envelope that never reached an
+    // adapter. Reachable only through the host's `deliver()`/`reply()` doors with a hand-built
+    // address, never by a model; a refusal either way, and this one is honest about having happened.
+    const senderRefusal = unaddressableSender(message.from);
+    if (senderRefusal !== undefined) return refused(message.messageId, senderRefusal);
     const snapshot = await snapshotFor(message.from);
     const key = serializeRuntimeAddress(message.to);
     const entry = snapshot.byAddress.get(key);
@@ -459,9 +476,11 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       if (entry === undefined) return notFound(request.messageId, `no directory record for ${key}`);
       // Target side, driven by the PINNED capability flag rather than by a probe call: a subagent is
       // never a valid target, and a peer whose adapter has no reliable idle signal reports the same.
-      // The row's flag AND the runtime's own capability: a host may not opt a runtime into an idle
-      // signal it does not have (see `RouterMessagingAdapter.supportsIdleSubscriptions`).
-      const runtimeCanSignalIdle = adapters.get(entry.runtimeKind)?.supportsIdleSubscriptions !== false;
+      // The row's flag AND the adapter's own answer — per runtime and then per ADDRESS (review r2,
+      // NEW-2). A host may not opt a runtime into an idle signal it does not have, and a runtime that
+      // has one in general may still not have one for THIS session.
+      const adapter = adapters.get(entry.runtimeKind);
+      const runtimeCanSignalIdle = adapter?.supportsIdleSubscriptions !== false && (adapter?.canSubscribeIdle === undefined || (await adapter.canSubscribeIdle(entry.parsed)));
       if (!isIdleSubscribeTargetAllowed({ objectKind: entry.objectKind, hasReliableIdleSignal: entry.capabilities.notifyWhenIdle && runtimeCanSignalIdle })) {
         return refused(request.messageId, `notify_when_idle: ${key} is not a valid target — subagents, teammates, remote targets and adapters without a reliable idle signal refuse the whole call (WS-10 §14)`);
       }

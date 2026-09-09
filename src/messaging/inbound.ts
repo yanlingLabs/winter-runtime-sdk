@@ -279,20 +279,25 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
     async reevaluate(receiver) {
       const receiverKey = receiver.address;
       const expired = await sweepExpired(receiverKey);
-      const authenticated = true; // a held message was already accepted onto an authenticated route
-      const explicitSetting = deps.explicitSetting === undefined ? undefined : await deps.explicitSetting(receiver);
-      const receiverClass = await deps.receiverClass(receiver);
       const durable = await deps.store.mailboxes.listHeld(receiverKey);
-      const byId = new Map(durable.map((record) => [record.messageId, record]));
-      const promoted = mailbox.reevaluate(receiverKey, (entry) => {
-        const record = byId.get(entry.messageId);
-        return resolveInboundDecision({
-          authenticated,
-          ...(explicitSetting === undefined ? {} : { explicitSetting }),
-          receiverClass,
-          senderClass: record?.message.senderPermissionClass ?? "unknown",
-        });
-      });
+
+      // EVERY CLASSIFICATION GOES THROUGH `classifyDetailed` — the initial decision AND this one
+      // (review r2, NEW-1). This callback used to call `resolveInboundDecision` directly with the raw
+      // class, which is how it missed the guard `decide` grew in fix r1: an `unknown` receiver class
+      // falls to the subpath's non-prompts branch, and `defaultInboundResult("unknown","bypasses")`
+      // returns ACCEPT — so a release delivered a bypassing sender's mail into a receiver nobody can
+      // classify. That is more open than the `prompts` substitution the fix removed (which would have
+      // held it), and it is the exact reading of "fail closed" the ruling asks for, lost on one path.
+      //
+      // `Mailbox.reevaluate`'s callback is SYNCHRONOUS and `classifyDetailed` is not, so the decisions
+      // are computed first and the sweep reads them. A held entry with no durable record decides
+      // `hold`: it cannot be classified at all, and the conservative answer is the whole point here.
+      const decisions = new Map<string, CrossSessionInbound>();
+      for (const record of durable) {
+        // `authenticated: true` — a held message was already accepted onto an authenticated route.
+        decisions.set(record.messageId, (await classifyDetailed(receiver, record.message, true)).decision);
+      }
+      const promoted = mailbox.reevaluate(receiverKey, (entry) => decisions.get(entry.messageId) ?? "hold");
       const released: GlobalAgentMessage[] = [];
       for (const { entry, next } of promoted) {
         const record = await deps.store.mailboxes.takeHeld(receiverKey, entry.messageId);

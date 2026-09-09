@@ -105,7 +105,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
    * still holding it. `ever > current` means someone let it go — reuse — and that is rule 5.
    * `current > 1` is rule 4, and is left to `resolveTarget`, which builds the candidate set.
    */
-  async function nameHistory(to: string, callerOwningSessionId: string): Promise<{ ever: SerializedRuntimeAddress[]; current: SerializedRuntimeAddress[] }> {
+  async function nameHistory(to: string, callerOwningSessionId: string, entries: ReadonlyMap<SerializedRuntimeAddress, RuntimeDirectoryEntry>): Promise<{ ever: SerializedRuntimeAddress[]; current: SerializedRuntimeAddress[] }> {
     // SCOPED TO THE CALLER'S CONVERSATION (review r1, M2). Both WS-10 §11 rule 5 and WS-15 §6.1 rule 5
     // say "a name previously used by a different child IN THE SAME CONVERSATION" — and the shared
     // core's own rule 5 is scoped exactly that way (it filters `ownChildren` by
@@ -127,7 +127,19 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     const leases: NameLeaseRecord[] = await store.names.lookup(to);
     const inScope = leases.filter((lease) => {
       const parsed = parseRuntimeAddress(lease.address);
-      if (parsed === undefined || parsed.objectKind !== "agent") return true;
+      // NEW-6: a lease whose address does not parse is DROPPED, not admitted. `syncLeases` always
+      // writes `entry.address`, so this is unreachable through this package — but a host writing the
+      // store directly could put anything there, and the reason text is echoed to the model verbatim.
+      // An address the router cannot even name is not one it should be quoting.
+      if (parsed === undefined) return false;
+      // NEW-7: an ARCHIVED holder is dropped too. The session-lease exception rests on "remembering
+      // that a session is gone discloses nothing plain resolution would not" — and that is exactly
+      // untrue of an archived one, which canonical addressing refuses outright ("no live session at
+      // canonical address …") and which no listing shows. The cost is stated: an archived object's old
+      // name answers "no such agent" rather than "that referred to something now archived".
+      const holder = entries.get(lease.address);
+      if (holder?.status === "archived") return false;
+      if (parsed.objectKind !== "agent") return true;
       return owningSessionIdOf(parsed) === callerOwningSessionId;
     });
     return {
@@ -192,7 +204,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     // identity that cannot be reused, so a stale-name history says nothing about them — which is
     // exactly why rule 5's own text ends "unless addressed canonically".
     if (!isCanonical && !isChildId) {
-      const history = await nameHistory(to, callerOwner);
+      const history = await nameHistory(to, callerOwner, snap.byAddress);
       if (history.ever.length > history.current.length) {
         return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever, callerOwner) };
       }
@@ -213,7 +225,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     if (resolved.kind === "not_found") {
       // A name the directory REMEMBERS but cannot reach is stale, not unknown — the whole reason a
       // released lease outlives the row it named.
-      const history = await nameHistory(to, callerOwner);
+      const history = await nameHistory(to, callerOwner, snap.byAddress);
       if (history.ever.length > 0 && !isCanonical && !isChildId) {
         return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever, callerOwner) };
       }

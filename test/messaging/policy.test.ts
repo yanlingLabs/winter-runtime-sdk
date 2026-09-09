@@ -170,6 +170,46 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
     expect((await refusing.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" })).status).toBe("refused");
   });
 
+  test("NEW-1 — a RELEASE re-evaluated while the class is still unknown stays held, and pushes nothing", async () => {
+    // THE REGRESSION FIX ROUND 1 INTRODUCED. `reevaluate` used to call `resolveInboundDecision`
+    // directly with the raw class, so it never learned the guard `decide` grew: an `unknown` receiver
+    // falls to the subpath's non-prompts branch, and `defaultInboundResult("unknown","bypasses")`
+    // returns ACCEPT — so `releaseHeld` delivered a BYPASSING sender's mail into a receiver nobody can
+    // classify. More open than the substitution the fix removed, which would have held it.
+    const world = bedWith(); // no class hook anywhere
+    const senderFacet = createFakeFacet();
+    senderFacet.setSenderClass("bypasses");
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachWinterSession("session:sender", winterHandle(senderFacet));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+
+    const held = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" });
+    expect(held.status).toBe("held");
+
+    expect(await world.messaging.releaseHeld("session:claude")).toEqual([]);
+    expect(official.pushed.length).toBe(0);
+    expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(1);
+  });
+
+  test("NEW-1's other half — once the class IS known, the same release delivers", async () => {
+    let known = false;
+    const world = bedWith({ official: { permissionClass: () => (known ? "bypasses" : "unknown") } });
+    const senderFacet = createFakeFacet();
+    senderFacet.setSenderClass("bypasses");
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachWinterSession("session:sender", winterHandle(senderFacet));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+    expect((await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" })).status).toBe("held");
+
+    known = true; // bypasses x bypasses -> accept
+    expect((await world.messaging.releaseHeld("session:claude")).map((outcome) => outcome.status)).toEqual(["queued"]);
+    expect(official.pushed.length).toBe(1);
+  });
+
   test("the unknown-class hold is CLASS-DRIVEN, so it is released the moment the class is known", async () => {
     // It is a default-kind hold, not an explicit one, and that is the point: `reevaluate` never
     // auto-promotes an explicit hold, so an unknown-class message parked as "explicit" could not be
