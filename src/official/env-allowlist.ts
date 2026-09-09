@@ -396,7 +396,7 @@ export function buildOfficialChildEnv(input: OfficialEnvInput, policy: OfficialE
     if (!new RegExp(PINNED_PROJECT_DIR_NAME_PATTERN).test(input.projectKey)) {
       throw new OfficialConfigurationError({
         option: `env.${OFFICIAL_RUNTIME_VARIABLES.projectDirName}`,
-        reason: `${JSON.stringify(input.projectKey)} (${input.projectKey.length} characters) does not match the pinned runtime's own rule ${PINNED_PROJECT_DIR_NAME_PATTERN}, and a key it rejects does not fail — it falls back to the runtime's own cwd-derived name, leaving the directory row, this environment and the auto-memory directory all naming a transcript that is somewhere else (WS-14 §1/§3, R-7b-13)`,
+        reason: `${JSON.stringify(input.projectKey)} (${input.projectKey.length} characters) does not match the pinned runtime's own rule ${PINNED_PROJECT_DIR_NAME_PATTERN}, and a key it rejects does not fail — it falls back to the runtime's own cwd-derived name, leaving the directory row, this environment and the auto-memory directory all naming a transcript that is somewhere else (WS-14 §1/§3, R-7b-13). Name a conforming key in \`runtime.official.projectKey\`; the door's own default is the Winter SDK's \`transcriptProjectKey(cwd)\`, which a deep working directory can push past this rule`,
         branchLabel,
       });
     }

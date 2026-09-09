@@ -25,6 +25,7 @@
 //      DECOY vendor home under the temp `HOME`, so "nothing was written there" is an assertion about
 //      a directory that exists rather than about one that never could.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -191,8 +192,31 @@ export interface HermeticSession {
 const roots: string[] = [];
 
 /** Creates one hermetic set of directories. Every root is removed by `cleanupHermetic()`. */
+/**
+ * A temp base short enough that a compact session's derived transcript key fits the pin's 64 (nit (a)).
+ *
+ * THE BED MUST NOT DEPEND ON THE OS TEMP PATH. macOS's `tmpdir()` is 48 characters here, which leaves
+ * five of headroom after `/w-XXXXXX/w`; a machine with a longer `TMPDIR` would fail EVERY
+ * real-runtime door test with an opaque key refusal that says nothing about the bed. So the base is
+ * chosen by measurement — `tmpdir()` when the projected key fits, else `/tmp` — and if neither fits the
+ * failure names the cause instead of arriving as a refusal 200 lines away.
+ */
+function compactTempBase(): string {
+  const projected = (base: string): number => transcriptProjectKey(join(base, "w-XXXXXX", "w")).length;
+  for (const base of [tmpdir(), "/tmp"]) {
+    if (existsSync(base) && projected(base) <= COMPACT_KEY_LIMIT) return base;
+  }
+  throw new Error(
+    `the door beds need a temp root short enough for the pinned runtime's ${COMPACT_KEY_LIMIT}-character CLAUDE_CODE_PROJECT_DIR_NAME rule: ` +
+      `${tmpdir()} projects a ${projected(tmpdir())}-character key and /tmp a ${existsSync("/tmp") ? projected("/tmp") : NaN}-character one. Set TMPDIR to a shorter path to run the real-runtime door tests.`,
+  );
+}
+
+/** The pinned artifact's own cap, spelled here so the bed's failure names the same number the refusal does. */
+const COMPACT_KEY_LIMIT = 64;
+
 export function hermeticSession(prefix = "official", options: HermeticSessionOptions = {}): HermeticSession {
-  const root = mkdtempSync(join(tmpdir(), options.compact === true ? "w-" : `winter-rt-${prefix}-`));
+  const root = mkdtempSync(join(options.compact === true ? compactTempBase() : tmpdir(), options.compact === true ? "w-" : `winter-rt-${prefix}-`));
   roots.push(root);
   const home = join(root, "home");
   const brandHome = join(home, ".winter");

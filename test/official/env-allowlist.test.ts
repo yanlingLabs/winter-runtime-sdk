@@ -488,6 +488,20 @@ describe("R-7b-11 — the traffic opt-outs are the production default", () => {
     }
   });
 
+  test("R-7b-13's refusal names the rule, the length AND the remedy field", () => {
+    // The message is the whole surface a host has when this fires — the README's paragraph is not in
+    // the stack trace — so it names the field to set, not only what was wrong (re-review, nit (b)).
+    try {
+      buildOfficialChildEnv({ ...input(), projectKey: "k".repeat(70) });
+      throw new Error("unreachable: a 70-character key should be refused");
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).toContain("^[A-Za-z0-9_-]{1,64}$");
+      expect(message).toContain("70 characters");
+      expect(message).toContain("runtime.official.projectKey");
+    }
+  });
+
   test("they are still names the PINNED artifact's own registry declares", () => {
     // Not load-bearing for the door any more (they are branch-owned, not extras) — but if a pin bump
     // dropped one, the variable would be inert and the child would silently regain the CDN's surface.
