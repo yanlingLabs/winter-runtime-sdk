@@ -5,17 +5,20 @@
 // `NotImplementedYet` naming its own lane, and the in-memory `RuntimeDirectoryStore` — the default,
 // and the store every hermetic test uses — behaves like a store rather than like a placeholder.
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { NotImplementedYet } from "../../src/errors.ts";
-import { HandoffPlanError } from "../../src/store/index.ts";
+import { HandoffPlanError, type HandoffBarrierHandle } from "../../src/store/index.ts";
 import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubOfficialAdapter, stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { SeamContext, SeamContextWithDirectory } from "../../src/seams/context.ts";
 import type { DeliveryRecord, IdleSubscriptionRecord, NameLeaseRecord, RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 import type { GlobalAgentMessage } from "../../src/seams/messaging-contract.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import { WINTER_BRAND, type SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import { WinterCompatibilitySessionStore, WINTER_BRAND, type SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
 const keychain = createFakeKeychain();
 
@@ -178,6 +181,43 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     await expect(sdk.handoff({ projectKey: "p", sessionId: "s" }, "claude-agent")).rejects.toThrow(HandoffPlanError);
+  });
+
+  // `SeamContext.winterHome` WAS A FIELD NOTHING READ (fix wave, item 12). The spine added it for
+  // Lane C and then wired the barrier as `createHandoffBarrier(context)` with no deps -- so a host
+  // that set a home got a store that resolved somewhere else, silently. Both halves are pinned here:
+  // the constructor option REACHES the context, and the barrier RESOLVES ITS STORE THERE.
+  test("winterHome reaches the seam context, and the barrier's store resolves under it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "runtime-sdk-seam-home-"));
+    try {
+      const { peer } = createFakeWinterPeer();
+      // The REAL store class spread onto the spine's fake, and a `resolveWinterHome` that THROWS: the
+      // only way the store can resolve at all is through the home this test passed in.
+      const winter = {
+        ...peer,
+        WinterCompatibilitySessionStore,
+        resolveWinterHome: () => {
+          throw new Error("a hermetic test must never resolve the real Winter home");
+        },
+      } as unknown as typeof peer;
+      const sdk = createRuntimeSdk({ peers: { winter }, keychain, winterHome: home });
+      const internals = runtimeSdkInternals(sdk)!;
+      expect(internals.context.winterHome).toBe(home);
+      // `internals.barrier` is typed as the SEAM (deliberately -- the seam is the contract), so
+      // reaching the handle's own two readers is an explicit cast rather than a widened spine type.
+      const barrier = internals.barrier as HandoffBarrierHandle;
+      expect(barrier.shared.identity.winterHome).toBe(home);
+      // ONE store, so the decorator resolves under the same home -- `decorator: barrier.decorator`.
+      expect(barrier.decorator.shared).toBe(barrier.shared);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("with no winterHome the field is ABSENT, so the peer's own resolution stays the production answer", () => {
+    const { peer } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    expect(runtimeSdkInternals(sdk)?.context.winterHome).toBeUndefined();
   });
 
   test("a NotImplementedYet says what it is about, not just that it is missing", () => {

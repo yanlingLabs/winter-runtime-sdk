@@ -222,8 +222,15 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   // EVERYTHING THE STORE TOUCHES IS RESOLVED ON FIRST USE. The spine's wiring line calls this factory
   // for every `createRuntimeSdk`, most of which never hand a session off and some of which (every
   // `test/spine/*` case) inject a peer with no store class at all. See `lazySharedSessionStore`.
-  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(deps.winterHome === undefined ? {} : { winterHome: deps.winterHome }) }) : () => deps.shared!;
-  const homeOf = (): string => deps.winterHome ?? sharedOf().identity.winterHome;
+  // THE HOME HAS THREE SOURCES AND ONE PRECEDENCE, and the middle one is what `SeamContext.winterHome`
+  // is FOR (fix wave, item 12). The spine added that field for this lane and then wired the barrier
+  // with `createHandoffBarrier(context)` and no deps — so a host that set it got a field nothing read
+  // and a store that resolved somewhere else. Explicit deps win (a test pointing at its own mkdtemp),
+  // then the host's constructor value on the context, then the peer's own `resolveWinterHome()` under
+  // the resolved brand, which is the production answer.
+  const winterHome = deps.winterHome ?? context.winterHome;
+  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(winterHome === undefined ? {} : { winterHome }) }) : () => deps.shared!;
+  const homeOf = (): string => winterHome ?? sharedOf().identity.winterHome;
   let decorator: MaterializedResumeDecoratorHandle | undefined = deps.decorator as MaterializedResumeDecoratorHandle | undefined;
   /**
    * ONE store for the barrier AND the decorator (review r1, F2).

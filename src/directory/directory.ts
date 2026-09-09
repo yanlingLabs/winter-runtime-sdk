@@ -24,7 +24,7 @@ import type { DirectoryResolution, DirectoryResolutionContext, RuntimeDirectory,
 import type { NameLeaseRecord, RuntimeDirectoryEntry, RuntimeDirectoryStore } from "../seams/directory-store.ts";
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import { entryToChildLike, entryToListedRuntimeObject, entryToListedRuntimeObjectList, isListableFrom, isResolvableFrom, mergeAdapterOwnedFields, owningSessionIdOf } from "./entries.ts";
-import { recoverDirectory, type RuntimeDirectoryRecoveryHooks } from "./recovery.ts";
+import { recoverDirectory, type RuntimeDirectoryRecoveryHooks, type RuntimeDirectoryRetention } from "./recovery.ts";
 
 /** What a caller may configure. Every field has an answer that is correct when it is absent. */
 export interface RuntimeDirectoryOptions extends RuntimeDirectoryRecoveryHooks {
@@ -39,6 +39,14 @@ export interface RuntimeDirectoryOptions extends RuntimeDirectoryRecoveryHooks {
    * was handed gets an outcome instead of a crash.
    */
   deliverToChild?: (entry: RuntimeDirectoryEntry, message: GlobalAgentMessage) => Promise<DeliveryOutcome>;
+  /**
+   * WS-10 §13's caps on the two durable sinks, applied by `recover()` at step 6 (Lane B fix r1, n3).
+   *
+   * ABSENT MEANS BOTH SINKS KEEP EVERYTHING — see `RuntimeDirectoryRetention`: forgetting a released
+   * name lease changes what a model is told about a name it can no longer reach, so the router will
+   * not choose a horizon for a host that did not state one.
+   */
+  retention?: RuntimeDirectoryRetention;
 }
 
 /**
@@ -315,7 +323,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     },
 
     async recover(): Promise<RuntimeDirectoryRecovery> {
-      return recoverDirectory({ store, now, hooks: options });
+      return recoverDirectory({ store, now, hooks: options, ...(options.retention === undefined ? {} : { retention: options.retention }) });
     },
   };
   return directory;

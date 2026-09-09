@@ -41,14 +41,35 @@ export interface RuntimeDirectoryRecoveryHooks {
   reattachSupervised?: (entry: RuntimeDirectoryEntry) => Promise<"reattached" | "skipped"> | "reattached" | "skipped";
 }
 
+/**
+ * How long the two durable sinks REMEMBER, in milliseconds (Lane B fix r1, n3).
+ *
+ * BOTH DEFAULT TO "FOREVER" (`undefined`), and that is deliberate rather than lazy: forgetting is a
+ * product decision with a visible model-facing consequence, so the router will not make it for a host
+ * that did not ask. `nameLeases` in particular is exactly how long a stale name keeps answering "that
+ * referred to something that has gone" instead of "no such agent" (WS-10 §11 rule 5).
+ *
+ * Neither number can delete evidence: a claimed-but-unreceipted delivery (WS-15 §6.4 step 5) and a
+ * HELD lease are excluded by the stores' own doors, at every retention.
+ */
+export interface RuntimeDirectoryRetention {
+  /** Receipted delivery records older than this are dropped at recovery. Absent = kept forever. */
+  deliveries?: number;
+  /** Released name leases released longer ago than this are dropped. Absent = kept forever. */
+  nameLeases?: number;
+}
+
 export interface RecoverDirectoryInput {
   store: RuntimeDirectoryStore;
   now: () => number;
   hooks: RuntimeDirectoryRecoveryHooks;
+  /** WS-10 §13's caps, applied at step 6. Absent = both sinks keep everything. */
+  retention?: RuntimeDirectoryRetention;
 }
 
 export async function recoverDirectory(input: RecoverDirectoryInput): Promise<RuntimeDirectoryRecovery> {
   const { store, now, hooks } = input;
+  const retention = input.retention ?? {};
   const steps: RuntimeDirectoryRecoveryStep[] = [];
   const at = new Date(now()).toISOString();
 
@@ -167,10 +188,16 @@ export async function recoverDirectory(input: RecoverDirectoryInput): Promise<Ru
     }
     subscriptionsKept += 1;
   }
+  // THE SINKS FORGET HERE, AND ONLY HERE (Lane B fix r1, n3). Recovery is the one moment the router
+  // already holds a whole-store read and no delivery is in flight, so pruning costs nothing extra and
+  // cannot race a claim. Both are no-ops with no configured retention, which is the default.
+  const deliveriesPruned = retention.deliveries === undefined ? 0 : await store.deliveries.prune(new Date(nowMs - retention.deliveries).toISOString());
+  const leasesPruned = retention.nameLeases === undefined ? 0 : await store.names.prune(new Date(nowMs - retention.nameLeases).toISOString());
+  const pruneNote = retention.deliveries === undefined && retention.nameLeases === undefined ? "" : `, ${deliveriesPruned} receipted delivery record(s) and ${leasesPruned} released lease(s) pruned under the host's retention`;
   steps.push({
     step: 6,
     name: "expire stale name leases and idle subscriptions by generation/TTL",
-    outcome: `${leasesReleased} name lease(s) released (holder gone or a newer generation), ${subscriptionsExpired} idle subscription(s) expired, ${subscriptionsKept} still valid`,
+    outcome: `${leasesReleased} name lease(s) released (holder gone or a newer generation), ${subscriptionsExpired} idle subscription(s) expired, ${subscriptionsKept} still valid${pruneNote}`,
   });
 
   // --- 7. Resume queued product-session messages only after receiver policy re-evaluates -------------

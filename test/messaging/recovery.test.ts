@@ -170,6 +170,77 @@ describe("WS-15 §6.4: restart recovery", () => {
     expect(second.steps[4]?.outcome).toContain("0 claimed-without-receipt");
   });
 
+  // ------------------------------------------------------------------------------------------------
+  // THE REMOVAL DOOR ON THE TWO DURABLE SINKS (Lane B fix r1's n3, taken in the fix wave).
+  //
+  // Both sinks were append-only: `DeliveryRecordStore` had get/put/claimedWithoutReceipt and
+  // `NameLeaseStore` had lookup/claim/release/held, while the SDK subpath's in-memory equivalents are
+  // explicitly bounded. The official branch made it worst — an un-keyed send writes a record under
+  // `no-tool-call:<now>:<random>` that can never be looked up again — so a long-lived host's store
+  // grew forever with rows that answer no question. What is asserted here is not that pruning happens
+  // but WHAT SURVIVES IT: the two records that are evidence rather than history.
+  // ------------------------------------------------------------------------------------------------
+
+  test("with no retention configured, both sinks keep EVERYTHING — forgetting is the host's decision", async () => {
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now });
+    await bed.store.deliveries.put({ messageId: "old", message: envelope({ messageId: "old" }), toGeneration: 1, outcome: { status: "delivered", messageId: "old" }, updatedAt: new Date(0).toISOString() });
+    await bed.store.names.claim({ name: "reviewer", address: "session:gone", generation: 1, claimedAt: new Date(0).toISOString(), releasedAt: new Date(0).toISOString() });
+
+    const report = await directory.recover();
+    expect(await bed.store.deliveries.get("old")).toBeDefined();
+    expect(await bed.store.names.lookup("reviewer")).toHaveLength(1);
+    expect(report.steps[5]?.outcome).not.toContain("pruned");
+  });
+
+  test("step 6 prunes RECEIPTED delivery records past the retention — and never the claimed-without-receipt one", async () => {
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now, retention: { deliveries: 60_000 } });
+    const old = new Date(bed.clock.now() - 3_600_000).toISOString();
+    const fresh = new Date(bed.clock.now() - 1_000).toISOString();
+    await bed.store.deliveries.put({ messageId: "receipted-old", message: envelope({ messageId: "receipted-old" }), toGeneration: 1, outcome: { status: "delivered", messageId: "receipted-old" }, updatedAt: old });
+    await bed.store.deliveries.put({ messageId: "receipted-fresh", message: envelope({ messageId: "receipted-fresh" }), toGeneration: 1, outcome: { status: "delivered", messageId: "receipted-fresh" }, updatedAt: fresh });
+    // WS-15 §6.4 step 5's evidence: claimed, never receipted, and OLDER than the retention.
+    await bed.store.deliveries.put({ messageId: "uncertain-old", message: envelope({ messageId: "uncertain-old" }), toGeneration: 1, claimedBy: "winter-agent", updatedAt: old });
+
+    const report = await directory.recover();
+    expect(await bed.store.deliveries.get("receipted-old")).toBeUndefined();
+    expect(await bed.store.deliveries.get("receipted-fresh")).toBeDefined();
+    expect(await bed.store.deliveries.get("uncertain-old")).toBeDefined();
+    expect(report.steps[5]?.outcome).toContain("1 receipted delivery record(s)");
+  });
+
+  test("step 6 prunes RELEASED name leases past the retention — and never a held one", async () => {
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now, retention: { nameLeases: 60_000 } });
+    await directory.record(sessionEntry("live", { displayName: "holder" }));
+    const old = new Date(bed.clock.now() - 3_600_000).toISOString();
+    await bed.store.names.claim({ name: "ancient", address: "session:gone", generation: 1, claimedAt: old, releasedAt: old });
+    await bed.store.names.claim({ name: "recent", address: "session:also-gone", generation: 1, claimedAt: old, releasedAt: new Date(bed.clock.now() - 1_000).toISOString() });
+
+    const report = await directory.recover();
+    expect(await bed.store.names.lookup("ancient")).toEqual([]);
+    expect(await bed.store.names.lookup("recent")).toHaveLength(1);
+    // The live holder's own lease is HELD, so no retention can touch it.
+    expect((await bed.store.names.held()).map((lease) => lease.name)).toContain("holder");
+    expect(report.steps[5]?.outcome).toContain("1 released lease(s) pruned");
+  });
+
+  test("a pruned name stops being a REFUSAL and becomes unknown again — which is why the horizon is the host's", async () => {
+    // The consequence a host is choosing when it sets `nameLeases`, pinned rather than described:
+    // rule 5's "that referred to something that has gone" is exactly as durable as the lease record.
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now, retention: { nameLeases: 60_000 } });
+    await directory.record(sessionEntry("caller"));
+    await directory.record(sessionEntry("peer", { displayName: "reviewer" }));
+    await directory.forget("session:peer");
+    expect((await directory.resolve("reviewer", { from: sessionAddress("caller") })).kind).toBe("stale-name");
+
+    bed.clock.advance(3_600_000);
+    await directory.recover();
+    expect((await directory.resolve("reviewer", { from: sessionAddress("caller") })).kind).toBe("not-found");
+  });
+
   test("a stale name survives recovery as a REFUSAL rather than as an unknown name", async () => {
     const bed = createBed();
     const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now });

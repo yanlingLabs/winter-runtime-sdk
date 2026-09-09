@@ -90,6 +90,16 @@ export interface RuntimeSdkOptions {
    * fill in when neither does.
    */
   brand?: Partial<BrandProfile>;
+  /**
+   * The Winter home the shared session store resolves under (Lane C's seam field, given its producer
+   * in the fix wave).
+   *
+   * ABSENT IS THE PRODUCTION ANSWER: the store resolves the peer's own `resolveWinterHome()` under
+   * the resolved brand, on first use. A host passes this when it owns the layout — a test on an
+   * `mkdtemp` home, or a harness that runs several isolated products out of one process — and it
+   * reaches the barrier and its decorator through `SeamContext.winterHome`.
+   */
+  winterHome?: string;
 }
 
 /** Options members this package OWNS. Never forwarded to either SDK — see `query()`. */
@@ -209,6 +219,7 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     brand,
     directoryStore,
     ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
+    ...(opts.winterHome === undefined ? {} : { winterHome: opts.winterHome }),
   };
   // LANES B AND C ARE LANDED (controller wiring, one commit): the directory and the messaging router
   // come from ONE factory (the directory's child view delivers through the router while the router

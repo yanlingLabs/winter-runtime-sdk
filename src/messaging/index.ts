@@ -9,7 +9,7 @@
 // the composed door is the one the package leads with.
 export { createRuntimeDirectory } from "../directory/directory.ts";
 export type { DirectorySnapshot, RuntimeDirectoryHandle, RuntimeDirectoryOptions } from "../directory/directory.ts";
-export type { RuntimeDirectoryRecoveryHooks } from "../directory/recovery.ts";
+export type { RuntimeDirectoryRecoveryHooks, RuntimeDirectoryRetention } from "../directory/recovery.ts";
 export { entryToChildLike, entryToListedRuntimeObject, entryToListedRuntimeObjectList, isListableFrom, isLiveStatus, isResolvableFrom, mergeAdapterOwnedFields, owningSessionIdOf, parentAddressOf, sessionAddressOf } from "../directory/entries.ts";
 
 export { createGlobalMessaging, callerAddressOf, deriveMessageId } from "./router.ts";
