@@ -227,12 +227,15 @@ export const RULING_ROWS: RouterRow[] = [
     status: "proven",
     owner: "Lane D",
     citations: [
+      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "the probe drove the PINNED artifact, over loopback only, and printed its inventories" },
       { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — no condition puts an advisor tool in the session's advertised tool inventory" },
-      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — configuring an advisor model adds a SERVER-tool schema to the endpoint request" },
-      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — the advisor server tool is independent of the client tool set entirely" },
+      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — configuring an advisor model puts NOTHING advisor-shaped on the wire (the pinned artifact, alone)" },
+      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — no advisor appears in ANY hermetic condition, on the wire or in the inventory" },
+      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "the remote-configuration leg, when it is explicitly enabled, shows what the CDN adds" },
       { file: "../../docs/probes/d29-advisor.md", testName: "## 3. Verdict" },
     ],
-    note: "The probe skips with a printed reason where the pinned runtime cannot start, so the citation is to the test AND to the record it produces.",
+    note:
+      "REWRITTEN IN THE FIX WAVE (whole-branch F-1). The first version's citations pointed at tests asserting that `settings.advisorModel` put an advisor on the wire; that was the pinned artifact PLUS its remote feature configuration, and it went red whenever the CDN fetch timed out. With the runtime's four traffic opt-outs set, no condition puts an advisor anywhere — it is a remotely-flagged capability, not a property of the pin. D29's split is unaffected either way (nothing client-side to alias under either condition). One labelled non-hermetic leg survives behind `WINTER_D29_ALLOW_REMOTE_CONFIG=1` and is evidence for nothing. The probe skips with a printed reason where the pinned runtime cannot start, so the citation is to the tests AND to the record they produce.",
   },
 ];
 

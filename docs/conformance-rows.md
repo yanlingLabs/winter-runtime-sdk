@@ -34,7 +34,7 @@ router-owned row is unproven.** Rows 6, 9, 10, 16 and 18 are excluded by WS-17 �
 | D14 gate | **proven** | Lane D | The Claude OAuth ship gate is closed by default, and a closed gate refuses rather than falling back to the Winter runtime. | — |
 | R-7b-1 | **proven** | Lane D (the selection half; the delivery half is Lane B's) | A child runs on the runtime its OWN slot's family selects, independent of the parent's; the child's selection is persisted with the child, resume follows the child's record, and a cross-runtime pair talks only through the RuntimeDirectory. | — |
 | WS13c-SM1/2/3 | **proven** | Lane D (selection level; the `DeliveryOutcome` half is Lane B's) | A parent switching family leaves its child's record untouched (both directions), and a child whose provider credential is gone refuses with `child-provider-unavailable` while the parent's turn continues. | — |
-| R-7b-8 | **proven** | Lane D | The D29 probe: whether the pinned official runtime exposes an advisor server tool in an SDK session, and under which condition, measured against the pinned artifact through the loopback capture and recorded. | The probe skips with a printed reason where the pinned runtime cannot start, so the citation is to the test AND to the record it produces. |
+| R-7b-8 | **proven** | Lane D | The D29 probe: whether the pinned official runtime exposes an advisor server tool in an SDK session, and under which condition, measured against the pinned artifact through the loopback capture and recorded. | REWRITTEN IN THE FIX WAVE (whole-branch F-1). The first version's citations pointed at tests asserting that `settings.advisorModel` put an advisor on the wire; that was the pinned artifact PLUS its remote feature configuration, and it went red whenever the CDN fetch timed out. With the runtime's four traffic opt-outs set, no condition puts an advisor anywhere — it is a remotely-flagged capability, not a property of the pin. D29's split is unaffected either way (nothing client-side to alias under either condition). One labelled non-hermetic leg survives behind `WINTER_D29_ALLOW_REMOTE_CONFIG=1` and is evidence for nothing. The probe skips with a printed reason where the pinned runtime cannot start, so the citation is to the tests AND to the record they produce. |
 
 ## Citations
 
@@ -94,9 +94,11 @@ router-owned row is unproven.** Rows 6, 9, 10, 16 and 18 are excluded by WS-17 �
 
 ### R-7b-8
 
+- `test/selection/d29-advisor-probe.test.ts` — `the probe drove the PINNED artifact, over loopback only, and printed its inventories`
 - `test/selection/d29-advisor-probe.test.ts` — `D29 — no condition puts an advisor tool in the session's advertised tool inventory`
-- `test/selection/d29-advisor-probe.test.ts` — `D29 — configuring an advisor model adds a SERVER-tool schema to the endpoint request`
-- `test/selection/d29-advisor-probe.test.ts` — `D29 — the advisor server tool is independent of the client tool set entirely`
+- `test/selection/d29-advisor-probe.test.ts` — `D29 — configuring an advisor model puts NOTHING advisor-shaped on the wire (the pinned artifact, alone)`
+- `test/selection/d29-advisor-probe.test.ts` — `D29 — no advisor appears in ANY hermetic condition, on the wire or in the inventory`
+- `test/selection/d29-advisor-probe.test.ts` — `the remote-configuration leg, when it is explicitly enabled, shows what the CDN adds`
 - `docs/probes/d29-advisor.md` — `## 3. Verdict`
 
 ## Still unproven
