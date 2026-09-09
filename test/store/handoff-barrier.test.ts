@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import { DIALECT_RECORD_ENTRY_TYPE, WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 
 import {
   acquireHandoffLease,
@@ -27,6 +27,8 @@ import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/inde
 import { createInMemoryRuntimeDirectoryStore, type RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import { createSharedSessionStore, HandoffWiringError } from "../../src/store/index.ts";
 import { RESUME_STAGING_PREFIX } from "../../src/vendor-paths.ts";
+// Lane A's own record sink — the real writer, so the F-2 pair is the real pair.
+import { directoryRecordSink } from "../../src/official/spawn-proxy.ts";
 import { selectionFor, sidecarPathFor, withStoreBed, type StoreBed } from "./support.ts";
 // Lane D's own fixtures, so the review is measured against the catalog shape the selector really
 // takes rather than against a second hand-rolled one (fix wave, item 20).
@@ -1708,6 +1710,109 @@ describe("item 20 — plan() reviews the persisted selection against the DESTINA
       expect(outcome.kind).toBe("resumed");
       if (outcome.kind === "resumed") expect(outcome.selection).toEqual(expected);
       expect((seen.target as { selection: RuntimeSelection }).selection).toEqual(expected);
+    });
+  });
+});
+
+// ====================================================================================================
+// F-2 — THREE WRITERS, ONE ROW: the barrier must not erase what the destination wrote.
+//
+// The one write a real destination makes during a handoff is the one no test ever saw, because every
+// `confirmInit` in this file is a fake that writes nothing. On the wired shape it is Lane A's
+// `resume(plan)` pulling to `system/init`, and its supervised proxy records `configDir` (the
+// `claude-resume-<uuid>` staging root, which "the default spawner exposes no post-cleanup lookup
+// for") and `processIdentity` onto the row the barrier is about to write. The barrier wrote
+// `{ ...entry }` from a snapshot taken before step 1, so it erased both the instant the handoff
+// committed — leaving a store-backed generation with no durable root and a `recover()` step 2 with no
+// identity to revalidate.
+//
+// THESE TESTS USE LANE A's OWN SINK, not a hand-rolled writer, so the pair is the real one.
+// ====================================================================================================
+describe("F-2 — the destination's launch record survives the commit", () => {
+  const observation = (root: string, pid: number) => ({
+    root: { configDir: root, kind: "sdk-resume-staging" as const, profile: "store-backed-resume" as const },
+    processIdentity: { pid, startedAt: new Date(1_000).toISOString() },
+  });
+
+  test("Winter -> official: `configDir` and `processIdentity` written during confirmInit survive a `resumed` outcome", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record();
+      await bed.append(1);
+      let recordedRoot = "";
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({
+            runtimeKind: "claude-agent" as const,
+            // THE REAL WRITE, through Lane A's sink, at the real moment: the destination is starting
+            // against `target.stagingRoot`, so this is where §6 rule 2's record comes from.
+            async confirmInit(target: { stagingRoot?: string }) {
+              recordedRoot = target.stagingRoot ?? "";
+              await directoryRecordSink({ store: bed.directoryStore, address: entry.address }).record(observation(recordedRoot, 4242) as never);
+              return OK;
+            },
+          }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome.kind).toBe("resumed");
+      expect(recordedRoot).toContain(RESUME_STAGING_PREFIX);
+
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.runtimeKind).toBe("claude-agent"); // the barrier's own field did move
+      expect(row?.configDir).toBe(recordedRoot); // …and the destination's did NOT get erased
+      expect(row?.processIdentity).toEqual({ pid: 4242, startedAt: new Date(1_000).toISOString() });
+      // The generation is monotonic over the row as it actually is, not over the stale snapshot.
+      expect(row?.generation).toBeGreaterThan(entry.generation);
+    });
+  });
+
+  test("official -> Winter: a `clear()` during close is not undone by the commit", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      const sink = directoryRecordSink({ store: bed.directoryStore, address: entry.address });
+      await sink.record(observation("/tmp/vendor-root-that-is-gone", 999) as never);
+      const barrier = barrierFor(bed, {
+        participants: {
+          // The source's proxy clears the record as the generation ends — the same moment `close()` runs.
+          source: () =>
+            idleOwner({
+              runtimeKind: "claude-agent",
+              close: async () => {
+                await sink.clear?.(observation("/tmp/vendor-root-that-is-gone", 999) as never);
+                return OK;
+              },
+            }),
+          destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+      expect(outcome.kind).toBe("resumed");
+
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.runtimeKind).toBe("winter-agent");
+      // A Winter-owned row must not carry a vendor staging root it never had.
+      expect(row?.configDir).toBeUndefined();
+      expect(row?.processIdentity).toBeUndefined();
+    });
+  });
+
+  test("loadEntry's repair patches the row too — the fields survive a crash between the two writes", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record();
+      await bed.append(1);
+      // The authoritative record says the destination owns it; the directory's cache has not caught up.
+      await bed.shared.store.append(bed.key, [{ type: DIALECT_RECORD_ENTRY_TYPE, producerRuntime: "claude-agent" } as never]);
+      await bed.shared.settle(bed.key);
+      // …and Lane A's sink wrote the new generation's root in the meantime.
+      await directoryRecordSink({ store: bed.directoryStore, address: entry.address }).record(observation("/tmp/staged-after-the-flip", 7) as never);
+
+      const plan = await barrierFor(bed, { participants: { source: () => idleOwner() } }).plan(bed.key, "winter-agent");
+      expect(plan.from).toBe("claude-agent"); // the repair followed the transcript
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.configDir).toBe("/tmp/staged-after-the-flip");
+      expect(row?.processIdentity).toEqual({ pid: 7, startedAt: new Date(1_000).toISOString() });
     });
   });
 });

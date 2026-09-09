@@ -335,14 +335,18 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     }
     const producer = summary["producerRuntime"];
     if ((producer === "claude-agent" || producer === "winter-agent") && producer !== entry.runtimeKind) {
-      const repaired: RuntimeDirectoryEntry = { ...entry, runtimeKind: producer, generation: entry.generation + 1, updatedAt: now().toISOString() };
+      // A REPAIR IS A PATCH, NOT A REPLACE (F-2). There are two awaits between `findEntry` and this
+      // write (`readSessionSummary`, and possibly the pending-marker append), and the destination's
+      // own launch record can land in either window — so the row is re-read and only the ownership
+      // fields move. The pre-handoff snapshot is the fallback for a row a host removed meanwhile.
+      let repaired: RuntimeDirectoryEntry = { ...entry, runtimeKind: producer, generation: entry.generation + 1, updatedAt: now().toISOString() };
       // THE REPAIR IS BEST-EFFORT, AND THE RETURNED ENTRY IS CORRECT EITHER WAY (review r2, N2.3). A
       // directory that refuses the write used to propagate a raw host error out of every future
       // `plan()`, which made the session permanently unplannable — a worse outcome than a stale cache.
       // The transcript's record is authoritative, so the entry returned reflects it; persisting is
       // retried on the next call.
       try {
-        await context.directoryStore.upsert(repaired);
+        repaired = await patchDirectoryRow({ context, address: entry.address, fallback: entry, runtimeKind: producer, now: now() });
         const cursor = summary["projectionCursor"];
         if (typeof cursor === "string" && cursor.length > 0) await context.directoryStore.cursors.set(entry.address, cursor);
       } catch {
@@ -1244,6 +1248,39 @@ export class HandoffCommitError extends RuntimeSdkError {
 }
 
 /**
+ * THE BARRIER'S DIRECTORY WRITES PATCH THE CURRENT ROW — they never replace it (whole-branch, F-2).
+ *
+ * THREE WRITERS SHARE ONE ROW AND THE SEAM'S `upsert` IS A FULL REPLACE. Lane A's spawn sink does a
+ * read-modify-write; Lane B's `record()` merges (`mergeAdapterOwnedFields`); this lane used to write
+ * `{ ...entry }` from a snapshot taken BEFORE step 1 — and on the primary Winter→official path the
+ * destination's own `confirmInit` is what writes `configDir` and `processIdentity` onto that row, in
+ * between. The replace erased them the instant the handoff committed, so the store-backed generation
+ * whose staging root "the default spawner exposes no post-cleanup lookup for" had no durable root and
+ * `recover()` step 2 had no identity to revalidate. The reverse direction was worse in kind: the
+ * source's stale `configDir` and dead pid were RE-written after the proxy's `clear()` had removed
+ * them, leaving a Winter-owned row carrying a vendor root it never had.
+ *
+ * SO EVERY WRITE HERE RE-READS FIRST and changes only the fields the barrier owns. It is not a
+ * general merge — the fix for a lost-update is to write less, not to invent a reconciliation — and
+ * the re-read cannot be hoisted: the whole point is that it happens AFTER the destination's write.
+ */
+async function patchDirectoryRow(args: {
+  context: SeamContextWithDirectory;
+  address: SerializedRuntimeAddress;
+  fallback: RuntimeDirectoryEntry;
+  runtimeKind: RuntimeKind;
+  now: Date;
+}): Promise<RuntimeDirectoryEntry> {
+  const rows = await args.context.directoryStore.load();
+  // The fallback is the pre-handoff snapshot: correct when the row was removed under us, which is a
+  // host's prerogative — re-creating it from what we know beats writing nothing at all.
+  const current = rows.find((row) => row.address === args.address) ?? args.fallback;
+  const patched: RuntimeDirectoryEntry = { ...current, runtimeKind: args.runtimeKind, generation: current.generation + 1, updatedAt: args.now.toISOString() };
+  await args.context.directoryStore.upsert(patched);
+  return patched;
+}
+
+/**
  * PHASE TWO, SECOND WRITE: the host directory's derived copy.
  *
  * A CACHE, and treated as one. Its failure does not undo the handoff — `loadEntry`'s repair reads the
@@ -1257,7 +1294,7 @@ async function syncDirectoryEntry(args: {
   now: Date;
 }): Promise<void> {
   await args.context.directoryStore.cursors.set(args.entry.address, args.staged.cursor);
-  await args.context.directoryStore.upsert({ ...args.entry, runtimeKind: args.plan.to, generation: args.entry.generation + 1, updatedAt: args.now.toISOString() });
+  await patchDirectoryRow({ context: args.context, address: args.entry.address, fallback: args.entry, runtimeKind: args.plan.to, now: args.now });
 }
 
 function cryptoRandomUuid(): string {
