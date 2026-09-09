@@ -153,6 +153,14 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
     store,
     now,
     ...options,
+    // NEW-10: a held message that leaves the mailbox WITHOUT being delivered — swept by the five-minute
+    // dialog expiry, or re-evaluated to `refuse` — gets its delivery receipt written through. The
+    // ledger is the router's, so the policy names the event and this writes it down; otherwise a
+    // sender's durable receipt reads `held` forever for a message that no longer exists.
+    onHoldTerminal: async (message, outcome) => {
+      const recorded = await store.deliveries.get(message.messageId);
+      await persistReceipt(message.messageId, recorded?.message ?? message, recorded?.toGeneration ?? message.toGeneration, recorded?.claimedBy, outcome);
+    },
     /**
      * The receiver's class, asked of the runtime that HOLDS the receiver — and `unknown` when it
      * cannot say, which the policy then FAILS CLOSED on (review r1, D2).
@@ -523,6 +531,13 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       const { original } = request;
       const from = original.to;
       const to = original.from;
+      // NEW-11: the door ANSWERS, it does not raise. `reply` serializes both halves of the original
+      // envelope while building the reply — before `dispatchEnvelope`'s own guard is ever reached — so
+      // a hand-built malformed address used to come out of the router as an unhandled throw. It is the
+      // same refusal D1 and NEW-4 established for the other two doors, and it is host-only: a model
+      // never builds an address.
+      const malformed = unaddressableSender(from) ?? unaddressableSender(to);
+      if (malformed !== undefined) return refused(deriveMessageId(original.messageId, "reply"), malformed);
       const snapshot = await snapshotFor(from);
       const targetKey = serializeRuntimeAddress(to);
       const target = snapshot.byAddress.get(targetKey);

@@ -21,7 +21,7 @@
 // runs on the SESSION path only. Steering a running child or resuming a terminal one is "delivered
 // inside the owning parent session" (WS-10 §10.3) — the child already runs under the parent's
 // permission mode, and there is no second receiver to have a policy.
-import { buildDefaultHoldEntry, buildExplicitHoldEntry, createMailbox, held as heldOutcome, refused as refusedOutcome, resolveInboundDecision, ACCEPTED_QUEUE_CAP, HELD_INBOX_CAP } from "@yanlinglabs/winter-agent-sdk/messaging";
+import { buildDefaultHoldEntry, buildExplicitHoldEntry, createMailbox, held as heldOutcome, refused as refusedOutcome, resolveInboundDecision, ACCEPTED_QUEUE_CAP, DEFAULT_HOLD_EXPIRY_MS, HELD_INBOX_CAP } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { CrossSessionInbound, HeldEntry, Mailbox, PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
 
 import type { HeldMessageRecord, RuntimeDirectoryEntry, RuntimeDirectoryStore } from "../seams/directory-store.ts";
@@ -46,6 +46,15 @@ export interface InboundPolicyHooks {
    * this hook is where the host says so.
    */
   authenticatedRoute?: (input: { message: GlobalAgentMessage; receiver: RuntimeDirectoryEntry; senderKnown: boolean }) => Promise<boolean> | boolean;
+  /**
+   * Called when a held message LEAVES THE MAILBOX WITHOUT BEING DELIVERED — swept by the five-minute
+   * dialog expiry, or re-evaluated to `refuse` (review r3, NEW-10).
+   *
+   * The router supplies it and writes the delivery receipt through, because the ledger is the router's.
+   * Without it a sender's durable receipt reads `held` forever for a message that no longer exists —
+   * and "held" reads as "waiting for you".
+   */
+  onHoldTerminal?: (message: GlobalAgentMessage, outcome: DeliveryOutcome) => Promise<void> | void;
   /** An explicit hold is the receiver's own choice to queue rather than to take; the kind is its own. */
   holdKind?: (input: { message: GlobalAgentMessage; receiver: RuntimeDirectoryEntry; decision: CrossSessionInbound }) => "default" | "explicit";
 }
@@ -55,6 +64,12 @@ export interface InboundPolicyDeps extends InboundPolicyHooks {
   now(): number;
   /** The receiver's permission class, asked of the runtime that actually holds it (WS-10 §13). */
   receiverClass(receiver: RuntimeDirectoryEntry): Promise<PermissionClassLabel>;
+}
+
+/** The two receiver-scoped facts a decision needs, read once per sweep (NEW-9). */
+export interface ReceiverFacts {
+  explicitSetting: CrossSessionInbound | undefined;
+  receiverClass: PermissionClassLabel;
 }
 
 export type InboundVerdict =
@@ -149,7 +164,14 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
   async function sweepExpired(receiverKey: SerializedRuntimeAddress): Promise<HeldEntry[]> {
     await ensureRehydrated(receiverKey);
     const expired = mailbox.sweepExpired(receiverKey, deps.now());
-    for (const entry of expired) await deps.store.mailboxes.takeHeld(receiverKey, entry.messageId);
+    for (const entry of expired) {
+      const record = await deps.store.mailboxes.takeHeld(receiverKey, entry.messageId);
+      if (record === undefined) continue;
+      // WS-10 §13's five-minute dialog expiry DROPS the message — and the sender's durable receipt
+      // used to go on reading `held` forever (review r3, NEW-10; the cheapest partial answer to
+      // NEW-5's evaporation). "Held" reads as "waiting for you"; once it is swept it is not.
+      await deps.onHoldTerminal?.(record.message, refusedOutcome(record.messageId, `the receiver held this message and it expired unread after the ${DEFAULT_HOLD_EXPIRY_MS / 60000}-minute dialog window (WS-10 §13); it was never delivered`));
+    }
     return expired;
   }
 
@@ -162,17 +184,30 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
    * which half of the rule fired in its refusal, and asking the host's hooks a second time to find out
    * would run a host's own code twice per message.
    */
+  async function receiverFacts(receiver: RuntimeDirectoryEntry): Promise<ReceiverFacts> {
+    return {
+      explicitSetting: deps.explicitSetting === undefined ? undefined : await deps.explicitSetting(receiver),
+      receiverClass: await deps.receiverClass(receiver),
+    };
+  }
+
   async function classifyDetailed(
     receiver: RuntimeDirectoryEntry,
     message: GlobalAgentMessage,
     senderKnown: boolean,
+    facts?: ReceiverFacts,
   ): Promise<{ decision: CrossSessionInbound; authenticated: boolean; explicitSetting: CrossSessionInbound | undefined; receiverClass: PermissionClassLabel }> {
     const authenticated = deps.authenticatedRoute === undefined ? senderKnown : await deps.authenticatedRoute({ message, receiver, senderKnown });
-    const explicitSetting = deps.explicitSetting === undefined ? undefined : await deps.explicitSetting(receiver);
+    // THE RECEIVER-SCOPED FACTS ARE READ ONCE PER SWEEP, not once per message (review r3, NEW-9).
+    // `receiverClass` is a host hook that may be an IPC round trip and `releaseHeld` runs on every
+    // mode change, so re-asking it per held record turned one call into up to a hundred. Only the two
+    // MESSAGE-scoped inputs — the sender's stamped class and `authenticatedRoute` — vary per record.
+    const scoped = facts ?? (await receiverFacts(receiver));
+    const explicitSetting = scoped.explicitSetting;
     // The RECEIVER's class is asked of the runtime that holds the receiver; the SENDER's class rides on
     // the envelope, stamped by the router at the sending end (WS-10 §13's matrix input). A caller-side
     // `accept` can therefore still come back `held` — the envelope's class is an input, never a verdict.
-    const receiverClass = await deps.receiverClass(receiver);
+    const receiverClass = scoped.receiverClass;
     // AN UNKNOWN RECEIVER CLASS FAILS CLOSED (review r1, D2). WS-10 §13's matrix has no `unknown`
     // RECEIVER row — `unknown` is a sender-side value ("an authenticated route that cannot prove
     // sender class") — so a receiver whose mode this process cannot read has to be answered by policy
@@ -292,10 +327,15 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
       // `Mailbox.reevaluate`'s callback is SYNCHRONOUS and `classifyDetailed` is not, so the decisions
       // are computed first and the sweep reads them. A held entry with no durable record decides
       // `hold`: it cannot be classified at all, and the conservative answer is the whole point here.
+      const facts = await receiverFacts(receiver);
       const decisions = new Map<string, CrossSessionInbound>();
+      const terminal = new Map<string, GlobalAgentMessage>();
       for (const record of durable) {
-        // `authenticated: true` — a held message was already accepted onto an authenticated route.
-        decisions.set(record.messageId, (await classifyDetailed(receiver, record.message, true)).decision);
+        // `senderKnown: true` — a held message was already accepted onto an authenticated route. The
+        // hook may still say otherwise now, and NEW-10 is what happens to the message when it does.
+        const decision = (await classifyDetailed(receiver, record.message, true, facts)).decision;
+        decisions.set(record.messageId, decision);
+        if (decision === "refuse") terminal.set(record.messageId, record.message);
       }
       const promoted = mailbox.reevaluate(receiverKey, (entry) => decisions.get(entry.messageId) ?? "hold");
       const released: GlobalAgentMessage[] = [];
@@ -304,7 +344,15 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
         if (record === undefined) continue;
         // A re-evaluation that lands on `refuse` is terminal: the message leaves the mailbox and is
         // NOT delivered. Only an `accept` produces an envelope for the router to deliver.
-        if (next === "accept") released.push(record.message);
+        if (next === "accept") {
+          released.push(record.message);
+          continue;
+        }
+        // …and the SENDER IS TOLD (review r3, NEW-10). The message is gone; leaving its durable
+        // receipt reading `held` would make "held" a permanent lie about something that no longer
+        // exists, which is the same harm NEW-5 names for the expiry sweep.
+        void terminal.delete(record.messageId);
+        await deps.onHoldTerminal?.(record.message, refusedOutcome(record.messageId, `the receiver re-evaluated this held message and refused it; refusal is terminal for this message id (WS-10 §13)`));
       }
       return { released, expired };
     },

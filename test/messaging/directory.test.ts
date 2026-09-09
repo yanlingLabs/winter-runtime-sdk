@@ -241,21 +241,61 @@ describe("rule 5 is scoped to the CALLER'S CONVERSATION (review r1, M2)", () => 
     expect((await directory.resolve("reviewer", { from: sessionAddress("a") })).kind).toBe("stale-name");
   });
 
-  test("NEW-7 — an ARCHIVED holder's address is not echoed at all: the name answers as unknown", async () => {
-    // The session-lease exception rests on "remembering that a session is gone discloses nothing plain
-    // resolution would not" — which is exactly untrue of an ARCHIVED session: canonical addressing
-    // refuses it outright and no listing shows it, so its address would leak only through this reason.
-    // The stated cost: an archived object's old name now answers "no such agent".
+  test("NEW-8 — an ARCHIVED holder still COUNTS for rule 5, and its address is REDACTED from the reason", async () => {
+    // The two properties that each of the last two rounds pinned only one of. NEW-7 was right that an
+    // archived holder's canonical address must not be quoted — canonical addressing refuses that
+    // session outright and no listing shows it — but dropping the lease from rule 5's COUNTING made a
+    // plain name resolve silently to a DIFFERENT live object, which is the mis-resolution rule 5
+    // exists to prevent. Count the lease; redact the address.
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(sessionEntry("old", { displayName: "reviewer" }));
+    await directory.record(sessionEntry("old", { displayName: "reviewer", status: "archived" }));
+    await directory.record(sessionEntry("new", { displayName: "reviewer" }));
+
+    const resolved = await directory.resolve("reviewer", { from: sessionAddress("a") });
+    // THE RULE STILL FIRES — the name is not silently resolved to `session:new`…
+    expect(resolved.kind).toBe("stale-name");
+    if (resolved.kind !== "stale-name") return;
+    expect(resolved.reason).toContain("more than one");
+    // …the archived holder's address is nowhere in the answer…
+    expect(JSON.stringify(resolved)).not.toContain("session:old");
+    // …and the LIVE one is still named, because that is the address the caller is being sent to.
+    expect(resolved.reason).toContain("session:new");
+    expect(resolved.candidates.map((row) => row.address)).toEqual(["session:new"]);
+  });
+
+  test("NEW-8 — the same for a CHILD in the caller's own conversation, which is rule 5's literal subject", async () => {
+    const bed = createBed();
+    const directory = directoryOver(bed);
+    await directory.record(sessionEntry("a"));
+    await directory.record(childEntry("a", "c1", { displayName: "scout" }));
+    await directory.record(childEntry("a", "c1", { displayName: "scout", status: "archived" }));
+    await directory.record(childEntry("a", "c2", { displayName: "scout" }));
+
+    const resolved = await directory.resolve("scout", { from: sessionAddress("a") });
+    expect(resolved.kind).toBe("stale-name");
+    if (resolved.kind !== "stale-name") return;
+    expect(resolved.reason).toContain("agent:a:c2"); // the live holder is nameable and is named
+    expect(resolved.reason).not.toContain("agent:a:c1"); // the archived one counts but is not
+    expect(resolved.candidates.map((row) => row.address)).toEqual(["agent:a:c2"]);
+  });
+
+  test("NEW-8 — when NOTHING nameable is left, the refusal says so without naming anything", async () => {
     const bed = createBed();
     const directory = directoryOver(bed);
     await directory.record(sessionEntry("a"));
     await directory.record(sessionEntry("filed", { displayName: "archivist" }));
     await directory.record(sessionEntry("filed", { displayName: "archivist", status: "archived" }));
 
-    const byName = await directory.resolve("archivist", { from: sessionAddress("a") });
-    expect(byName.kind).toBe("not-found");
-    expect(JSON.stringify(byName)).not.toContain("session:filed");
-    // …and canonical addressing already refused it, which is the answer this one now matches.
+    const resolved = await directory.resolve("archivist", { from: sessionAddress("a") });
+    expect(resolved.kind).toBe("stale-name");
+    if (resolved.kind !== "stale-name") return;
+    expect(resolved.reason).toContain("no longer reachable");
+    expect(resolved.reason).not.toContain("session:filed");
+    expect(resolved.candidates).toEqual([]);
+    // …and canonical addressing still refuses it, which is the answer this one is consistent with.
     expect((await directory.resolve("session:filed", { from: sessionAddress("a") })).kind).toBe("not-found");
   });
 

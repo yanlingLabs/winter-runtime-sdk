@@ -132,13 +132,6 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
       // store directly could put anything there, and the reason text is echoed to the model verbatim.
       // An address the router cannot even name is not one it should be quoting.
       if (parsed === undefined) return false;
-      // NEW-7: an ARCHIVED holder is dropped too. The session-lease exception rests on "remembering
-      // that a session is gone discloses nothing plain resolution would not" — and that is exactly
-      // untrue of an archived one, which canonical addressing refuses outright ("no live session at
-      // canonical address …") and which no listing shows. The cost is stated: an archived object's old
-      // name answers "no such agent" rather than "that referred to something now archived".
-      const holder = entries.get(lease.address);
-      if (holder?.status === "archived") return false;
       if (parsed.objectKind !== "agent") return true;
       return owningSessionIdOf(parsed) === callerOwningSessionId;
     });
@@ -155,10 +148,22 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
    * differently: a name that meant SEVERAL things needs the canonical address of the one meant, while
    * a name that meant ONE thing that is gone needs to know the object is gone.
    */
-  function staleReason(to: string, holders: readonly SerializedRuntimeAddress[]): string {
-    return holders.length > 1
-      ? `"${to}" has been used by more than one runtime object (${holders.join(", ")}); address the one you mean by its canonical address from the listing`
-      : `"${to}" referred to ${holders.join(", ")}, which is no longer reachable; address the one you mean by its canonical address from the listing`;
+  function staleReason(to: string, holders: readonly SerializedRuntimeAddress[], entries: ReadonlyMap<SerializedRuntimeAddress, RuntimeDirectoryEntry>): string {
+    // COUNT THE LEASE, REDACT THE ADDRESS (review r3, NEW-8). NEW-7 was right that an ARCHIVED
+    // holder's canonical address must not be quoted to the model — canonical addressing refuses that
+    // session outright and no listing shows it — but the fix dropped the lease from the set rule 5
+    // COUNTS as well as from the text, and rule 5 stopped firing: a plain name that had belonged to a
+    // different object resolved silently and confidently to a live one, which is the exact
+    // mis-resolution rule 5 exists to prevent. So the holder still counts and only its NAME is
+    // withheld; when nothing nameable is left, the sentence says what happened without naming anything.
+    const nameable = holders.filter((address) => entries.get(address)?.status !== "archived");
+    const tail = "address the one you mean by its canonical address from the listing";
+    // WHICH SENTENCE is decided by how many objects have HELD the name (the fact rule 5 is about);
+    // WHICH ADDRESSES appear is decided by how many of them may be named. Deciding the sentence from
+    // the nameable count instead would tell a caller that a LIVE holder is "no longer reachable" as
+    // soon as an archived sibling was redacted out.
+    if (holders.length > 1) return `"${to}" has been used by more than one runtime object${nameable.length > 0 ? ` (${nameable.join(", ")})` : ""}; ${tail}`;
+    return nameable.length === 1 ? `"${to}" referred to ${nameable.join(", ")}, which is no longer reachable; ${tail}` : `"${to}" referred to an object that is no longer reachable; ${tail}`;
   }
 
   /**
@@ -206,7 +211,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     if (!isCanonical && !isChildId) {
       const history = await nameHistory(to, callerOwner, snap.byAddress);
       if (history.ever.length > history.current.length) {
-        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever, callerOwner) };
+        return { kind: "stale-name", reason: staleReason(to, history.ever, snap.byAddress), candidates: candidatesFor(snap, history.ever, callerOwner) };
       }
     }
 
@@ -227,7 +232,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
       // released lease outlives the row it named.
       const history = await nameHistory(to, callerOwner, snap.byAddress);
       if (history.ever.length > 0 && !isCanonical && !isChildId) {
-        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever, callerOwner) };
+        return { kind: "stale-name", reason: staleReason(to, history.ever, snap.byAddress), candidates: candidatesFor(snap, history.ever, callerOwner) };
       }
       return { kind: "not-found", reason: resolved.message };
     }

@@ -229,6 +229,82 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
     expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(0);
   });
 
+  test("NEW-9 — the receiver-scoped hooks are read ONCE per sweep, not once per held record", async () => {
+    let classReads = 0;
+    let settingReads = 0;
+    const world = bedWith({
+      official: {
+        permissionClass: () => {
+          classReads += 1;
+          return "unknown";
+        },
+      },
+      explicitSetting: () => {
+        settingReads += 1;
+        return undefined;
+      },
+    });
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+    for (let index = 0; index < 8; index += 1) {
+      await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: `held-${index}`, originToolCallId: `t-${index}` });
+    }
+    expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(8);
+
+    classReads = 0;
+    settingReads = 0;
+    await world.messaging.releaseHeld("session:claude");
+    // `receiverClass` may be an IPC round trip and `releaseHeld` runs on every mode change, so eight
+    // held records must not mean eight round trips. Only the MESSAGE-scoped inputs vary per record.
+    expect(classReads).toBe(1);
+    expect(settingReads).toBe(1);
+  });
+
+  test("NEW-10 — a hold that is REFUSED on re-evaluation writes its receipt through", async () => {
+    let authenticated = true;
+    const world = bedWith({ official: { permissionClass: () => "prompts" }, authenticatedRoute: () => authenticated });
+    const official = createFakeOfficialSession("running");
+    const senderFacet = createFakeFacet();
+    senderFacet.setSenderClass("bypasses");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachWinterSession("session:sender", winterHandle(senderFacet));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+
+    const held = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "waiting", originToolCallId: "t1" });
+    expect(held.status).toBe("held");
+
+    authenticated = false; // the route lost its authentication while the message sat there
+    expect(await world.messaging.releaseHeld("session:claude")).toEqual([]);
+    expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(0);
+    expect(official.pushed.length).toBe(0);
+    // THE SENDER IS TOLD. "held" reading forever for a message that no longer exists is the harm.
+    const receipt = await world.store.deliveries.get(held.messageId);
+    expect(receipt?.outcome?.status).toBe("refused");
+    if (receipt?.outcome?.status === "refused") expect(receipt.outcome.reason).toContain("refused it");
+  });
+
+  test("NEW-10 — a hold swept by the five-minute expiry writes its receipt through too", async () => {
+    const world = bedWith(); // no class hook: the unknown-class hold, which is the shipped default
+    const official = createFakeOfficialSession("running");
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:claude", official.handle);
+    const held = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "waiting", originToolCallId: "t1" });
+    expect(held.status).toBe("held");
+
+    world.clock.advance(DEFAULT_HOLD_EXPIRY_MS + 1);
+    await world.messaging.releaseHeld("session:claude");
+
+    expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(0);
+    const receipt = await world.store.deliveries.get(held.messageId);
+    expect(receipt?.outcome?.status).toBe("refused");
+    if (receipt?.outcome?.status === "refused") expect(receipt.outcome.reason).toContain("expired unread");
+    expect(official.pushed.length).toBe(0);
+  });
+
   test("a Winter session driven through a plain WRITER can be declared too", async () => {
     const world = bedWith({ winter: { permissionClass: () => "prompts" } });
     const writer = winterWriterHandle(() => "idle");

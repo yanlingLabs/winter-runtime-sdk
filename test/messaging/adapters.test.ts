@@ -302,6 +302,24 @@ describe("one envelope, one answer: attribution before any push (review r1, D1)"
     expect(writer.pushed.length).toBe(0);
   });
 
+  test("NEW-11 — `reply()` ANSWERS on a malformed address, it does not throw", async () => {
+    // `reply` serializes both halves of the original envelope while building the reply — before
+    // `dispatchEnvelope`'s own guard is reached — so a hand-built malformed address came out of the
+    // router as an unhandled throw. Host-only (a model never builds an address), and the whole point
+    // of D1/NEW-4 is that these doors answer.
+    const world = bedWith();
+    await world.directory.record(sessionEntry("a"));
+    await world.directory.record(sessionEntry("b"));
+    const malformed = { objectKind: "agent" as const, runtimeKind: "winter-agent" as const, winterSessionId: "a", parentWinterSessionId: "a" };
+
+    const asSender = await world.messaging.reply({ original: envelope({ from: sessionAddress("a"), to: malformed }), body: "hi" });
+    expect(asSender.status).toBe("refused");
+    if (asSender.status === "refused") expect(asSender.reason).toContain("not a canonical address");
+
+    const asTarget = await world.messaging.reply({ original: envelope({ from: malformed, to: sessionAddress("b") }), body: "hi" });
+    expect(asTarget.status).toBe("refused");
+  });
+
   test("the official OWNER-QUALIFIED child relay keeps its deliberate absence of an owner", async () => {
     // A message FOR a child is handed to the parent that owns the child but NOT the sender — the one
     // place the owner check must not run, and the reason `renderOwnerQualifiedTurn` takes no owner.
