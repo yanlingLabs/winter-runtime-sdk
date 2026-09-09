@@ -298,7 +298,11 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
           ? refused(message.messageId, error instanceof Error ? error.message : String(error))
           : { status: "delivery_uncertain", messageId: message.messageId, deliveryMayHaveOccurred: true, reason: `unexpected error during delivery: ${error instanceof Error ? error.message : String(error)}` };
     }
-    await persistReceipt(message.messageId, message, entry.generation, entry.runtimeKind, outcome);
+    // The receipt carries the record's OWN claim rather than an assumed one: a message the inbound
+    // policy held was never handed to an adapter, and a record that claimed otherwise would make
+    // WS-15 §6.4 step 5's "claimed but unreceipted" reconciliation read a fiction.
+    const recorded = await store.deliveries.get(message.messageId);
+    await persistReceipt(message.messageId, recorded?.message ?? message, recorded?.toGeneration ?? entry.generation, recorded?.claimedBy, outcome);
     return outcome;
   }
 

@@ -187,8 +187,12 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
      */
     async listReachable(scope) {
       const rows: ListedRuntimeObject[] = [];
+      // ONE read, indexed — not one `get` per handle. The store seam has no point lookup (`get` is a
+      // `load()` and a find), so a handle-by-handle walk is O(handles x entries) against a host store
+      // that may be a database round trip each time.
+      const byAddress = new Map((await deps.directory.list()).map((entry) => [entry.address, entry]));
       for (const address of deps.sessions.addresses()) {
-        const entry = await deps.directory.get(address);
+        const entry = byAddress.get(address);
         if (entry === undefined || entry.runtimeKind !== "winter-agent") continue;
         if (scope.parent !== undefined && entry.objectKind === "agent" && owningSessionIdOf(entry.parsed) !== owningSessionIdOf(scope.parent)) continue;
         rows.push({ ...entryToListedRuntimeObject(entry), status: liveStatus(entry, deps.sessions.get(address)) });
