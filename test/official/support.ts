@@ -58,19 +58,26 @@ export interface OfficialRuntimeBed {
 }
 
 /**
- * THE ENV POLICY EVERY REAL-RUNTIME BED USES (whole-branch review, F-1).
+ * THE ENV POLICY EVERY REAL-RUNTIME BED USES (whole-branch review, F-1; R-7b-11).
  *
- * The four traffic opt-outs ride the `configuredExtras` door, which is a POSITIVE allowlist over the
- * pinned artifact's own non-credential registry — all four names are declared there, so this is the
- * door working as designed rather than an exception carved for tests. Without them the child fetches
- * remote feature configuration and the advertised tool inventory changes under the same pin: measured
- * at 25 tools with the fetch, 21 without, the four extra being `DesignSync`, `Monitor`,
- * `PushNotification` and `advisor_20260301:advisor`. A proof about "what 0.3.250 does" that moves
- * with a CDN is not a proof about 0.3.250.
+ * NOW EMPTY, AND THAT IS THE POINT. The four traffic opt-outs used to ride the `configuredExtras`
+ * door from here, which meant the beds were hermetic and a shipped session was not — the pin's tool
+ * surface stayed remotely mutable for every host. R-7b-11 moved them into the production env builder
+ * as branch-owned defaults, so a bed that passes NOTHING now gets exactly what a host gets. The
+ * function stays because the beds call it and because a future bed-wide policy has somewhere to live;
+ * an empty object here is the evidence that the default carries the behaviour.
+ *
+ * Without them the child fetches remote feature configuration and the advertised tool inventory
+ * changes under the same pin: measured at 25 tools with the fetch, 21 without, the four extra being
+ * `DesignSync`, `Monitor`, `PushNotification` and `advisor_20260301:advisor`. A proof about "what
+ * 0.3.250 does" that moves with a CDN is not a proof about 0.3.250.
  */
-export function hermeticEnvPolicy(): { env: { configuredExtras: Record<string, string> } } {
-  return { env: { configuredExtras: { ...HERMETIC_TRAFFIC_OPT_OUTS } } };
+export function hermeticEnvPolicy(): { env: Record<string, never> } {
+  return { env: {} };
 }
+
+/** The four names the production builder sets — re-exported so a bed can assert on them. */
+export { HERMETIC_TRAFFIC_OPT_OUTS };
 
 let cached: OfficialRuntimeBed | undefined;
 let resolutionFailure: string | undefined;

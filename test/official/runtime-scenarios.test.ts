@@ -23,7 +23,7 @@ import type { OfficialUserMessage } from "../../src/seams/official-sdk-shapes.ts
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter, type OfficialSessionHandle } from "../../src/official/index.ts";
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
-import { buildOfficialChildEnv } from "../../src/official/env-allowlist.ts";
+import { buildOfficialChildEnv, TRAFFIC_OPT_OUT_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../../src/official/env-allowlist.ts";
 import { AUTH_FAMILY_VARIABLES } from "../../src/official/auth.ts";
 import { cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
@@ -260,8 +260,15 @@ describeRuntime("WS-04 §12's corpus on the official branch", () => {
 
 describe("the RuntimeSelection fixture per auth family", () => {
   test("each family produces exactly its own variables, and nothing else", () => {
-    const build = (selection: RuntimeSelection, credentials: Record<string, string>): Record<string, string> =>
-      buildOfficialChildEnv({ selection, configDir: "/spool", brand: WINTER_BRAND, credentials }, { claudeOauth: { approved: true } });
+    // THE SUBJECT IS THE AUTH FAMILY, so R-7b-11's four branch-owned traffic opt-outs are removed
+    // before the comparison — and asserted present on every family first, which is the other half of
+    // the claim ("exactly its own variables, and nothing else" is about credentials, not about the
+    // variables this branch sets on every child whatever the family).
+    const build = (selection: RuntimeSelection, credentials: Record<string, string>): Record<string, string> => {
+      const env = buildOfficialChildEnv({ selection, configDir: "/spool", brand: WINTER_BRAND, credentials }, { claudeOauth: { approved: true } });
+      for (const [name, value] of Object.entries(TRAFFIC_OPT_OUT_VARIABLES)) expect({ family: selection.authFamily, name, value: env[name] }).toEqual({ family: selection.authFamily, name, value });
+      return Object.fromEntries(Object.entries(env).filter(([name]) => !TRAFFIC_OPT_OUT_VARIABLE_NAMES.includes(name)));
+    };
 
     expect(build(SELECTION_FIXTURES["api-key"], { ANTHROPIC_API_KEY: "k" })).toEqual({ ANTHROPIC_API_KEY: "k", CLAUDE_CONFIG_DIR: "/spool" });
     expect(build(SELECTION_FIXTURES["console-oauth"], { ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_BASE_URL: "https://gw" })).toEqual({

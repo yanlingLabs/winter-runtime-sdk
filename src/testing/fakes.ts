@@ -40,15 +40,15 @@ export const withLoopbackFake: <T>(opts: StartFakeOptions, fn: (fake: FakeServer
  * SO A TEST WITHOUT THESE IS NOT MEASURING THE PIN. It is measuring the pin plus whatever a CDN said
  * this minute, which is (a) a different answer on a different day, (b) a suite that goes red when the
  * fetch times out — the "flake seen twice in ~20 runs" — and (c) a `docs/probes/` record whose "no
- * network" line is false. All four names are in the pinned artifact's own non-credential registry, so
- * they ride Lane A's `configuredExtras` door as declared extras rather than as an exception to it.
+ * network" line is false.
+ *
+ * THE SAME OBJECT THE PRODUCTION ENV BUILDER SETS (R-7b-11). It used to be a test-only copy handed to
+ * `configuredExtras`, and a copy is exactly how a test bed and a shipped session end up measuring two
+ * different artifacts: this re-export is what makes "the beds run what a host runs" checkable by
+ * identity rather than by reading two lists.
  */
-export const HERMETIC_TRAFFIC_OPT_OUTS: Readonly<Record<string, string>> = {
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-  DISABLE_TELEMETRY: "1",
-  DISABLE_ERROR_REPORTING: "1",
-  DISABLE_AUTOUPDATER: "1",
-};
+export { TRAFFIC_OPT_OUT_VARIABLES as HERMETIC_TRAFFIC_OPT_OUTS } from "../official/env-allowlist.ts";
+import { TRAFFIC_OPT_OUT_VARIABLES } from "../official/env-allowlist.ts";
 
 /**
  * The minimal environment that points an official-SDK session at a loopback fake (R-7b-6).
@@ -69,6 +69,6 @@ export function officialCaptureEnv(input: { baseUrl: string; apiKey?: string; cl
     ANTHROPIC_API_KEY: input.apiKey ?? "sk-ant-fake-hermetic-key",
     CLAUDE_CONFIG_DIR: input.claudeConfigDir,
     HOME: input.home,
-    ...(input.allowRemoteConfig === true ? {} : HERMETIC_TRAFFIC_OPT_OUTS),
+    ...(input.allowRemoteConfig === true ? {} : TRAFFIC_OPT_OUT_VARIABLES),
   };
 }

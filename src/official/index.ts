@@ -48,6 +48,8 @@ export {
   PINNED_OFFICIAL_RUNTIME,
   PROXY_AND_TELEMETRY_PREFIXES,
   PROXY_AND_TELEMETRY_VARIABLES,
+  TRAFFIC_OPT_OUT_VARIABLES,
+  TRAFFIC_OPT_OUT_VARIABLE_NAMES,
   assertNoForbiddenChildVariables,
   buildOfficialChildEnv,
   minimalOsEnvironmentFrom,

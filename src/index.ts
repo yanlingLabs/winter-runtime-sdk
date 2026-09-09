@@ -59,6 +59,9 @@ export { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from ".
 // The README tells a host to READ this set rather than trust a description of it (round 3, NEW-H), so
 // it has to be reachable from the package a host installs — not only from the official lane's barrel.
 export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./official/env-allowlist.ts";
+// R-7b-11's four, for the same reason: the README says the router disables the runtime's remote
+// feature configuration by default, and a host should be able to READ the set rather than trust prose.
+export { TRAFFIC_OPT_OUT_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./official/env-allowlist.ts";
 export {
   LIST_AGENTS_FIELD_MAX,
   NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,

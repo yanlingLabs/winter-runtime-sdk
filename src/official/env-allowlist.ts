@@ -21,7 +21,7 @@
 // same breath.
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
-import type { EnvInput } from "../seams/official-adapter.ts";
+import type { EnvInput, RemoteConfigPolicy } from "../seams/official-adapter.ts";
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
 import { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, isAuthShapedVariable, validateAuthEnvironment, type ClaudeOauthGate } from "./auth.ts";
 import { officialBranchLabel } from "./branding.ts";
@@ -66,6 +66,38 @@ export const PROXY_AND_TELEMETRY_VARIABLES: readonly string[] = [
   "DISABLE_ERROR_REPORTING",
 ];
 export const PROXY_AND_TELEMETRY_PREFIXES: readonly string[] = ["OTEL_"];
+
+/**
+ * R-7b-11: THE FOUR TRAFFIC OPT-OUTS THIS BRANCH SETS ON EVERY CHILD, BY DEFAULT.
+ *
+ * These are not a privacy setting; they are what makes "the pinned artifact" mean one thing. Measured
+ * on 0.3.250 — same binary, same options, same loopback endpoint — the runtime advertises 25 tools
+ * with these unset and 21 with them set; `DesignSync`, `Monitor`, `PushNotification` and
+ * `advisor_20260301:advisor` are present only when its feature-flag CDN answers. A tool surface that
+ * changes with a remote flag under one version defeats WS-02 §6.1's "a new official version is a
+ * reviewed compatibility event": the surface moves with nothing reviewed and nothing versioned.
+ *
+ * WS-14 §3's own words permit this — proxy and telemetry variables reach the child "unless explicitly
+ * configured", and the router configuring them explicitly is that clause, not an exception to it. Two
+ * of the four names (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) are in
+ * `PROXY_AND_TELEMETRY_VARIABLES`, i.e. names this module refuses to let a child INHERIT — which is a
+ * different question from whether this branch SETS them, and the validator below now separates the
+ * two rather than conflating them.
+ *
+ * THEY ARE BRANCH-OWNED, like the config dir: a host may not pass them through `configuredExtras`
+ * (the record would then disagree with the environment), it opts back in with
+ * `OfficialEnvPolicy.remoteConfig: "allow"`, and that choice is recorded on the session's directory
+ * row. A test-only escape hatch is not needed any more — the hermetic beds get this for free.
+ */
+export const TRAFFIC_OPT_OUT_VARIABLES: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+  DISABLE_TELEMETRY: "1",
+  DISABLE_ERROR_REPORTING: "1",
+  DISABLE_AUTOUPDATER: "1",
+};
+
+/** The four names above, for the validator and the drift-gate snapshot. */
+export const TRAFFIC_OPT_OUT_VARIABLE_NAMES: readonly string[] = Object.keys(TRAFFIC_OPT_OUT_VARIABLES);
 
 // The vendor-home matcher is IMPORTED, not re-spelled (review r2, NEW-4). It lived in three places,
 // C1 folded only one of them, and the two survivors were case-exact — so `/Users/dev/.Claude/ca.pem`
@@ -146,6 +178,14 @@ export interface OfficialEnvPolicy {
    * it" is exactly why it is dangerous. One name at a time; never a prefix, never a wildcard.
    */
   reviewedExecutionExtras?: readonly string[];
+  /**
+   * R-7b-11: `"deny"` (the default) sets `TRAFFIC_OPT_OUT_VARIABLES` on the child; `"allow"` omits
+   * them, letting the runtime fetch its own remote feature configuration.
+   *
+   * ABSENT MEANS DENY, EVERYWHERE — including for a host that never heard of this field, which is the
+   * point: the shipped default must be the one that makes the pin mean one artifact.
+   */
+  remoteConfig?: RemoteConfigPolicy;
   /** D14's ship gate, threaded to the auth validator. Default: closed. */
   claudeOauth?: ClaudeOauthGate;
 }
@@ -352,6 +392,8 @@ export function buildOfficialChildEnv(input: OfficialEnvInput, policy: OfficialE
   };
   if (input.projectKey !== undefined && input.projectKey.length > 0) env[OFFICIAL_RUNTIME_VARIABLES.projectDirName] = input.projectKey;
   if (input.sharedTempRoot !== undefined && input.sharedTempRoot.length > 0) env[OFFICIAL_RUNTIME_VARIABLES.tmpdir] = input.sharedTempRoot;
+  // R-7b-11: the pin's tool surface is the pin's, unless this deployment says otherwise IN WRITING.
+  if ((policy.remoteConfig ?? "deny") === "deny") for (const [name, value] of Object.entries(TRAFFIC_OPT_OUT_VARIABLES)) env[name] = value;
   for (const [name, value] of Object.entries(input.credentials)) env[name] = value;
   for (const [name, value] of Object.entries(input.base ?? {})) {
     const wanted = MINIMAL_OS_VARIABLES.includes(name) || MINIMAL_OS_VARIABLE_PREFIXES.some((prefix) => name.startsWith(prefix));
@@ -466,7 +508,17 @@ export function assertNoForbiddenChildVariables(
     if (declared.has(name) && runtimeVariables.includes(name)) {
       refuse("a configured extra may not override a variable this branch owns: the config dir, the transcript project key and the shared temp root are §1/§3's own, and the record is written against them");
     }
-    if (!declared.has(name) && (PROXY_AND_TELEMETRY_VARIABLES.includes(name) || PROXY_AND_TELEMETRY_PREFIXES.some((prefix) => name.startsWith(prefix)))) {
+    // R-7b-11 — THE OPT-OUTS ARE BRANCH-OWNED, AND THE DOOR TO CHANGE THEM IS `remoteConfig`.
+    // A host that set one of these through `configuredExtras` would move the child off the surface the
+    // session's directory row says it ran on, and nothing downstream would notice: the row records the
+    // POLICY, not four variable values. So the extras door refuses them by name and points at the one
+    // knob whose answer is recorded.
+    if (declared.has(name) && TRAFFIC_OPT_OUT_VARIABLE_NAMES.includes(name)) {
+      refuse(
+        "this is one of the four traffic opt-outs this branch sets itself (R-7b-11), and setting it through the extras door would leave the session's recorded `remoteConfig` describing a surface the child does not have — use `OfficialEnvPolicy.remoteConfig` (\"allow\" opts back in, and the choice is recorded)",
+      );
+    }
+    if (!declared.has(name) && !TRAFFIC_OPT_OUT_VARIABLE_NAMES.includes(name) && (PROXY_AND_TELEMETRY_VARIABLES.includes(name) || PROXY_AND_TELEMETRY_PREFIXES.some((prefix) => name.startsWith(prefix)))) {
       refuse("proxy and telemetry variables reach this child only when the deployment configures them explicitly (WS-14 §3); an inherited one redirects or duplicates traffic invisibly");
     }
     if (VENDOR_HOME_SEGMENT_RE.test(value)) {
@@ -478,6 +530,7 @@ export function assertNoForbiddenChildVariables(
     // minimal OS variable or an explicitly declared extra has no business in the child at all.
     const known =
       runtimeVariables.includes(name) ||
+      TRAFFIC_OPT_OUT_VARIABLE_NAMES.includes(name) ||
       ALL_AUTH_VARIABLES.includes(name) ||
       MINIMAL_OS_VARIABLES.includes(name) ||
       MINIMAL_OS_VARIABLE_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
@@ -501,6 +554,8 @@ export interface EnvAllowlistSnapshot {
   neverInjected: readonly string[];
   refusedProxyTelemetry: readonly string[];
   refusedProxyTelemetryPrefixes: readonly string[];
+  /** R-7b-11: the names this branch SETS by default. A change here is a reviewed compatibility event too. */
+  trafficOptOuts: readonly string[];
 }
 
 /** The pinned artifact every name above was captured from (WS-02 §6.1: an upgrade is reviewed). */
@@ -516,6 +571,7 @@ export function officialEnvAllowlistSnapshot(): EnvAllowlistSnapshot {
     neverInjected: NEVER_INJECTED_AUTH_VARIABLES,
     refusedProxyTelemetry: PROXY_AND_TELEMETRY_VARIABLES,
     refusedProxyTelemetryPrefixes: PROXY_AND_TELEMETRY_PREFIXES,
+    trafficOptOuts: TRAFFIC_OPT_OUT_VARIABLE_NAMES,
   };
 }
 

@@ -16,7 +16,7 @@ import type { OfficialLaunchPlan, OptionsTemplateInput } from "../../src/seams/o
 import type { OfficialOptions, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions } from "../../src/seams/official-sdk-shapes.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
-import { createOfficialAdapter, officialHandoffEligibility, type OfficialSessionHandle } from "../../src/official/index.ts";
+import { createOfficialAdapter, officialHandoffEligibility, TRAFFIC_OPT_OUT_VARIABLES, type OfficialSessionHandle } from "../../src/official/index.ts";
 import { OfficialConfigurationError, OfficialInvalidResumeError, OfficialMcpError } from "../../src/official/errors.ts";
 import { assertOptionsInvariants, buildOfficialOptions } from "../../src/official/options-template.ts";
 import { CONTAINMENT_FLOOR_MARK, carriesMark, isOurContainmentHook } from "../../src/official/callbacks.ts";
@@ -191,7 +191,8 @@ describe("the official adapter", () => {
     const { module } = fakeClaudeModule();
     const adapter = createOfficialAdapter(context(module));
     const env = adapter.buildChildEnv({ selection, configDir: SPOOL, brand: WINTER_BRAND, credentials: { ANTHROPIC_API_KEY: "k" }, base: { PATH: "/usr/bin", EDITOR: "vim" } });
-    expect(env).toEqual({ ANTHROPIC_API_KEY: "k", CLAUDE_CONFIG_DIR: SPOOL, PATH: "/usr/bin" });
+    // …including R-7b-11's four, which the env module now sets on every child by default.
+    expect(env).toEqual({ ANTHROPIC_API_KEY: "k", CLAUDE_CONFIG_DIR: SPOOL, PATH: "/usr/bin", ...TRAFFIC_OPT_OUT_VARIABLES });
   });
 });
 

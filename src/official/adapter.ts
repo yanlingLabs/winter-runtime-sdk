@@ -182,6 +182,9 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
         mode: "code",
         generation: 1,
         selection: plan.selection,
+        // R-7b-11: WHICH of the pin's two tool surfaces this session ran with, on the row itself —
+        // otherwise the only evidence is four variables in a child environment nobody keeps.
+        remoteConfig: plan.remoteConfig ?? "deny",
         capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
         updatedAt: new Date().toISOString(),
         ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }),
@@ -344,6 +347,7 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     },
     profile: args.plan.profile,
     selection: args.plan.selection,
+    remoteConfig: args.plan.remoteConfig ?? "deny",
     supervisor: args.supervisor,
     get containmentBreaches() {
       return args.sweep?.breaches ?? [];

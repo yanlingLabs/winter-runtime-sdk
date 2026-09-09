@@ -15,6 +15,7 @@
 //     resolution order. A cap enforced in the store would be a second, invisible copy of a rule the
 //     router must apply anyway (it has to produce the visible refusal), and the two would drift.
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
+import type { RemoteConfigPolicy } from "./official-adapter.ts";
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, RuntimeAddress, RuntimeKind, RuntimeObjectKind, SerializedRuntimeAddress } from "./messaging-contract.ts";
 
 /**
@@ -82,6 +83,16 @@ export interface RuntimeDirectoryEntry {
    * in-daemon (`winter-thread`) objects, which have no child at all.
    */
   processIdentity?: { pid: number; startedAt: string };
+  /**
+   * R-7b-11: whether this session's child was allowed to fetch the runtime's REMOTE FEATURE
+   * CONFIGURATION. Absent (and for every `winter-agent` row) means the shipped default, `"deny"`.
+   *
+   * IT IS ON THE ROW BECAUSE THE SURFACE IS NOT DERIVABLE FROM THE VERSION. Two sessions on the same
+   * pinned artifact advertise different tool sets depending on this one answer, so a reader asking
+   * "what could this session do?" cannot answer it from `selection.engineVersion` alone. Written by
+   * the official adapter's record sink at launch, from `OfficialLaunchPlan.remoteConfig`.
+   */
+  remoteConfig?: RemoteConfigPolicy;
   capabilities: ListedRuntimeObject["capabilities"];
   /**
    * ISO-8601. A DELIBERATE DEPARTURE from WS-15 §6.1's `updatedAt: number`: every other timestamp on
