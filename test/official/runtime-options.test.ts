@@ -89,7 +89,7 @@ describeRuntime("WS-14 §2 — the settings layer is the door (review r1, m3)", 
         expect((options.settings as { plansDirectory: string; autoMemoryEnabled: boolean; autoMemoryDirectory: string }).plansDirectory).toBe(".winter/plans");
         expect(options["model"]).toBeUndefined();
 
-        const live = adapter.launch({ address: "claude:session:options", selection, prompt: "hello", cwd: session.cwd, profile: "fresh-spool", configDir: session.spool, options: { ...options, env } });
+        const live = adapter.launch({ address: "session:options", selection, prompt: "hello", cwd: session.cwd, profile: "fresh-spool", configDir: session.spool, options: { ...options, env } });
         for await (const _message of live.query) {
           /* drained: the assertion is on what the runtime ASKED FOR */
         }

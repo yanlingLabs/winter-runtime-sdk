@@ -128,7 +128,7 @@ async function runSession(args: {
     });
     const options = adapter.buildOptions(templateInput);
     const live = adapter.launch({
-      address: "claude:session:aliases",
+      address: "session:aliases",
       selection,
       prompt: "do the thing",
       cwd: session.cwd,

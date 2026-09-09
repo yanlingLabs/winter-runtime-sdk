@@ -25,6 +25,7 @@ import type { NameLeaseRecord, RuntimeDirectoryEntry, RuntimeDirectoryStore } fr
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import { entryToChildLike, entryToListedRuntimeObject, entryToListedRuntimeObjectList, isListableFrom, isResolvableFrom, mergeAdapterOwnedFields, owningSessionIdOf } from "./entries.ts";
 import { recoverDirectory, type RuntimeDirectoryRecoveryHooks, type RuntimeDirectoryRetention } from "./recovery.ts";
+import { UnaddressableEntryError } from "../errors.ts";
 
 /** What a caller may configure. Every field has an answer that is correct when it is absent. */
 export interface RuntimeDirectoryOptions extends RuntimeDirectoryRecoveryHooks {
@@ -295,6 +296,17 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
      * revalidation input — with nothing failing at the time.
      */
     async record(entry) {
+      // A LISTED OBJECT IS ALWAYS ADDRESSABLE (review r4, NEW-13). Every row this store holds is shown
+      // to a model by `ListAgents` and is then expected to answer `SendMessage`; an address that does
+      // not parse fails all three resolution doors (by the listed string, by its canonicalised form,
+      // and by `deliver()` on the row's own address), so the listing advertises something no model can
+      // reach and no error explains. The seam TYPES this field `SerializedRuntimeAddress` and calls it
+      // "the session's canonical directory address" — but that alias is `= string`, so nothing enforced
+      // it, and Lane A's default sink really did seed `claude:session:<id>`. This is the same guard
+      // NEW-6 gave name leases, moved to the door the rows come in through.
+      if (parseRuntimeAddress(entry.address) === undefined) {
+        throw new UnaddressableEntryError(entry.address);
+      }
       const existing = await get(entry.address);
       const merged = mergeAdapterOwnedFields(entry, existing);
       await store.upsert(merged);

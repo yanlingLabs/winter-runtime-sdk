@@ -284,8 +284,19 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
       // class is known), so a session the router cannot read must have a way to be known, or a host
       // that drives sessions through a plain input-stream writer could never receive anything.
       if (deps.permissionClass !== undefined) {
-        const entry = await deps.directory.get(sessionAddressOf(ownerId));
-        if (entry !== undefined) return deps.permissionClass(entry);
+        // WRAPPED EXACTLY LIKE THE FACET CALL ABOVE (review r4, NEW-12). The hook "may be an IPC round
+        // trip" (this lane's own NEW-9 note), so FAILING is its expected mode — and an unwrapped one
+        // came out of `send()`, `reply()` and the model-facing `SendMessage` handler as a raw throw,
+        // which is a model's tool call erroring instead of receiving a classified failure. `unknown`
+        // is §13's own word for "an authenticated route that cannot prove sender class" and is
+        // already what a host with no hook gets, so D2's fail-closed reading is unchanged: the
+        // receiver's mail is HELD, not delivered.
+        try {
+          const entry = await deps.directory.get(sessionAddressOf(ownerId));
+          if (entry !== undefined) return await deps.permissionClass(entry);
+        } catch {
+          /* fall through to `unknown`, which holds rather than delivers */
+        }
       }
       return "unknown"; // WS-10 §13's own word for "an authenticated route that cannot prove sender class"
     },

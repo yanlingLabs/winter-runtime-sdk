@@ -29,6 +29,10 @@ import { createContainmentSweep, type ContainmentBreach, type ContainmentSweep }
 import { mergeHooks } from "./options-template.ts";
 import { buildOfficialChildEnv, type OfficialEnvInput, type OfficialEnvPolicy } from "./env-allowlist.ts";
 import { OfficialConfigurationError, OfficialInvalidResumeError } from "./errors.ts";
+// NEW-13: the row this adapter's default sink writes is shown to a model, so its address must be one
+// the model can send to. Both the parser and the refusal are shared with the directory's own door.
+import { parseRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
+import { UnaddressableEntryError } from "../errors.ts";
 import { assertOptionsInvariants, buildOfficialOptions, type OptionsTemplatePolicy } from "./options-template.ts";
 import type { OfficialContainmentBreachError } from "./errors.ts";
 import { classifyLocalWriteRoot } from "./spool.ts";
@@ -154,14 +158,22 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
    * travels on the plan, so the default is the real store, and a host that wants its own record
    * passes `policy.sink` as before.
    */
-  const sinkFor = (plan: OfficialLaunchPlan): SpawnRecordSink =>
-    policy.sink ??
-    directoryRecordSink({
+  const sinkFor = (plan: OfficialLaunchPlan): SpawnRecordSink => {
+    if (policy.sink !== undefined) return policy.sink;
+    // THE ROW THIS SINK WRITES IS SHOWN TO A MODEL, so its address has to be one the model can send
+    // to (review r4, NEW-13). The first version derived `parsed` by putting the whole address string
+    // into `winterSessionId`, which produced a row `ListAgents` advertised and all three of Lane B's
+    // resolution doors refused — a listing entry with no reachable object behind it. The seam types
+    // this field `SerializedRuntimeAddress` and calls it canonical, but that alias is `= string`, so
+    // the guard has to be here (and Lane B's `record()` now refuses the same shape from any writer).
+    const parsed = parseRuntimeAddress(plan.address);
+    if (parsed === undefined) throw new UnaddressableEntryError(plan.address);
+    return directoryRecordSink({
       store: context.directoryStore,
       address: plan.address,
       seed: () => ({
         address: plan.address,
-        parsed: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: plan.address },
+        parsed,
         runtimeKind: "claude-agent",
         objectKind: "session",
         // WS-14's own preamble: "every claude-agent session is a child process", Code mode only.
@@ -175,6 +187,7 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
         ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }),
       }),
     });
+  };
 
   const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string, sink: SpawnRecordSink): SupervisedSpawnProxy =>
     createSupervisedSpawnProxy({

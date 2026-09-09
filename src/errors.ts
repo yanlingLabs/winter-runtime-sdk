@@ -21,6 +21,29 @@ export class RuntimeSdkError extends Error {
 }
 
 /**
+ * A directory row whose address the router cannot name — refused at the door rather than listed.
+ *
+ * WHY IT IS AN ERROR AND NOT A DROPPED ROW (review r4, NEW-13). Every row the directory holds is
+ * shown to a model by `ListAgents` and is then expected to answer `SendMessage`. An address that does
+ * not parse fails all three resolution doors — by the listed string, by its canonicalised form, and
+ * by `deliver()` on the row's own address — so the listing advertises an object nothing can reach and
+ * no error explains why. A LISTED OBJECT IS ALWAYS ADDRESSABLE; the writer is an adapter recording a
+ * launch, and the fix is always one line at the call site, so it is told.
+ *
+ * SPINE-OWNED because two lanes throw it: the directory's `record()` door and the official adapter's
+ * default record sink, which is where the non-canonical address actually came from.
+ */
+export class UnaddressableEntryError extends RuntimeSdkError {
+  readonly address: string;
+  constructor(address: string) {
+    super(
+      `winter-runtime-sdk: ${JSON.stringify(address)} is not a canonical runtime address, so a directory row under it would be listed to the model by ListAgents and refused by every resolution door (WS-15 §6.1). Build it with serializeRuntimeAddress(buildSessionAddress(<winter session id>)) — the canonical forms are "session:<id>" and "agent:<parent>:<child>"`,
+    );
+    this.address = address;
+  }
+}
+
+/**
  * D19a: the injected peers are outside the tested compatibility matrix, so construction refuses.
  *
  * `expected`/`actual` are the two fields the plan pins. They are STRINGS, not objects, because the

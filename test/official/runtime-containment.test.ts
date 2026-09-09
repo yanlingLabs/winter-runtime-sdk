@@ -118,7 +118,7 @@ async function runContainment(args: {
     };
     const options = args.mutateOptions === undefined ? withBridge : args.mutateOptions(withBridge);
     const live = adapter.launch({
-      address: "claude:session:containment",
+      address: "session:containment",
       selection,
       prompt: "do the thing",
       cwd: args.session.cwd,

@@ -97,7 +97,7 @@ const templateInput = (spawnProxy: OptionsTemplateInput["spawnProxy"]): OptionsT
 });
 
 const plan = (options: OfficialOptions): OfficialLaunchPlan => ({
-  address: "claude:session:test",
+  address: "session:test",
   selection,
   prompt: "hi",
   options,
@@ -210,7 +210,7 @@ describe("review r1, M3 — the wiring through the router's own door", () => {
     // …and §6 rule 2's record lands in the store the SPINE handed the adapter, with no explicit sink
     // and no `ready()` — the two things the owed wiring would have got wrong.
     // The seam's return type is `OfficialSession`; the supervisor rides on the handle Lane A returns.
-    const session = official?.launch({ ...plan(options as OfficialOptions), address: "claude:session:wired" }) as unknown as OfficialSessionHandle;
+    const session = official?.launch({ ...plan(options as OfficialOptions), address: "session:wired" }) as unknown as OfficialSessionHandle;
     // A REAL SPAWN, through the REAL default child starter and with no `ready()` call anywhere: that
     // is the half of M3 a fake `spawnChild` cannot prove. `/bin/cat` is a process that starts, has a
     // pid, and waits — which is all the record needs.
@@ -222,7 +222,7 @@ describe("review r1, M3 — the wiring through the router's own door", () => {
     } finally {
       child.kill("SIGTERM");
     }
-    const recorded = (await directoryStore.load()).find((entry) => entry.address === "claude:session:wired");
+    const recorded = (await directoryStore.load()).find((entry) => entry.address === "session:wired");
     expect(recorded?.configDir).toBe(SPOOL);
     expect(recorded?.processIdentity?.pid).toBeGreaterThan(0);
     // The seeded entry is a MINIMAL one — the real directory entry, when the host records it, owns
