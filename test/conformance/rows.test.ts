@@ -169,7 +169,7 @@ export const ROUTER_ROWS: RouterRow[] = [
     ],
     scoped: true,
     note:
-      "SCOPED, and the scope is the honest half of this row: both legs are produced by the SHARED STORE over the pinned dialect, at every advertised level, over real `mkdtemp` homes. What is NOT claimed is a Claude leg written by the pinned runtime — `docs/probes/materialized-resume.md` records what happened when one was tried in the fix wave (probe (c) FAILED: the parent chain does not come back unbroken), which is exactly why no `agent-state` or `full-filesystem` compatibility claim rests on this row today.",
+      "SCOPED, and the scope is what this row's own tests cover: both legs are produced by the SHARED STORE over the pinned dialect, at every advertised level, over real `mkdtemp` homes. A Claude leg written by the PINNED RUNTIME is covered next door rather than here — `docs/probes/materialized-resume.md`'s probe (c) drives both round-trip orders with the real artifact producing every Claude leg, and as of round 2 it PASSES (its round-1 failure was two probe-side defects: a seed that never reached the canonical store, and a line-adjacency rule stricter than the dialect and than the barrier's own step 5). All four probes now pass measured, so `probe()` reports `preferred`; the SHIPPED default is still `fallback`, because the door follows a measurement a host takes on its own pin. No `agent-state` or `full-filesystem` compatibility claim rests on this row.",
   },
   {
     id: "WS17-11",

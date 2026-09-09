@@ -22,9 +22,11 @@ for release"; it is not implemented and not claimed.)
 **Re-probed after review round 1** (the (c) row below described work the code did not do — see "What
 changed in fix round 1").
 
-**RE-PROBED WITH THE PINNED RUNTIME, 2026-09-09 (P7b fix wave, items 11 + 23).** Lane A's bed is now
-in the same tree, so the three legs that name the pinned official runtime have RUN — see "The pinned
-run" below. The door is still `fallback`, and that is now a MEASUREMENT rather than a missing bed.
+**RE-PROBED WITH THE PINNED RUNTIME, 2026-09-09 (P7b fix wave, items 11 + 23; corrected in round 2).**
+Lane A's bed is now in the same tree, so the three legs that name the pinned official runtime have
+RUN. Round 1 read (c)'s failure wrongly and blamed the runtime; round 2 measured the two causes, both
+on the PROBE's side, fixed them, and re-ran: **all four probes now pass against the pinned artifact,
+and `probe()` reports `door: "preferred"`.** See "The pinned run" below for both rounds.
 
 **Reproduce:** `bun test test/store/materialized-resume.test.ts` (the harness, its honesty in both
 directions, and the doors), or call `createMaterializedResumeDecorator(context, { shared }).probe()`,
@@ -56,28 +58,48 @@ from the staging root with the shared store attached as `Options.sessionStore`.
 | --- | --- | --- |
 | **(a)** neighbour-file survival | **PASS** | `fresh-process resume`: the resume added **6 entries** to the store and the sidecar's bytes were **identical** afterwards |
 | **(b)** no-wash-back | **PASS** | `mirror from a decorated copy`: a real resume FROM the decorated copy mirrored 6 entries; the canonical prefix was intact and the decoration **never** appeared in the store. This is the probe WS-17 §8 makes the PREFERRED door conditional on, and the vendor's mirror does **not** re-send the entries it read |
-| **(c)** sidecar-present round-trip | **FAIL** | `the Claude legs on the pinned runtime`: on `claude→winter→claude`, the Claude legs' lines are byte-identical in the final file (**true**) but **the parent chain is NOT unbroken** once a real Claude leg produced it. The store-produced version of the same round trip keeps the chain intact, so this is a property of what the runtime writes on a resume — not of the store |
+| **(c)** sidecar-present round-trip | **PASS** (round 2; FAILED in round 1 for two probe-side reasons — below) | `the Claude legs on the pinned runtime`, both orders: the Claude legs' lines byte-identical in the final file, the parent chain reachable, the sidecar populated, and the producer record naming the last producer |
 | **(d)** crash pairs | **PASS** | (no pinned leg — entirely a store property) |
 
-**Door: `fallback`.** Three of four pass with the real artifact; (c) fails, and WS-17 §8 requires all
-four. Nothing here is unexercised any more.
+**Door: `preferred` — four measured passes on this pin.** Nothing here is unexercised, nothing is
+simulated, and no leg is a hardcoded pass.
 
-**Two fixture defects were fixed to get this far, and both are worth naming** because each had been
-recording a bed failure that looked like a runtime verdict: the probe transcripts carried no
-`message` field, so the pinned runtime refused the resume outright (`undefined is not an object
-(evaluating 'e.message.content')`); and a round trip that STARTS on the Claude leg was handed an empty
-staging copy, which the runtime reports as `No conversation found with session ID`. A probe of the
-pinned runtime has to be resumable by the pinned runtime.
+**Four FIXTURE defects had to be fixed to get here, and every one of them had been producing a result
+that read like a verdict about the runtime.** Round 1 found two: the probe transcripts carried no
+`message` field, so the pinned runtime refused every resume outright (`undefined is not an object
+(evaluating 'e.message.content')`), and a round trip STARTING on the Claude leg was handed an empty
+staging copy, which the runtime reports as `No conversation found with session ID`. Round 2 found the
+two behind (c)'s failure, both measured rather than read:
 
-**What (c)'s failure is and is not.** It is not a wash-back (that is (b), which passes) and it does not
-touch the sidecar (that is (a), which passes). What it says is that a transcript whose Claude legs were
-written by a real resume does not present an unbroken `parentUuid` chain end to end — the runtime
-re-anchors what it writes after a resume. Whether that is a defect, a fixture artefact of resuming a
-synthetic transcript, or simply how the vendor chains a resumed generation is **not** established here,
-and the honest consequence is the one WS-17 §8 already prescribes: the FALLBACK door ships, the
-canonical file gets one explicitly labelled entry at the barrier, and no `agent-state` or
-`full-filesystem` compatibility claim rests on this. **Owed:** a follow-up that reads the chain the
-runtime actually writes on a resume and decides which of the three it is.
+1. **The Claude-first seed never reached the canonical store.** It was written into the staging COPY
+   only. The mirror sends what the runtime WRITES, not what it READ — that is probe (b), and it
+   passes — so the canonical file began with an entry chaining to a parent the store had never
+   received. In a real handoff the copy IS a copy of the canonical file, so this dangling parent
+   cannot occur in production: it was an artefact of "a round trip that starts on the Claude leg".
+   The seed is now appended through `shared.store.append` **before** the copy is taken.
+2. **`orderIntact` demanded line-ADJACENT chaining**, which the dialect never promised. The pinned
+   runtime interleaves uuid-less bookkeeping entries (`queue-operation`, `last-prompt`, `mode`) into
+   the shared store, and a producer's first entry chains to the last CHAIN entry rather than the last
+   LINE. The store-produced legs passed only because they write chain entries alone. The rule is now
+   the BARRIER's own (`validateChain`): a `parentUuid` must appear EARLIER, entries without a uuid are
+   skipped — the dialect's actual rule, and the one step 5 enforces before any handoff.
+
+**The runtime does NOT re-anchor what it writes.** Round 1's record said it did; measured, it chains
+its first new entry to the last chain entry of the copy it resumed, which is exactly right. That
+sentence is withdrawn.
+
+**What `door: "preferred"` does and does not change.** It is the value `probe()` returns from a
+measured run. **The shipped default is unchanged and is still `fallback`**: `createMaterializedResumeDecorator`
+reports `fallback` until it is given a report or told to probe, and the handoff barrier builds it with
+neither — so a host gets the barrier-append FALLBACK unless it deliberately supplies this report or
+runs the probes on its own pin and platform. That is the design (the door follows a MEASUREMENT, and a
+measurement taken on someone else's machine is not this host's), and it means opening the door in
+production is a deliberate act with a name, not a side effect of this file changing.
+
+**Owed (controller):** a ruling on whether the router should ship this report as the default for the
+pinned 0.3.250 — WS-13 §8.2 permits PREFERRED on four measured passes, and there are now four, on
+darwin-arm64 and (as of this branch's CI) linux-x64. Until that ruling, the FALLBACK door ships and
+the canonical file gets one explicitly labelled entry at the barrier.
 
 ## The table (the earlier, bedless run — kept for the contrast)
 

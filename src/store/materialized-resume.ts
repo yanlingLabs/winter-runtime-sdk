@@ -585,10 +585,32 @@ async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedRes
       const claudeLegsIntact = claudeLegBytes.every((bytes) => lines.includes(bytes));
       // NO LINE COUNT (review r2, N5). A real `freshProcessResume` returns "once the generation has
       // ended", which is at least a user entry and an assistant entry — so a count keyed to the number
-      // of LEGS made the PREFERRED door unopenable by any real bed, with the misleading evidence "the
-      // parent chain is unbroken=false" while the chain was perfectly intact. The chain is the property;
-      // the same expression already asserts it.
-      const orderIntact = lines.length > 0 && lines.every((line, index) => index === 0 || parentOf(line) === uuidOf(lines[index - 1]!));
+      // of LEGS made the PREFERRED door unopenable by any real bed.
+      //
+      // AND NO LINE-ADJACENCY EITHER (fix-wave re-review, NEW-F). The rule was
+      // `parentOf(line) === uuidOf(previous line)`, which demands that every entry chain to the line
+      // immediately before it — something the dialect never promised and the pinned runtime does not
+      // do. Measured: the runtime interleaves uuid-less bookkeeping entries (`queue-operation`,
+      // `last-prompt`, `mode`) into the shared store, and a producer's first entry chains to the last
+      // CHAIN entry rather than the last LINE. So a passing store-produced leg and a failing
+      // real-runtime leg were reporting the same property under two different rules, and the failure
+      // was the RULE's, not the runtime's.
+      //
+      // THE RULE IS THE BARRIER'S OWN (`validateChain`): a `parentUuid` must appear EARLIER in the
+      // transcript, and entries without a uuid are skipped. That is what the dialect states and what
+      // step 5 enforces before any handoff, so a probe holding the transcript to a stricter standard
+      // than the code that consumes it was measuring the probe.
+      const seenUuids = new Set<string>();
+      let orderIntact = lines.length > 0;
+      for (const line of lines) {
+        const parent = parentOf(line);
+        if (typeof parent === "string" && !seenUuids.has(parent)) {
+          orderIntact = false;
+          break;
+        }
+        const uuid = uuidOf(line);
+        if (typeof uuid === "string") seenUuids.add(uuid);
+      }
       const summary = await shared.canonical.readSessionSummary(key);
       return {
         passed: claudeLegsIntact && orderIntact && sidecarBytes.length > 0 && summary?.["producerRuntime"] === order[order.length - 1],
@@ -617,27 +639,24 @@ async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedRes
             const stagingRoot = resumeStagingRoot(randomUUID(), home);
             const copyPath = materializedTranscriptPath(stagingRoot, key);
             mkdirSync(dirname(copyPath), { recursive: true, mode: 0o700 });
-            const canonicalPath = canonicalTranscriptPath(home, key);
-            if (existsSync(canonicalPath)) copyFileSync(canonicalPath, copyPath);
-            else {
-              // A ROUND TRIP THAT STARTS ON THE CLAUDE LEG HAS NOTHING TO RESUME YET, and an EMPTY
-              // staging copy is not "nothing to resume" to the pinned runtime — it is "no conversation
-              // found with session ID", which recorded a bed failure for a fixture problem (items
-              // 11/23). One chain-valid entry makes the resume possible; the leg's subject is whether
-              // the Claude legs' bytes survive the round trip, not whether an empty session resumes.
-              const seed = {
-                type: "user",
-                uuid: randomUUID(),
-                parentUuid: null,
-                sessionId: key.sessionId,
-                timestamp: new Date(0).toISOString(),
-                cwd: "/probe",
-                version: "0.0.0",
-                isSidechain: false,
-                message: { role: "user", content: "a probe entry" },
-              };
-              writeFile(copyPath, Buffer.from(`${JSON.stringify(seed)}\n`, "utf8"));
+            // A ROUND TRIP THAT STARTS ON THE CLAUDE LEG HAS NOTHING TO RESUME YET, and an EMPTY
+            // staging copy is not "nothing to resume" to the pinned runtime — it is "no conversation
+            // found with session ID", which recorded a bed failure for a fixture problem (items
+            // 11/23). One chain-valid entry makes the resume possible.
+            //
+            // THE SEED GOES THROUGH THE CANONICAL STORE FIRST (fix-wave re-review, NEW-F). Writing it
+            // into the staging COPY only produced a canonical file whose first entry chained to a
+            // parent the store had never received — the mirror sends what the runtime WRITES, not what
+            // it READ (that is probe (b), which passes) — so probe (c) failed on a dangling parent that
+            // cannot occur in production, where the copy IS a copy of the canonical file. Appending
+            // first and then copying makes the staging root a true copy, which is the thing being
+            // probed.
+            if (!existsSync(canonicalTranscriptPath(home, key))) {
+              await shared.store.append(key, [{ ...probeEntry({ uuid: randomUUID(), parentUuid: null }), sessionId: key.sessionId }]);
+              await shared.settle(key);
             }
+            const canonicalPath = canonicalTranscriptPath(home, key);
+            copyFileSync(canonicalPath, copyPath);
             await bed.freshProcessResume({ home, stagingRoot, key, shared });
           });
           if (!result.passed) return { passed: false, evidence: `${order.join(" -> ")}: ${result.evidence}` };

@@ -72,6 +72,13 @@ describeRuntime("WS-17 §8 — the four materialized-resume probes, driven again
       expect(results).toHaveLength(4);
       const allPassed = results.every((result) => result.passed);
       expect(report.door).toBe(allPassed ? "preferred" : "fallback");
+
+      // THE SHIPPED DEFAULT IS UNCHANGED BY THIS RUN, and that is the property worth pinning now that
+      // the probes pass: a decorator built the way the BARRIER builds it — no report, no probe — still
+      // reports `fallback`. Opening the door in production is a host supplying a measurement taken on
+      // its own pin and platform, never a side effect of this file going green.
+      const shipped = createMaterializedResumeDecorator(context, {});
+      expect(shipped.door).toBe("fallback");
     },
     PROBE_TIMEOUT,
   );
