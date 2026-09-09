@@ -1,0 +1,59 @@
+{
+  "canUseTool": "<function>",
+  "cwd": "/work/repo",
+  "disallowedTools": [
+    "CronCreate"
+  ],
+  "env": {
+    "ANTHROPIC_API_KEY": "<redacted>",
+    "CLAUDE_CONFIG_DIR": "<redacted>",
+    "PATH": "<redacted>"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          "<function>"
+        ]
+      }
+    ]
+  },
+  "includeHookEvents": true,
+  "includePartialMessages": true,
+  "mcpServers": {
+    "acme": {
+      "name": "acme",
+      "type": "sdk"
+    }
+  },
+  "pathToClaudeCodeExecutable": "/vendored/runtimes/claude",
+  "perTaskStopAffordance": true,
+  "plugins": [
+    {
+      "path": "/work/repo/.acme",
+      "skipMcpDiscovery": true,
+      "type": "local"
+    }
+  ],
+  "sessionId": "00000000-0000-4000-8000-000000000001",
+  "sessionStore": "<instance FakeCompatibilityStore>",
+  "sessionStoreFlush": "batched",
+  "settingSources": [],
+  "settings": {
+    "autoMemoryDirectory": "/home/.acme/projects/project-key-9/memory",
+    "autoMemoryEnabled": true,
+    "plansDirectory": ".acme/plans"
+  },
+  "spawnClaudeCodeProcess": "<function>",
+  "strictMcpConfig": true,
+  "systemPrompt": {
+    "append": "<deterministically built instructions>",
+    "excludeDynamicSections": true,
+    "preset": "claude_code",
+    "type": "preset"
+  },
+  "toolAliases": {
+    "ListAgents": "mcp__acme__list_agents",
+    "SendMessage": "mcp__acme__send_message"
+  }
+}
