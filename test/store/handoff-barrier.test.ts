@@ -1,9 +1,9 @@
 // WS-05 §12: the eight steps, and the three ways they end.
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import { WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 
 import {
   acquireHandoffLease,
@@ -88,24 +88,55 @@ function confirmingDestination(seen: { target?: unknown }, report: HandoffStepRe
 }
 
 describe("the wiring the spine will do in one line", () => {
-  test("both factories construct with the spine's OWN fake peer, and only a real handoff needs a store", async () => {
-    // The exact call `src/sdk.ts` will make: `stubHandoffBarrier(context)` -> `createHandoffBarrier(context)`,
-    // for EVERY `createRuntimeSdk` — including every spine test, whose peer exports five members and
-    // neither a store class nor `resolveWinterHome`. If either factory resolved a store eagerly, this
-    // line would throw there, and the "one-line swap" would not be one.
+  test("`barrier.decorator` — the expression the spine WRITES — is readable with the spine's own fake peer", async () => {
+    // The exact two expressions `src/sdk.ts` evaluates for EVERY `createRuntimeSdk`, including every
+    // spine test, whose peer exports five members and neither a store class nor `resolveWinterHome`.
+    // Reading `barrier.decorator` used to resolve the store through the F2 identity check and throw
+    // here (review r2, N1) — and the previous version of this test missed it by building the decorator
+    // separately, which is not what the wiring does.
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain: createFakeKeychain() });
     const context = runtimeSdkInternals(sdk)!.context;
 
     const barrier = createHandoffBarrier(context);
-    const decorator = createMaterializedResumeDecorator(context);
-    // The decorator still ANSWERS the one question it can answer without a store (WS-13 §8.2 makes
-    // FALLBACK the always-available door).
+    const decorator = barrier.decorator; // <- the wiring line
     expect(decorator.door).toBe("fallback");
+    expect(barrier.decorator).toBe(decorator); // memoised, and still no store
     // A plan for an unknown session fails on the DIRECTORY, not on a missing store.
     await expect(barrier.plan({ projectKey: "p", sessionId: "s" }, "claude-agent")).rejects.toThrow(HandoffPlanError);
     // And the store is demanded only when a handoff actually runs.
     expect(() => barrier.shared).toThrow(SharedStoreUnavailableError);
+  });
+
+  test("...and with a peer whose `resolveWinterHome` throws, which is this lane's own bed", async () => {
+    // review r2, PLANT 20. The bed's peer HAS the store class; what it refuses is resolving a real home.
+    await withStoreBed(async (bed) => {
+      const barrier = createHandoffBarrier(bed.context);
+      expect(barrier.decorator.door).toBe("fallback");
+      await expect(barrier.plan({ projectKey: "p", sessionId: "s" }, "claude-agent")).rejects.toThrow(HandoffPlanError);
+      expect(() => barrier.shared).toThrow("a hermetic test must never resolve the real Winter home");
+    });
+  });
+
+  test("an injected decorator is still checked — but only when a handoff needs the store", async () => {
+    await withStoreBed(async (bed) => {
+      const second = createSharedSessionStore({ peers: bed.peers, winterHome: bed.home });
+      const foreign = createMaterializedResumeDecorator(bed.context, { shared: second });
+      const barrier = barrierFor(bed, { decorator: foreign, participants: { source: () => idleOwner() } });
+      // Reading it is free; USING it is what refuses.
+      expect(barrier.decorator).toBe(foreign);
+      await bed.record();
+      await expect(barrier.plan(bed.key, "claude-agent")).rejects.toThrow(HandoffWiringError);
+    });
+  });
+
+  test("a decorator that cannot say which store it writes into is refused", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      const bare = { door: "fallback" as const, probe: async () => ({ door: "fallback" as const, results: [], probedAt: "" }), decorate: async () => ({ door: "fallback" as const, resumePath: "", canonicalUntouched: true }) };
+      const barrier = barrierFor(bed, { decorator: bare as never, participants: { source: () => idleOwner() } });
+      await expect(barrier.plan(bed.key, "claude-agent")).rejects.toThrow(HandoffWiringError);
+    });
   });
 });
 
@@ -741,10 +772,11 @@ describe("F1 — ownership moves ONLY after step 8 confirms (WS-05 §12's own cl
     });
   });
 
-  test("a crash INSIDE the flip is repaired by the pending record on the next plan()", async () => {
-    // The flip is two writes across two stores. The first (the transcript's own producer record) is
-    // atomic; the second (the directory's derived copy) can be lost to a crash. This makes the
-    // directory's write fail exactly once — the crash window — and then asks `plan()` to repair it.
+  test("a directory write lost inside the commit is `resumed`, not `lossy` — and the cache is repaired", async () => {
+    // The commit is two writes: the producer record (authoritative, atomic) and the directory's derived
+    // copy. Once the FIRST has landed the handoff IS committed — a destination is already running on it
+    // — so the outcome is `resumed` with the lagging copy NAMED (review r2, N2.1), and the next `plan()`
+    // brings the cache into line (review r1, F1).
     const failing = createInMemoryRuntimeDirectoryStore();
     let failNextUpsert = false;
     const guarded: RuntimeDirectoryStore = {
@@ -766,8 +798,8 @@ describe("F1 — ownership moves ONLY after step 8 confirms (WS-05 §12's own cl
         failNextUpsert = true;
         const outcome = await barrier.execute(plan);
 
-        // The destination confirmed and the transcript's record moved; the directory did not.
-        expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+        expect(outcome.kind).toBe("resumed");
+        expect(outcome.detail).toContain("derived copy is behind");
         expect((await bed.shared.canonical.readSessionSummary(bed.key))!["producerRuntime"]).toBe("claude-agent");
         expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
 
@@ -777,6 +809,34 @@ describe("F1 — ownership moves ONLY after step 8 confirms (WS-05 §12's own cl
         expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("claude-agent");
         expect((await bed.directoryStore.load())[0]!.generation).toBe(entry.generation + 1);
         expect(await bed.directoryStore.cursors.get(entry.address)).toBe(String((await bed.shared.canonical.readSessionSummary(bed.key))!["projectionCursor"]));
+      },
+      { directoryStore: guarded },
+    );
+  });
+
+  test("a directory that NEVER accepts a write does not make the session unplannable", async () => {
+    // review r2, N2.3: a throwing `upsert` used to propagate a raw host error out of every future
+    // `plan()`. The repair is best-effort now; the entry it returns is the authoritative one either way.
+    const inner = createInMemoryRuntimeDirectoryStore();
+    let readOnly = false;
+    const guarded: RuntimeDirectoryStore = {
+      ...inner,
+      async upsert(entry) {
+        if (readOnly) throw new Error("the host directory is read-only");
+        return inner.upsert(entry);
+      },
+    };
+    await withStoreBed(
+      async (bed) => {
+        await bed.record();
+        await bed.append(1);
+        const barrier = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+        const plan = await barrier.plan(bed.key, "claude-agent");
+        readOnly = true;
+        const outcome = await barrier.execute(plan);
+        expect(outcome.kind).toBe("resumed");
+        // Every later plan still works, and reports the authoritative owner rather than the stale cache.
+        for (let i = 0; i < 2; i++) expect((await barrier.plan(bed.key, "winter-agent")).from).toBe("claude-agent");
       },
       { directoryStore: guarded },
     );
@@ -939,6 +999,340 @@ describe("F7 / F8 / F9 — plan and execute agree", () => {
       if (outcome.kind !== "lossy-fork-offered") throw new Error("unreachable");
       expect(outcome.reason).toContain("owns it now");
       expect((await bed.directoryStore.load())[0]!.generation).toBe(7);
+    });
+  });
+});
+
+describe("N2 / N3 — after `confirmInit`, the barrier never lies and never throws", () => {
+  test("the confirmed destination's staging root survives a failed commit", async () => {
+    // review r2, N2.2 + PLANT 6: the barrier hands the staging root to `confirmInit` itself, so a
+    // destination that answered `ok` is reading it. `unwind()` used to delete it under that process.
+    class RefusesTheProducerRecord extends WinterCompatibilitySessionStore {
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        if (entries.some((entry) => entry["producerRuntime"] !== undefined)) throw new Error("the summary sidecar is read-only");
+        return super.append(key, entries);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        const entry = await bed.record();
+        await bed.append(1);
+        let seenRoot: string | undefined;
+        const barrier = barrierFor(bed, {
+          participants: {
+            source: () => idleOwner(),
+            destination: () => ({
+              runtimeKind: "claude-agent" as const,
+              confirmInit: (target: any) => {
+                seenRoot = target.stagingRoot;
+                return OK;
+              },
+            }),
+          },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+
+        expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+        if (outcome.kind !== "lossy-fork-offered") throw new Error("unreachable");
+        expect(outcome.reason).toContain("producer record could not be written");
+        // The source keeps the session — the record never landed...
+        expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe(entry.runtimeKind);
+        // ...but the copy the destination is READING is still there.
+        expect(existsSync(seenRoot!)).toBe(true);
+      },
+      { store: RefusesTheProducerRecord, policy: { backoffMs: 1 } },
+    );
+  });
+
+  test("a throw from the staging-root factory returns an outcome and unwinds", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      const barrier = barrierFor(bed, {
+        stagingRootFor: () => {
+          throw new Error("no temp directory");
+        },
+        participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+      expect((await bed.shared.canonical.readSessionSummary(bed.key))?.["pendingHandoff"]).toBeNull();
+    });
+  });
+
+  test("a throw from `decorate()` returns an outcome, unwinds, and leaves no staged copy", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      const real = createMaterializedResumeDecorator(bed.context, { shared: bed.shared });
+      const throwing = {
+        get door() {
+          return real.door;
+        },
+        get report() {
+          return real.report;
+        },
+        get shared() {
+          return bed.shared;
+        },
+        probe: () => real.probe(),
+        decorate: () => {
+          throw new Error("the staging root is not writable");
+        },
+      };
+      const barrier = barrierFor(bed, { decorator: throwing as never, participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+      expect(outcome.detail).toContain("not writable");
+      expect((await bed.shared.canonical.readSessionSummary(bed.key))?.["pendingHandoff"]).toBeNull();
+      expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
+    });
+  });
+
+  test("a throw from the destination RESOLVER returns an outcome and unwinds", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner(),
+          destination: () => {
+            throw new Error("the runtime directory is unreachable");
+          },
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+      expect((await bed.shared.canonical.readSessionSummary(bed.key))?.["pendingHandoff"]).toBeNull();
+    });
+  });
+
+  test("a throw AFTER the producer record lands is `resumed`, with the failure named", async () => {
+    // review r2, N3 / PLANT 17: ownership has moved and a destination is running. "The source kept the
+    // session" would be false; the honest answer is `resumed` with the failure in the detail.
+    const inner = createInMemoryRuntimeDirectoryStore();
+    let poisoned = false;
+    const guarded: RuntimeDirectoryStore = {
+      ...inner,
+      cursors: {
+        ...inner.cursors,
+        async set(address, cursor) {
+          if (poisoned) throw new Error("the cursor store is unreachable");
+          return inner.cursors.set(address, cursor);
+        },
+      },
+    };
+    await withStoreBed(
+      async (bed) => {
+        await bed.record();
+        await bed.append(1);
+        const barrier = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+        const plan = await barrier.plan(bed.key, "claude-agent");
+        poisoned = true;
+        const outcome = await barrier.execute(plan);
+        expect(outcome.kind).toBe("resumed");
+        expect(outcome.detail).toContain("derived copy is behind");
+        expect((await bed.shared.canonical.readSessionSummary(bed.key))!["producerRuntime"]).toBe("claude-agent");
+      },
+      { directoryStore: guarded },
+    );
+  });
+});
+
+describe("N4 — step 4 records `reconciled` only when the repair actually landed", () => {
+  test("a session whose id is not a backend uuid is reconciled by PATH, not looked for by a scan", async () => {
+    await withStoreBed(async (bed) => {
+      // The comparison addresses the file directly; the repair used to reach it through the allowlist
+      // scan, which skips a name like this — so the tail was dropped and step 4 said "reconciled".
+      const odd: SessionKey = { projectKey: bed.key.projectKey, sessionId: "legacy-session-7" };
+      await bed.record({ backendSessionId: odd.sessionId, parsed: { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: odd.sessionId, backendSessionId: odd.sessionId } });
+      const [a] = await bed.append(1, odd);
+      const b = bed.entry({ key: odd });
+      const spool = join(bed.home, "spool");
+      const path = localTranscriptPath(spool, odd);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify(a)}\n${JSON.stringify(b)}\n`);
+
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ health: () => ({ launchedThroughProxy: true, recordedLocalWriteRoot: spool, transcriptHealth: "ok" }) }),
+          destination: () => confirmingDestination({}),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(odd, "claude-agent"));
+      expect(outcome.kind, outcome.detail).toBe("resumed");
+      // The tail the source wrote is IN the canonical store, which is what "reconciled" has to mean.
+      expect(((await bed.shared.store.load(odd)) ?? []).map((entry) => entry["uuid"])).toContain(b["uuid"]);
+    });
+  });
+
+  test("a repair that does not land is `repair-required` — the barrier verifies, it does not assume", async () => {
+    // A store that silently swallows the entry the repair appends: the reconciler's own re-read then
+    // finds the canonical file still behind, and step 4 must refuse rather than record "reconciled"
+    // over a tail that was dropped (review r2, N4 / PLANT 15).
+    class SwallowsTheTail extends WinterCompatibilitySessionStore {
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        const kept = entries.filter((entry) => entry["swallowMe"] !== true);
+        if (kept.length === 0) return;
+        return super.append(key, kept);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.record();
+        const [a] = await bed.append(1);
+        const lost = bed.entry({ swallowMe: true });
+        const spool = join(bed.home, "spool");
+        const path = localTranscriptPath(spool, bed.key);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, `${JSON.stringify(a)}\n${JSON.stringify(lost)}\n`);
+
+        const barrier = barrierFor(bed, {
+          participants: {
+            source: () => idleOwner({ health: () => ({ launchedThroughProxy: true, recordedLocalWriteRoot: spool, transcriptHealth: "ok" }) }),
+            destination: () => confirmingDestination({}),
+          },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+        expect(outcome).toMatchObject({ kind: "blocked", reason: "repair-required", step: 4 });
+        // The handoff did NOT complete, and the tail is still only in the local root.
+        expect(((await bed.shared.store.load(bed.key)) ?? []).map((entry) => entry["uuid"])).not.toContain(lost["uuid"]);
+        expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
+      },
+      { store: SwallowsTheTail },
+    );
+  });
+});
+
+describe("N6 / F8 / F11 — the marker, the health source and the producer's identity", () => {
+  test("a concurrent plan() does not clear a LIVE handoff's pending marker", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      let markerDuringConfirm: unknown;
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({
+            runtimeKind: "claude-agent" as const,
+            async confirmInit() {
+              // A second, read-shaped call while the handoff is in flight.
+              const observer = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+              expect((await observer.plan(bed.key, "claude-agent")).from).toBe("winter-agent");
+              markerDuringConfirm = (await bed.shared.canonical.readSessionSummary(bed.key))?.["pendingHandoff"];
+              return OK;
+            },
+          }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome.kind).toBe("resumed");
+      // The marker survived the concurrent plan(), so a crash at that instant would still be recoverable.
+      expect(markerDuringConfirm).toMatchObject({ pid: process.pid, from: "winter-agent", to: "claude-agent" });
+    });
+  });
+
+  test("a marker left by a DEAD holder is cleared", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      await bed.shared.store.append(bed.key, [{ type: "winter_dialect_record", pendingHandoff: { pid: 999_999, from: "winter-agent", to: "claude-agent", at: "x", level: "conversation", sourceGeneration: 1, cursor: "" } }]);
+      await bed.shared.settle(bed.key);
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+      expect((await barrier.plan(bed.key, "claude-agent")).from).toBe("winter-agent");
+      expect((await bed.shared.canonical.readSessionSummary(bed.key))?.["pendingHandoff"]).toBeNull();
+    });
+  });
+
+  test("plan() marks step 4 from the store's health in the WIRED shape, where no store is injected", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      const canonical = bed.shared.canonical as unknown as { append: (key: SessionKey, entries: SessionStoreEntry[]) => Promise<void> };
+      const original = canonical.append.bind(canonical);
+      canonical.append = async () => {
+        throw new Error("mirror is down");
+      };
+      await bed.shared.store.append(bed.key, [bed.entry()]);
+      await bed.shared.settle(bed.key);
+      canonical.append = original;
+
+      // NOT `deps.shared` — the wired barrier never sets it (review r2, F8). This one resolves lazily
+      // and must still see the store's own health.
+      const barrier = createHandoffBarrier(bed.context, {
+        winterHome: bed.home,
+        leaseRoot: join(bed.home, "runtimes", "handoff-leases"),
+        participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) },
+      });
+      // The lazily-built store is a different instance over the same home, so plant the failure in it.
+      barrier.shared.store.append(bed.key, []).catch(() => undefined);
+      const lazyCanonical = barrier.shared.canonical as unknown as { append: (key: SessionKey, entries: SessionStoreEntry[]) => Promise<void> };
+      const lazyOriginal = lazyCanonical.append.bind(lazyCanonical);
+      lazyCanonical.append = async () => {
+        throw new Error("mirror is down");
+      };
+      await barrier.shared.store.append(bed.key, [bed.entry()]);
+      await barrier.shared.settle(bed.key);
+      lazyCanonical.append = lazyOriginal;
+
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.steps[3]!.knownUnprovable).toContain("mirror is unhealthy");
+    });
+  });
+
+  test("the producer record names the DESTINATION's versions, or none at all", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: { ...selectionFor("winter-agent"), sdkVersion: "WINTER-9.9.9", engineVersion: "WINTER-ENGINE" } });
+      await bed.append(1);
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({ runtimeKind: "claude-agent" as const, confirmInit: () => ({ ok: true as const, producer: { sdkVersion: "0.3.250", engineVersion: "claude-cli/2.1.250" } }) }),
+        },
+      });
+      expect((await barrier.execute(await barrier.plan(bed.key, "claude-agent"))).kind).toBe("resumed");
+      const summary = await bed.shared.canonical.readSessionSummary(bed.key);
+      expect(summary!["producerRuntime"]).toBe("claude-agent");
+      expect(summary!["producerSdkVersion"]).toBe("0.3.250");
+      expect(summary!["producerEngineVersion"]).toBe("claude-cli/2.1.250");
+      // The SOURCE's versions are never written under the destination's name.
+      expect(JSON.stringify(summary)).not.toContain("WINTER-9.9.9");
+    });
+  });
+
+  test("a destination that reports no versions leaves the fields OUT rather than inventing them", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: { ...selectionFor("winter-agent"), sdkVersion: "WINTER-9.9.9" } });
+      await bed.append(1);
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+      expect((await barrier.execute(await barrier.plan(bed.key, "claude-agent"))).kind).toBe("resumed");
+      const summary = await bed.shared.canonical.readSessionSummary(bed.key);
+      expect(summary!["producerSdkVersion"]).toBeUndefined();
+      expect(JSON.stringify(summary)).not.toContain("WINTER-9.9.9");
+    });
+  });
+});
+
+describe("the source can still write after a handoff — a DOCUMENTED behaviour, not a guard", () => {
+  test("a post-handoff Winter append restamps the producer record, and the next plan() follows it", async () => {
+    // Review r2 confirmed the mechanism: `dialect.ts`'s `appendWithDialectRecord` stamps
+    // `producerRuntime: "winter-agent"` beside EVERY Winter append. "Exactly one runtime owns a
+    // compatibility session at a time" is enforced by `owner.close()` plus convention — the store's
+    // writer lease is re-entrant per pid and the router hosts both branches in one process — so this
+    // test PINS the behaviour rather than claiming it is prevented. The close-out owes it a sentence.
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+      expect((await barrier.execute(await barrier.plan(bed.key, "claude-agent"))).kind).toBe("resumed");
+      expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("claude-agent");
+
+      // The closed source appends anyway, with its own dialect record.
+      await bed.shared.store.append(bed.key, [bed.entry(), { type: "winter_dialect_record", producerRuntime: "winter-agent", dialectFamily: "claude-code-jsonl" }]);
+      await bed.shared.settle(bed.key);
+
+      expect((await barrier.plan(bed.key, "claude-agent")).from).toBe("winter-agent");
+      expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
     });
   });
 });

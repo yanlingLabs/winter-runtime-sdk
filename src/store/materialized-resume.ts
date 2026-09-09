@@ -577,7 +577,12 @@ async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedRes
       const sidecarBytes = readFileSync(path);
       const lines = readFileSync(canonicalTranscriptPath(home, key), "utf8").trimEnd().split("\n");
       const claudeLegsIntact = claudeLegBytes.every((bytes) => lines.includes(bytes));
-      const orderIntact = lines.length === order.length && lines.every((line, index) => index === 0 || parentOf(line) === uuidOf(lines[index - 1]!));
+      // NO LINE COUNT (review r2, N5). A real `freshProcessResume` returns "once the generation has
+      // ended", which is at least a user entry and an assistant entry — so a count keyed to the number
+      // of LEGS made the PREFERRED door unopenable by any real bed, with the misleading evidence "the
+      // parent chain is unbroken=false" while the chain was perfectly intact. The chain is the property;
+      // the same expression already asserts it.
+      const orderIntact = lines.length > 0 && lines.every((line, index) => index === 0 || parentOf(line) === uuidOf(lines[index - 1]!));
       const summary = await shared.canonical.readSessionSummary(key);
       return {
         passed: claudeLegsIntact && orderIntact && sidecarBytes.length > 0 && summary?.["producerRuntime"] === order[order.length - 1],

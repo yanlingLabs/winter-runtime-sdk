@@ -239,9 +239,22 @@ export interface TranscriptReconcilerInput {
  */
 export async function reconcileLocalWriteRoot(root: string, input: TranscriptReconcilerInput): Promise<ReconcileReport> {
   const { shared } = input;
-  const transcripts = scanLocalWriteRoot(root).filter(
-    (found) => input.only === undefined || (found.key.projectKey === input.only.projectKey && found.key.sessionId === input.only.sessionId),
-  );
+  // WHEN A SESSION IS NAMED, IT IS ADDRESSED — never looked for (review r2, N4). The barrier's step 4
+  // compares the canonical tail against `<root>/projects/<key>/<id>.jsonl` BY PATH, and this repair used
+  // to reach the same file through `scanLocalWriteRoot`, whose allowlist can legitimately skip a name
+  // the comparison read. Two predicates for "is this the transcript" on the two halves of one step is
+  // how a handoff completed while silently dropping the tail the source had written.
+  const transcripts =
+    input.only === undefined
+      ? scanLocalWriteRoot(root)
+      : (() => {
+          const key: SessionKey = { projectKey: input.only.projectKey, sessionId: input.only.sessionId };
+          const direct = localTranscriptPath(root, key);
+          const named: LocalTranscript[] = isFile(direct) ? [{ path: direct, key }] : [];
+          // Its subagents still come from the scan — they are addressed by a subkey this caller did not name.
+          const children = scanLocalWriteRoot(root).filter((found) => found.key.subpath !== undefined && found.key.projectKey === key.projectKey && found.key.sessionId === key.sessionId);
+          return [...named, ...children];
+        })();
   const outcomes: TranscriptReconcileOutcome[] = [];
   const cleared: SessionKey[] = [];
   let appended = 0;
