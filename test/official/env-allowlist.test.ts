@@ -22,6 +22,8 @@ import { WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
 import { OfficialConfigurationError } from "../../src/official/errors.ts";
 import {
   buildOfficialChildEnv,
+  EXECUTION_INDIRECTION_ENV_NAMES,
+  isExecutionIndirectionVariable,
   assertNoForbiddenChildVariables,
   minimalOsEnvironmentFrom,
   officialEnvAllowlistNames,
@@ -325,5 +327,73 @@ describe("WS-17's drift gate — the allowlist snapshot", () => {
     expect(missing).toEqual([]);
     // Non-vacuity: a name we invented is NOT in there, so the scan discriminates.
     expect(artifact.includes("ANTHROPIC_NOT_A_REAL_VARIABLE")).toBe(false);
+  });
+});
+
+// ====================================================================================================
+// ITEM 22 / NEW-A — THE NAMES THAT CHANGE HOW THE CHILD EXECUTES CODE OR AUTHENTICATES.
+//
+// The extras door had two rules and BOTH were blind to this class. The credential rule is a SHAPE rule
+// and none of these names looks like a credential; the positive-allowlist rule admits any name the
+// pinned artifact's own registry declares — and `BASH_ENV`, `CLAUDE_CODE_SHELL_PREFIX`,
+// `NODE_OPTIONS`, `GIT_ASKPASS` and `CLAUDE_CODE_GIT_BASH_PATH` are ALL declared there, because the
+// runtime really does read them. "The artifact reads it" is why the registry lists it and why it is
+// dangerous, which is exactly why it cannot be the whole test.
+//
+// The exposure was bounded — the `base` door drops these silently, so only a host naming one itself
+// could pass it — but the README told hosts the door refused what it admitted, and a false
+// host-facing security claim is the one state that must not ship.
+// ====================================================================================================
+describe("item 22 — the execution/indirection names are refused BY NAME", () => {
+  const planted = (name: string) => ({ configuredExtras: { [name]: "/tmp/planted" } });
+
+  test("every name in the set is refused, whoever declares it", () => {
+    for (const name of EXECUTION_INDIRECTION_ENV_NAMES) {
+      expect(() => buildOfficialChildEnv(input(), planted(name))).toThrow(/refused explicitly/);
+    }
+    // NOT VACUOUS: the set really contains the five the review measured as ADMITTED.
+    for (const name of ["BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "NODE_OPTIONS", "GIT_ASKPASS", "CLAUDE_CODE_GIT_BASH_PATH"]) {
+      expect(EXECUTION_INDIRECTION_ENV_NAMES).toContain(name);
+    }
+  });
+
+  test("the loader PREFIXES are refused too, because no closed list can enumerate them", () => {
+    for (const name of ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH"]) {
+      expect(() => buildOfficialChildEnv(input(), planted(name))).toThrow(/refused explicitly/);
+      expect(isExecutionIndirectionVariable(name)).toBe(true);
+    }
+  });
+
+  test("matching is case-insensitive, because a differently-cased spelling is the same program", () => {
+    expect(() => buildOfficialChildEnv(input(), planted("bash_env"))).toThrow(/refused explicitly/);
+    expect(() => buildOfficialChildEnv(input(), planted("ld_preload"))).toThrow(/refused explicitly/);
+  });
+
+  test("the check runs BEFORE the registry rule — which is the whole fix", () => {
+    // `BASH_ENV` is IN the pinned artifact's own non-credential registry, so a check placed after the
+    // positive-allowlist rule would never fire. This is the assertion that pins the ORDER.
+    expect(NON_CREDENTIAL_ENV_REGISTRY.map((name) => name.toUpperCase())).toContain("BASH_ENV");
+    const refusal = (() => {
+      try {
+        buildOfficialChildEnv(input(), planted("BASH_ENV"));
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    })();
+    expect(refusal).toContain("refused explicitly");
+    expect(refusal).toContain("EXECUTES code");
+    // …and it is not the positive-allowlist refusal wearing a different hat.
+    expect(refusal).not.toContain("positive allowlist");
+  });
+
+  test("a REVIEWED name still gets through, one name at a time — it is a door, not a wall", () => {
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { NODE_OPTIONS: "--max-old-space-size=4096" }, reviewedExecutionExtras: ["NODE_OPTIONS"] })["NODE_OPTIONS"]).toBe("--max-old-space-size=4096");
+    // Reviewing one does NOT review its neighbours.
+    expect(() => buildOfficialChildEnv(input(), { configuredExtras: { NODE_OPTIONS: "-r /tmp/x", BASH_ENV: "/tmp/y" }, reviewedExecutionExtras: ["NODE_OPTIONS"] })).toThrow(/refused explicitly/);
+  });
+
+  test("an ordinary non-credential extra is unaffected", () => {
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { NO_COLOR: "1" } })["NO_COLOR"]).toBe("1");
   });
 });

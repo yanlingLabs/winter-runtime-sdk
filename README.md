@@ -74,13 +74,20 @@ background write that lands later is caught opportunistically by the next swept 
 floor runs first and any deny wins, so containment is unaffected — but your broker will not see that
 call, which matters if you were counting on it for audit.
 
-**The extras door is a positive allowlist, and the credential-shaped escape hatch is closed by
-default.** `configuredExtras` admits only names the pinned artifact's own environment registry
-declares AND that an independent rule classifies as non-credential; anything auth-shaped is refused
-with a sentence naming why. A deployment that has REVIEWED a specific credential-shaped variable
-names it explicitly in `reviewedCredentialShapedExtras` — one name at a time, never a wildcard —
-which is a reviewed compatibility event rather than a silent addition. `BASH_ENV` and its neighbours
-are refused explicitly rather than by keyword, because the keyword rule cannot see them.
+**The extras door is a positive allowlist with two closed escape hatches.** `configuredExtras` admits
+only names the pinned artifact's own environment registry declares AND that an independent rule
+classifies as non-credential; anything auth-shaped is refused with a sentence naming why, and a
+deployment that has REVIEWED a specific credential-shaped variable names it in
+`reviewedCredentialShapedExtras` — one name at a time, never a wildcard.
+
+A second class is refused **by name**: variables that change how the child EXECUTES code or
+authenticates — `BASH_ENV`, `ENV` and `CLAUDE_CODE_SHELL_PREFIX` (a file the shell sources on every
+non-interactive start, or a prefix around every command), `NODE_OPTIONS` and `LD_*`/`DYLD_*` (loader
+and runtime hooks), `GIT_ASKPASS`, `SSH_ASKPASS` and the credential helpers (programs the child RUNS
+to obtain a credential). Neither of the other two rules can see them: they are not credential-SHAPED,
+and the pinned artifact's registry legitimately declares several of them, because the runtime really
+does read them — which is why "the registry declares it" cannot be the whole test. The reviewed door
+for this class is `reviewedExecutionExtras`, again one name at a time.
 
 **The approval bridge is fail-closed when no broker is configured.** A host MUST supply a broker: with
 none, every call that reaches the bridge is denied. That is deliberate — the alternative is a session

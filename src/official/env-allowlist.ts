@@ -137,8 +137,89 @@ export interface OfficialEnvPolicy {
    * is §12's own "reviewed compatibility event" rather than a silent addition.
    */
   reviewedCredentialShapedExtras?: readonly string[];
+  /**
+   * Execution/indirection variables this deployment has reviewed and needs anyway (item 22, NEW-A).
+   *
+   * The sibling of `reviewedCredentialShapedExtras`, for the other blind spot: names that change how
+   * the child EXECUTES code or authenticates (`BASH_ENV`, `NODE_OPTIONS`, `GIT_ASKPASS`, `LD_*`, …).
+   * They are refused by name even when the pinned registry declares them, because "the artifact reads
+   * it" is exactly why it is dangerous. One name at a time; never a prefix, never a wildcard.
+   */
+  reviewedExecutionExtras?: readonly string[];
   /** D14's ship gate, threaded to the auth validator. Default: closed. */
   claudeOauth?: ClaudeOauthGate;
+}
+
+/**
+ * NAMES THAT CHANGE HOW THE CHILD EXECUTES CODE OR AUTHENTICATES — refused by NAME, always (item 22,
+ * fix-wave re-review NEW-A).
+ *
+ * WHY A LITERAL SET AND NOT A RULE. The extras door already has two rules and BOTH are blind here.
+ * The credential rule is a SHAPE rule (`_KEY`, `TOKEN`, `OAUTH`, …) and none of these names looks
+ * like a credential; the positive-allowlist rule admits any name the pinned artifact's own registry
+ * declares, and all five of the headline names below ARE declared there — the artifact reads them, so
+ * the registry is right to list them, and that is precisely why "the registry declares it" cannot be
+ * the whole test. Measured on the head before this set existed: `BASH_ENV`,
+ * `CLAUDE_CODE_SHELL_PREFIX`, `NODE_OPTIONS`, `GIT_ASKPASS` and `CLAUDE_CODE_GIT_BASH_PATH` were all
+ * ADMITTED through `configuredExtras`, while the README told hosts they were refused.
+ *
+ * WHAT THESE NAMES DO, which is the reason they are one class:
+ *
+ *   * `BASH_ENV` / `ENV` / `CLAUDE_CODE_SHELL_PREFIX` — a file the shell SOURCES on every
+ *     non-interactive start, or a prefix wrapped around every command. Arbitrary code before any
+ *     command the containment floor ever sees.
+ *   * `NODE_OPTIONS` / `LD_PRELOAD` / `LD_*` / `DYLD_*` — loader and runtime hooks. `--require` runs
+ *     a module inside the child before its own entry point.
+ *   * `GIT_ASKPASS` / `SSH_ASKPASS` / `SUDO_ASKPASS` / `GIT_SSH*` / `GIT_CREDENTIAL_HELPER` — programs
+ *     the child EXECUTES to obtain credentials. Not credential-shaped; credential-producing.
+ *
+ * The exposure was bounded (the `base` door drops these silently, so only a host naming one itself
+ * could pass it), which is why this is a scheduled hardening rather than an incident — but "the
+ * README claims a refusal the code does not make" is the one state that must not ship.
+ *
+ * IT IS STILL A DOOR, NOT A WALL. A deployment that has REVIEWED a specific name and needs it says so
+ * in `reviewedExecutionExtras`, one name at a time — the same shape as the credential hatch, and a
+ * reviewed compatibility event rather than a silent addition.
+ */
+export const EXECUTION_INDIRECTION_ENV_NAMES: readonly string[] = [
+  // shells: a file sourced on every non-interactive start, or a prefix around every command
+  "BASH_ENV",
+  "ENV",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PROMPT_COMMAND",
+  "CLAUDE_CODE_SHELL_PREFIX",
+  "CLAUDE_CODE_GIT_BASH_PATH",
+  // loader and runtime hooks
+  "NODE_OPTIONS",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "BUN_INSPECT",
+  "PYTHONSTARTUP",
+  "PERL5OPT",
+  "RUBYOPT",
+  // askpass / credential helpers: programs the child RUNS to obtain a credential
+  "GIT_ASKPASS",
+  "SSH_ASKPASS",
+  "SUDO_ASKPASS",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "GIT_CREDENTIAL_HELPER",
+  "GIT_EXTERNAL_DIFF",
+  "GIT_PAGER",
+  "PAGER",
+  "EDITOR",
+  "VISUAL",
+];
+
+/** The loader-hook PREFIXES, which no closed list can enumerate (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, …). */
+export const EXECUTION_INDIRECTION_ENV_PREFIXES: readonly string[] = ["LD_", "DYLD_"];
+
+const EXECUTION_INDIRECTION_FOLDED: ReadonlySet<string> = new Set(EXECUTION_INDIRECTION_ENV_NAMES.map((name) => name.toUpperCase()));
+
+/** True for a name that changes how the child executes code or authenticates. Case-insensitive. */
+export function isExecutionIndirectionVariable(name: string): boolean {
+  const folded = name.toUpperCase();
+  return EXECUTION_INDIRECTION_FOLDED.has(folded) || EXECUTION_INDIRECTION_ENV_PREFIXES.some((prefix) => folded.startsWith(prefix));
 }
 
 /** The positive allowlist, folded once (review r3, NEW-10 — matching is case-insensitive). */
@@ -212,6 +293,7 @@ export function assertNoForbiddenChildVariables(
   const branchLabel = args.branchLabel ?? officialBranchLabel(args.brand);
   const declared = new Set(Object.keys(args.policy?.configuredExtras ?? {}));
   const reviewedExtras = args.policy?.reviewedCredentialShapedExtras ?? [];
+  const reviewedExecution = args.policy?.reviewedExecutionExtras ?? [];
   const prefixes = [args.brand.envPrefix, ...(args.policy?.hostEnvPrefixes ?? [])];
   const runtimeVariables: readonly string[] = Object.values(OFFICIAL_RUNTIME_VARIABLES);
   const familyVariables = args.selection === undefined ? undefined : allowedAuthVariables(args.selection);
@@ -261,6 +343,18 @@ export function assertNoForbiddenChildVariables(
     // at least one credential name.
     const foldedName = name.toUpperCase();
     const isThisFamilysVariable = (familyVariables ?? []).includes(name);
+    // BEFORE THE REGISTRY RULE, because the registry is what admits these (item 22, NEW-A). The order
+    // is the whole fix: `BASH_ENV` is IN the pinned artifact's own non-credential registry — the
+    // runtime really does read it — so a check placed after the positive-allowlist rule would never
+    // fire. A name that changes how the child executes code or authenticates is refused whoever
+    // declares it, unless this deployment has reviewed that exact name.
+    if (declared.has(name) && isExecutionIndirectionVariable(name) && !runtimeVariables.includes(name) && !reviewedExecution.includes(name)) {
+      refuse(
+        "it is refused explicitly: this name changes how the child EXECUTES code or authenticates (a shell startup file or command prefix, a loader/runtime hook, or an askpass/credential helper the child runs), " +
+          "which no credential-shape rule can see and which the artifact's own registry legitimately declares — so neither of the extras door's two rules would stop it. " +
+          "A deployment that has REVIEWED this exact name and needs it names it in `reviewedExecutionExtras` (WS-14 §3/§12, item 22)",
+      );
+    }
     if (declared.has(name) && isAuthShapedVariable(foldedName) && !runtimeVariables.includes(name) && !isThisFamilysVariable && !reviewedExtras.includes(name)) {
       refuse(
         "it is credential-bearing by shape, and the configured-extras door carries non-credential variables only: the runtime resolves credentials by its own precedence order, so one of these re-points billing, rate limits and audit at an account this session's persisted selection does not name (WS-14 §12). " +

@@ -54,6 +54,7 @@ export {
   officialEnvAllowlistNames,
   officialEnvAllowlistSnapshot,
 } from "./env-allowlist.ts";
+export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./env-allowlist.ts";
 export type { EnvAllowlistSnapshot, OfficialEnvInput, OfficialEnvPolicy } from "./env-allowlist.ts";
 
 export {
