@@ -25,7 +25,8 @@ import { delivered, deliveryUncertain, notFound, queued, refused, resumedAndDeli
 import { entryToListedRuntimeObject, owningSessionIdOf, parentAddressOf } from "../directory/entries.ts";
 import type { RuntimeDirectory } from "../seams/directory.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
-import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress, RuntimeMessagingAdapter } from "../seams/messaging-contract.ts";
+import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress } from "../seams/messaging-contract.ts";
+import type { RouterMessagingAdapter } from "./dispatch.ts";
 import { renderAttributedTurn, renderOwnerQualifiedTurn } from "./attribution.ts";
 import type { AttachedOfficialSession, AttachedSessionRegistry } from "./sessions.ts";
 
@@ -57,7 +58,7 @@ export interface OfficialMessagingAdapterDeps {
   permissionClass?: (entry: RuntimeDirectoryEntry) => Promise<PermissionClassLabel> | PermissionClassLabel;
 }
 
-export interface OfficialMessagingAdapter extends RuntimeMessagingAdapter {
+export interface OfficialMessagingAdapter extends RouterMessagingAdapter {
   readonly sessions: AttachedSessionRegistry<AttachedOfficialSession>;
 }
 
@@ -145,6 +146,11 @@ export function createOfficialMessagingAdapter(deps: OfficialMessagingAdapterDep
 
   return {
     sessions: deps.sessions,
+    // MEASURED, NOT ASSUMED: the pinned official SDK's `Query` exposes no session-status surface at
+    // all, so this branch cannot back an idle subscription — and WS-10 §14 makes that a refusal of the
+    // WHOLE call, not of the subscription alone. The dispatcher clears `notifyWhenIdle` on every row
+    // of this runtime so the refusal happens BEFORE the attached message is delivered.
+    supportsIdleSubscriptions: false,
 
     /** Live status for the addresses this adapter holds a handle for. It never invents a row. */
     async listReachable(scope) {

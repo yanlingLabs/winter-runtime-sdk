@@ -50,7 +50,7 @@ import { owningSessionIdOf } from "../directory/entries.ts";
 import type { SeamContext } from "../seams/context.ts";
 import type { GlobalMessaging, SendMessageRequest } from "../seams/global-messaging.ts";
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress, RuntimeKind, SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
-import { createDispatchingAdapter } from "./dispatch.ts";
+import { createDispatchingAdapter, type RouterMessagingAdapter } from "./dispatch.ts";
 import { createInboundPolicy, type InboundPolicy, type InboundPolicyHooks } from "./inbound.ts";
 import { createOfficialMessagingAdapter, type OfficialMessagingAdapter, type OfficialMessagingAdapterDeps } from "./official-adapter.ts";
 import { createAttachedSessionRegistry, type AttachedOfficialSession, type AttachedSessionRegistry, type AttachedWinterSession } from "./sessions.ts";
@@ -143,7 +143,7 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
 
   const winterAdapter = createWinterMessagingAdapter({ peers: context.peers, directory, sessions: winterSessions, ...(options.winter ?? {}) });
   const officialAdapter = createOfficialMessagingAdapter({ directory, sessions: officialSessions, ...(options.official ?? {}) });
-  const adapters = new Map<RuntimeKind, RuntimeMessagingAdapter>([
+  const adapters = new Map<RuntimeKind, RouterMessagingAdapter>([
     ["winter-agent", winterAdapter],
     ["claude-agent", officialAdapter],
   ]);
@@ -425,7 +425,10 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       if (entry === undefined) return notFound(request.messageId, `no directory record for ${key}`);
       // Target side, driven by the PINNED capability flag rather than by a probe call: a subagent is
       // never a valid target, and a peer whose adapter has no reliable idle signal reports the same.
-      if (!isIdleSubscribeTargetAllowed({ objectKind: entry.objectKind, hasReliableIdleSignal: entry.capabilities.notifyWhenIdle })) {
+      // The row's flag AND the runtime's own capability: a host may not opt a runtime into an idle
+      // signal it does not have (see `RouterMessagingAdapter.supportsIdleSubscriptions`).
+      const runtimeCanSignalIdle = adapters.get(entry.runtimeKind)?.supportsIdleSubscriptions !== false;
+      if (!isIdleSubscribeTargetAllowed({ objectKind: entry.objectKind, hasReliableIdleSignal: entry.capabilities.notifyWhenIdle && runtimeCanSignalIdle })) {
         return refused(request.messageId, `notify_when_idle: ${key} is not a valid target — subagents, teammates, remote targets and adapters without a reliable idle signal refuse the whole call (WS-10 §14)`);
       }
       const at = now();

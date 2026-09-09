@@ -19,7 +19,7 @@ export type { WinterMessagingAdapter, WinterMessagingAdapterDeps } from "./winte
 export { createOfficialMessagingAdapter } from "./official-adapter.ts";
 export type { OfficialMessagingAdapter, OfficialMessagingAdapterDeps } from "./official-adapter.ts";
 export { createDispatchingAdapter } from "./dispatch.ts";
-export type { DispatchDeps } from "./dispatch.ts";
+export type { DispatchDeps, RouterMessagingAdapter } from "./dispatch.ts";
 export { createInboundPolicy } from "./inbound.ts";
 export type { InboundPolicy, InboundPolicyDeps, InboundPolicyHooks, InboundVerdict } from "./inbound.ts";
 export { createAttachedSessionRegistry } from "./sessions.ts";

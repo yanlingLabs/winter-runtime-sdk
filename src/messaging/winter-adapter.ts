@@ -25,7 +25,8 @@ import type { RuntimeSdkPeers } from "../sdk.ts";
 import { entryToListedRuntimeObject, owningSessionIdOf, parentAddressOf, sessionAddressOf } from "../directory/entries.ts";
 import type { RuntimeDirectory } from "../seams/directory.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
-import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress, RuntimeMessagingAdapter } from "../seams/messaging-contract.ts";
+import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress } from "../seams/messaging-contract.ts";
+import type { RouterMessagingAdapter } from "./dispatch.ts";
 import type { ChildSelectionInput } from "../selection/runtime-selection.ts";
 import { resumeChildSelection } from "../selection/child-runtime.ts";
 import { renderAttributedTurn } from "./attribution.ts";
@@ -57,7 +58,7 @@ export interface WinterMessagingAdapterDeps {
 }
 
 /** The adapter plus the one thing the router attaches to it: the live-session registry. */
-export interface WinterMessagingAdapter extends RuntimeMessagingAdapter {
+export interface WinterMessagingAdapter extends RouterMessagingAdapter {
   readonly sessions: AttachedSessionRegistry<AttachedWinterSession>;
 }
 
@@ -172,6 +173,9 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
 
   return {
     sessions: deps.sessions,
+    // The engine IS the session-status event source (Task 0's self-peer registers with
+    // `hasReliableIdleSignal: true`), so this branch can honestly back a subscription.
+    supportsIdleSubscriptions: true,
 
     /**
      * The LIVE view this adapter owns: status for the addresses it actually holds a handle for.

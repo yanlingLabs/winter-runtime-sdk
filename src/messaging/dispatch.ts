@@ -28,9 +28,26 @@ import type { RuntimeDirectoryEntry, RuntimeDirectoryStore } from "../seams/dire
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress, RuntimeKind } from "../seams/messaging-contract.ts";
 import type { InboundPolicy } from "./inbound.ts";
 
+/**
+ * WS-10 §15's adapter, plus the ONE fact the router must know about a runtime that the interface has
+ * nowhere to put: whether it has a reliable idle signal at all.
+ *
+ * WS-10 §14 requires that "subagents, teammates, cloud/remote targets, AND ADAPTERS WITHOUT A RELIABLE
+ * IDLE SIGNAL MUST refuse the ENTIRE call (including any attached message)". The shared core enforces
+ * that from the target row's `capabilities.notifyWhenIdle` flag — which is a DIRECTORY field, written
+ * by a host. A host that sets it optimistically on an official-runtime row would get the body
+ * delivered and only the subscription refused, which is precisely the "delivered and then
+ * un-delivered" shape §14 exists to prevent. So the adapter declares it, and the dispatcher clears the
+ * flag on every row belonging to a runtime that cannot back it. Absent means "yes" — the honest
+ * default for a host-registered adapter this package knows nothing about.
+ */
+export interface RouterMessagingAdapter extends RuntimeMessagingAdapter {
+  readonly supportsIdleSubscriptions?: boolean;
+}
+
 export interface DispatchDeps {
   snapshot: DirectorySnapshot;
-  adapters: ReadonlyMap<RuntimeKind, RuntimeMessagingAdapter>;
+  adapters: ReadonlyMap<RuntimeKind, RouterMessagingAdapter>;
   policy: InboundPolicy;
   store: RuntimeDirectoryStore;
   now(): number;
@@ -56,8 +73,14 @@ export function createDispatchingAdapter(deps: DispatchDeps): RuntimeMessagingAd
     return deps.snapshot.byAddress.get(serializeRuntimeAddress(address));
   }
 
-  function adapterFor(entry: RuntimeDirectoryEntry): RuntimeMessagingAdapter | undefined {
+  function adapterFor(entry: RuntimeDirectoryEntry): RouterMessagingAdapter | undefined {
     return deps.adapters.get(entry.runtimeKind);
+  }
+
+  /** WS-10 §14's target-side truth, applied to the row the core reads it from. */
+  function withIdleTruth(row: ListedRuntimeObject): ListedRuntimeObject {
+    if (deps.adapters.get(row.runtimeKind)?.supportsIdleSubscriptions !== false) return row;
+    return { ...row, capabilities: { ...row.capabilities, notifyWhenIdle: false } };
   }
 
   function noAdapter(entry: RuntimeDirectoryEntry, messageId: string): DeliveryOutcome {
@@ -87,7 +110,7 @@ export function createDispatchingAdapter(deps: DispatchDeps): RuntimeMessagingAd
 
   return {
     async listReachable(scope) {
-      const rows: readonly ListedRuntimeObject[] = deps.view === "list" ? deps.snapshot.listable : deps.snapshot.resolvable;
+      const rows: readonly ListedRuntimeObject[] = (deps.view === "list" ? deps.snapshot.listable : deps.snapshot.resolvable).map(withIdleTruth);
       if (scope.parent === undefined) return [...rows];
       // The snapshot is already scoped to the caller (its children are its own), so `parent` narrows
       // nothing further here; it is honoured rather than ignored so a caller passing it gets what it
