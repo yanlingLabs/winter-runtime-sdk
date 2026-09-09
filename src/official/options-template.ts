@@ -28,7 +28,7 @@ import { mcpToolName, type BrandProfile, type SessionStore } from "@yanlinglabs/
 import type { OfficialOptions } from "../seams/official-sdk-shapes.ts";
 import type { OptionsTemplateInput } from "../seams/official-adapter.ts";
 import { officialToolAliases } from "./aliases.ts";
-import { createContainmentHooks } from "./callbacks.ts";
+import { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, type OfficialPermissionMode } from "./callbacks.ts";
 import type { OfficialApprovalBridge } from "./callbacks.ts";
 import { containmentPaths, officialDisallowedTools, type ContainmentPolicy } from "./containment.ts";
 import { officialBranchLabel } from "./branding.ts";
@@ -84,8 +84,10 @@ export interface OptionsTemplatePolicy {
   settings?: Readonly<Record<string, unknown>>;
   /** §11's server entry, already materialized. */
   mcpServers?: Readonly<Record<string, unknown>>;
-  /** §10's bridge. */
+  /** §10's bridge. Absent -> a fail-closed one is installed, because the invariants require one. */
   canUseTool?: OfficialApprovalBridge;
+  /** The session's permission mode, for the fail-closed bridge the template installs. */
+  permissionMode?: OfficialPermissionMode;
   /** §10's hook bridge (WS-08 owns its contract). */
   hooks?: unknown;
   /** §3's built child environment. Built by `buildChildEnv`, because only it has the credentials. */
@@ -103,7 +105,7 @@ export interface OptionsTemplatePolicy {
 }
 
 /** Puts the containment matchers FIRST, then whatever the host installed for the same events. */
-function mergeHooks(ours: Record<string, unknown[]>, hostHooks: unknown): Record<string, unknown[]> {
+export function mergeHooks(ours: Record<string, unknown[]>, hostHooks: unknown): Record<string, unknown[]> {
   const host = (hostHooks ?? {}) as Record<string, unknown[]>;
   const merged: Record<string, unknown[]> = { ...host };
   for (const [event, matchers] of Object.entries(ours)) merged[event] = [...matchers, ...(host[event] ?? [])];
@@ -170,11 +172,25 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     includeHookEvents: true,
     perTaskStopAffordance: true,
 
-    ...(policy.canUseTool === undefined ? {} : { canUseTool: policy.canUseTool }),
     // §8's floor is installed as a PreToolUse hook ALWAYS, merged ahead of the host's own matchers —
     // see `createContainmentHooks` for the measurement that made this mandatory (the permission
     // callback is not consulted for every tool on this runtime).
     hooks: mergeHooks(createContainmentHooks({ brand: input.brand, ...(policy.containment === undefined ? {} : { containment: policy.containment }) }), policy.hooks),
+    // §10's bridge is INSTALLED, not merely accepted (review r2, NEW-1): the invariants below refuse an
+    // options object without it, so the template must produce one. A host that supplies its own broker
+    // gets it wrapped; a host that supplies none gets a fail-closed one that says so.
+    canUseTool:
+      policy.canUseTool ??
+      createApprovalBridge({
+        brand: input.brand,
+        mode: policy.permissionMode ?? "default",
+        ...(policy.containment === undefined ? {} : { containment: policy.containment }),
+        broker: async (request) => ({
+          behavior: "deny",
+          message: `no approval broker is configured for this session, so ${request.toolName} cannot be approved; this branch owns permissions (settingSources is empty) and a host must bridge its broker into canUseTool (WS-14 §10)`,
+          toolUseID: request.toolUseID,
+        }),
+      }),
     ...(policy.env === undefined ? {} : { env: { ...policy.env } }),
     ...(policy.sessionId === undefined ? {} : { sessionId: policy.sessionId }),
     ...(policy.resume === undefined ? {} : { resume: policy.resume }),
@@ -226,6 +242,30 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
   if (options.strictMcpConfig !== true) {
     refuse("strictMcpConfig", "the host is the sole owner of every MCP server and tool effect on this branch (WS-14 §11)");
   }
+  // REVIEW r2, NEW-1 — §8's FLOOR IS AN INVARIANT OF EVERY LAUNCH, not a courtesy of this builder.
+  //
+  // The measurement: `launch()` spread the CALLER's options and overrode only the spawn hook, so an
+  // options object built by hand (or built here and then edited) reached the runtime with no floor —
+  // and a model-emitted `EnterWorktree` created `<cwd>/.claude/worktrees/feature` through the
+  // adapter's own door. `canUseTool` is not consulted for that writer at all, so the hook is its ONLY
+  // floor; an invariant that did not check for it was checking the wrong things.
+  //
+  // The marks are what make this checkable for an object we did not build — see `callbacks.ts`.
+  const hooks = (options["hooks"] ?? {}) as Record<string, Array<{ hooks?: unknown[] }>>;
+  const hasFloor = (hooks["PreToolUse"] ?? []).some((matcher) => (matcher.hooks ?? []).some((hook) => carriesMark(hook, CONTAINMENT_FLOOR_MARK)));
+  if (!hasFloor) {
+    refuse(
+      "hooks.PreToolUse",
+      "§8's containment floor is missing: the permission callback is not consulted for every tool on this runtime (the worktree writers never reach it), so the PreToolUse hook is the only point every call passes through — a session without it can create vendor-named paths (WS-14 §8/§10)",
+    );
+  }
+  if (!carriesMark(options["canUseTool"], APPROVAL_BRIDGE_MARK)) {
+    refuse(
+      "canUseTool",
+      "the approval bridge is missing or is not this branch's: §10's decisions must go through the bridge that applies the containment floor first and returns a typed PermissionResult (never `null`)",
+    );
+  }
+
   const extraArgs = options["extraArgs"];
   if (extraArgs !== undefined) {
     const keys = Object.keys(extraArgs as Record<string, unknown>);

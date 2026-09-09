@@ -126,8 +126,11 @@ describe("WS-14 §8 — builtin-path containment", () => {
       "/w/.Claude/settings.json",
       "/w/.CLAUDE/settings.json",
       "/Users/u/.Claude/plans/p.md",
-      "/w/CLAUDE.md".normalize("NFD"),
-      "/w/.claude/x".normalize("NFD"),
+      // review r2, NEW-6: the NFD plants were VACUOUS — `"CLAUDE.md".normalize("NFD") === "CLAUDE.md"`,
+      // because both names are pure ASCII. The constructible case is a COMPATIBILITY form, which NFC
+      // does not fold and NFKC does; the fold uses NFKC for that reason.
+      "/w/ＣＬＡＵＤＥ.md",
+      "/w/.ｃｌａｕｄｅ/settings.json",
     ]) {
       expect([folded, targetsForbiddenPath(folded).forbidden]).toEqual([folded, true]);
     }

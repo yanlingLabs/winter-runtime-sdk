@@ -84,7 +84,7 @@ const DURABLE_APPROVAL_DESTINATIONS: readonly string[] = ["userSettings", "proje
 export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialApprovalBridge {
   const containmentPolicy: ContainmentPolicy = { projectDirName: options.brand.projectDirName, ...options.containment };
   const savedApprovals = containmentPolicy.savedWebFetchApprovals ?? "disable";
-  return async (toolName, input, rest) => {
+  const bridge: OfficialApprovalBridge = async (toolName, input, rest) => {
     const request: ApprovalRequest = { toolName, input, ...rest };
 
     // 1. THE FLOOR. Not a user decision, and not skippable by mode.
@@ -125,6 +125,8 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
     options.onDecision?.({ request, result, source: "broker" });
     return result;
   };
+  (bridge as unknown as Record<symbol, unknown>)[APPROVAL_BRIDGE_MARK] = true;
+  return bridge;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -141,6 +143,24 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
 // PreToolUse hooks are the enforcement point for must-see-every-call logic." So the containment floor
 // is installed as a PreToolUse hook as well as in the bridge — the same decision function, at the one
 // point every call passes through.
+
+/**
+ * THE MARKS THAT MAKE THE FLOOR CHECKABLE (review r2, NEW-1).
+ *
+ * `assertOptionsInvariants` has to be able to answer "does this options object carry the floor?" for
+ * an object it did not build — that is the whole point of a function whose doc says it validates what
+ * `launch()` is HANDED. A structural guess ("some PreToolUse matcher exists") would pass for any hook
+ * at all, so the floor's own callback and the approval bridge each carry a symbol the check looks for.
+ * `Symbol.for` rather than a module-local symbol: two copies of this package in one process (a host
+ * vendoring the router beside an app that also vendors it) must still recognise each other's floor.
+ */
+export const CONTAINMENT_FLOOR_MARK = Symbol.for("winter-runtime-sdk.official.containment-floor");
+export const APPROVAL_BRIDGE_MARK = Symbol.for("winter-runtime-sdk.official.approval-bridge");
+
+/** True when this function is one of ours — the floor's hook or the approval bridge. */
+export function carriesMark(value: unknown, mark: symbol): boolean {
+  return typeof value === "function" && (value as unknown as Record<symbol, unknown>)[mark] === true;
+}
 
 /** The subset of the hook contract this needs, declared structurally (the peer is never imported). */
 export interface PreToolUseHookInput {
@@ -180,6 +200,7 @@ export function createContainmentHooks(options: ContainmentHooksOptions): Record
     options.onDecision?.({ tool: toolName, target: decision.target, reason: decision.reason });
     return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } };
   };
+  (guard as unknown as Record<symbol, unknown>)[CONTAINMENT_FLOOR_MARK] = true;
   return { PreToolUse: [{ hooks: [guard] }] };
 }
 

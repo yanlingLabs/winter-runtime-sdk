@@ -21,6 +21,7 @@ import {
   OfficialBranchError,
   OfficialConfigurationError,
   OfficialConnectionError,
+  OfficialContainmentBreachError,
   OfficialExecutableNotFoundError,
   OfficialInterruptedError,
   OfficialInvalidResumeError,
@@ -56,6 +57,7 @@ const every = (): OfficialBranchError[] => [
   new OfficialInvalidResumeError({ reason: "fork of a fork", branchLabel }),
   new OfficialInterruptedError({ gesture: "interrupt-turn", branchLabel }),
   new OfficialStdoutUnterminatedError({ graceMs: 2000, branchLabel }),
+  new OfficialContainmentBreachError({ toolName: "Bash", created: ["/w/.claude"], removed: ["/w/.claude"], retained: [], branchLabel }),
 ];
 
 describe("WS-14 §13 — the official branch's error taxonomy", () => {

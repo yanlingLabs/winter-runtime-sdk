@@ -26,6 +26,7 @@ import {
   minimalOsEnvironmentFrom,
   officialEnvAllowlistNames,
   officialEnvAllowlistSnapshot,
+  sanitizePathListValue,
   type OfficialEnvInput,
 } from "../../src/official/env-allowlist.ts";
 import { fetchAuthCredentials, validateAuthEnvironment, authVariableSetKey, allowedAuthVariables } from "../../src/official/auth.ts";
@@ -113,6 +114,11 @@ describe("WS-14 §3 — the child environment", () => {
     test("ANY variable whose VALUE points into the vendor's user-level home", () => {
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CONFIG_DIR: "/Users/u/.claude" }, { brand })).toThrow(/vendor's user-level home/);
       expect(() => assertNoForbiddenChildVariables({ HOME: "/Users/u/.claude/plans" }, { brand })).toThrow(/vendor's user-level home/);
+      // review r2, NEW-4: the same name in ANY casing, on the filesystem where they are one directory.
+      expect(() => assertNoForbiddenChildVariables({ HOME: "/Users/u/.Claude/ca.pem" }, { brand })).toThrow(/vendor's user-level home/);
+      expect(() => assertNoForbiddenChildVariables({ HOME: "/Users/u/.CLAUDE" }, { brand })).toThrow(/vendor's user-level home/);
+      expect(sanitizePathListValue("/usr/bin:/Users/d/.Claude/plugins/x/bin:/bin")).toBe("/usr/bin:/bin");
+      expect(sanitizePathListValue("/usr/bin:/Users/d/.claude/plugins/x/bin:/bin")).toBe("/usr/bin:/bin");
       // the spool and the vendor's own staging root are NOT under it
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CONFIG_DIR: "/Users/u/.winter/runtimes/official-agent-spool" }, { brand })).not.toThrow();
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CONFIG_DIR: "/tmp/claude-resume-abc" }, { brand })).not.toThrow();

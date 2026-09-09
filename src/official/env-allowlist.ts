@@ -25,6 +25,7 @@ import type { EnvInput } from "../seams/official-adapter.ts";
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
 import { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, validateAuthEnvironment, type ClaudeOauthGate } from "./auth.ts";
 import { officialBranchLabel } from "./branding.ts";
+import { VENDOR_HOME_SEGMENT_RE } from "./containment.ts";
 import { OfficialConfigurationError } from "./errors.ts";
 
 /**
@@ -65,8 +66,10 @@ export const PROXY_AND_TELEMETRY_VARIABLES: readonly string[] = [
 ];
 export const PROXY_AND_TELEMETRY_PREFIXES: readonly string[] = ["OTEL_"];
 
-/** A path segment naming the runtime's own user-level home. Any VALUE reaching into it is refused. */
-const VENDOR_HOME_SEGMENT_RE = /(^|\/)\.claude(\/|$)/;
+// The vendor-home matcher is IMPORTED, not re-spelled (review r2, NEW-4). It lived in three places,
+// C1 folded only one of them, and the two survivors were case-exact — so `/Users/dev/.Claude/ca.pem`
+// passed this value check and a `PATH` entry under `~/.Claude/plugins/.../bin` survived the sanitizer
+// on the very filesystem where those are the same directory.
 
 /**
  * Variables whose value is a LIST of paths, sanitized entry by entry rather than refused whole.

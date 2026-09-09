@@ -1,4 +1,5 @@
 {
+  "canUseTool": "<function>",
   "cwd": "/work/repo",
   "disallowedTools": [
     "CronCreate"

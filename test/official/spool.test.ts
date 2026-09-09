@@ -78,6 +78,8 @@ describe("WS-14 §1 — launch profiles and the authoritative root", () => {
     for (const profile of ["fresh-spool", "store-backed-resume"] as const) {
       expect(() => validateObservedConfigDir({ observed: "/Users/dev/.claude", configured: "/spool", profile, brand })).toThrow(/vendor's user-level home/);
       expect(() => validateObservedConfigDir({ observed: "/Users/dev/.claude/projects", configured: "/spool", profile, brand })).toThrow(/vendor's user-level home/);
+      // review r2, NEW-4: in ANY casing — this one was accepted, and recorded as a staging root.
+      expect(() => validateObservedConfigDir({ observed: "/tmp/.Claude/claude-resume-abc", configured: "/spool", profile, brand })).toThrow(/vendor's user-level home/);
     }
   });
 

@@ -26,6 +26,8 @@ import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 import type { OfficialLaunchProfile } from "../seams/official-adapter.ts";
 import { OfficialConfigurationError } from "./errors.ts";
 import { officialBranchLabel } from "./branding.ts";
+// One definition of "the vendor's user-level home" for the whole package (review r2, NEW-4).
+import { VENDOR_HOME_SEGMENT_RE } from "./containment.ts";
 
 /**
  * The spool's path segments under the brand home.
@@ -131,7 +133,7 @@ export function validateObservedConfigDir(args: {
   // on neither profile: a `store-backed-resume` generation observed at `~/.claude` was ACCEPTED and
   // recorded as kind `official-spool`, which is §1's exact conflation ("conflating them breaks crash
   // recovery"). The regex is the same one the env allowlist refuses values with.
-  if (/(^|\/)\.claude(\/|$)/.test(args.observed)) {
+  if (VENDOR_HOME_SEGMENT_RE.test(args.observed)) {
     throw new OfficialConfigurationError({
       option: "env.CLAUDE_CONFIG_DIR",
       reason: `the child was handed ${args.observed}, which is inside the vendor's user-level home; this branch never writes there (WS-14 §1/§3, WS-17 row 4)`,

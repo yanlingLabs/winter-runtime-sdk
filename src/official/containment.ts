@@ -207,12 +207,14 @@ const norm = (path: string): string => path.replace(/\\/g, "/").replace(/\/+/g, 
  * whose name is the vendor's instructions file in the only sense a human or a later `mv` cares about,
  * and a floor whose behaviour depended on the volume would be a floor nobody could reason about.
  *
- * NFC FIRST, because macOS stores decomposed forms: a name that arrives NFD and a name that arrives
- * NFC are the same file, and comparing the raw strings would let one of the two spellings through.
- * For these ASCII names the normalization is a no-op today; it is here so a future brand-derived or
- * user-supplied name cannot reintroduce the hole.
+ * NFKC, NOT NFC (review r2, NEW-6). The reviewer proved the NFC claim vacuous — `"CLAUDE.md"` and
+ * `".claude"` are pure ASCII, so `normalize("NFD")` is the identity and a "decomposed accent" plant is
+ * not constructible. What IS constructible is a COMPATIBILITY form: the real runtime created
+ * `ＣＬＡＵＤＥ.md` (fullwidth), which NFC leaves alone and NFKC folds onto `claude.md`. Compatibility
+ * folding is the right normal form for deciding "is this the vendor's name": it is lossy for text, and
+ * this comparison is not text — it is an identity check on a path segment.
  */
-const fold = (value: string): string => value.normalize("NFC").toLowerCase();
+const fold = (value: string): string => value.normalize("NFKC").toLowerCase();
 
 const FORBIDDEN_PROJECT_DIR = fold(FORBIDDEN_TARGETS.projectDir);
 const FORBIDDEN_INSTRUCTIONS_FILE = fold(FORBIDDEN_TARGETS.instructionsFile);
@@ -238,6 +240,17 @@ export function targetsForbiddenPath(rawPath: string): { forbidden: boolean; tar
   if (segments[segments.length - 1] === FORBIDDEN_INSTRUCTIONS_FILE) return { forbidden: true, target: FORBIDDEN_TARGETS.instructionsFile };
   return { forbidden: false, target: "" };
 }
+
+/**
+ * THE ONE DEFINITION OF "the vendor's user-level home" IN THIS PACKAGE (review r2, NEW-4).
+ *
+ * It lived in three places and C1 folded only one of them, so `/Users/dev/.Claude/ca.pem` passed the
+ * env value check, a `PATH` entry under `~/.Claude/plugins/.../bin` survived the sanitizer, and
+ * `/tmp/.Claude/claude-resume-abc` was accepted as a staging root — all on the filesystem where those
+ * ARE the same directory. Case-insensitive, exported, and imported by `env-allowlist.ts` and
+ * `spool.ts` rather than re-spelled.
+ */
+export const VENDOR_HOME_SEGMENT_RE = /(^|\/)\.claude(\/|$)/i;
 
 /**
  * Argument fields that carry a path on the pinned runtime's own file tools.
@@ -274,8 +287,8 @@ const PATH_FIELDS = [
  * shell parser that is 95% right is a worse answer than an honest scan plus a host-side `PostToolUse`
  * sweep, which is where WS-08 puts must-see-every-call logic.
  */
-const COMMAND_PROJECT_DIR_RE = /(?:^|[^A-Za-z0-9_.-])\.claude(?![A-Za-z0-9_-])/i;
-const COMMAND_INSTRUCTIONS_FILE_RE = /(?:^|[^A-Za-z0-9_-])claude\.md(?![A-Za-z0-9_.-])/i;
+const COMMAND_PROJECT_DIR_RE = /(?:^|[^A-Za-z0-9_.\\-])\.claude(?![A-Za-z0-9_-])/i;
+const COMMAND_INSTRUCTIONS_FILE_RE = /(?:^|[^A-Za-z0-9_\\-])claude\.md(?![A-Za-z0-9_.-])/i;
 
 /**
  * The floor, applied to one tool call.
@@ -313,9 +326,21 @@ export function containmentDecisionFor(toolName: string, input: Record<string, u
   for (const field of ["command", "script", "code"] as const) {
     const value = input[field];
     if (typeof value !== "string") continue;
-    const path = norm(value).normalize("NFC");
-    if (COMMAND_PROJECT_DIR_RE.test(path)) return deny(FORBIDDEN_TARGETS.projectDir, value);
-    if (COMMAND_INSTRUCTIONS_FILE_RE.test(path)) return deny(FORBIDDEN_TARGETS.instructionsFile, value);
+    // NO `norm()` HERE (review r2, NEW-3). `norm` rewrites `\` to `/` — a PATH convention — and this
+    // is a SHELL COMMAND, where a backslash is an escape: `mkdir -p .cla\ude` became `.cla/ude` before
+    // the regex ever saw it, and the command then created a real `.claude/` with a file in it. The
+    // string is scanned as written, with `\` added to the leading boundary class so an escaped
+    // separator does not hide the name either.
+    const command = value.normalize("NFKC");
+    if (COMMAND_PROJECT_DIR_RE.test(command)) return deny(FORBIDDEN_TARGETS.projectDir, value);
+    if (COMMAND_INSTRUCTIONS_FILE_RE.test(command)) return deny(FORBIDDEN_TARGETS.instructionsFile, value);
+    // The escape ITSELF is the signal: a command that splices the vendor's name out of fragments
+    // (`.cla\ude`, `.clau''de`) is caught by removing the shell's own quoting characters and looking
+    // again. What survives even that — a name built by substitution, or from a variable set in an
+    // earlier call — is the post-hoc sweep's job (`sweep.ts`), which is installed on every session.
+    const unquoted = command.replace(/[\\'"`]/g, "");
+    if (COMMAND_PROJECT_DIR_RE.test(unquoted)) return deny(FORBIDDEN_TARGETS.projectDir, value);
+    if (COMMAND_INSTRUCTIONS_FILE_RE.test(unquoted)) return deny(FORBIDDEN_TARGETS.instructionsFile, value);
   }
   // THE §8 ROWS WITH NO PATH ARGUMENT (review r1, M2). Each names the redirect target in its own
   // refusal, so the model — and a host reading the tool_result — learns where the replacement lives

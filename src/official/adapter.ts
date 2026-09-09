@@ -20,10 +20,17 @@ import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialResumePlan, OfficialSession, OptionsTemplateInput } from "../seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, OfficialSpawnOptions, OfficialSpawnedProcess } from "../seams/official-sdk-shapes.ts";
+import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
+
 import { officialBranchLabel } from "./branding.ts";
+import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createContainmentHooks, type OfficialApprovalBridge, type OfficialPermissionMode } from "./callbacks.ts";
+import type { ContainmentPolicy } from "./containment.ts";
+import { createContainmentSweep, type ContainmentBreach, type ContainmentSweep } from "./sweep.ts";
+import { mergeHooks } from "./options-template.ts";
 import { buildOfficialChildEnv, type OfficialEnvInput, type OfficialEnvPolicy } from "./env-allowlist.ts";
 import { OfficialConfigurationError, OfficialInvalidResumeError } from "./errors.ts";
 import { assertOptionsInvariants, buildOfficialOptions, type OptionsTemplatePolicy } from "./options-template.ts";
+import type { OfficialContainmentBreachError } from "./errors.ts";
 import { classifyLocalWriteRoot } from "./spool.ts";
 import {
   createSupervisedSpawnProxy,
@@ -51,6 +58,12 @@ export interface OfficialAdapterPolicy {
   /** Injected for tests; production uses Node's own spawn with the brand's process label as argv0. */
   spawnChild?: SpawnChild;
   onCrash?: (error: OfficialBranchError) => void;
+  /** §8's post-hoc sweep found a vendor-named path a call created (review r2, NEW-3). */
+  onContainmentBreach?: (breach: ContainmentBreach, error: OfficialContainmentBreachError) => void;
+  /** §8's dispositions, threaded into the floor this adapter installs on every launch. */
+  containment?: ContainmentPolicy;
+  /** The session's permission mode, for the bridge the adapter installs when the caller supplied none. */
+  permissionMode?: OfficialPermissionMode;
   now?: () => Date;
 }
 
@@ -62,6 +75,8 @@ export interface OfficialSessionHandle extends OfficialSession {
   interrupt(): Promise<unknown>;
   /** The generation's proxy — its stderr tail, its record, its exit gate. */
   readonly supervisor: SupervisedSpawnProxy;
+  /** §8's post-hoc sweep findings for this session (review r2, NEW-3). Empty is the normal case. */
+  readonly containmentBreaches: readonly ContainmentBreach[];
 }
 
 export interface OfficialAdapterHandle extends OfficialAdapter {
@@ -197,6 +212,58 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
 
   const optionsPolicyFor = (input: OptionsTemplateInput): OptionsTemplatePolicy => (typeof policy.options === "function" ? policy.options(input) : (policy.options ?? {}));
 
+  /** Every session's sweep, kept so the handle can report what it caught (review r2, NEW-3). */
+  const sweeps = new WeakMap<object, ContainmentSweep>();
+
+  /**
+   * Installs §8's two layers onto the options a caller handed us, merging rather than replacing.
+   *
+   * THE PRE-HOC LAYER is the containment hook plus the approval bridge; THE POST-HOC LAYER is the
+   * sweep, which needs this session's own roots (`cwd`, and `HOME` as the child was given it) and is
+   * therefore per-launch rather than per-adapter.
+   */
+  const installFloor = (plan: OfficialLaunchPlan): OfficialOptions => {
+    const containment: ContainmentPolicy = { projectDirName: brand.projectDirName, ...(policy.containment ?? {}) };
+    const home = (plan.options.env ?? {})["HOME"];
+    const sweep = createContainmentSweep({
+      cwd: plan.cwd,
+      ...(home === undefined ? {} : { home }),
+      onBreach: (breach, error) => {
+        breaches.push(breach);
+        policy.onContainmentBreach?.(breach, error);
+      },
+    });
+    const floorHooks = createContainmentHooks({ brand, containment });
+    const merged = mergeHooks(mergeHooks(floorHooks as Record<string, unknown[]>, sweep.hooks as unknown), plan.options.hooks);
+    const existing = plan.options.canUseTool;
+    // A CALLER'S OWN CALLBACK IS WRAPPED, NEVER DROPPED: it becomes the broker behind our bridge, so
+    // the floor runs first and their decision still decides everything the floor allows. `null` — the
+    // transport escape §10 forbids on this bridge — becomes a typed deny rather than an indefinite
+    // wait.
+    const canUseTool = carriesMark(existing, APPROVAL_BRIDGE_MARK)
+      ? (existing as OfficialApprovalBridge)
+      : createApprovalBridge({
+          brand,
+          mode: policy.permissionMode ?? "default",
+          containment,
+          broker: async (request) => {
+            if (typeof existing !== "function") {
+              return {
+                behavior: "deny",
+                message: `no approval broker is configured for this session, so ${request.toolName} cannot be approved; this branch owns permissions and a host must bridge its broker into canUseTool (WS-14 §10)`,
+                toolUseID: request.toolUseID,
+              };
+            }
+            const answer = await (existing as (toolName: string, input: Record<string, unknown>, options: unknown) => Promise<PermissionResult | null>)(request.toolName, request.input, request);
+            return answer ?? { behavior: "deny", message: "the host callback returned no decision; this bridge never uses the `null` transport escape (WS-14 §10)", toolUseID: request.toolUseID };
+          },
+        });
+    const options: OfficialOptions = { ...plan.options, hooks: merged, canUseTool };
+    sweeps.set(options, sweep);
+    return options;
+  };
+  const breaches: ContainmentBreach[] = [];
+
   const start = (plan: OfficialLaunchPlan, resume: { resume: string; forkSession?: boolean } | undefined): OfficialSessionHandle => {
     const claude = context.peers.claude;
     if (claude === undefined) {
@@ -206,7 +273,13 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
         branchLabel,
       });
     }
-    assertOptionsInvariants(plan.options, branchLabel);
+    // REVIEW r2, NEW-1 — THE FLOOR IS INSTALLED HERE, on the caller's options, before anything is
+    // asserted about them. "Merge, never replace": the host's own hooks and its own broker survive,
+    // ours run first, and the sweep's snapshot pair rides along. Then the invariants check that the
+    // result really carries both marks — so an options object that arrived without them is fixed and
+    // an object that cannot be fixed is refused, rather than launching uncontained.
+    const withFloor = installFloor(plan);
+    assertOptionsInvariants(withFloor, branchLabel);
     if (resume !== undefined && resume.resume.length === 0) {
       throw new OfficialInvalidResumeError({ reason: "a resume needs the backend session id it is resuming", branchLabel });
     }
@@ -218,16 +291,16 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     // because the caller's plan is theirs — and the ONLY field changed is the spawn hook.
     const supervisor = makeProxy(plan.profile, plan.configDir, sinkFor(plan));
     const options: OfficialOptions = {
-      ...plan.options,
+      ...withFloor,
       ...(resume === undefined ? {} : { resume: resume.resume, ...(resume.forkSession === undefined ? {} : { forkSession: resume.forkSession }) }),
       spawnClaudeCodeProcess: supervisor.spawn,
     };
 
     const query = claude.query({ prompt: plan.prompt, options }) as OfficialQuery;
-    return makeSession({ query, supervisor, plan });
+    return makeSession({ query, supervisor, plan, sweep: sweeps.get(withFloor) });
   };
 
-  const makeSession = (args: { query: OfficialQuery; supervisor: SupervisedSpawnProxy; plan: OfficialLaunchPlan }): OfficialSessionHandle => ({
+  const makeSession = (args: { query: OfficialQuery; supervisor: SupervisedSpawnProxy; plan: OfficialLaunchPlan; sweep: ContainmentSweep | undefined }): OfficialSessionHandle => ({
     query: args.query,
     // §1/§6: the OBSERVED value once there is one; before the lazy spawn, the value this generation
     // is configured with — and never a value from some other generation.
@@ -237,6 +310,9 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     profile: args.plan.profile,
     selection: args.plan.selection,
     supervisor: args.supervisor,
+    get containmentBreaches() {
+      return args.sweep?.breaches ?? [];
+    },
     async whenObserved() {
       await args.supervisor.whenRecorded();
       const observed = args.supervisor.observation?.root.configDir;

@@ -72,6 +72,15 @@ export const OFFICIAL_ERROR_CODES = [
    * generation silently alive from the host's point of view.
    */
   "official_stdout_unterminated",
+  /**
+   * §8's POST-HOC breach (review r2, NEW-3): a call created a vendor-named path that the pre-hoc scan
+   * could not see, and the sweep removed it.
+   *
+   * A class of its own rather than a permission denial, because it is neither: the call was permitted
+   * and then produced an effect this branch forbids. A host needs to be able to count these — a
+   * session that trips one has found a spelling the scanner does not know.
+   */
+  "official_containment_breach",
 ] as const;
 
 export type OfficialErrorCode = (typeof OFFICIAL_ERROR_CODES)[number];
@@ -171,6 +180,26 @@ export class OfficialKilledError extends OfficialBranchError {
   constructor(args: { signal: string; reason: string; branchLabel: string }) {
     super(`${args.branchLabel}: the runtime was killed with ${args.signal} — ${args.reason}`, args.branchLabel);
     this.signal = args.signal;
+  }
+}
+
+/** §8's post-hoc breach — see `OFFICIAL_ERROR_CODES`. Never a crash class: the process is healthy. */
+export class OfficialContainmentBreachError extends OfficialBranchError {
+  readonly code = "official_containment_breach";
+  readonly winterClass = "WinterSDKError";
+  readonly tool: string;
+  readonly created: readonly string[];
+  readonly removed: readonly string[];
+  readonly retained: readonly string[];
+  constructor(args: { toolName: string; created: readonly string[]; removed: readonly string[]; retained: readonly string[]; branchLabel: string }) {
+    super(
+      `${args.branchLabel}: ${args.toolName} created ${args.created.length} vendor-named path(s) that the pre-hoc scan did not see; ${args.removed.length} removed, ${args.retained.length} retained (WS-14 §8)`,
+      args.branchLabel,
+    );
+    this.tool = args.toolName;
+    this.created = [...args.created];
+    this.removed = [...args.removed];
+    this.retained = [...args.retained];
   }
 }
 

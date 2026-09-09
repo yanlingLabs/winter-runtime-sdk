@@ -160,9 +160,14 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
           { toolUses: [{ id: "c1", name: "Write", input: { file_path: join(session.cwd, "claude.md"), content: "# folded\n" } }] },
           { toolUses: [{ id: "c2", name: "Write", input: { file_path: join(session.cwd, ".Claude", "settings.json"), content: "{}" } }] },
           { toolUses: [{ id: "c3", name: "Bash", input: { command: "D=.claude; mkdir -p $PWD/$D && echo x > $PWD/$D/leak.txt" } }] },
-          // …and the Unicode-normalized spellings of the same two names.
-          { toolUses: [{ id: "c4", name: "Write", input: { file_path: join(session.cwd, "CLAUDE.md").normalize("NFD"), content: "# nfd\n" } }] },
-          { toolUses: [{ id: "c5", name: "Write", input: { file_path: join(session.cwd, ".claude", "nfd.json").normalize("NFD"), content: "{}" } }] },
+          // …and the ONE normalization case that is actually constructible (review r2, NEW-6). A
+          // "decomposed accent that folds onto a forbidden name" does NOT exist: both names are pure
+          // ASCII, so NFD is the identity and the previous c4/c5 plants could not fail differently
+          // from t1/t2. What DOES collide is a COMPATIBILITY form — the runtime created a fullwidth
+          // `ＣＬＡＵＤＥ.md` in the reviewer's own probe — which NFC leaves alone and NFKC folds. The
+          // floor folds with NFKC for exactly this.
+          { toolUses: [{ id: "c4", name: "Write", input: { file_path: join(session.cwd, "ＣＬＡＵＤＥ.md"), content: "# fullwidth\n" } }] },
+          { toolUses: [{ id: "c5", name: "Write", input: { file_path: join(session.cwd, ".ｃｌａｕｄｅ", "x.json"), content: "{}" } }] },
           { text: "done" },
         ],
       });

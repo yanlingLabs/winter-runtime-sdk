@@ -27,7 +27,7 @@ export type { AuthCredentialPlan, AuthFamily, AuthVariableSetKey, ClaudeOauthGat
 export { OFFICIAL_DISCLOSURES, officialBranchLabel } from "./branding.ts";
 export type { OfficialDisclosure } from "./branding.ts";
 
-export { createApprovalBridge, createContainmentHooks, createFirstResponseWins, revalidateResumedDecision } from "./callbacks.ts";
+export { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, createFirstResponseWins, revalidateResumedDecision } from "./callbacks.ts";
 export type {
   ApprovalBroker,
   ApprovalRequest,
@@ -42,7 +42,7 @@ export type {
   ResumedDecision,
 } from "./callbacks.ts";
 
-export { FORBIDDEN_TARGETS, containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, targetsForbiddenPath } from "./containment.ts";
+export { FORBIDDEN_TARGETS, VENDOR_HOME_SEGMENT_RE, containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, targetsForbiddenPath } from "./containment.ts";
 export type { ContainmentDecision, ContainmentDisposition, ContainmentPaths, ContainmentPolicy, SavedApprovalDisposition } from "./containment.ts";
 
 export {
@@ -87,7 +87,7 @@ export type { OfficialCrashClass, OfficialErrorCode, WinterErrorClassName } from
 export { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, materializeOfficialMcpServer, messagingToolDescriptors, officialMcpServers, winterMcpServerDescriptor } from "./mcp-descriptors.ts";
 export type { InputShapeFactory, JsonSchemaObject, MessagingHandlers, OfficialMcpModule, WinterMcpHandler, WinterMcpServerDescriptor, WinterMcpToolDescriptor, WinterMcpToolResult } from "./mcp-descriptors.ts";
 
-export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, brandedFlagSettings, buildOfficialOptions, captureOptions } from "./options-template.ts";
+export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, brandedFlagSettings, buildOfficialOptions, captureOptions, mergeHooks } from "./options-template.ts";
 export type { OptionsTemplatePolicy } from "./options-template.ts";
 
 export { RESUME_STAGING_PREFIX, SPOOL_SEGMENTS, classifyLocalWriteRoot, isResumeStagingRoot, officialSpoolRoot, resumeStagingRoot, validateObservedConfigDir, vendorTempRootReport } from "./spool.ts";
@@ -95,6 +95,9 @@ export type { LocalWriteRootKind, ObservedLocalWriteRoot, VendorTempRootReport }
 
 export { createSupervisedSpawnProxy, directoryRecordSink, prepareDefaultSpawn } from "./spawn-proxy.ts";
 export type { ProcessIdentity, SpawnChild, SpawnObservation, SpawnRecordSink, SpawnedChildProcess, SupervisedSpawnProxy, SupervisedSpawnProxyOptions, TranscriptReconcile } from "./spawn-proxy.ts";
+
+export { SWEPT_TARGETS, SWEPT_TOOLS, createContainmentSweep, forbiddenArtifactsUnder } from "./sweep.ts";
+export type { ContainmentBreach, ContainmentSweep, ContainmentSweepOptions } from "./sweep.ts";
 
 export { CANCELLATION_MAPPINGS, DEFAULT_SESSION_QUOTAS, cancellationMappingFor, crashClassOf, interruptionFor, isProcessCrash, revalidateProcessIdentity } from "./supervision.ts";
 export type { CancellationGesture, CancellationMapping } from "./supervision.ts";
