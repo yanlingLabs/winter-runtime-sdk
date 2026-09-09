@@ -71,6 +71,15 @@ brand or read from the pinned contract you already fill in: credentials come fro
 `options.provider.authRef` through your own `KeychainSeam`, the spool from the resolved Winter home,
 the session store from the one shared instance both branches use.
 
+**What `SessionKey` a door-opened session has.** `sdk.handoff(session, to)` and every store-facing API
+take a `SessionKey`, and both halves of it are chosen by the door rather than by you: `projectKey` is
+the transcript project key the door set on the child (see "the transcript key" below) and `sessionId`
+is the **backend uuid the vendor allocated**, not `runtime.official.sessionId`. The door records that
+uuid on the session's directory row as `backendSessionId` the moment the runtime reports it at
+`system/init`, so
+`sdk.handoff({ projectKey, sessionId: (await sdk.directory.get("session:s-42"))!.backendSessionId! }, "winter-agent")`
+is the route. WS-15 §6.2's cold resume of an exited official session reads the same field.
+
 **What the persisted selection means.** `runtime.selection` is "what this session's record says", so a
 selection that DISAGREES with the record is a request to change runtime — and D13 answers that with
 the certified handoff (`sdk.handoff(session, to)`) or a visible fork, never by serving the new runtime

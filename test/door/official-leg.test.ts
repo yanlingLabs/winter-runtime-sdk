@@ -5,7 +5,7 @@
 // wrongly, these tests are what notices.
 import { afterAll, describe, expect, test } from "bun:test";
 
-import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery } from "../../src/index.ts";
+import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery, runtimeSdkInternals } from "../../src/index.ts";
 import { TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../../src/official/env-allowlist.ts";
 import { cleanupHermetic, officialRuntimeBed } from "../official/support.ts";
 import { DOOR_TIMEOUT, doorSelection, drain, withDoorBed } from "./support.ts";
@@ -59,12 +59,40 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
         // R-7b-11: which of the pin's two tool surfaces this session ran with.
         expect(row?.remoteConfig).toBe("deny");
 
+        // REVIEW r1, I-2 — THE BACKEND ID THE VENDOR ALLOCATED IS ON THE ROW.
+        // Without it `findEntry` has nothing to match and `sdk.handoff()` — the remedy this door's own
+        // refusal names — fails for every session the door opened.
+        const init = (await bed.sdk.directory.get(bed.address))?.backendSessionId;
+        expect(typeof init).toBe("string");
+        expect(init).toMatch(/^[0-9a-f-]{36}$/);
+
         // …and the identity survives the generation; only the live pair is cleared (§6 rule 5).
         while (!(await iterator.next()).done) void 0;
         const after = await bed.sdk.directory.get(bed.address);
         expect(after?.runtimeKind).toBe("claude-agent");
         expect(after?.selection.runtimeKind).toBe("claude-agent");
         expect(after?.processIdentity).toBeUndefined();
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
+  test(
+    "the backend session id makes `sdk.handoff()` — this door's own named remedy — reachable",
+    async () => {
+      await withDoorBed({ turns: [{ text: "handoffable" }], sessionId: "door-handoff" }, async (bed) => {
+        const messages = await drain(bed.sdk.query({ prompt: "hi", options: bed.officialOptions() }));
+        const init = messages.find((message) => message.type === "system" && message.subtype === "init") as { session_id?: string } | undefined;
+        expect(typeof init?.session_id).toBe("string");
+        const row = await bed.sdk.directory.get(bed.address);
+        expect(row?.backendSessionId).toBe(init?.session_id as string);
+
+        // THE ROUTE THE REFUSAL NAMES, actually taken: `plan()` finds the row by the backend id.
+        // Before I-2 this was `HandoffPlanError: … it is not in the runtime directory`.
+        const internals = runtimeSdkInternals(bed.sdk);
+        const plan = await internals?.barrier.plan({ projectKey: bed.projectKey, sessionId: init?.session_id as string }, "winter-agent");
+        expect(plan?.to).toBe("winter-agent");
+        expect(plan?.from).toBe("claude-agent");
       });
     },
     DOOR_TIMEOUT,

@@ -61,6 +61,8 @@ export interface DoorBed {
   /** The address the official session is launched under. */
   address: string;
   sessionId: string;
+  /** The transcript project key the door sets — half of the `SessionKey` a handoff takes (I-2/M-2). */
+  projectKey: string;
   /** The options a `sdk.query()` needs for the official leg, ready to spread. */
   officialOptions(over?: { sessionId?: string; withMessagingTools?: boolean }): Record<string, unknown>;
 }
@@ -124,6 +126,7 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
       directoryStore,
       record,
       sessionId,
+      projectKey: sessionId,
       address: `session:${sessionId}`,
       officialOptions(over = {}) {
         const id = over.sessionId ?? sessionId;

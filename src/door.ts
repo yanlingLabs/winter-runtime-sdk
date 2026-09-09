@@ -371,6 +371,33 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
   const stream = typeof request.prompt === "string" ? undefined : createOfficialInputStream();
   let detach: (() => void) | undefined;
+  let sawInit = false;
+
+  /**
+   * THE BACKEND SESSION ID, THE MOMENT THE RUNTIME REPORTS IT (review r1, I-2).
+   *
+   * THE VENDOR ALLOCATES IT, NOT US. `system/init.session_id` is the identity the pinned runtime keys
+   * its own transcript by and the one WS-15 §6.2 resumes an exited official session BY — so a row
+   * without it is a session that cannot be handed off (`HandoffPlanError: … not in the runtime
+   * directory`, because `findEntry` has nothing to match) and cannot be cold-resumed
+   * (`unavailable: … has no backend session id`, even for a host that wired `resumeExited`). Which
+   * made `RuntimeHandoffRequiredError`'s own remedy — "use `sdk.handoff(session, …)`" — name a route
+   * that failed for every session this door opened.
+   *
+   * ONCE, ON THE FIRST `init`, and through `directory.record()` so the merge keeps the two fields the
+   * spawn proxy owns (`configDir`, `processIdentity`) rather than replacing the row from a stale copy.
+   */
+  const noteFrame = async (message: unknown): Promise<void> => {
+    if (sawInit) return;
+    const frame = message as { type?: unknown; subtype?: unknown; session_id?: unknown };
+    if (frame.type !== "system" || frame.subtype !== "init") return;
+    sawInit = true;
+    const backendSessionId = frame.session_id;
+    if (typeof backendSessionId !== "string" || backendSessionId.length === 0) return;
+    const current = await deps.directory.get(address);
+    if (current === undefined || current.backendSessionId === backendSessionId) return;
+    await deps.directory.record({ ...current, backendSessionId, updatedAt: new Date().toISOString() });
+  };
 
   const start = async (): Promise<OfficialQuery> => {
     // D13, AGAINST THE DURABLE RECORD — before a credential is read, before a child exists.
@@ -515,9 +542,13 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     return session.query;
   };
 
-  return deferredOfficialQuery(start, () => {
-    detach?.();
-    stream?.close();
+  return deferredOfficialQuery({
+    start,
+    onMessage: noteFrame,
+    onClose: () => {
+      detach?.();
+      stream?.close();
+    },
   });
 }
 
@@ -584,7 +615,14 @@ export function pumpCallerPrompt(prompt: AsyncIterable<string>, stream: Official
  * `Symbol.asyncIterator` are not forwarded either — a launch triggered by a `Symbol.toPrimitive` or an
  * inspector's probe would be a session started by a debugger.
  */
-function deferredOfficialQuery(start: () => Promise<OfficialQuery>, onClose: () => void): OfficialQuery {
+interface DeferredQueryHooks {
+  start: () => Promise<OfficialQuery>;
+  onClose: () => void;
+  /** Called for each message BEFORE it is yielded, so a row update lands before a host acts on it. */
+  onMessage?: (message: unknown) => Promise<void>;
+}
+
+function deferredOfficialQuery({ start, onClose, onMessage }: DeferredQueryHooks): OfficialQuery {
   let started: Promise<OfficialQuery> | undefined;
   let closed = false;
   const ready = (): Promise<OfficialQuery> => {
@@ -595,7 +633,10 @@ function deferredOfficialQuery(start: () => Promise<OfficialQuery>, onClose: () 
   const target: OfficialQuery & { close(): void } = {
     async *[Symbol.asyncIterator]() {
       const query = await ready();
-      for await (const message of query) yield message;
+      for await (const message of query) {
+        await onMessage?.(message);
+        yield message;
+      }
     },
     interrupt: async () => (await ready()).interrupt(),
     close: () => {
