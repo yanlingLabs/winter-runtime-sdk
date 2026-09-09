@@ -21,6 +21,31 @@ export class RuntimeSdkError extends Error {
 }
 
 /**
+ * The door was asked for a runtime it does not yet route to (whole-branch review, F-4).
+ *
+ * WHY A REFUSAL AND NOT A FALLBACK. `query()` forwards to the Winter peer; a session whose persisted
+ * selection names the official runtime was, until this class existed, served by Winter SILENTLY — no
+ * error, no diagnostic, and no directory record saying which runtime actually ran. That is D13's
+ * "never a silent rewrite" broken at the one door the package exists for, and it is worse than a
+ * refusal in the specific way that matters: the host cannot tell it happened.
+ *
+ * THE OFFICIAL BRANCH IS REACHABLE TODAY, just not through this door — `runtimeSdkInternals(sdk)
+ * .official` is the adapter, and routing `query()` to it (building the launch plan from the
+ * selection, the shared store from the store lane, the descriptors from the official lane, attaching
+ * the session to the messaging registry) is its own task. The message says so, because a refusal that
+ * does not name the way forward is just a wall.
+ */
+export class RuntimeNotRoutedError extends RuntimeSdkError {
+  readonly runtimeKind: string;
+  constructor(runtimeKind: string) {
+    super(
+      `winter-runtime-sdk: this session's selection names the ${runtimeKind} runtime, and \`query()\` routes only to the Winter peer today — serving it on Winter anyway would be the silent rewrite D13 forbids. Reach the official branch through \`runtimeSdkInternals(sdk).official\` until the door routes both branches`,
+    );
+    this.runtimeKind = runtimeKind;
+  }
+}
+
+/**
  * A directory row whose address the router cannot name — refused at the door rather than listed.
  *
  * WHY IT IS AN ERROR AND NOT A DROPPED ROW (review r4, NEW-13). Every row the directory holds is

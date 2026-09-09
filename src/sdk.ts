@@ -27,7 +27,7 @@
 // Both are in the Task 1 report under "what the pinned interfaces forced me to change".
 import type { BrandProfile, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
-import { RuntimeSdkDisposedError } from "./errors.ts";
+import { RuntimeNotRoutedError, RuntimeSdkDisposedError } from "./errors.ts";
 import type { SeamContext, SeamContextWithDirectory } from "./seams/context.ts";
 import type { OfficialSdkModule } from "./seams/official-sdk-shapes.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
@@ -285,11 +285,25 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     messaging,
     query(args) {
       assertLive("query");
-      // ROUTES TO THE WINTER PEER FOR NOW (Task 1's own scope): Lane D's selector decides the branch
-      // and Lane A's adapter serves the official one. What is already final here is the PASS-THROUGH —
-      // the prompt is forwarded by reference and the options object loses nothing but this package's
-      // own additive key.
+      // THE DOOR DECIDES, AND REFUSES WHAT IT CANNOT SERVE (whole-branch review, F-4).
+      //
+      // It forwards to the Winter peer — routing the official branch is its own task — but "forwards
+      // to Winter" and "ignores the selection" are not the same thing, and until this block existed
+      // they were. A host passing the persisted choice the entire selection lane exists to honour
+      // (`options.runtime.selection = { runtimeKind: "claude-agent", … }`) got a WINTER session, with
+      // no error, no diagnostic and no record of which runtime ran. That is D13's "the certified
+      // handoff or a visible fork, never a silent rewrite" broken at the one door.
+      //
+      // A REFUSAL IS THE HONEST ANSWER while the official leg is unrouted. It is typed, it names the
+      // runtime, and it points at the adapter that does serve that branch today.
       const options = args.options ?? {};
+      const runtime = (options as RouterOptions).runtime;
+      if (runtime !== undefined) {
+        // The persisted selection WINS and is never re-decided (D13); `select` is decided here only
+        // when there is no persisted one — the same precedence `selectRuntime` itself implements.
+        const decided = runtime.selection ?? (runtime.select === undefined ? undefined : sdk.selectRuntime(runtime.select));
+        if (decided !== undefined && decided.runtimeKind !== "winter-agent") throw new RuntimeNotRoutedError(decided.runtimeKind);
+      }
       return opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand) });
     },
     selectRuntime(input) {
