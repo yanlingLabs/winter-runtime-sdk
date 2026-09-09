@@ -68,5 +68,6 @@
     "DISABLE_TELEMETRY",
     "DISABLE_ERROR_REPORTING",
     "DISABLE_AUTOUPDATER"
-  ]
+  ],
+  "projectDirNamePattern": "^[A-Za-z0-9_-]{1,64}$"
 }

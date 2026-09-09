@@ -4,10 +4,10 @@
 // through the one door. Nothing in this file calls a lane factory: if the door composed the lanes
 // wrongly, these tests are what notices.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WinterCompatibilitySessionStore } from "@yanlinglabs/winter-agent-sdk";
+import { WinterCompatibilitySessionStore, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 
 import { createRuntimeSdk, RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery, runtimeSdkInternals, type RuntimeSdkPeers } from "../../src/index.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
@@ -179,6 +179,51 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
     DOOR_TIMEOUT,
   );
 
+  // ==================================================================================================
+  // REVIEW r1, M-2 / RULING R-7b-13 — THE TRANSCRIPT KEY IS WINTER'S, AND A KEY THE PIN REJECTS IS
+  // REFUSED RATHER THAN SUBSTITUTED.
+  //
+  // The default used to be the SESSION ID, so for one working directory the two branches wrote to two
+  // project directories and two auto-memory directories — against WS-14 §3 ("Winter's stable transcript
+  // key") and §2 ("ONE shared auto-memory directory, identical for both branches") — and the
+  // `projectKey` half of the `SessionKey` a host must pass to `sdk.handoff()` was a per-session value
+  // nothing documented.
+  // ==================================================================================================
+  test(
+    "the default transcript key is the Winter SDK's own, and the runtime really writes under it",
+    async () => {
+      await withDoorBed({ turns: [{ text: "keyed" }], sessionId: "door-key" }, async (bed) => {
+        await drain(bed.sdk.query({ prompt: "hi", options: bed.officialOptions() }));
+        const expected = transcriptProjectKey(bed.session.cwd);
+        expect(bed.projectKey).toBe(expected);
+        // THE PROOF IS THE RUNTIME'S OWN FILESYSTEM, not our env object: the vendor writes its
+        // transcript under `<CLAUDE_CONFIG_DIR>/projects/<CLAUDE_CODE_PROJECT_DIR_NAME>/`, and it
+        // substitutes its own key when it rejects ours — so the directory's NAME is what says which
+        // key actually took effect.
+        expect(readdirSync(join(bed.session.spool, "projects"))).toEqual([expected]);
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
+  test(
+    "a key the pinned runtime would reject is refused BEFORE any spawn, never substituted",
+    async () => {
+      await withDoorBed({ turns: [{ text: "unused" }], sessionId: "door-longkey" }, async (bed) => {
+        const options = bed.officialOptions() as Record<string, unknown>;
+        (options["runtime"] as { official: Record<string, unknown> }).official["projectKey"] = "k".repeat(70);
+        const query = bed.sdk.query({ prompt: "hi", options });
+        const failure: unknown = await drain(query as AsyncIterable<unknown>).then((): unknown => undefined, (error: unknown): unknown => error);
+        expect((failure as Error).message).toContain("does not match the pinned runtime's own rule");
+        expect((failure as Error).message).toContain("70 characters");
+        // Nothing spawned, nothing recorded — the substitution never got the chance to happen.
+        expect(bed.record.requests).toHaveLength(0);
+        expect(await bed.sdk.directory.get(bed.address)).toBeUndefined();
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
   test(
     "a mid-session runtime change is refused against the DURABLE row, before anything launches",
     async () => {
@@ -284,7 +329,9 @@ describe("the door's official leg — the inputs only a host can supply", () => 
 // ====================================================================================================
 describe("the door's official leg — a refused launch", () => {
   test("leaves no phantom row behind", async () => {
-    const root = mkdtempSync(join(tmpdir(), "winter-rt-door-phantom-"));
+    // SHORT, so the DEFAULT transcript key fits the pin's 64-character rule (R-7b-13) and this test
+    // reaches the launch it is about rather than the key refusal.
+    const root = mkdtempSync(join(tmpdir(), "w-"));
     try {
       const { peer } = createFakeWinterPeer();
       const sdk = createRuntimeSdk({
@@ -297,7 +344,7 @@ describe("the door's official leg — a refused launch", () => {
       const query = sdk.query({
         prompt: "hi",
         options: {
-          cwd: join(root, "work"),
+          cwd: join(root, "w"),
           runtime: {
             selection: doorSelection,
             official: { sessionId: "phantom", credentials: [{ variable: "ANTHROPIC_API_KEY", ref: DOOR_CREDENTIAL }], base: { HOME: join(root, "home"), PATH: "/usr/bin" } },

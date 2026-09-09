@@ -390,7 +390,18 @@ export function buildOfficialChildEnv(input: OfficialEnvInput, policy: OfficialE
   const env: Record<string, string> = {
     [OFFICIAL_RUNTIME_VARIABLES.configDir]: input.configDir,
   };
-  if (input.projectKey !== undefined && input.projectKey.length > 0) env[OFFICIAL_RUNTIME_VARIABLES.projectDirName] = input.projectKey;
+  if (input.projectKey !== undefined && input.projectKey.length > 0) {
+    // R-7b-13: a key the pinned artifact would reject must never reach the child, because the runtime
+    // silently substitutes its own and the record then describes a transcript that is somewhere else.
+    if (!new RegExp(PINNED_PROJECT_DIR_NAME_PATTERN).test(input.projectKey)) {
+      throw new OfficialConfigurationError({
+        option: `env.${OFFICIAL_RUNTIME_VARIABLES.projectDirName}`,
+        reason: `${JSON.stringify(input.projectKey)} (${input.projectKey.length} characters) does not match the pinned runtime's own rule ${PINNED_PROJECT_DIR_NAME_PATTERN}, and a key it rejects does not fail — it falls back to the runtime's own cwd-derived name, leaving the directory row, this environment and the auto-memory directory all naming a transcript that is somewhere else (WS-14 §1/§3, R-7b-13)`,
+        branchLabel,
+      });
+    }
+    env[OFFICIAL_RUNTIME_VARIABLES.projectDirName] = input.projectKey;
+  }
   if (input.sharedTempRoot !== undefined && input.sharedTempRoot.length > 0) env[OFFICIAL_RUNTIME_VARIABLES.tmpdir] = input.sharedTempRoot;
   // R-7b-11: the pin's tool surface is the pin's, unless this deployment says otherwise IN WRITING.
   if ((policy.remoteConfig ?? "deny") === "deny") for (const [name, value] of Object.entries(TRAFFIC_OPT_OUT_VARIABLES)) env[name] = value;
@@ -556,10 +567,27 @@ export interface EnvAllowlistSnapshot {
   refusedProxyTelemetryPrefixes: readonly string[];
   /** R-7b-11: the names this branch SETS by default. A change here is a reviewed compatibility event too. */
   trafficOptOuts: readonly string[];
+  /** R-7b-13: the shape the pin accepts for the transcript project key — a rejected one is substituted. */
+  projectDirNamePattern: string;
 }
 
 /** The pinned artifact every name above was captured from (WS-02 §6.1: an upgrade is reviewed). */
 export const PINNED_OFFICIAL_RUNTIME = "0.3.250";
+
+/**
+ * R-7b-13: the shape the PINNED ARTIFACT accepts for `CLAUDE_CODE_PROJECT_DIR_NAME`.
+ *
+ * A PINNED LITERAL, read off 0.3.250 itself, because the consequence of getting it wrong is silent:
+ * the runtime validates the variable against this pattern and, when it does not match, FALLS BACK TO
+ * ITS OWN cwd-derived key. Measured — a 70-character key left the transcript under the vendor's own
+ * realpath-derived name while the directory row, the child environment and the auto-memory directory
+ * all named the host's key. That is "the record and the transcript disagree", which is the class WS-14
+ * §1 exists to prevent, and no assertion downstream would ever notice it.
+ *
+ * So a key this pattern rejects is REFUSED here rather than passed through and quietly ignored. The
+ * drift gate re-checks the literal on every pin bump.
+ */
+export const PINNED_PROJECT_DIR_NAME_PATTERN = "^[A-Za-z0-9_-]{1,64}$";
 
 export function officialEnvAllowlistSnapshot(): EnvAllowlistSnapshot {
   return {
@@ -572,6 +600,7 @@ export function officialEnvAllowlistSnapshot(): EnvAllowlistSnapshot {
     refusedProxyTelemetry: PROXY_AND_TELEMETRY_VARIABLES,
     refusedProxyTelemetryPrefixes: PROXY_AND_TELEMETRY_PREFIXES,
     trafficOptOuts: TRAFFIC_OPT_OUT_VARIABLE_NAMES,
+    projectDirNamePattern: PINNED_PROJECT_DIR_NAME_PATTERN,
   };
 }
 

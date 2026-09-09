@@ -207,6 +207,16 @@ export interface OfficialLegDeps {
   keychain: { read(ref: CredentialRef): Promise<string | undefined> };
   /** Lane C's ONE shared store, resolved on first use (the identity also carries the winter home). */
   shared: () => SharedSessionStore;
+  /**
+   * R-7b-13: the Winter SDK's OWN transcript project key for a working directory.
+   *
+   * INJECTED FROM THE PEER, NEVER RE-DERIVED. WS-14 §3 calls `CLAUDE_CODE_PROJECT_DIR_NAME` "Winter's
+   * stable transcript key" and §2 wants ONE shared auto-memory directory "identical for both
+   * branches" — which is only true if the official leg writes under the key the WINTER leg writes
+   * under. The SDK exports `transcriptProjectKey(cwd)`; re-implementing its sanitizer here would give
+   * two branches two keys for one cwd the first time either changed.
+   */
+  transcriptProjectKey: (cwd: string) => string;
   /** WS-14 §5.1's vendored runtime, from the constructor. A per-query `Options` value wins over it. */
   vendoredOfficialRuntime?: string;
   /** The adapter's own policy, so a host's `env`/`containment` choices reach the door's own builders. */
@@ -470,6 +480,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       ...officialConnectionEnv({ selection: request.selection, provider: request.options.provider, explicit: request.input.connectionEnv }),
     };
     const remoteConfig: RemoteConfigPolicy = request.input.remoteConfig ?? deps.policy?.env?.remoteConfig ?? "deny";
+    // R-7b-13: the WINTER leg's own key for this cwd, so both branches write under one project
+    // directory and share one auto-memory directory. The session id — the old default — is a
+    // PER-SESSION key, which put every session in a directory of its own and made the `projectKey`
+    // half of the `SessionKey` a host must pass to `sdk.handoff()` something nothing documented.
+    const projectKey = request.input.projectKey ?? deps.transcriptProjectKey(cwd);
     const env = buildOfficialChildEnv(
       {
         selection: request.selection,
@@ -477,7 +492,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         brand: deps.brand,
         credentials,
         ...(request.input.base === undefined ? {} : { base: request.input.base }),
-        projectKey: request.input.projectKey ?? request.input.sessionId,
+        projectKey,
         ...(request.input.sharedTempRoot === undefined ? {} : { sharedTempRoot: request.input.sharedTempRoot }),
       },
       { ...(deps.policy?.env ?? {}), remoteConfig },
@@ -522,7 +537,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         selection: request.selection,
         cwd,
         sessionStore: shared.store,
-        autoMemoryDirectory: request.input.autoMemoryDirectory ?? `${home}/projects/${request.input.projectKey ?? request.input.sessionId}/memory`,
+        autoMemoryDirectory: request.input.autoMemoryDirectory ?? `${home}/projects/${projectKey}/memory`,
         brand: deps.brand,
         pathToClaudeCodeExecutable: executable,
         spawnProxy: deps.official.spawnProxy,

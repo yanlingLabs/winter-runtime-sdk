@@ -80,6 +80,20 @@ uuid on the session's directory row as `backendSessionId` the moment the runtime
 `sdk.handoff({ projectKey, sessionId: (await sdk.directory.get("session:s-42"))!.backendSessionId! }, "winter-agent")`
 is the route. WS-15 §6.2's cold resume of an exited official session reads the same field.
 
+**The transcript key** (R-7b-13). The official child is given
+`CLAUDE_CODE_PROJECT_DIR_NAME`, and it defaults to the Winter SDK's own
+`transcriptProjectKey(options.cwd)` — read off the peer you injected, never re-derived — so both
+branches write under one project directory for one working directory, and the auto-memory directory
+(WS-14 §2's ONE shared directory) derives from the same key. It is also the `projectKey` half of the
+`SessionKey` above. **The pinned runtime validates that variable against `^[A-Za-z0-9_-]{1,64}$` and
+silently substitutes its own cwd-derived name when it does not match**, so the door refuses a key it
+would reject — including its own default — rather than letting the row, the environment and the memory
+directory name a transcript that is somewhere else. Two consequences for a host: a deep working
+directory (a sanitized path over 64 characters) needs an explicit short `runtime.official.projectKey`,
+and the vendor's own fallback key is built from the **realpath** of `cwd` (`/private/var/…` on macOS)
+while `transcriptProjectKey` takes the path as given — so pass the key explicitly rather than relying
+on either default when the two could differ.
+
 **What the persisted selection means.** `runtime.selection` is "what this session's record says", so a
 selection that DISAGREES with the record is a request to change runtime — and D13 answers that with
 the certified handoff (`sdk.handoff(session, to)`) or a visible fork, never by serving the new runtime

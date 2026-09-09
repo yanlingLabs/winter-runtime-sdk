@@ -335,6 +335,26 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
    */
   const persistedRuntime = new Map<string, RuntimeKind>();
 
+  /**
+   * R-7b-13: the INJECTED peer's own transcript key derivation, resolved once.
+   *
+   * Read off the peer rather than imported, for the same reason the store class is: WS-05 §6's
+   * "the identical package/version on both legs" is a statement about the instance the host handed us.
+   * A peer that does not export it is a typed refusal at the first official launch rather than a
+   * silently different key — the two branches would then write under two project directories for one
+   * working directory, which is exactly what this key exists to prevent.
+   */
+  const transcriptProjectKey = (cwd: string): string => {
+    const derive = (opts.peers.winter as unknown as { transcriptProjectKey?: (path: string) => string }).transcriptProjectKey;
+    if (typeof derive !== "function") {
+      throw new RuntimeLaunchInputError({
+        field: "runtime.official.projectKey",
+        reason: "the injected Winter peer exports no `transcriptProjectKey`, so the door cannot derive the key the WINTER leg writes under — name it explicitly rather than let the two branches write to two project directories for one cwd (WS-14 §2/§3, R-7b-13)",
+      });
+    }
+    return derive(cwd);
+  };
+
   let disposed = false;
   const assertLive = (method: string): void => {
     if (disposed) throw new RuntimeSdkDisposedError(method);
@@ -407,6 +427,7 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
             messaging,
             keychain: opts.keychain,
             shared: () => barrier.shared,
+            transcriptProjectKey,
             ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
             ...(opts.official === undefined ? {} : { policy: opts.official }),
             onOpened: noteOpened,

@@ -15,7 +15,7 @@
 // HERMETIC IN THE FULL SENSE: `HOME` and `CLAUDE_CONFIG_DIR` are `mkdtemp` roots, a decoy vendor home
 // is planted under `HOME`, and R-7b-11's four traffic opt-outs are set by the PRODUCTION env builder —
 // this bed passes no policy at all, which is the point.
-import { WinterCompatibilitySessionStore } from "@yanlinglabs/winter-agent-sdk";
+import { WinterCompatibilitySessionStore, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 
 import { createRuntimeSdk, type RuntimeSdk, type RuntimeSdkPeers } from "../../src/index.ts";
 import type { RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
@@ -104,7 +104,9 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
   /* c8 ignore next */
   if (runtime === undefined) throw new Error("unreachable: the door suite is skipped without a bed");
   const sessionId = options.sessionId ?? "door-1";
-  const session = options.reuse ?? hermeticSession(`door-${sessionId}`);
+  // COMPACT, so the DEFAULT transcript key (the Winter SDK's own `transcriptProjectKey(cwd)`) fits the
+  // pinned runtime's 64-character rule and every door test exercises the default a host gets.
+  const session = options.reuse ?? hermeticSession(`door-${sessionId}`, { compact: true });
   const { routes, record } = scriptedLoopback(options.turns);
 
   return withLoopbackFake({ routes }, async (fake) => {
@@ -126,7 +128,7 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
       directoryStore,
       record,
       sessionId,
-      projectKey: sessionId,
+      projectKey: transcriptProjectKey(session.cwd),
       address: `session:${sessionId}`,
       officialOptions(over = {}) {
         const id = over.sessionId ?? sessionId;

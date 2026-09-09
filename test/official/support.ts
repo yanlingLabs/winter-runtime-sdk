@@ -162,6 +162,17 @@ export interface HermeticSessionOptions {
    * refusal a measurement rather than a coincidence.
    */
   git?: boolean;
+  /**
+   * SHORT paths, because the pinned artifact caps `CLAUDE_CODE_PROJECT_DIR_NAME` at 64 characters
+   * (R-7b-13) and macOS's temp root spends 47 of them before this helper adds anything.
+   *
+   * The door derives that key from the working directory (the Winter SDK's own
+   * `transcriptProjectKey(cwd)`), so a bed with the ordinary prefix produces an 86-character key the
+   * runtime would REJECT — and a test bed that cannot exercise the default is a bed that measures a
+   * different door from the one a host runs. `w-<mkdtemp>/w` fits with room to spare on both
+   * platforms, and it is still `mkdtemp` under `tmpdir()`, so the hermeticity rule is untouched.
+   */
+  compact?: boolean;
 }
 
 export interface HermeticSession {
@@ -181,12 +192,12 @@ const roots: string[] = [];
 
 /** Creates one hermetic set of directories. Every root is removed by `cleanupHermetic()`. */
 export function hermeticSession(prefix = "official", options: HermeticSessionOptions = {}): HermeticSession {
-  const root = mkdtempSync(join(tmpdir(), `winter-rt-${prefix}-`));
+  const root = mkdtempSync(join(tmpdir(), options.compact === true ? "w-" : `winter-rt-${prefix}-`));
   roots.push(root);
   const home = join(root, "home");
   const brandHome = join(home, ".winter");
   const spool = join(brandHome, "runtimes", "official-agent-spool");
-  const cwd = join(root, "work");
+  const cwd = join(root, options.compact === true ? "w" : "work");
   const decoyVendorHome = join(home, ".claude");
   for (const dir of [home, brandHome, spool, cwd, decoyVendorHome]) mkdirSync(dir, { recursive: true });
   // The decoy carries a file, so "unchanged" is checkable rather than vacuous.
