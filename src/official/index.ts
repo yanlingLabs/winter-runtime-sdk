@@ -7,19 +7,11 @@
 export { createOfficialAdapter, officialHandoffEligibility } from "./adapter.ts";
 export type { HandoffEligibility, OfficialAdapterHandle, OfficialAdapterPolicy, OfficialSessionHandle, OfficialSessionHealth } from "./adapter.ts";
 
-export {
-  ALIASED_BUILTINS,
-  CANONICAL_DUPLICATE_EXPOSURE,
-  aliasDenyNames,
-  NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
-  NATIVE_LIST_AGENTS_SCHEMA,
-  NATIVE_SEND_MESSAGE_SCHEMA,
-  acceptNativeListAgentsArgs,
-  acceptNativeSendMessageArgs,
-  aliasTargetFor,
-  officialToolAliases,
-} from "./aliases.ts";
-export type { AliasedBuiltin, NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } from "./aliases.ts";
+// The native schemas and their acceptors are NOT here: WS-10 §10.1/§10.2's model-facing contract has
+// ONE home for both branches, `src/native-args.ts`, and the package barrel exports it once (review
+// r4, N13). `aliases.ts` re-exports them so the alias contract still reads in one place.
+export { ALIASED_BUILTINS, CANONICAL_DUPLICATE_EXPOSURE, aliasDenyNames, aliasTargetFor, officialToolAliases } from "./aliases.ts";
+export type { AliasedBuiltin } from "./aliases.ts";
 
 export { NON_CREDENTIAL_ENV_REGISTRY, PINNED_ENV_REGISTRY_SIZE } from "./env-registry.ts";
 export { CREDENTIAL_NAME_KEYWORDS, extractEnvRegistry, isCredentialByName } from "./env-registry-rule.ts";
@@ -62,6 +54,7 @@ export {
   officialEnvAllowlistNames,
   officialEnvAllowlistSnapshot,
 } from "./env-allowlist.ts";
+export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./env-allowlist.ts";
 export type { EnvAllowlistSnapshot, OfficialEnvInput, OfficialEnvPolicy } from "./env-allowlist.ts";
 
 export {
@@ -93,7 +86,10 @@ export type { InputShapeFactory, JsonSchemaObject, MessagingHandlers, OfficialMc
 export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, brandedFlagSettings, buildOfficialOptions, captureOptions, mergeHooks } from "./options-template.ts";
 export type { OptionsTemplatePolicy } from "./options-template.ts";
 
-export { RESUME_STAGING_PREFIX, SPOOL_SEGMENTS, classifyLocalWriteRoot, isResumeStagingRoot, officialSpoolRoot, resumeStagingRoot, validateObservedConfigDir, vendorTempRootReport } from "./spool.ts";
+// `RESUME_STAGING_PREFIX`/`resumeStagingRoot`/`isResumeStagingRoot` are NOT here: they are the
+// vendor's own vocabulary, shared with Lane C, and they live in `src/vendor-paths.ts` with one
+// definition and one argument order (review r4, N13). The package barrel exports them once.
+export { SPOOL_SEGMENTS, classifyLocalWriteRoot, officialSpoolRoot, validateObservedConfigDir, vendorTempRootReport } from "./spool.ts";
 export type { LocalWriteRootKind, ObservedLocalWriteRoot, VendorTempRootReport } from "./spool.ts";
 
 export { createSupervisedSpawnProxy, directoryRecordSink, prepareDefaultSpawn } from "./spawn-proxy.ts";

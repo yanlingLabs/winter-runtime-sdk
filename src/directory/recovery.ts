@@ -37,18 +37,50 @@ export interface RuntimeDirectoryRecoveryHooks {
    * identity too, which is why the field is a pair. Absent: nothing revalidates.
    */
   revalidateProcessIdentity?: (entry: RuntimeDirectoryEntry) => Promise<boolean> | boolean;
-  /** WS-15 §6.4 step 3: "where policy permits" — the host's call, never the router's. */
+  /**
+   * WS-15 §6.4 step 3: "where policy permits" — the host's call, never the router's.
+   *
+   * THIS HOOK IS THE READER OF §6 RULE 2's DURABLE ROOT (whole-branch review, F-5). `entry.configDir`
+   * is the `CLAUDE_CONFIG_DIR` the child was OBSERVED to get — for a store-backed resume, a
+   * `claude-resume-<uuid>` staging root that "the default spawner exposes no post-cleanup lookup
+   * for". The field exists precisely for the case where the process that knew it is gone, which is
+   * this one, and nothing inside this package can act on it: reconciling or cleaning a vendor root
+   * after a crash is a policy decision (WS-05 §12's barrier does it for a live handoff; a restart is
+   * the host's). So it travels on the entry, the step's own report counts the rows that carry one,
+   * and a host that reattaches is expected to read it.
+   */
   reattachSupervised?: (entry: RuntimeDirectoryEntry) => Promise<"reattached" | "skipped"> | "reattached" | "skipped";
+}
+
+/**
+ * How long the two durable sinks REMEMBER, in milliseconds (Lane B fix r1, n3).
+ *
+ * BOTH DEFAULT TO "FOREVER" (`undefined`), and that is deliberate rather than lazy: forgetting is a
+ * product decision with a visible model-facing consequence, so the router will not make it for a host
+ * that did not ask. `nameLeases` in particular is exactly how long a stale name keeps answering "that
+ * referred to something that has gone" instead of "no such agent" (WS-10 §11 rule 5).
+ *
+ * Neither number can delete evidence: a claimed-but-unreceipted delivery (WS-15 §6.4 step 5) and a
+ * HELD lease are excluded by the stores' own doors, at every retention.
+ */
+export interface RuntimeDirectoryRetention {
+  /** Receipted delivery records older than this are dropped at recovery. Absent = kept forever. */
+  deliveries?: number;
+  /** Released name leases released longer ago than this are dropped. Absent = kept forever. */
+  nameLeases?: number;
 }
 
 export interface RecoverDirectoryInput {
   store: RuntimeDirectoryStore;
   now: () => number;
   hooks: RuntimeDirectoryRecoveryHooks;
+  /** WS-10 §13's caps, applied at step 6. Absent = both sinks keep everything. */
+  retention?: RuntimeDirectoryRetention;
 }
 
 export async function recoverDirectory(input: RecoverDirectoryInput): Promise<RuntimeDirectoryRecovery> {
   const { store, now, hooks } = input;
+  const retention = input.retention ?? {};
   const steps: RuntimeDirectoryRecoveryStep[] = [];
   const at = new Date(now()).toISOString();
 
@@ -90,17 +122,26 @@ export async function recoverDirectory(input: RecoverDirectoryInput): Promise<Ru
   });
 
   // --- 3. Reattach/resume supervised top-level runtimes where policy permits -------------------------
+  //
+  // AND THE RECORDED ROOTS ARE COUNTED HERE (F-5). §6 rule 2's `configDir` had no reader in this
+  // package after a restart — the only consumer was the LIVE proxy's own observation, i.e. the
+  // process that is by definition gone. The hook receives the whole entry and always did; what was
+  // missing was any signal that the field is there to be read, and any way for a host to notice that
+  // it reattached nothing while N staging roots were sitting on disk with no owner.
+  const sessions = entries.filter((entry) => entry.objectKind === "session");
+  const withRecordedRoot = sessions.filter((entry) => entry.configDir !== undefined);
   let reattached = 0;
   if (hooks.reattachSupervised !== undefined) {
-    for (const entry of entries) {
-      if (entry.objectKind !== "session") continue;
+    for (const entry of sessions) {
       if ((await hooks.reattachSupervised(entry)) === "reattached") reattached += 1;
     }
   }
+  const rootNote = withRecordedRoot.length === 0 ? "" : `; ${withRecordedRoot.length} session(s) carry a recorded local-write root (WS-14 §6 rule 2) for the host to reconcile or clean`;
   steps.push({
     step: 3,
     name: "reattach/resume supervised top-level runtimes where policy permits",
-    outcome: hooks.reattachSupervised === undefined ? "no reattachment policy supplied; nothing was reattached (D19c keeps resume policy with the host)" : `${reattached} session(s) reattached`,
+    outcome:
+      (hooks.reattachSupervised === undefined ? "no reattachment policy supplied; nothing was reattached (D19c keeps resume policy with the host)" : `${reattached} session(s) reattached`) + rootNote,
   });
 
   // --- 4. Rebuild child ownership/resume context from durable state ----------------------------------
@@ -167,10 +208,16 @@ export async function recoverDirectory(input: RecoverDirectoryInput): Promise<Ru
     }
     subscriptionsKept += 1;
   }
+  // THE SINKS FORGET HERE, AND ONLY HERE (Lane B fix r1, n3). Recovery is the one moment the router
+  // already holds a whole-store read and no delivery is in flight, so pruning costs nothing extra and
+  // cannot race a claim. Both are no-ops with no configured retention, which is the default.
+  const deliveriesPruned = retention.deliveries === undefined ? 0 : await store.deliveries.prune(new Date(nowMs - retention.deliveries).toISOString());
+  const leasesPruned = retention.nameLeases === undefined ? 0 : await store.names.prune(new Date(nowMs - retention.nameLeases).toISOString());
+  const pruneNote = retention.deliveries === undefined && retention.nameLeases === undefined ? "" : `, ${deliveriesPruned} receipted delivery record(s) and ${leasesPruned} released lease(s) pruned under the host's retention`;
   steps.push({
     step: 6,
     name: "expire stale name leases and idle subscriptions by generation/TTL",
-    outcome: `${leasesReleased} name lease(s) released (holder gone or a newer generation), ${subscriptionsExpired} idle subscription(s) expired, ${subscriptionsKept} still valid`,
+    outcome: `${leasesReleased} name lease(s) released (holder gone or a newer generation), ${subscriptionsExpired} idle subscription(s) expired, ${subscriptionsKept} still valid${pruneNote}`,
   });
 
   // --- 7. Resume queued product-session messages only after receiver policy re-evaluates -------------

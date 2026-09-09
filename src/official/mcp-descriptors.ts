@@ -44,7 +44,22 @@ export interface WinterMcpToolResult {
   isError?: boolean;
 }
 
-export type WinterMcpHandler = (args: unknown) => Promise<WinterMcpToolResult>;
+/**
+ * A tool handler, and the vendor's own second argument (item 15).
+ *
+ * `extra` IS FORWARDED, NOT DROPPED — but what it CARRIES is a measurement, not an assumption. The
+ * carry that produced this change asked for it so the official branch could derive WS-10 §12's retry
+ * key (the (session, tool-call id) pair a retry must allocate the SAME message id from), and the
+ * whole-branch review was right to say that must be checked first: the in-process server's `extra` is
+ * the MCP REQUEST CONTEXT — the JSON-RPC request id and `_meta` — which is not the model's
+ * `tool_use_id`. `test/official/runtime-aliases.test.ts` records what the pinned runtime actually
+ * puts there; see that test and this module's own note below for the answer.
+ *
+ * Forwarding it is worth doing either way: it is the only channel the vendor gives a tool for request
+ * context, dropping it is unrecoverable at the handler, and a handler that does not want it simply
+ * declares one parameter.
+ */
+export type WinterMcpHandler = (args: unknown, extra?: unknown) => Promise<WinterMcpToolResult>;
 
 /** One tool on the standing server. Everything a branch needs to register it, and nothing branch-specific. */
 export interface WinterMcpToolDescriptor {
@@ -201,7 +216,9 @@ export function materializeOfficialMcpServer(args: {
       descriptor.tool,
       descriptor.description,
       args.toInputShape(descriptor.inputSchema),
-      async (rawArgs: unknown) => descriptor.handler(rawArgs),
+      // THE VENDOR'S `extra` REACHES THE HANDLER (item 15). Whether anything in it is usable as a
+      // §12 retry key is measured in `runtime-aliases.test.ts` rather than assumed here.
+      async (rawArgs: unknown, extra: unknown) => descriptor.handler(rawArgs, extra),
       descriptor.annotations === undefined ? undefined : { annotations: descriptor.annotations },
     ),
   );

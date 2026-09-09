@@ -36,6 +36,11 @@ import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sd
 
 
 import { RuntimeSdkError } from "../errors.ts";
+// The vendor's staging-root vocabulary, defined ONCE for the whole package (review r4, N13): this
+// lane STAGES a root and Lane A's `src/official/spool.ts` RECOGNISES an observed one, so the two
+// cannot drift — they are the same function. See `src/vendor-paths.ts`'s header for the argument
+// order and why a mirrored second copy was a real hazard rather than a tidiness complaint.
+import { resumeStagingRoot } from "../vendor-paths.ts";
 import type { SeamContext } from "../seams/context.ts";
 import type {
   MaterializedResumeDecorator,
@@ -50,9 +55,6 @@ import { canonicalTranscriptPath } from "./reconcile.ts";
 import { reconcileLocalWriteRoot } from "./reconcile.ts";
 import { createSharedSessionStore, lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";
 
-/** The vendor's own staging prefix (WS-14 §1, WS-05 §9). A Claude-mirroring literal, never rebranded. */
-export const RESUME_STAGING_PREFIX = "claude-resume-";
-
 /** The provider-state sidecar's suffix (WS-05 §13). Named here only so the probes can leave it alone. */
 export const PROVIDER_STATE_SUFFIX = ".provider-state.jsonl";
 
@@ -64,17 +66,6 @@ export class MaterializedResumeError extends RuntimeSdkError {
   constructor(reason: string) {
     super(`winter-runtime-sdk: the handoff decoration could not be produced — ${reason}`);
   }
-}
-
-/**
- * The staging root a store-backed resume reads from: `<os.tmpdir()>/claude-resume-<uuid>`.
- *
- * WS-05 §9: "Store-backed resume still stages under SDK-parent `os.tmpdir()/claude-resume-<uuid>`."
- * Lane A's `src/official/spool.ts` builds the same path for the launch side and classifies an OBSERVED
- * one; `test/store/materialized-resume.test.ts` asserts the two agree, so the two lanes cannot drift.
- */
-export function resumeStagingRoot(uuid: string, base: string = tmpdir()): string {
-  return join(base, `${RESUME_STAGING_PREFIX}${uuid}`);
 }
 
 /** Where inside a staging root the destination runtime reads this session's transcript. */
@@ -365,10 +356,24 @@ async function withProbeHome<T>(context: SeamContext, fn: (bed: { home: string; 
 
 const PROBE_KEY: SessionKey = { projectKey: "probe-project", sessionId: "00000000-0000-4000-8000-000000000001" };
 
-/** A minimal, chain-valid dialect entry. */
+/**
+ * A minimal, chain-valid dialect entry — and, for a conversational type, a REAL `message`.
+ *
+ * THE MESSAGE IS NOT DECORATION (items 11/23). Three of the four probes now hand their transcript to
+ * the PINNED RUNTIME for a fresh-process resume, and the runtime reads these entries with its own
+ * parser: without `message.content` it fails the resume outright ("Failed to resume session: undefined
+ * is not an object (evaluating 'e.message.content')"), which recorded every pinned leg as a bed
+ * failure and kept the door shut for a reason that was about the FIXTURE rather than about the
+ * artifact. A probe of the pinned runtime has to be resumable BY the pinned runtime.
+ *
+ * Only conversational types get one: a `system`/`compact_boundary` entry legitimately has none, and
+ * inventing one would be a novel entry shape (WS-05 §13's closed corpus).
+ */
 function probeEntry(args: { uuid: string; parentUuid: string | null; type?: string; extra?: Record<string, unknown> }): SessionStoreEntry {
+  const type = args.type ?? "user";
+  const conversational = type === "user" || type === "assistant";
   return {
-    type: args.type ?? "user",
+    type,
     uuid: args.uuid,
     parentUuid: args.parentUuid,
     sessionId: PROBE_KEY.sessionId,
@@ -376,6 +381,7 @@ function probeEntry(args: { uuid: string; parentUuid: string | null; type?: stri
     cwd: "/probe",
     version: "0.0.0",
     isSidechain: false,
+    ...(conversational ? { message: { role: type === "assistant" ? "assistant" : "user", content: "a probe entry" } } : {}),
     ...(args.extra ?? {}),
   };
 }
@@ -518,9 +524,18 @@ async function probeNoWashBack(context: SeamContext, deps: MaterializedResumeDep
         const canonicalAfterResume = readFileSync(canonicalPath);
         const prefixIntact = canonicalAfterResume.subarray(0, canonicalBeforeResume.length).equals(canonicalBeforeResume);
         const stillNoDecoration = ((await shared.store.load(PROBE_KEY)) ?? []).every((entry) => entry["uuid"] !== decoration["uuid"]);
+        // DUPLICATE UUIDS ARE THE FAILURE MODE THIS LEG IS FOR (round 3, NEW-I). A mirror that re-sends
+        // what it READ appends the entries it was given back onto the canonical file — AFTER the
+        // prefix, so the prefix check cannot see it, and the decoration is dropped by the router's own
+        // gate on every write, so its absence measures the ROUTER rather than the vendor. What such a
+        // re-send leaves behind is a second copy of an existing uuid, which is exactly what step 5's
+        // uuid-uniqueness check refuses the next handoff on. Measured 0 on this pin — which is why the
+        // clause is cheap to add now and expensive to add after a pin bump has opened the door.
+        const uuids = ((await shared.store.load(PROBE_KEY)) ?? []).map((entry) => entry["uuid"]).filter((uuid): uuid is string => typeof uuid === "string");
+        const duplicateUuids = uuids.length - new Set(uuids).size;
         return {
-          passed: prefixIntact && stillNoDecoration,
-          evidence: `after a resume from the decorated copy that mirrored ${after - before} entr(y|ies): canonical prefix intact=${prefixIntact}; decoration still absent=${stillNoDecoration}`,
+          passed: prefixIntact && stillNoDecoration && duplicateUuids === 0,
+          evidence: `after a resume from the decorated copy that mirrored ${after - before} entr(y|ies): canonical prefix intact=${prefixIntact}; decoration still absent=${stillNoDecoration}; duplicate uuids=${duplicateUuids}`,
         };
       }),
     );
@@ -579,10 +594,41 @@ async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedRes
       const claudeLegsIntact = claudeLegBytes.every((bytes) => lines.includes(bytes));
       // NO LINE COUNT (review r2, N5). A real `freshProcessResume` returns "once the generation has
       // ended", which is at least a user entry and an assistant entry — so a count keyed to the number
-      // of LEGS made the PREFERRED door unopenable by any real bed, with the misleading evidence "the
-      // parent chain is unbroken=false" while the chain was perfectly intact. The chain is the property;
-      // the same expression already asserts it.
-      const orderIntact = lines.length > 0 && lines.every((line, index) => index === 0 || parentOf(line) === uuidOf(lines[index - 1]!));
+      // of LEGS made the PREFERRED door unopenable by any real bed.
+      //
+      // AND NO LINE-ADJACENCY EITHER (fix-wave re-review, NEW-F). The rule was
+      // `parentOf(line) === uuidOf(previous line)`, which demands that every entry chain to the line
+      // immediately before it — something the dialect never promised and the pinned runtime does not
+      // do. Measured: the runtime interleaves uuid-less bookkeeping entries (`queue-operation`,
+      // `last-prompt`, `mode`) into the shared store, and a producer's first entry chains to the last
+      // CHAIN entry rather than the last LINE. So a passing store-produced leg and a failing
+      // real-runtime leg were reporting the same property under two different rules, and the failure
+      // was the RULE's, not the runtime's.
+      //
+      // THE RULE IS THE BARRIER'S OWN (`validateChain`): a `parentUuid` must appear EARLIER in the
+      // transcript, and entries without a uuid are skipped. That is what the dialect states and what
+      // step 5 enforces before any handoff, so a probe holding the transcript to a stricter standard
+      // than the code that consumes it was measuring the probe.
+      const seenUuids = new Set<string>();
+      let orderIntact = lines.length > 0;
+      for (const line of lines) {
+        const parent = parentOf(line);
+        if (typeof parent === "string" && !seenUuids.has(parent)) {
+          orderIntact = false;
+          break;
+        }
+        const uuid = uuidOf(line);
+        if (typeof uuid !== "string") continue;
+        // BOTH of `validateChain`'s clauses, not one (round 3, NEW-I). The first version copied the
+        // reachability half and left the uniqueness half behind, so a re-sent entry whose parent
+        // appears earlier passed a probe whose stated purpose is to catch exactly that. Step 5 refuses
+        // a duplicate uuid; a probe that opens the PREFERRED door has to hold the same line.
+        if (seenUuids.has(uuid)) {
+          orderIntact = false;
+          break;
+        }
+        seenUuids.add(uuid);
+      }
       const summary = await shared.canonical.readSessionSummary(key);
       return {
         passed: claudeLegsIntact && orderIntact && sidecarBytes.length > 0 && summary?.["producerRuntime"] === order[order.length - 1],
@@ -611,9 +657,24 @@ async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedRes
             const stagingRoot = resumeStagingRoot(randomUUID(), home);
             const copyPath = materializedTranscriptPath(stagingRoot, key);
             mkdirSync(dirname(copyPath), { recursive: true, mode: 0o700 });
+            // A ROUND TRIP THAT STARTS ON THE CLAUDE LEG HAS NOTHING TO RESUME YET, and an EMPTY
+            // staging copy is not "nothing to resume" to the pinned runtime — it is "no conversation
+            // found with session ID", which recorded a bed failure for a fixture problem (items
+            // 11/23). One chain-valid entry makes the resume possible.
+            //
+            // THE SEED GOES THROUGH THE CANONICAL STORE FIRST (fix-wave re-review, NEW-F). Writing it
+            // into the staging COPY only produced a canonical file whose first entry chained to a
+            // parent the store had never received — the mirror sends what the runtime WRITES, not what
+            // it READ (that is probe (b), which passes) — so probe (c) failed on a dangling parent that
+            // cannot occur in production, where the copy IS a copy of the canonical file. Appending
+            // first and then copying makes the staging root a true copy, which is the thing being
+            // probed.
+            if (!existsSync(canonicalTranscriptPath(home, key))) {
+              await shared.store.append(key, [{ ...probeEntry({ uuid: randomUUID(), parentUuid: null }), sessionId: key.sessionId }]);
+              await shared.settle(key);
+            }
             const canonicalPath = canonicalTranscriptPath(home, key);
-            if (existsSync(canonicalPath)) copyFileSync(canonicalPath, copyPath);
-            else writeFile(copyPath, Buffer.alloc(0));
+            copyFileSync(canonicalPath, copyPath);
             await bed.freshProcessResume({ home, stagingRoot, key, shared });
           });
           if (!result.passed) return { passed: false, evidence: `${order.join(" -> ")}: ${result.evidence}` };

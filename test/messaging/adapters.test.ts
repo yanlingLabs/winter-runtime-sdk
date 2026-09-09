@@ -16,7 +16,7 @@
 // the CHILD's own record rather than by its parent's runtime.
 import { describe, expect, test } from "bun:test";
 
-import { createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
 import { childAddress, childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
 import { credentials, listing, NOW, VERSIONS } from "../selection/fixtures.ts";
@@ -427,5 +427,98 @@ describe("WS13c-SM1/SM2/SM3 — the cross-family pairs, routed by the CHILD's ow
     const outcome = await world.messaging.deliver(envelope({ messageId: "m1", from: sessionAddress("parent"), to: childAddress("parent", "sonnet-child") }));
     expect(outcome.status).toBe("queued");
     expect(parentFacet.resumed.map((call) => call.id)).toEqual(["sonnet-child"]);
+  });
+});
+
+// ====================================================================================================
+// NEW-12 — A THROWING HOST `permissionClass` HOOK IS AN ANSWER, NOT A CRASH.
+//
+// The hook is the ONLY way an official session's class is ever known and the documented way a host
+// declares one for any session driven through a plain writer; this package's own note describes it as
+// something that "may be an IPC round trip", so FAILING is its expected mode. Unwrapped, it came out
+// of `send()`, `reply()` and the model-facing `SendMessage` handler as a raw throw — a model's tool
+// call erroring instead of receiving a classified failure, which is the same class D1/NEW-4 closed on
+// the adapter side. Falling through to `unknown` is not a weakening: it is §13's own word for "an
+// authenticated route that cannot prove sender class" and already what a host with NO hook gets, so
+// D2 stays fail-closed and the message is HELD.
+// ====================================================================================================
+describe("NEW-12 — a host permission-class hook that raises", () => {
+  const boom = () => {
+    throw new Error("boom: the host's permission-class IPC round trip failed");
+  };
+
+  for (const [label, hooks] of [
+    ["the WINTER adapter's host hook", { winter: { permissionClass: boom } }],
+    ["the OFFICIAL adapter's host hook", { official: { permissionClass: boom } }],
+  ] as const) {
+    test(`${label} falls through to unknown, and D2 HOLDS rather than delivering`, async () => {
+      const world = bedWith(hooks as GlobalMessagingOptions);
+      await world.directory.record(sessionEntry("sender"));
+      // The hook under test has to be the one the RECEIVER's branch reads, so the receiver's runtime
+      // follows the adapter being exercised.
+      const receiverKind = "official" in hooks ? ("claude-agent" as const) : ("winter-agent" as const);
+      await world.directory.record(sessionEntry("receiver", { runtimeKind: receiverKind }));
+      world.messaging.attachWinterSession("session:receiver", winterWriterHandle(() => "idle").handle);
+
+      // BEFORE: this line threw, out of `send()` and out of the model-facing handler with it.
+      const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:receiver", body: "hi", originToolCallId: "t1" });
+      expect(outcome.status).toBe("held");
+      // `unknown` is §13's own word, and holding is exactly what a host with NO hook already gets —
+      // so the catch preserves D2's fail-closed reading rather than weakening it.
+      expect("reason" in outcome ? outcome.reason : "").toContain("class unknown");
+    });
+  }
+
+  test("the model-facing SendMessage handler answers with a tool_result, not an exception", async () => {
+    const world = bedWith({ winter: { permissionClass: boom } });
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("receiver"));
+    world.messaging.attachWinterSession("session:receiver", winterWriterHandle(() => "idle").handle);
+    const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "sender", toolUseId: "toolu-new12" });
+    const result = await handlers.sendMessage({ to: "session:receiver", message: "a message only this test sends" });
+    expect(Array.isArray(result.content)).toBe(true);
+    expect(result.content[0]?.text).toContain("held");
+    expect(result.content[0]?.text).toContain("class unknown");
+  });
+
+  test("a hook that ANSWERS is unaffected — the catch is a fall-through, not a swallow", async () => {
+    const world = bedWith({ winter: { permissionClass: () => "prompts" as const } });
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("receiver"));
+    world.messaging.attachWinterSession("session:receiver", winterWriterHandle(() => "idle").handle);
+    const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:receiver", body: "hi", originToolCallId: "t-ok" });
+    expect(outcome.status).toBe("delivered");
+  });
+});
+
+// ====================================================================================================
+// THE `reply()` REFUSAL NAMES THE HALF THAT IS MALFORMED (round 3, nit b).
+//
+// One message served both halves, so a malformed TARGET was reported as "the envelope's sender is not
+// a canonical address" — which sends a host to the wrong field. NEW-11 pinned that the door ANSWERS;
+// this pins that the answer is usable.
+// ====================================================================================================
+describe("reply() — the refusal names sender or target, whichever is malformed", () => {
+  test("a malformed TARGET is reported as the target", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("sender"));
+    // `reply`'s target is the ORIGINAL's `from`, so a malformed one lands in that half.
+    const outcome = await world.messaging.reply({
+      original: { ...envelope({ messageId: "m-1" }), from: { objectKind: "agent", runtimeKind: "winter-agent", winterSessionId: "x" } as never, to: sessionAddress("sender") },
+      body: "answering",
+    });
+    expect(outcome.status).toBe("refused");
+    expect("reason" in outcome ? outcome.reason : "").toContain("target");
+  });
+
+  test("a malformed SENDER is still reported as the sender", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("peer"));
+    const outcome = await world.messaging.reply({
+      original: { ...envelope({ messageId: "m-2" }), from: sessionAddress("peer"), to: { objectKind: "agent", runtimeKind: "winter-agent", winterSessionId: "y" } as never },
+      body: "answering",
+    });
+    expect(outcome.status).toBe("refused");
+    expect("reason" in outcome ? outcome.reason : "").toContain("sender");
   });
 });

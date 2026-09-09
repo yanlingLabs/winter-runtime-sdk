@@ -24,7 +24,8 @@ import type { DirectoryResolution, DirectoryResolutionContext, RuntimeDirectory,
 import type { NameLeaseRecord, RuntimeDirectoryEntry, RuntimeDirectoryStore } from "../seams/directory-store.ts";
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import { entryToChildLike, entryToListedRuntimeObject, entryToListedRuntimeObjectList, isListableFrom, isResolvableFrom, mergeAdapterOwnedFields, owningSessionIdOf } from "./entries.ts";
-import { recoverDirectory, type RuntimeDirectoryRecoveryHooks } from "./recovery.ts";
+import { recoverDirectory, type RuntimeDirectoryRecoveryHooks, type RuntimeDirectoryRetention } from "./recovery.ts";
+import { UnaddressableEntryError } from "../errors.ts";
 
 /** What a caller may configure. Every field has an answer that is correct when it is absent. */
 export interface RuntimeDirectoryOptions extends RuntimeDirectoryRecoveryHooks {
@@ -39,6 +40,14 @@ export interface RuntimeDirectoryOptions extends RuntimeDirectoryRecoveryHooks {
    * was handed gets an outcome instead of a crash.
    */
   deliverToChild?: (entry: RuntimeDirectoryEntry, message: GlobalAgentMessage) => Promise<DeliveryOutcome>;
+  /**
+   * WS-10 §13's caps on the two durable sinks, applied by `recover()` at step 6 (Lane B fix r1, n3).
+   *
+   * ABSENT MEANS BOTH SINKS KEEP EVERYTHING — see `RuntimeDirectoryRetention`: forgetting a released
+   * name lease changes what a model is told about a name it can no longer reach, so the router will
+   * not choose a horizon for a host that did not state one.
+   */
+  retention?: RuntimeDirectoryRetention;
 }
 
 /**
@@ -162,8 +171,13 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     // WHICH ADDRESSES appear is decided by how many of them may be named. Deciding the sentence from
     // the nameable count instead would tell a caller that a LIVE holder is "no longer reachable" as
     // soon as an archived sibling was redacted out.
-    if (holders.length > 1) return `"${to}" has been used by more than one runtime object${nameable.length > 0 ? ` (${nameable.join(", ")})` : ""}; ${tail}`;
-    return nameable.length === 1 ? `"${to}" referred to ${nameable.join(", ")}, which is no longer reachable; ${tail}` : `"${to}" referred to an object that is no longer reachable; ${tail}`;
+    // …AND WHEN NOTHING NAMEABLE IS LEFT, THE COUNT DOES NOT CHANGE THE ADVICE (review r4, NEW-17).
+    // "address the one you mean by its canonical address from the listing" is dead advice when the
+    // listing contains none of them: the caller is told to pick from an empty set. The preceding
+    // paragraph's rule still holds wherever there IS something to name.
+    if (nameable.length === 0) return `"${to}" referred to an object that is no longer reachable`;
+    if (holders.length > 1) return `"${to}" has been used by more than one runtime object (${nameable.join(", ")}); ${tail}`;
+    return `"${to}" referred to ${nameable.join(", ")}, which is no longer reachable; ${tail}`;
   }
 
   /**
@@ -287,6 +301,17 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
      * revalidation input — with nothing failing at the time.
      */
     async record(entry) {
+      // A LISTED OBJECT IS ALWAYS ADDRESSABLE (review r4, NEW-13). Every row this store holds is shown
+      // to a model by `ListAgents` and is then expected to answer `SendMessage`; an address that does
+      // not parse fails all three resolution doors (by the listed string, by its canonicalised form,
+      // and by `deliver()` on the row's own address), so the listing advertises something no model can
+      // reach and no error explains. The seam TYPES this field `SerializedRuntimeAddress` and calls it
+      // "the session's canonical directory address" — but that alias is `= string`, so nothing enforced
+      // it, and Lane A's default sink really did seed `claude:session:<id>`. This is the same guard
+      // NEW-6 gave name leases, moved to the door the rows come in through.
+      if (parseRuntimeAddress(entry.address) === undefined) {
+        throw new UnaddressableEntryError(entry.address);
+      }
       const existing = await get(entry.address);
       const merged = mergeAdapterOwnedFields(entry, existing);
       await store.upsert(merged);
@@ -315,7 +340,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     },
 
     async recover(): Promise<RuntimeDirectoryRecovery> {
-      return recoverDirectory({ store, now, hooks: options });
+      return recoverDirectory({ store, now, hooks: options, ...(options.retention === undefined ? {} : { retention: options.retention }) });
     },
   };
   return directory;

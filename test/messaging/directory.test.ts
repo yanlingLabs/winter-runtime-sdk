@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { createRuntimeDirectory } from "../../src/messaging/index.ts";
 import type { RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 import { childEntry, createBed, sessionAddress, sessionEntry } from "./support.ts";
+import { UnaddressableEntryError } from "../../src/errors.ts";
 
 function directoryOver(bed: ReturnType<typeof createBed>) {
   return createRuntimeDirectory(bed.context, { now: bed.clock.now });
@@ -411,5 +412,81 @@ describe("record(): the row two lanes write", () => {
     expect((await directory.resolve("new", { from: sessionAddress("caller") })).kind).toBe("resolved");
     const stale = await directory.resolve("old", { from: sessionAddress("caller") });
     expect(stale.kind).toBe("stale-name");
+  });
+});
+
+// ====================================================================================================
+// NEW-13 — A LISTED OBJECT IS ALWAYS ADDRESSABLE.
+//
+// Lane A's default record sink seeded `parsed.winterSessionId` with the WHOLE address string, so a
+// launch under `claude:session:worker` produced a row that `ListAgents` advertised to the model and
+// that all three resolution doors refused: by the listed string, by its canonicalised form, and by
+// `deliver()` on the row's own address. Nothing enforced the shape because the seam's
+// `SerializedRuntimeAddress` is `= string`. The guard is now at BOTH ends — the writer (Lane A) and
+// the door every writer comes through (here).
+// ====================================================================================================
+describe("NEW-13 — the directory refuses a row nothing could address", () => {
+  test("record() refuses an address that does not parse, and says how to build one", async () => {
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now });
+    const rogue = { ...sessionEntry("worker"), address: "claude:session:worker" };
+    await expect(directory.record(rogue)).rejects.toThrow(UnaddressableEntryError);
+    await expect(directory.record(rogue)).rejects.toThrow(/serializeRuntimeAddress/);
+    // NOTHING WAS WRITTEN — the listing cannot advertise what the door refused.
+    expect(await bed.store.load()).toEqual([]);
+  });
+
+  test("both canonical forms are admitted, so the guard is a shape check and not a prefix check", async () => {
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now });
+    await directory.record(sessionEntry("worker"));
+    await directory.record(childEntry("worker", "child-1"));
+    expect((await bed.store.load()).map((entry) => entry.address).sort()).toEqual(["agent:worker:child-1", "session:worker"]);
+  });
+
+  test("every row the model is SHOWN resolves back to the row it names", async () => {
+    // The property NEW-13 is really about, asserted end to end rather than by shape.
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now });
+    await directory.record(sessionEntry("caller"));
+    await directory.record(sessionEntry("worker", { runtimeKind: "claude-agent" }));
+    const snapshot = await directory.snapshot({ owningSessionId: "caller" });
+    expect(snapshot.listable.length).toBeGreaterThan(0);
+    for (const listed of snapshot.listable) {
+      const resolved = await directory.resolve(listed.address, { from: sessionAddress("caller") });
+      expect({ address: listed.address, kind: resolved.kind }).toEqual({ address: listed.address, kind: "resolved" });
+    }
+  });
+});
+
+// ====================================================================================================
+// NEW-17's OWN CASE — the arm that only fires when SEVERAL holders are all unnameable (round 3, nit b).
+//
+// The existing "NOTHING nameable is left" test has ONE holder, so it exercises the singular sentence
+// and would pass with the old code too. This is the case NEW-17 was actually about: `holders.length >
+// 1` (rule 5's own fact, which still counts archived holders) with `nameable.length === 0`, where the
+// old code told the caller to "address the one you mean by its canonical address from the listing"
+// and the listing contained none of them.
+// ====================================================================================================
+describe("NEW-17 — several holders, none of them nameable", () => {
+  test("the refusal says the object is gone rather than pointing at an empty listing", async () => {
+    const bed = createBed();
+    const directory = createRuntimeDirectory(bed.context, { now: bed.clock.now });
+    await directory.record(sessionEntry("caller"));
+    // Two holders of one name, BOTH archived — so rule 5 still counts two, and neither may be named.
+    for (const id of ["ghost-a", "ghost-b"]) {
+      await directory.record(sessionEntry(id, { displayName: "ghost" }));
+      await directory.record(sessionEntry(id, { displayName: "ghost", status: "archived", generation: 2 }));
+    }
+
+    const resolved = await directory.resolve("ghost", { from: sessionAddress("caller") });
+    expect(resolved.kind).toBe("stale-name");
+    const reason = "reason" in resolved ? String(resolved.reason) : "";
+    expect(reason).toContain("no longer reachable");
+    // THE DEAD ADVICE IS GONE: nothing to address, so the caller is not told to address one.
+    expect(reason).not.toContain("address the one you mean");
+    // …and no archived address is quoted (NEW-8's rule, still holding).
+    expect(reason).not.toContain("session:ghost-a");
+    expect(reason).not.toContain("session:ghost-b");
   });
 });

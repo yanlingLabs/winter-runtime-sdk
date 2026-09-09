@@ -47,11 +47,35 @@ export type { ProviderAuthView, SelectionAuthFamily, SelectionVersions } from ".
 export { D14_CLAUDE_OAUTH_APPROVED_DEFAULT, SELECTION_RULES, UNKNOWN_VERSION, reviewPersistedSelection, ruleIdOf, selectionVersionsFrom } from "./selection/select-runtime.ts";
 export type { SelectionReview, SelectionRuleId } from "./selection/select-runtime.ts";
 
+// --- the two modules NEITHER lane owns, each defined once and exported here once (review r4, N13) ---
+//
+// Both were written twice, in parallel trees, by lanes that could not see each other: the vendor's
+// staging-root vocabulary (Lane A recognises one, Lane C stages one — with MIRRORED argument orders)
+// and WS-10 §10.1/§10.2's model-facing schemas with their acceptors (Lane A's alias target, Lane B's
+// canonical handler — already drifted on what `to` may contain). Neither is a lane's to own, so
+// neither sits on a lane barrel; `test/spine/barrel-exports.test.ts` pins that no name is exported by
+// two of them again.
+export { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "./vendor-paths.ts";
+// The README tells a host to READ this set rather than trust a description of it (round 3, NEW-H), so
+// it has to be reachable from the package a host installs — not only from the official lane's barrel.
+export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./official/env-allowlist.ts";
+export {
+  LIST_AGENTS_FIELD_MAX,
+  NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
+  NATIVE_LIST_AGENTS_SCHEMA,
+  NATIVE_SEND_MESSAGE_SCHEMA,
+  SEND_MESSAGE_SUMMARY_MAX,
+  SEND_MESSAGE_TO_MAX,
+  acceptNativeListAgentsArgs,
+  acceptNativeSendMessageArgs,
+} from "./native-args.ts";
+export type { NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } from "./native-args.ts";
+
 // --- the seams (interfaces the four lanes implement behind) ----------------------------------------
 export * from "./seams/index.ts";
 
 // --- typed errors ----------------------------------------------------------------------------------
-export { NotImplementedYet, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError } from "./errors.ts";
+export { NotImplementedYet, RuntimeNotRoutedError, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError, UnaddressableEntryError } from "./errors.ts";
 export type { LaneId } from "./errors.ts";
 
 // --- WS-15 §6.1–6.4: the directory and the cross-runtime messaging router (Lane B; the three doors a host needs + their vocabulary) ---

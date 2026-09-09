@@ -173,6 +173,22 @@ export interface DeliveryRecordStore {
   put(record: DeliveryRecord): Promise<void>;
   /** WS-15 §6.4 step 5's entry point: claimed, never receipted — every one is `delivery_uncertain`. */
   claimedWithoutReceipt(): Promise<DeliveryRecord[]>;
+  /**
+   * Drop every RECEIPTED record older than this ISO stamp; returns how many went (Lane B fix r1, n3).
+   *
+   * WHY A DURABLE SINK NEEDS A REMOVAL DOOR AT ALL. This store is the only unbounded thing in the
+   * delivery path — the SDK subpath's own in-memory equivalents are explicitly capped
+   * (`rememberBounded`, `MAX_TRACKED_MESSAGE_IDS`) — and on the OFFICIAL branch the growth is worst,
+   * because a send with no tool-call id to derive from writes a record under `no-tool-call:<now>:
+   * <random>` that can never be looked up again. Without this door a long-lived host's directory
+   * store grows forever with rows that answer no question.
+   *
+   * A CLAIMED-BUT-UNRECEIPTED RECORD IS NEVER PRUNED, at any age. It is WS-15 §6.4 step 5's whole
+   * evidence: the pair (claimed, no receipt) is what makes a crashed delivery `delivery_uncertain`
+   * rather than invisible, and an "old enough" heuristic would silently convert the one state
+   * recovery must report into no state at all.
+   */
+  prune(receiptedBefore: string): Promise<number>;
 }
 
 /**
@@ -228,6 +244,17 @@ export interface NameLeaseStore {
   release(name: string, address: SerializedRuntimeAddress, releasedAt: string): Promise<void>;
   /** Every currently-held lease — WS-15 §6.4 step 6 sweeps these by generation. */
   held(): Promise<NameLeaseRecord[]>;
+  /**
+   * Drop every RELEASED lease released before this ISO stamp; returns how many went (Lane B fix r1, n3).
+   *
+   * A HELD LEASE IS NEVER PRUNED, at any age — it is the live answer to "who owns this name".
+   *
+   * THE RETENTION IS A PRODUCT DECISION, not a cleanup interval: it is exactly how long a stale name
+   * keeps answering "that referred to something that has gone" instead of "no such agent" (WS-10 §11
+   * rule 5). Prune too eagerly and a model that addresses a session that exited an hour ago gets the
+   * refusal rule 5 exists to avoid; never prune and the memory of every name ever used is permanent.
+   */
+  prune(releasedBefore: string): Promise<number>;
 }
 
 /**
@@ -342,6 +369,17 @@ export function createInMemoryRuntimeDirectoryStore(): RuntimeDirectoryStore {
       async claimedWithoutReceipt() {
         return [...deliveries.values()].filter((r) => r.claimedBy !== undefined && r.outcome === undefined).map((r) => copy(r));
       },
+      async prune(receiptedBefore) {
+        let pruned = 0;
+        for (const [messageId, record] of [...deliveries]) {
+          // RECEIPTED ONLY. `outcome === undefined` is step 5's evidence and outlives every retention.
+          if (record.outcome === undefined) continue;
+          if (record.updatedAt >= receiptedBefore) continue;
+          deliveries.delete(messageId);
+          pruned += 1;
+        }
+        return pruned;
+      },
     },
     subscriptions: {
       async list() {
@@ -373,6 +411,17 @@ export function createInMemoryRuntimeDirectoryStore(): RuntimeDirectoryStore {
       },
       async held() {
         return [...leases.values()].flat().filter((r) => r.releasedAt === undefined).map((r) => copy(r));
+      },
+      async prune(releasedBefore) {
+        let pruned = 0;
+        for (const [name, records] of [...leases]) {
+          // A HELD LEASE (`releasedAt === undefined`) is the live owner and is never a candidate.
+          const kept = records.filter((record) => record.releasedAt === undefined || record.releasedAt >= releasedBefore);
+          pruned += records.length - kept.length;
+          if (kept.length === 0) leases.delete(name);
+          else leases.set(name, kept);
+        }
+        return pruned;
       },
     },
   };

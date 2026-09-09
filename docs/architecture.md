@@ -53,13 +53,29 @@ package owns, who owns which files, and the interfaces the four lanes build behi
 > **The in-memory `RuntimeDirectoryStore` is SPINE-owned and already complete** (`src/seams/directory-store.ts`). The plan's ownership map listed it under Lane B; it shipped with the spine instead, because it is the default store and every hermetic test's store. Lane B implements the DIRECTORY and the MESSAGING ROUTER over it — not the store.
 
 **Shared files (`src/index.ts`, `src/seams/*.ts`, `package.json`) are spine-owned.** A lane that needs
-a change there posts NEEDS_CONTEXT with the exact diff. Two edits are pre-authorised because the
-spine scheduled them:
+a change there posts NEEDS_CONTEXT with the exact diff. Two edits were pre-authorised because the
+spine scheduled them, and **both have landed**:
 
-1. `src/seams/messaging-contract.ts` — its whole body becomes a re-export of
-   `@yanlinglabs/winter-agent-sdk/messaging` once Task 0's subpath lands (Lane B's first commit).
-2. The five wiring lines in `createRuntimeSdk` — each lane replaces one `stubX()` call with its real
-   factory. `src/seams/stubs.ts` exists to make that diff a single line.
+1. `src/seams/messaging-contract.ts` **IS** a re-export of `@yanlinglabs/winter-agent-sdk/messaging`
+   (Lane B's first commit). One deliberate duplicate survives it — `RuntimeKind`, declared in
+   `src/selection/runtime-selection.ts` and character-identical to the subpath's — and it is
+   documented at the site.
+2. The five wiring lines in `createRuntimeSdk` **are** the real factories; `src/seams/stubs.ts`
+   survives for the seams tests, which is what it is now for.
+
+**Two modules belong to NO lane** (fix wave, review r4 N13): `src/vendor-paths.ts` — the vendor's
+`claude-resume-<uuid>` staging-root vocabulary, shared by the official adapter (which recognises one)
+and the store lane (which stages one) — and `src/native-args.ts` — WS-10 §10.1/§10.2's model-facing
+schemas and their acceptors, shared by the official branch's alias targets and the Winter branch's
+canonical handler. Both were written TWICE, in parallel trees, with mirrored argument orders and
+already-drifted validation. Each now has one definition, is exported once from the package barrel and
+by no lane barrel, and `test/spine/barrel-exports.test.ts` fails if a name is ever exported by two
+lane barrels again.
+
+**`test/joint/` belongs to no lane either.** It is the bed where one real pinned runtime drives Lane
+B's real router: every lane had proven its own half against a DOUBLE of its neighbour, which is
+exactly where a schema mismatch or a caller-identity mistake survives four reviews. WS-17 rows 1, 2,
+4 and 5 are proven there.
 
 ---
 
@@ -80,7 +96,7 @@ These are the signatures every lane builds against. They are in `src/`; this tab
 | `MaterializedResumeDecorator` and its probe report | `src/seams/materialized-resume.ts` |
 | `KeychainSeam` | `src/seams/keychain.ts` |
 | `RuntimeDirectory`, `GlobalMessaging` | `src/seams/directory.ts`, `src/seams/global-messaging.ts` |
-| `RuntimeAddress`, `ListedRuntimeObject`, `DeliveryOutcome`, `GlobalAgentMessage`, `RuntimeMessagingAdapter` | `src/seams/messaging-contract.ts` (temporary — see above) |
+| `RuntimeAddress`, `ListedRuntimeObject`, `DeliveryOutcome`, `GlobalAgentMessage`, `RuntimeMessagingAdapter` | `src/seams/messaging-contract.ts` — a re-export of the SDK's `messaging` subpath; no second definition of any contract type |
 
 ### Four places the plan's pinned text had to change, and why
 
@@ -185,11 +201,20 @@ the official branch through `SeamContext.brand`, which is what `OptionsTemplateI
 ## The seam context (what a lane's factory receives)
 
 Every seam factory takes ONE object (`src/seams/context.ts`): the injected `peers`, the host's
-`keychain`, the resolved `brand`, the `directoryStore`, the optional `vendoredOfficialRuntime`, and —
-for everything except the directory itself — the `directory`, which is built first and hoisted out of
-the handle's object literal. A lane's wiring diff in `src/sdk.ts` is therefore one line
-(`stubX(context)` → `createX(context)`), and a lane that needs something new adds one field here where
-the other three lanes can see it.
+`keychain`, the resolved `brand`, the `directoryStore`, the optional `vendoredOfficialRuntime`, the
+optional `winterHome`, and — for everything except the directory itself — the `directory`, which is
+built first and hoisted out of the handle's object literal. A lane's wiring diff in `src/sdk.ts` was
+therefore one line (`stubX(context)` → `createX(context)`).
+
+**Wired for construction is not wired for configuration** (whole-branch review, F-3). Calling every
+factory was the spine's promise and it was kept — but the factories' OPTIONS had no field on
+`RuntimeSdkOptions`, and the consequences were not cosmetic: with no `participants` the barrier marks
+step 8 "no destination runtime was supplied", so `sdk.handoff()` could never return `resumed`; with no
+`official.permissionClass` an official receiver's class can never be known, and since D2 an unknown
+class fails closed, so every message to every official session was HELD. `RuntimeSdkOptions.handoff`
+and `RuntimeSdkOptions.messaging` are those doors, threaded verbatim into the two factory calls;
+`SeamContext.winterHome` is fed from `handoff.winterHome`, so the context and the barrier cannot
+resolve two different homes.
 
 ---
 

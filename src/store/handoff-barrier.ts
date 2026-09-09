@@ -25,6 +25,28 @@
 // store's copy is written AFTER, as a derived cache — a crash between them leaves the transcript's own
 // record authoritative, which is exactly the direction WS-05 §5.4 and WS-16 §4 already point.
 //
+// FIVE DECISIONS A READER WOULD OTHERWISE HAVE TO INFER, each with its reason (fix wave, item 13):
+//
+//   * STEP 6's ATOMICITY IS SINGLE-STORE. The producer record is one atomic append to the transcript's
+//     own summary; the DIRECTORY's copy is a derived cache written after, so a crash between them can
+//     leave the directory behind. That is survivable by design — `loadEntry`'s repair follows the
+//     authoritative record on the next `plan()`, and Lane B's `recover()` repairs the rest — and it is
+//     the honest alternative to pretending a distributed transaction exists.
+//   * PROBE (b)'s VENDOR-MIRROR LEG IS MEASURED, NEVER ASSUMED. "Does 0.3.250's mirror re-send the
+//     entries it READ, decoration among them?" is the one question inspection cannot answer, so it is
+//     a probe with a real runtime behind it. Measured in the fix wave: it does NOT — the decoration
+//     never reached the store (`docs/probes/materialized-resume.md`).
+//   * `sameRecord` TRUSTS `uuid` OVER BYTES. Two serializations of one entry can differ (key order, a
+//     re-encoded field) while naming the same entry; the uuid is the identity the dialect gives us, and
+//     comparing bytes would report a divergence where there is none.
+//   * THE TOOL-PAIRING CHECK HAS NO FINAL-ENTRY EXEMPTION, and an earlier version of this comment said
+//     it did. Fix round 1 removed it: an interrupted turn whose last entry is an unpaired `tool_use`
+//     FORKS at step 5 rather than being waved through, because "the transcript ends mid-tool-call" and
+//     "the transcript is fine" are not the same state and only one of them is safe to resume.
+//   * THE STAGING ROOT BELONGS TO THE DESTINATION FROM THE MOMENT IT IS HANDED OVER, not from the
+//     moment `confirmInit` answers: the destination spawns against that directory INSIDE the call, so
+//     unwinding must not delete it under a live child (whole-branch F-7).
+//
 // WHAT THIS FILE DOES NOT DO: ask the user anything. R-7b-3 splits WS-13 §8.2 — the router owns the
 // MECHANICS and the Claude-leg injection; "switch UX/confirmations" stay with the host (Phase 8,
 // D19c). `plan()` produces something a host can render and confirm; `execute()` acts on the plan it is
@@ -37,11 +59,16 @@ import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } fr
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
-import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffStep, HandoffStepNumber } from "../seams/handoff.ts";
+import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffSelection, HandoffStep, HandoffStepNumber } from "../seams/handoff.ts";
 import type { MaterializedResumeDoor } from "../seams/materialized-resume.ts";
 import type { SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
-import type { RuntimeKind, RuntimeSelection } from "../selection/runtime-selection.ts";
-import { createMaterializedResumeDecorator, materializedTranscriptPath, resumeStagingRoot, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
+import type { RuntimeKind, RuntimeSelection, SelectionInput } from "../selection/runtime-selection.ts";
+// LANE D'S DOOR, and the one consumer it was owed (fix wave, item 20). `reviewPersistedSelection`
+// answers "what would a fresh decision say about this session today" without ever rewriting the
+// record — which is exactly the question a handoff has to ask before it moves ownership.
+import { reviewPersistedSelection } from "../selection/select-runtime.ts";
+import { createMaterializedResumeDecorator, materializedTranscriptPath, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
+import { resumeStagingRoot } from "../vendor-paths.ts";
 import { canonicalTranscriptPath, compareTranscriptTail, localTranscriptPath, reconcileLocalWriteRoot, scanLocalWriteRoot } from "./reconcile.ts";
 import { materializeTempContinuity, resolveEngineTempLayout, tempContinuityModeFor, type EngineTempLayout } from "./temp-continuity.ts";
 import { lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";
@@ -113,7 +140,13 @@ export interface HandoffSourceOwner {
 
 /** What step 8 hands the destination runtime. */
 export interface HandoffResumeTarget {
-  address?: SerializedRuntimeAddress;
+  /**
+   * REQUIRED (review r4, Lane C nit 1). It was optional because an early draft could build a target
+   * before the directory row was read; `execute()` has read it since step 1 for several rounds, every
+   * construction site sets it, and a destination that cannot be told WHICH row it now owns cannot
+   * record anything against it.
+   */
+  address: SerializedRuntimeAddress;
   runtimeKind: RuntimeKind;
   /** §12 step 8: "resume the SAME backend UUID and project key". */
   backendSessionId: string;
@@ -187,6 +220,15 @@ export interface HandoffBarrierDeps {
   stagingRootFor?: (uuid: string) => string;
   /** The temp layout for a session. Defaults to D18's derivation from the resolved brand. */
   tempLayoutFor?: (entry: RuntimeDirectoryEntry, session: SessionKey) => EngineTempLayout;
+  /**
+   * The catalog and credentials a FRESH selection decision needs, so `plan()` can ask Lane D whether
+   * the destination branch can actually serve this session (fix wave, item 20).
+   *
+   * ABSENT MEANS UNREVIEWED, NOT ASSUMED-FINE. Only the host has the model catalog and the credential
+   * presence map; the barrier will not synthesise them, and a plan built without them says
+   * `selection.kind === "unreviewed"` in so many words rather than implying a check that never ran.
+   */
+  selectionInputFor?: (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }) => SelectionInput | Promise<SelectionInput>;
   /** The handoff note's text. The host owns the wording; this is the default. */
   noteText?: (args: { from: RuntimeKind; to: RuntimeKind; session: SessionKey }) => string;
   now?: () => Date;
@@ -221,8 +263,15 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   // EVERYTHING THE STORE TOUCHES IS RESOLVED ON FIRST USE. The spine's wiring line calls this factory
   // for every `createRuntimeSdk`, most of which never hand a session off and some of which (every
   // `test/spine/*` case) inject a peer with no store class at all. See `lazySharedSessionStore`.
-  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(deps.winterHome === undefined ? {} : { winterHome: deps.winterHome }) }) : () => deps.shared!;
-  const homeOf = (): string => deps.winterHome ?? sharedOf().identity.winterHome;
+  // THE HOME HAS THREE SOURCES AND ONE PRECEDENCE, and the middle one is what `SeamContext.winterHome`
+  // is FOR (fix wave, item 12). The spine added that field for this lane and then wired the barrier
+  // with `createHandoffBarrier(context)` and no deps — so a host that set it got a field nothing read
+  // and a store that resolved somewhere else. Explicit deps win (a test pointing at its own mkdtemp),
+  // then the host's constructor value on the context, then the peer's own `resolveWinterHome()` under
+  // the resolved brand, which is the production answer.
+  const winterHome = deps.winterHome ?? context.winterHome;
+  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(winterHome === undefined ? {} : { winterHome }) }) : () => deps.shared!;
+  const homeOf = (): string => winterHome ?? sharedOf().identity.winterHome;
   let decorator: MaterializedResumeDecoratorHandle | undefined = deps.decorator as MaterializedResumeDecoratorHandle | undefined;
   /**
    * ONE store for the barrier AND the decorator (review r1, F2).
@@ -314,14 +363,18 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     }
     const producer = summary["producerRuntime"];
     if ((producer === "claude-agent" || producer === "winter-agent") && producer !== entry.runtimeKind) {
-      const repaired: RuntimeDirectoryEntry = { ...entry, runtimeKind: producer, generation: entry.generation + 1, updatedAt: now().toISOString() };
+      // A REPAIR IS A PATCH, NOT A REPLACE (F-2). There are two awaits between `findEntry` and this
+      // write (`readSessionSummary`, and possibly the pending-marker append), and the destination's
+      // own launch record can land in either window — so the row is re-read and only the ownership
+      // fields move. The pre-handoff snapshot is the fallback for a row a host removed meanwhile.
+      let repaired: RuntimeDirectoryEntry = { ...entry, runtimeKind: producer, generation: entry.generation + 1, updatedAt: now().toISOString() };
       // THE REPAIR IS BEST-EFFORT, AND THE RETURNED ENTRY IS CORRECT EITHER WAY (review r2, N2.3). A
       // directory that refuses the write used to propagate a raw host error out of every future
       // `plan()`, which made the session permanently unplannable — a worse outcome than a stale cache.
       // The transcript's record is authoritative, so the entry returned reflects it; persisting is
       // retried on the next call.
       try {
-        await context.directoryStore.upsert(repaired);
+        repaired = await patchDirectoryRow({ context, address: entry.address, fallback: entry, runtimeKind: producer, now: now() });
         const cursor = summary["projectionCursor"];
         if (typeof cursor === "string" && cursor.length > 0) await context.directoryStore.cursors.set(entry.address, cursor);
       } catch {
@@ -360,6 +413,81 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     return markers;
   };
 
+  /**
+   * CAN THE DESTINATION BRANCH SERVE THIS SESSION'S SELECTION? (fix wave, item 20 — Lane D's door
+   * gains the consumer Lane C's report said it was owed.)
+   *
+   * THE TEST IS ASYMMETRIC BECAUSE THE TWO BRANCHES ARE. `decideRuntime`'s own table is the authority
+   * for the official branch: it returns `claude-agent` for exactly the rows that branch serves (the
+   * Claude family, in a mode that allows it, over a backend the official runtime speaks, with a peer
+   * present) and `winter-agent` for every other row. So "the fresh decision would route this session
+   * to the official runtime" IS "the official runtime can serve it", and nothing else here has to
+   * re-derive that rule. Winter, by contrast, serves whatever the catalog serves — with ONE exception
+   * the table states unconditionally: a Claude OAuth credential "never routes to winter" (D28,
+   * WS-13c §0), which is the one refusal a `winter-agent` destination can earn.
+   *
+   * A REFUSAL IS NEVER A SUBSTITUTION. The barrier does not pick a different provider for the
+   * destination — that is the selector's business — so a session whose row is gone entirely
+   * (`fresh-refused`) travels with Lane D's own refusal object, verbatim.
+   */
+  const reviewSelectionFor = async (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }): Promise<HandoffSelection> => {
+    const { persisted, to } = args;
+    const stamped = { ...persisted, runtimeKind: to };
+    if (deps.selectionInputFor === undefined) {
+      return {
+        kind: "unreviewed",
+        selection: stamped,
+        detail: `no selection input was supplied, so nothing checked whether ${to} can serve ${persisted.providerId}/${persisted.modelRef}; the destination's own init is the first thing that will (supply \`selectionInputFor\` to review it here instead)`,
+      };
+    }
+    const supplied = await deps.selectionInputFor(args);
+    // THE REQUEST IS PINNED TO THE RECORDED ROW, and this is the whole correctness of the check.
+    // `reviewPersistedSelection` re-decides from `input.requested`, which for a HOST's input means
+    // "what would this session ask for if it were new" — a question whose answer is about a different
+    // row entirely (with an empty request it falls through to the listing's ACTIVE slot set, so a
+    // session persisted on Gemini would be reviewed against a Claude row and pass). What a handoff
+    // has to ask is "is the row this session is RECORDED on still servable, and where does it route
+    // today", so the recorded provider and model are pinned into the resolution — the same technique
+    // `resumeChildSelection` uses for the same question, and for the same reason (WS-10's Phase 6.6
+    // amendment: "the resolved provider id must equal the recorded one").
+    const input: SelectionInput = { ...supplied, requested: { provider: persisted.providerId, model: persisted.modelRef } };
+    const review = reviewPersistedSelection({ ...input, persisted });
+    if (review.kind === "fresh-refused") {
+      return {
+        kind: "refused",
+        refusal: review.refusal,
+        detail: `this session's persisted selection is no longer servable at all: ${review.refusal.detail}`,
+      };
+    }
+    if (to === "winter-agent" && persisted.authFamily === "claude-oauth") {
+      return {
+        kind: "refused",
+        refusal: {
+          refused: true,
+          reason: "runtime-unavailable",
+          detail: `${persisted.modelRef} is persisted under a Claude OAuth credential, which never routes to the Winter runtime (D28, WS-13c §0); handing this session to winter-agent would require a different credential, and choosing one is the selector's business rather than the barrier's`,
+        },
+        detail: "a Claude OAuth credential never routes to the Winter runtime (D28)",
+      };
+    }
+    if (to === "claude-agent" && review.fresh.runtimeKind !== "claude-agent") {
+      return {
+        kind: "refused",
+        refusal: {
+          refused: true,
+          reason: "runtime-unavailable",
+          detail: `a fresh decision over this host's catalog routes ${persisted.providerId}/${persisted.modelRef} to ${review.fresh.runtimeKind} (${review.fresh.reason}), so the official runtime does not serve it; the barrier will not invent a provider the destination can serve (WS-00 §2, D13)`,
+        },
+        detail: `the official runtime does not serve ${persisted.providerId}/${persisted.modelRef}`,
+      };
+    }
+    // THE SELECTION THAT TRAVELS IS THE PERSISTED ONE, with the destination's runtime stamped on it —
+    // never `review.fresh`. D13 makes the persisted choice authoritative and a handoff moves the
+    // RUNTIME, not the model: adopting a fresh provider here would be the silent rewrite D13 forbids.
+    // `review` is carried beside it so a host can render `handoff-required`'s proposal itself.
+    return { kind: "servable", selection: stamped, review };
+  };
+
   const plan = async (session: SessionKey, to: RuntimeKind): Promise<HandoffPlan> => {
     const entry = await loadEntry(session);
     assertOneDecoratorStore();
@@ -367,6 +495,11 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     const owner = (await deps.participants?.source?.(session, from)) ?? undefined;
     const health = owner?.health === undefined ? undefined : await owner.health();
     const markers = markersFor({ entry, to, session, ...(health === undefined ? {} : { health }) });
+    const selection = await reviewSelectionFor({ session, from, to, persisted: entry.selection });
+    // A DESTINATION THAT CANNOT SERVE THE SELECTION MAKES STEP 8 KNOWN-UNPROVABLE, which is exactly
+    // what `knownUnprovable` is for: a host renders "this will be a fork, here is why" BEFORE it
+    // confirms, instead of after the lease, the drain and the staging have all run.
+    if (selection.kind === "refused") markers.set(8, selection.refusal.detail);
     const steps: HandoffStep[] = HANDOFF_STEPS.map(({ step, name }) => {
       const knownUnprovable = markers.get(step);
       return knownUnprovable === undefined ? { step, name } : { step, name, knownUnprovable };
@@ -378,6 +511,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       steps,
       decorationDoor: decoratorOf().door,
       tempContinuity: tempContinuityModeFor(to),
+      selection,
     };
   };
 
@@ -396,15 +530,51 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     };
 
     const session = plan.session;
-    // EVERY AWAIT IS INSIDE THE TRY (review r3, N10). N3 wrapped the destination side and left the
-    // symmetric source-side calls — `loadEntry`, the source resolver, `owner.health()` — outside it, so
-    // `execute()` still had a fourth arm: an unknown session, an unreachable directory or a throwing
-    // `health()` escaped as a raw error. Nothing leaks on those paths (they precede the lease and the
-    // marker), but the seam's `Promise<HandoffOutcome>` is either total or it is not.
-    const shared = sharedOf();
-    const winterHome = homeOf();
+    // THE TWO LAZY RESOLVERS LIVE INSIDE THE TRY (review r4, N12 — N10's own residual). They are
+    // SYNCHRONOUS, which is why "every await is inside the try" was true while the property the seam
+    // promises was not: `sharedOf()` throws `SharedStoreUnavailableError` for a peer that exports no
+    // store class and `homeOf()` propagates whatever the peer's `resolveWinterHome` throws — and the
+    // WIRED expression, `createHandoffBarrier(context)` with no deps, is exactly such a peer in every
+    // spine test. So `execute()` really did have a fourth arm: a raw throw instead of an outcome.
+    let shared: SharedSessionStore;
+    let winterHome: string;
+    try {
+      shared = sharedOf();
+      winterHome = homeOf();
+    } catch (error) {
+      // Nothing has been touched — no lease, no marker, no copy — so this is a plain step-1 refusal.
+      return lossy(1, `the shared session store could not be resolved, so nothing about this session can be read or written: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // A DESTINATION THAT CANNOT SERVE THIS SELECTION NEVER GETS THE SESSION (fix wave, item 20).
+    // Refused BEFORE the lease, the drain and the staging, because `plan()` already knows: WS-05 §12's
+    // rule for an unprovable step is "keep the source owner, offer a visibly lossy fork", and this is
+    // the cheapest possible way to obey it. The step is 8 — the destination's own — so the outcome
+    // names the obstacle rather than the moment it was noticed.
+    if (plan.selection.kind === "refused") {
+      return lossy(8, plan.selection.refusal.detail);
+    }
+    // EVERY AWAIT — AND NOW EVERY THROWING SYNCHRONOUS CALL — IS INSIDE A TRY (review r3 N10, review
+    // r4 N12). N3 wrapped the destination side and left the symmetric source-side calls; r3 moved
+    // those; r4 found the two SYNCHRONOUS resolvers above, which is why the previous round's
+    // "everything is inside it now" was measured true and was false. Nothing leaks on any of those
+    // paths (they precede the lease and the marker), but the seam's `Promise<HandoffOutcome>` is
+    // either total or it is not.
     let lease: HandoffLease | undefined;
     let stagedRoot: string | undefined;
+    /**
+     * True from the instant `confirmInit` is INVOKED — not from the instant it answers (F-7).
+     *
+     * The destination spawns its runtime against `target.stagingRoot` INSIDE `confirmInit` (the
+     * official branch's spawn is lazy: it happens on the first pull). A `confirmInit` that starts a
+     * process against that root and then throws — or that is racing an abort — used to have the root
+     * `rmSync`'d out from under a live child, which the proxy then reports as a crash class rather
+     * than as the barrier's own refusal, i.e. the wrong diagnosis of the wrong event.
+     *
+     * So once the destination has been HANDED the root, the barrier stops owning it. A copy left
+     * behind is the same deliberate, locatable leak as the one after a post-confirm commit failure —
+     * `outcome.target.stagingRoot` names it, and the host's retention pass owns it.
+     */
+    let destinationHoldsRoot = false;
     let pendingWritten = false;
     /** True once the producer record has landed: from that instant the handoff IS committed. */
     let committed = false;
@@ -417,10 +587,11 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
      * IT NEVER THROWS: it runs on the failure path, and a failure inside the cleanup of a failure would
      * replace an outcome the host can act on with an exception it cannot.
      *
-     * IT NEVER DELETES A CONFIRMED DESTINATION'S STAGING ROOT (review r2, N2.2). The barrier hands the
-     * root to `confirmInit` itself, so a destination that answered `ok` is by definition reading it;
-     * `stagedRoot` is cleared the instant that happens, and a copy leaked by a later failure is the
-     * right outcome.
+     * IT NEVER DELETES A STAGING ROOT THE DESTINATION HAS BEEN HANDED (review r2 N2.2, widened by the
+     * whole-branch review's F-7). N2.2 cleared `stagedRoot` when `confirmInit` ANSWERED `ok`; F-7 is
+     * the window before that — the destination spawns against the root inside `confirmInit`, so a
+     * throw there, or an abort racing it, met an `rmSync` on a directory a live process was using.
+     * The flag is therefore set BEFORE the call, not after it.
      */
     const unwind = async (): Promise<void> => {
       try {
@@ -429,7 +600,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           await shared.settle(session);
           pendingWritten = false;
         }
-        if (stagedRoot !== undefined) {
+        if (stagedRoot !== undefined && !destinationHoldsRoot) {
           rmSync(stagedRoot, { recursive: true, force: true });
           stagedRoot = undefined;
         }
@@ -571,7 +742,10 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         await unwind();
         return lossy(6, `the handoff could not be staged: ${error instanceof Error ? error.message : String(error)}`);
       }
-      record(6, true, `the owner is closed, the writer lease is this process's, and a pending handoff to ${plan.to} at level ${level} is recorded — ownership has NOT moved`);
+      // "WAS GRANTED TO" and not "is this process's" (review r4, Lane C nit 3): the store's writer
+      // lease is re-entrant per pid, so claiming ownership of it in a host-visible report overstates
+      // exactly the guarantee the close-out says is unenforced.
+      record(6, true, `the owner is closed, the writer lease was granted to this process, and a pending handoff to ${plan.to} at level ${level} is recorded — ownership has NOT moved`);
 
       // ---- step 7: temp continuity ---------------------------------------------------------------------
       at = 7;
@@ -618,20 +792,30 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         ...(stagingRoot === undefined ? {} : { stagingRoot, profile: "store-backed-resume" as const }),
         effectiveTempDir: continuity.effectiveTempDir,
         door: decorated.door,
-        // The persisted selection, with the RUNTIME it is being handed to (review r2, nit 3: the target
-        // used to say `runtimeKind: <source>` while the `resumed` outcome said `<destination>`). The
-        // provider, model and auth family are NOT rewritten — WS-00 §2's D13 makes the persisted choice
-        // authoritative, and deciding a session serves a different provider is the selector's business,
-        // never the barrier's. A destination whose branch cannot serve this selection is the host's
-        // question, asked before it calls `handoff()`.
-        selection: { ...entry.selection, runtimeKind: plan.to },
+        // The selection the PLAN carries, which is the persisted one with the destination's runtime
+        // stamped on it (review r2, nit 3: the target used to say `runtimeKind: <source>` while the
+        // `resumed` outcome said `<destination>`). The provider, model and auth family are NOT
+        // rewritten — WS-00 §2's D13 makes the persisted choice authoritative, and deciding a session
+        // serves a different provider is the selector's business, never the barrier's. What IS new
+        // (fix wave, item 20) is that a destination which cannot serve it never reaches this line:
+        // `plan()` asked Lane D and `execute()` refused at the top.
+        selection: plan.selection.selection,
       };
       const destination = (await deps.participants?.destination?.(session, plan.to)) ?? undefined;
       if (destination === undefined) {
         await unwind();
         return lossy(8, "no destination runtime confirmed the resumed session and level, and the next user message must not be delivered until one does");
       }
+      // FROM HERE THE ROOT IS THE DESTINATION'S (F-7). It is about to start a runtime against that
+      // exact directory, and whether it answers, throws or never returns, deleting it under a live
+      // child is not a cleanup — it is a second failure that hides the first.
+      destinationHoldsRoot = true;
       const confirmed = await destination.confirmInit(target);
+      // A RETURNED `ok: false` IS THE DESTINATION REPORTING IT IS DONE WITH THE ROOT — it answered, it
+      // did not take the session, and a clean refusal should not leak a directory. The window F-7 is
+      // about is the one where `confirmInit` THROWS or is aborted: nothing has reported anything, a
+      // child may be live against that root, and the flag stays set so `unwind()` leaves it alone.
+      destinationHoldsRoot = false;
       if (!confirmed.ok) {
         await unwind();
         return lossy(8, confirmed.reason);
@@ -654,12 +838,16 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // told only "the producer record could not be written" has no way to find the directory it now
         // owns. Naming it is the difference between a documented leak and an orphan.
         const reason = `the destination confirmed init but the producer record could not be written: ${error instanceof Error ? error.message : String(error)}`;
-        record(8, false, reason);
+        // THE STEP TRAIL GETS THE ENRICHED SENTENCE TOO (review r4, Lane C nit 5). A host that reads
+        // `steps` rather than `detail` — a renderer walking the eight steps — was told the record
+        // failed and never told where the directory it now owns is.
+        const enriched = target?.stagingRoot === undefined ? reason : `${reason}. The destination is reading ${target.stagingRoot}; that staging copy is retained deliberately and belongs to the host's retention pass.`;
+        record(8, false, enriched);
         return {
           kind: "lossy-fork-offered",
           reason,
           step: 8,
-          detail: target?.stagingRoot === undefined ? reason : `${reason}. The destination is reading ${target.stagingRoot}; that staging copy is retained deliberately and belongs to the host's retention pass.`,
+          detail: enriched,
           ...(target === undefined ? {} : { target }),
           steps: trail,
         };
@@ -690,7 +878,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
 
       return {
         kind: "resumed",
-        selection: { ...entry.selection, runtimeKind: plan.to },
+        selection: plan.selection.selection,
         step: 8,
         detail: `the session resumed on ${plan.to} at level ${level} through the ${decorated.door} decoration door${notes.length === 0 ? "" : ` — ${notes.join("; ")}`}`,
         target,
@@ -707,7 +895,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // root it now owns, and this arm is one of the two that can leak one deliberately.
         return {
           kind: "resumed",
-          selection: { ...entry.selection, runtimeKind: plan.to },
+          selection: plan.selection.selection,
           step: 8,
           detail: `the session resumed on ${plan.to}, but the barrier failed afterwards: ${detail}`,
           ...(target === undefined ? {} : { target }),
@@ -1133,6 +1321,39 @@ export class HandoffCommitError extends RuntimeSdkError {
 }
 
 /**
+ * THE BARRIER'S DIRECTORY WRITES PATCH THE CURRENT ROW — they never replace it (whole-branch, F-2).
+ *
+ * THREE WRITERS SHARE ONE ROW AND THE SEAM'S `upsert` IS A FULL REPLACE. Lane A's spawn sink does a
+ * read-modify-write; Lane B's `record()` merges (`mergeAdapterOwnedFields`); this lane used to write
+ * `{ ...entry }` from a snapshot taken BEFORE step 1 — and on the primary Winter→official path the
+ * destination's own `confirmInit` is what writes `configDir` and `processIdentity` onto that row, in
+ * between. The replace erased them the instant the handoff committed, so the store-backed generation
+ * whose staging root "the default spawner exposes no post-cleanup lookup for" had no durable root and
+ * `recover()` step 2 had no identity to revalidate. The reverse direction was worse in kind: the
+ * source's stale `configDir` and dead pid were RE-written after the proxy's `clear()` had removed
+ * them, leaving a Winter-owned row carrying a vendor root it never had.
+ *
+ * SO EVERY WRITE HERE RE-READS FIRST and changes only the fields the barrier owns. It is not a
+ * general merge — the fix for a lost-update is to write less, not to invent a reconciliation — and
+ * the re-read cannot be hoisted: the whole point is that it happens AFTER the destination's write.
+ */
+async function patchDirectoryRow(args: {
+  context: SeamContextWithDirectory;
+  address: SerializedRuntimeAddress;
+  fallback: RuntimeDirectoryEntry;
+  runtimeKind: RuntimeKind;
+  now: Date;
+}): Promise<RuntimeDirectoryEntry> {
+  const rows = await args.context.directoryStore.load();
+  // The fallback is the pre-handoff snapshot: correct when the row was removed under us, which is a
+  // host's prerogative — re-creating it from what we know beats writing nothing at all.
+  const current = rows.find((row) => row.address === args.address) ?? args.fallback;
+  const patched: RuntimeDirectoryEntry = { ...current, runtimeKind: args.runtimeKind, generation: current.generation + 1, updatedAt: args.now.toISOString() };
+  await args.context.directoryStore.upsert(patched);
+  return patched;
+}
+
+/**
  * PHASE TWO, SECOND WRITE: the host directory's derived copy.
  *
  * A CACHE, and treated as one. Its failure does not undo the handoff — `loadEntry`'s repair reads the
@@ -1146,7 +1367,7 @@ async function syncDirectoryEntry(args: {
   now: Date;
 }): Promise<void> {
   await args.context.directoryStore.cursors.set(args.entry.address, args.staged.cursor);
-  await args.context.directoryStore.upsert({ ...args.entry, runtimeKind: args.plan.to, generation: args.entry.generation + 1, updatedAt: args.now.toISOString() });
+  await patchDirectoryRow({ context: args.context, address: args.entry.address, fallback: args.entry, runtimeKind: args.plan.to, now: args.now });
 }
 
 function cryptoRandomUuid(): string {

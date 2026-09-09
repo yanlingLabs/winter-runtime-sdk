@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import { DIALECT_RECORD_ENTRY_TYPE, WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 
 import {
   acquireHandoffLease,
@@ -16,7 +16,6 @@ import {
   localTranscriptPath,
   releaseHandoffLease,
   resolveEngineTempLayout,
-  RESUME_STAGING_PREFIX,
   validateSessionTranscript,
   type HandoffBarrierDeps,
   type HandoffSourceOwner,
@@ -27,7 +26,14 @@ import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { createInMemoryRuntimeDirectoryStore, type RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import { createSharedSessionStore, HandoffWiringError } from "../../src/store/index.ts";
+import { RESUME_STAGING_PREFIX } from "../../src/vendor-paths.ts";
+// Lane A's own record sink — the real writer, so the F-2 pair is the real pair.
+import { directoryRecordSink } from "../../src/official/spawn-proxy.ts";
 import { selectionFor, sidecarPathFor, withStoreBed, type StoreBed } from "./support.ts";
+// Lane D's own fixtures, so the review is measured against the catalog shape the selector really
+// takes rather than against a second hand-rolled one (fix wave, item 20).
+import { NOW, VERSIONS, credentials, listing } from "../selection/fixtures.ts";
+import type { RuntimeSelection, SelectionInput } from "../../src/selection/runtime-selection.ts";
 
 const OK: HandoffStepReport = { ok: true };
 
@@ -1537,5 +1543,380 @@ describe("fix round 3 — the last four edges", () => {
       },
       { store: RefusesTheProducerRecord, policy: { backoffMs: 1 } },
     );
+  });
+});
+
+// ====================================================================================================
+// ITEM 20 — LANE D's DOOR, AND THE ONE CONSUMER IT WAS OWED.
+//
+// `reviewPersistedSelection` shipped with Lane D and had no caller anywhere in the package; the
+// barrier, meanwhile, stamped the destination's `runtimeKind` over the SOURCE's provider fields and
+// left "can that branch actually serve this?" to the destination's own `confirmInit` — i.e. to a
+// point AFTER the lease, the drain, the producer-record window and the staged copy. The two facts
+// were one gap. `plan()` now asks, and a destination that cannot serve the selection never gets the
+// session.
+//
+// THE TEST IS ASYMMETRIC BECAUSE THE BRANCHES ARE: `decideRuntime` returns `claude-agent` for exactly
+// the rows the official runtime serves, so "a fresh decision routes this elsewhere" IS "the official
+// branch cannot serve it"; Winter serves the whole catalog except the one row D28 forbids it.
+// ====================================================================================================
+describe("item 20 — plan() reviews the persisted selection against the DESTINATION branch", () => {
+  const claudeSelection = (over: Partial<RuntimeSelection> = {}): RuntimeSelection => ({
+    runtimeKind: "winter-agent",
+    providerId: "anthropic",
+    modelRef: "anthropic/claude-opus-5",
+    family: "claude",
+    authFamily: "api-key",
+    sdkVersion: "0.0.2",
+    reason: "persisted by the fixture",
+    decidedAt: NOW,
+    ...over,
+  });
+
+  const inputFor = (over: Partial<SelectionInput> = {}): SelectionInput => ({
+    mode: "code",
+    requested: {},
+    families: listing("claude"),
+    credentials: credentials(["anthropic", "google"]),
+    hasClaudePeer: true,
+    claudeOauthApproved: false,
+    versions: VERSIONS,
+    now: NOW,
+    ...over,
+  });
+
+  test("with no selection input, the plan says UNREVIEWED rather than implying a check that never ran", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      const plan = await barrierFor(bed, { participants: { source: () => idleOwner() } }).plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("unreviewed");
+      if (plan.selection.kind === "unreviewed") {
+        expect(plan.selection.detail).toContain("no selection input");
+        // The persisted record still travels, with the destination's runtime stamped on it.
+        expect(plan.selection.selection.runtimeKind).toBe("claude-agent");
+      }
+      // …and nothing is marked unprovable on its account.
+      expect(plan.steps[7]?.knownUnprovable).toBeUndefined();
+    });
+  });
+
+  test("a Claude row the official branch DOES serve is servable, and the record is not rewritten", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection() });
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner() }, selectionInputFor: () => inputFor() });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("servable");
+      if (plan.selection.kind === "servable") {
+        // THE PERSISTED PROVIDER AND MODEL SURVIVE — D13 makes the persisted choice authoritative, so a
+        // handoff moves the RUNTIME and nothing else. The fresh proposal rides beside it, unapplied.
+        expect(plan.selection.selection.providerId).toBe("anthropic");
+        expect(plan.selection.selection.modelRef).toBe("anthropic/claude-opus-5");
+        expect(plan.selection.selection.runtimeKind).toBe("claude-agent");
+        expect(plan.selection.review.kind === "fresh-refused" ? undefined : plan.selection.review.fresh.runtimeKind).toBe("claude-agent");
+      }
+      expect(plan.steps[7]?.knownUnprovable).toBeUndefined();
+    });
+  });
+
+  test("a NON-Claude row handed to the official runtime is a typed refusal, and step 8 says so BEFORE anything runs", async () => {
+    await withStoreBed(async (bed) => {
+      const gemini = claudeSelection({ providerId: "google", modelRef: "google/gemini-3-pro", family: "gemini" });
+      await bed.record({ selection: gemini });
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner() }, selectionInputFor: () => inputFor() });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("refused");
+      if (plan.selection.kind === "refused") {
+        expect(plan.selection.refusal.refused).toBe(true);
+        expect(plan.selection.refusal.reason).toBe("runtime-unavailable");
+        expect(plan.selection.refusal.detail).toContain("google/gemini-3-pro");
+        // NEVER A SUBSTITUTION: no provider the destination CAN serve is offered in its place.
+        expect(plan.selection.refusal.detail).toContain("will not invent a provider");
+      }
+      expect(plan.steps[7]?.knownUnprovable).toContain("does not serve");
+    });
+  });
+
+  test("…and execute() offers the lossy fork instead of moving ownership — before the lease exists", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection({ providerId: "google", modelRef: "google/gemini-3-pro", family: "gemini" }) });
+      let confirmed = 0;
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({
+            runtimeKind: "claude-agent" as const,
+            confirmInit: () => {
+              confirmed += 1;
+              return OK;
+            },
+          }),
+        },
+        selectionInputFor: () => inputFor(),
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+      expect(outcome.detail).toContain("does not serve it");
+      // THE SOURCE KEEPS THE SESSION, and the destination was never asked: no lease, no drain, no copy.
+      expect(confirmed).toBe(0);
+      expect(existsSync(join(bed.home, "runtimes", "handoff-leases"))).toBe(false);
+      expect((await bed.directoryStore.load())[0]?.runtimeKind).toBe("winter-agent");
+    });
+  });
+
+  test("a Claude OAuth credential handed to WINTER is refused — D28's one unconditional direction", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: claudeSelection({ runtimeKind: "claude-agent", authFamily: "claude-oauth" }) });
+      const barrier = barrierFor(bed, {
+        participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }), destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }) },
+        selectionInputFor: () => inputFor({ claudeOauthApproved: true }),
+      });
+      const plan = await barrier.plan(bed.key, "winter-agent");
+      expect(plan.selection.kind).toBe("refused");
+      if (plan.selection.kind === "refused") expect(plan.selection.refusal.detail).toContain("never routes to the Winter runtime");
+    });
+  });
+
+  test("a session whose row is GONE travels with Lane D's own refusal, verbatim", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection() });
+      const barrier = barrierFor(bed, {
+        participants: { source: () => idleOwner() },
+        // The credential for this session's provider is gone: a fresh decision cannot be made at all.
+        selectionInputFor: () => inputFor({ credentials: credentials(["google"]) }),
+      });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("refused");
+      if (plan.selection.kind === "refused") {
+        expect(plan.selection.detail).toContain("no longer servable at all");
+        expect(["slot-unservable", "runtime-unavailable", "claude-oauth-not-approved", "mode-forbids-runtime"]).toContain(plan.selection.refusal.reason);
+      }
+    });
+  });
+
+  test("the RESUMED outcome and the target carry the same reviewed selection object", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection() });
+      await bed.append(1);
+      const seen: { target?: unknown } = {};
+      const barrier = barrierFor(bed, {
+        participants: { source: () => idleOwner(), destination: () => confirmingDestination(seen) },
+        selectionInputFor: () => inputFor(),
+      });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("servable");
+      if (plan.selection.kind === "refused") throw new Error("unreachable: the fixture is servable");
+      const expected = plan.selection.selection;
+      const outcome = await barrier.execute(plan);
+      expect(outcome.kind).toBe("resumed");
+      if (outcome.kind === "resumed") expect(outcome.selection).toEqual(expected);
+      expect((seen.target as { selection: RuntimeSelection }).selection).toEqual(expected);
+    });
+  });
+});
+
+// ====================================================================================================
+// F-2 — THREE WRITERS, ONE ROW: the barrier must not erase what the destination wrote.
+//
+// The one write a real destination makes during a handoff is the one no test ever saw, because every
+// `confirmInit` in this file is a fake that writes nothing. On the wired shape it is Lane A's
+// `resume(plan)` pulling to `system/init`, and its supervised proxy records `configDir` (the
+// `claude-resume-<uuid>` staging root, which "the default spawner exposes no post-cleanup lookup
+// for") and `processIdentity` onto the row the barrier is about to write. The barrier wrote
+// `{ ...entry }` from a snapshot taken before step 1, so it erased both the instant the handoff
+// committed — leaving a store-backed generation with no durable root and a `recover()` step 2 with no
+// identity to revalidate.
+//
+// THESE TESTS USE LANE A's OWN SINK, not a hand-rolled writer, so the pair is the real one.
+// ====================================================================================================
+describe("F-2 — the destination's launch record survives the commit", () => {
+  const observation = (root: string, pid: number) => ({
+    root: { configDir: root, kind: "sdk-resume-staging" as const, profile: "store-backed-resume" as const },
+    processIdentity: { pid, startedAt: new Date(1_000).toISOString() },
+  });
+
+  test("Winter -> official: `configDir` and `processIdentity` written during confirmInit survive a `resumed` outcome", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record();
+      await bed.append(1);
+      let recordedRoot = "";
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({
+            runtimeKind: "claude-agent" as const,
+            // THE REAL WRITE, through Lane A's sink, at the real moment: the destination is starting
+            // against `target.stagingRoot`, so this is where §6 rule 2's record comes from.
+            async confirmInit(target: { stagingRoot?: string }) {
+              recordedRoot = target.stagingRoot ?? "";
+              await directoryRecordSink({ store: bed.directoryStore, address: entry.address }).record(observation(recordedRoot, 4242) as never);
+              return OK;
+            },
+          }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome.kind).toBe("resumed");
+      expect(recordedRoot).toContain(RESUME_STAGING_PREFIX);
+
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.runtimeKind).toBe("claude-agent"); // the barrier's own field did move
+      expect(row?.configDir).toBe(recordedRoot); // …and the destination's did NOT get erased
+      expect(row?.processIdentity).toEqual({ pid: 4242, startedAt: new Date(1_000).toISOString() });
+      // The generation is monotonic over the row as it actually is, not over the stale snapshot.
+      expect(row?.generation).toBeGreaterThan(entry.generation);
+    });
+  });
+
+  test("official -> Winter: a `clear()` during close is not undone by the commit", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      const sink = directoryRecordSink({ store: bed.directoryStore, address: entry.address });
+      await sink.record(observation("/tmp/vendor-root-that-is-gone", 999) as never);
+      const barrier = barrierFor(bed, {
+        participants: {
+          // The source's proxy clears the record as the generation ends — the same moment `close()` runs.
+          source: () =>
+            idleOwner({
+              runtimeKind: "claude-agent",
+              close: async () => {
+                await sink.clear?.(observation("/tmp/vendor-root-that-is-gone", 999) as never);
+                return OK;
+              },
+            }),
+          destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+      expect(outcome.kind).toBe("resumed");
+
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.runtimeKind).toBe("winter-agent");
+      // A Winter-owned row must not carry a vendor staging root it never had.
+      expect(row?.configDir).toBeUndefined();
+      expect(row?.processIdentity).toBeUndefined();
+    });
+  });
+
+  test("loadEntry's repair patches the row too — the fields survive a crash between the two writes", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record();
+      await bed.append(1);
+      // The authoritative record says the destination owns it; the directory's cache has not caught up.
+      await bed.shared.store.append(bed.key, [{ type: DIALECT_RECORD_ENTRY_TYPE, producerRuntime: "claude-agent" } as never]);
+      await bed.shared.settle(bed.key);
+      // …and Lane A's sink wrote the new generation's root in the meantime.
+      await directoryRecordSink({ store: bed.directoryStore, address: entry.address }).record(observation("/tmp/staged-after-the-flip", 7) as never);
+
+      const plan = await barrierFor(bed, { participants: { source: () => idleOwner() } }).plan(bed.key, "winter-agent");
+      expect(plan.from).toBe("claude-agent"); // the repair followed the transcript
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.configDir).toBe("/tmp/staged-after-the-flip");
+      expect(row?.processIdentity).toEqual({ pid: 7, startedAt: new Date(1_000).toISOString() });
+    });
+  });
+});
+
+// ====================================================================================================
+// F-7 — A DESTINATION MID-`confirmInit` OWNS THE ROOT IT WAS HANDED.
+//
+// The official branch's spawn is LAZY: the runtime starts on the first pull, which happens inside
+// `confirmInit`, against `target.stagingRoot`. So there is a window in which a child is live on that
+// directory and the barrier has not yet been told anything. `unwind()` used to `rmSync` it in that
+// window — removing a live child's `CLAUDE_CONFIG_DIR`, which the proxy then reports as a crash
+// class rather than as the barrier's own refusal: the wrong diagnosis of the wrong event.
+//
+// THE LINE IS BETWEEN "ANSWERED" AND "DID NOT ANSWER", not between ok and not-ok. A returned
+// `{ ok: false }` is the destination reporting it is done, and that root is still cleaned up (the two
+// F1 tests above pin exactly that). A THROW is not a report.
+// ====================================================================================================
+describe("F-7 — the staging root a destination is mid-confirmInit on", () => {
+  test("a confirmInit that READ the root and then threw does not have it deleted under it", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(2);
+      const staged: string[] = [];
+      let sawRoot = "";
+      const barrier = barrierFor(bed, {
+        stagingRootFor: (uuid) => {
+          const root = join(bed.home, "staging", `${RESUME_STAGING_PREFIX}${uuid}`);
+          staged.push(root);
+          return root;
+        },
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({
+            runtimeKind: "claude-agent" as const,
+            confirmInit(target: { stagingRoot?: string }) {
+              // The destination has started against the root — this read stands in for the spawn.
+              sawRoot = target.stagingRoot ?? "";
+              expect(existsSync(sawRoot)).toBe(true);
+              throw new Error("the destination runtime crashed while starting");
+            },
+          }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome.kind).toBe("lossy-fork-offered");
+      // OWNERSHIP DID NOT MOVE — the throw is still a refusal, and the source keeps the session.
+      expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
+      // …and the directory the destination may still be reading is INTACT.
+      expect(staged).toHaveLength(1);
+      expect(existsSync(sawRoot)).toBe(true);
+      // The leak is deliberate and locatable, which is what makes it a retention question rather
+      // than an orphan: the same shape as the post-confirm commit failure's.
+      expect(sawRoot).toContain(RESUME_STAGING_PREFIX);
+    });
+  });
+});
+
+// ====================================================================================================
+// N12 — `execute()` HAS THREE ARMS AND NO FOURTH, including the synchronous ones.
+//
+// r3's N10 moved every AWAIT inside the try and the round reported "everything is inside it now".
+// It was measured, and it was false: `sharedOf()` and `homeOf()` are SYNCHRONOUS, sat above the try,
+// and both resolve lazily — so a peer whose store class is missing (the spine's own fake, i.e. the
+// WIRED expression `createHandoffBarrier(context)` with no deps) or whose `resolveWinterHome` throws
+// (this lane's own bed peer) got a raw exception out of a seam that promises an outcome.
+// ====================================================================================================
+describe("N12 — the fourth arm, closed", () => {
+  test("a peer that exports no store class gets a step-1 fork, not a SharedStoreUnavailableError", async () => {
+    const { peer } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain: createFakeKeychain() });
+    const context = runtimeSdkInternals(sdk)!.context;
+    const barrier = createHandoffBarrier(context);
+    // Reading the store still throws — that is `barrier.shared`'s documented contract, unchanged.
+    expect(() => barrier.shared).toThrow(SharedStoreUnavailableError);
+    // But EXECUTING answers, because the seam's `Promise<HandoffOutcome>` is total or it is not.
+    const outcome = await barrier.execute({
+      session: { projectKey: "p", sessionId: "s" },
+      from: "winter-agent",
+      to: "claude-agent",
+      steps: [],
+      decorationDoor: "fallback",
+      tempContinuity: "clone-copy",
+      selection: { kind: "unreviewed", selection: selectionFor("claude-agent"), detail: "fixture" },
+    });
+    expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 1 });
+    expect(outcome.detail).toContain("shared session store could not be resolved");
+  });
+
+  test("a peer whose resolveWinterHome throws gets the same answer, not the peer's exception", async () => {
+    await withStoreBed(async (bed) => {
+      // The bed's peer HAS the store class and refuses to resolve a real home — the exact shape r4
+      // planted (44c). `deps` carries no `winterHome`, so `homeOf()` has to ask the peer.
+      const barrier = createHandoffBarrier(bed.context);
+      const outcome = await barrier.execute({
+        session: bed.key,
+        from: "winter-agent",
+        to: "claude-agent",
+        steps: [],
+        decorationDoor: "fallback",
+        tempContinuity: "clone-copy",
+        selection: { kind: "unreviewed", selection: selectionFor("claude-agent"), detail: "fixture" },
+      });
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 1 });
+      expect(outcome.detail).toContain("hermetic test must never resolve the real Winter home");
+    });
   });
 });

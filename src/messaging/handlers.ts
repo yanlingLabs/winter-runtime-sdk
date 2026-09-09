@@ -16,87 +16,13 @@
 // outcome. Resolution, policy, the ledger and the adapters are all above/below them, once, for both
 // branches — which is what makes the two branches' behaviour the same behaviour rather than the same
 // intention.
-import { validateToField } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { DeliveryOutcome } from "@yanlinglabs/winter-agent-sdk/messaging";
 
 import { callerAddressOf, type GlobalMessagingHandle } from "./router.ts";
-
-/** WS-10 §10.1's pinned bounds. `to` is validated by the subpath's own `validateToField`. */
-export const SEND_MESSAGE_SUMMARY_MAX = 200;
-
-/** The native `SendMessage` arguments (WS-10 §10.1), after validation. */
-export interface NativeSendMessageArgs {
-  to: string;
-  message: string;
-  summary?: string;
-  notify_when_idle?: boolean;
-}
-
-/** The native `ListAgents` arguments (WS-10 §10.2). Both fields are reserved in the pinned build. */
-export interface NativeListAgentsArgs {
-  channel?: string;
-  q?: string;
-}
-
-export type NativeArgsResult<T> = { ok: true; args: T } | { ok: false; reason: string };
-
-const SEND_MESSAGE_FIELDS = new Set(["to", "message", "summary", "notify_when_idle"]);
-const LIST_AGENTS_FIELDS = new Set(["channel", "q"]);
-
-/**
- * Accept the native `SendMessage` arguments EXACTLY.
- *
- * `to`'s own rules (required, ≤300 chars, no newline, never the `"*"` broadcast) come from the
- * subpath's `validateToField` rather than from a second copy here — the Winter branch's tool surface
- * validates with the same function, so "both runtime branches MUST present this exact model-facing
- * schema" (WS-10 §10.1) is true by construction rather than by review.
- */
-export function acceptNativeSendMessageArgs(input: unknown): NativeArgsResult<NativeSendMessageArgs> {
-  if (typeof input !== "object" || input === null) return { ok: false, reason: "expected an object of SendMessage arguments" };
-  const record = input as Record<string, unknown>;
-  const extra = Object.keys(record).filter((key) => !SEND_MESSAGE_FIELDS.has(key));
-  if (extra.length > 0) return { ok: false, reason: `unknown argument(s): ${extra.join(", ")}` };
-  const to = record["to"];
-  const validated = validateToField(to);
-  if (!validated.ok) return { ok: false, reason: validated.message };
-  const message = record["message"];
-  if (typeof message !== "string") return { ok: false, reason: "`message` is required and must be a string (an empty string is a pure idle subscription)" };
-  const summary = record["summary"];
-  if (summary !== undefined && (typeof summary !== "string" || summary.length > SEND_MESSAGE_SUMMARY_MAX)) {
-    return { ok: false, reason: `\`summary\` must be a string of at most ${SEND_MESSAGE_SUMMARY_MAX} characters` };
-  }
-  const notify = record["notify_when_idle"];
-  if (notify !== undefined && typeof notify !== "boolean") return { ok: false, reason: "`notify_when_idle` must be a boolean" };
-  return {
-    ok: true,
-    args: {
-      to: to as string,
-      message,
-      ...(summary === undefined ? {} : { summary: summary as string }),
-      ...(notify === undefined ? {} : { notify_when_idle: notify }),
-    },
-  };
-}
-
-/** The same treatment for `ListAgents`: two reserved optional fields, both ≤256 chars, nothing else. */
-export function acceptNativeListAgentsArgs(input: unknown): NativeArgsResult<NativeListAgentsArgs> {
-  if (input === undefined || input === null) return { ok: true, args: {} };
-  if (typeof input !== "object") return { ok: false, reason: "expected an object of ListAgents arguments" };
-  const record = input as Record<string, unknown>;
-  const extra = Object.keys(record).filter((key) => !LIST_AGENTS_FIELDS.has(key));
-  if (extra.length > 0) return { ok: false, reason: `unknown argument(s): ${extra.join(", ")}` };
-  for (const field of ["channel", "q"] as const) {
-    const value = record[field];
-    if (value !== undefined && (typeof value !== "string" || value.length > 256)) return { ok: false, reason: `\`${field}\` must be a string of at most 256 characters` };
-  }
-  return {
-    ok: true,
-    args: {
-      ...(typeof record["channel"] === "string" ? { channel: record["channel"] } : {}),
-      ...(typeof record["q"] === "string" ? { q: record["q"] } : {}),
-    },
-  };
-}
+// ONE definition of the model-facing schemas and their acceptors, shared with the official branch's
+// alias targets (review r4, N13). WS-10 §10.1 requires "this exact model-facing schema" on BOTH
+// branches, and two copies is how that stops being true; see `src/native-args.ts`'s header.
+import { acceptNativeListAgentsArgs, acceptNativeSendMessageArgs } from "../native-args.ts";
 
 /** The MCP result shape both branches return — structurally the descriptor's own (WS-14 §11). */
 export interface MessagingToolResult {
@@ -104,7 +30,37 @@ export interface MessagingToolResult {
   isError?: boolean;
 }
 
-export type MessagingToolHandler = (args: unknown) => Promise<MessagingToolResult>;
+export type MessagingToolHandler = (args: unknown, extra?: unknown) => Promise<MessagingToolResult>;
+
+/**
+ * WS-10 §12's RETRY KEY, on the official branch — and it exists, which was not known until it was
+ * measured (item 15; `test/official/runtime-aliases.test.ts` is the measurement).
+ *
+ * §12 wants a message id derived from (sender session, TOOL-CALL id) so "a retry allocates the SAME
+ * id" and returns the stored outcome instead of starting a second turn. On the Winter branch the
+ * caller binds `toolUseId` at registration. On the official branch the handler is inside the vendor's
+ * in-process MCP server, where the only per-call channel is the second argument the vendor passes —
+ * and the reasonable expectation was that it carries MCP request context (a JSON-RPC request id,
+ * `_meta`) rather than an Anthropic-API `tool_use_id`, which is one layer up.
+ *
+ * THE PINNED RUNTIME BRIDGES THEM. Measured on 0.3.250: `extra._meta["claudecode/toolUseId"]` is the
+ * exact id the model emitted. So the official branch gets a real §12 key rather than depending on the
+ * rapid-repeat guard, and the vendor's own namespaced `_meta` name is read rather than guessed at.
+ *
+ * A VENDOR-NAMESPACED KEY IS NEVER REBRANDED (WS-01 §5): `claudecode/toolUseId` is the vendor's name
+ * for the vendor's field, exactly like `CLAUDE_CONFIG_DIR`. It is read defensively — an absent or
+ * non-string value simply falls back to the bound caller's id — because a future pin may move it, and
+ * losing the key must degrade to today's behaviour rather than to a crash.
+ */
+export const VENDOR_TOOL_USE_ID_META_KEY = "claudecode/toolUseId";
+
+export function toolUseIdFromExtra(extra: unknown): string | undefined {
+  if (typeof extra !== "object" || extra === null) return undefined;
+  const meta = (extra as { _meta?: unknown })._meta;
+  if (typeof meta !== "object" || meta === null) return undefined;
+  const id = (meta as Record<string, unknown>)[VENDOR_TOOL_USE_ID_META_KEY];
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
 
 export interface MessagingToolHandlers {
   sendMessage: MessagingToolHandler;
@@ -142,10 +98,16 @@ export function createMessagingToolHandlers(messaging: GlobalMessagingHandle, ca
   const identity = (): MessagingToolCaller => (typeof caller === "function" ? caller() : caller);
 
   return {
-    async sendMessage(rawArgs) {
+    async sendMessage(rawArgs, extra) {
       const accepted = acceptNativeSendMessageArgs(rawArgs);
       if (!accepted.ok) return text(accepted.reason, true);
-      const who = identity();
+      const bound = identity();
+      // THE PER-CALL TOOL-USE ID WINS (item 15). On the official branch the caller is bound once at
+      // registration and cannot know it; the vendor's `extra` carries the id of THIS call, which is
+      // exactly what §12's retry key is derived from. On the Winter branch there is no `extra` and
+      // the bound value is already the right one, so this is additive in both directions.
+      const perCall = toolUseIdFromExtra(extra);
+      const who: MessagingToolCaller = perCall === undefined ? bound : { ...bound, toolUseId: perCall };
       const from = callerAddressOf(who);
       const result = await messaging.sendDetailed({
         from,

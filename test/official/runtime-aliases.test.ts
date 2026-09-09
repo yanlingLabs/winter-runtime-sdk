@@ -23,7 +23,7 @@ import { acceptNativeSendMessageArgs, aliasDenyNames, officialToolAliases } from
 import { officialDisallowedTools } from "../../src/official/containment.ts";
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
 import { officialMcpServers, winterMcpServerDescriptor, type WinterMcpHandler } from "../../src/official/mcp-descriptors.ts";
-import { advertisedToolNames, cleanupHermetic, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type ScriptedTurn } from "./support.ts";
+import { advertisedToolNames, cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -82,7 +82,7 @@ async function runSession(args: {
     const directoryStore = createInMemoryRuntimeDirectoryStore();
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore };
     const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
-    const adapter = createOfficialAdapter(context);
+    const adapter = createOfficialAdapter(context, hermeticEnvPolicy());
     await adapter.ready();
 
     const descriptor = winterMcpServerDescriptor({
@@ -128,7 +128,7 @@ async function runSession(args: {
     });
     const options = adapter.buildOptions(templateInput);
     const live = adapter.launch({
-      address: "claude:session:aliases",
+      address: "session:aliases",
       selection,
       prompt: "do the thing",
       cwd: session.cwd,
@@ -248,6 +248,55 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
       const aliases = officialToolAliases(WINTER_BRAND);
       expect(Object.keys(aliases)).toEqual(["SendMessage", "ListAgents"]);
       expect(Object.values(aliases)).toEqual([mcpToolName(WINTER_BRAND, "send_message"), mcpToolName(WINTER_BRAND, "list_agents")]);
+    },
+    TIMEOUT,
+  );
+
+  // ==================================================================================================
+  // ITEM 15 — WHAT THE VENDOR'S `extra` ACTUALLY CARRIES, MEASURED BEFORE ANYTHING DEPENDS ON IT.
+  //
+  // The Lane B carry asked Lane A to stop dropping the in-process server's second handler argument so
+  // the official branch could derive WS-10 §12's retry key — the (session, tool-call id) pair a retry
+  // must allocate the SAME message id from, without which an identical retry is caught only by the
+  // rapid-repeat guard. The whole-branch review's §5 was right to make that conditional: `extra` is
+  // the MCP REQUEST context (a JSON-RPC request id, `_meta`), and the model's `tool_use_id` is an
+  // ANTHROPIC-API concept one layer up. Whether the pinned runtime bridges the two is not something
+  // either report could know, so this test asks the runtime.
+  //
+  // IT ASSERTS WHAT IT OBSERVES AND PRINTS THE REST. The forwarding is worth having regardless; what
+  // this pins is the honest state of the retry key on this branch, so the README clause and the SDK
+  // carry say the true thing.
+  // ==================================================================================================
+  test(
+    "the handler receives the vendor's `extra`, and its contents decide whether a §12 retry key exists",
+    async () => {
+      const seen: unknown[] = [];
+      const result = await runSession({
+        turns: [{ toolUses: [{ id: "toolu_extra_probe", name: "SendMessage", input: { to: "reviewer", message: "ping" } }] }, { text: "done" }],
+        handlers: {
+          sendMessage: async (raw, extra) => {
+            seen.push(extra);
+            void raw;
+            return { content: [{ type: "text" as const, text: "ok" }] };
+          },
+        },
+      });
+      expect(result.messages.some((message) => message.type === "result")).toBe(true);
+      // THE HANDLER REALLY RAN, and it really got a second argument.
+      expect(seen).toHaveLength(1);
+      const extra = seen[0] as Record<string, unknown> | undefined;
+      const keys = extra === undefined || extra === null ? [] : Object.keys(extra).sort();
+      const flat = JSON.stringify(extra, (_k, value) => (typeof value === "function" ? "[function]" : value));
+      console.log(`[item 15] the vendor's \`extra\`, as the pinned runtime passes it — keys: ${JSON.stringify(keys)}\n[item 15] value: ${String(flat).slice(0, 600)}`);
+      expect(extra).toBeDefined();
+
+      // THE QUESTION THE CARRY ASKED, answered against the artifact rather than by inference: is the
+      // MODEL's tool-use id reachable from here? `toolu_extra_probe` is the id the model emitted.
+      const carriesToolUseId = String(flat).includes("toolu_extra_probe");
+      console.log(`[item 15] the model's tool_use_id is reachable from \`extra\`: ${carriesToolUseId}`);
+      // Recorded as an observation, not asserted in one direction: if a later pin starts carrying it,
+      // this line changes and the README clause and the SDK carry change with it.
+      expect(typeof carriesToolUseId).toBe("boolean");
     },
     TIMEOUT,
   );

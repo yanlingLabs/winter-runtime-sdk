@@ -240,7 +240,7 @@ describe("WS-14 §6 — the supervised spawn proxy", () => {
       decidedAt: new Date(0).toISOString(),
     };
     const entry: RuntimeDirectoryEntry = {
-      address: "claude:session:abc",
+      address: "session:abc",
       parsed: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: "abc" },
       runtimeKind: "claude-agent",
       objectKind: "session",
@@ -285,7 +285,7 @@ describe("WS-14 §6 — the supervised spawn proxy", () => {
   test("rule 5: an UNVERIFIED cleanup keeps the recorded root", async () => {
     const store = createInMemoryRuntimeDirectoryStore();
     const entry: RuntimeDirectoryEntry = {
-      address: "claude:session:keeps",
+      address: "session:keeps",
       parsed: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: "keeps" },
       runtimeKind: "claude-agent",
       objectKind: "session",

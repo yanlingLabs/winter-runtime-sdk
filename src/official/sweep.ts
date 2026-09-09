@@ -152,7 +152,10 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
     return {};
   };
 
-  const post = async (raw: unknown): Promise<Record<string, unknown>> => {
+  // `event` IS THE HOOK THIS INVOCATION CAME FROM (review r4, NEW-20). The runtime does not tell the
+  // hook which event fired it, so the registration closes over the name — the alternative was the
+  // constant `"PostToolUse"` on all three, which named the wrong hook in the one field a host reads.
+  const post = async (raw: unknown, event: string = POST_TOOL_EVENTS[0] as string): Promise<Record<string, unknown>> => {
     const input = (raw ?? {}) as SweepHookInput;
     // A batch reports several calls at once; any of them may be the one that wrote.
     const calls = input.tool_calls ?? [{ tool_name: input.tool_name, tool_use_id: input.tool_use_id }];
@@ -217,12 +220,24 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
       systemMessage: reason,
       decision: "block",
       reason,
-      hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput: reason, additionalContext: reason },
+      // THE EVENT IS THE ONE THAT FIRED (review r4, NEW-20). The sweep is registered on three events
+      // and every block used to report `PostToolUse`, so a breach caught on `PostToolUseFailure` or
+      // `PostToolBatch` named the wrong hook in the one field a host reads to find it.
+      //
+      // …AND ONLY THE FIELDS THAT EVENT DECLARES (round 3, nit a). On this pin `updatedToolOutput`
+      // exists on `PostToolUseHookSpecificOutput` alone; `PostToolUseFailureHookSpecificOutput` and
+      // `PostToolBatchHookSpecificOutput` declare `additionalContext` and nothing else. Sending a key
+      // the shape does not have was never measured to break anything — the sweep's own REMOVAL is the
+      // guarantee, and the real-runtime test asserts the removal rather than the report — but a hook
+      // output that does not match the pinned declaration is drift waiting to be discovered by a
+      // runtime that starts validating.
+      hookSpecificOutput:
+        event === "PostToolUse" ? { hookEventName: event, updatedToolOutput: reason, additionalContext: reason } : { hookEventName: event, additionalContext: reason },
     };
   };
 
   return {
-    hooks: { PreToolUse: [{ hooks: [pre] }], ...Object.fromEntries(POST_TOOL_EVENTS.map((event) => [event, [{ hooks: [post] }]])) },
+    hooks: { PreToolUse: [{ hooks: [pre] }], ...Object.fromEntries(POST_TOOL_EVENTS.map((event) => [event, [{ hooks: [(input: unknown) => post(input, event)] }]])) },
     get breaches() {
       return breaches;
     },

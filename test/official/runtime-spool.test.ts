@@ -25,8 +25,9 @@ import type { RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
 import { directoryRecordSink, type SpawnObservation } from "../../src/official/spawn-proxy.ts";
-import { isResumeStagingRoot, vendorTempRootReport } from "../../src/official/spool.ts";
-import { cleanupHermetic, decoyUntouched, hermeticSession, officialRuntimeBed, scriptedLoopback, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
+import { vendorTempRootReport } from "../../src/official/spool.ts";
+import { isResumeStagingRoot } from "../../src/vendor-paths.ts";
+import { cleanupHermetic, decoyUntouched, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -90,6 +91,7 @@ async function runSpoolSession(args: {
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore };
     const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
     const adapter = createOfficialAdapter(context, {
+      ...hermeticEnvPolicy(),
       sink: directoryRecordSink({ store: directoryStore, address: args.address }),
       // §6 RULE 3's COLLABORATOR, and the assertion row 15 is about: the recorded root must still be
       // on disk when reconciliation runs, because the wrapper deletes `claude-resume-*` on observing
@@ -154,8 +156,8 @@ describeRuntime("WS-17 row 4 + row 15 — the spool, the staging root and the ve
       const winterHome = join(session.brandHome);
       const store = new WinterCompatibilitySessionStore({ winterHome });
 
-      const first = await runSpoolSession({ session, store, winterHome, projectKey: "project-alpha", address: "claude:session:alpha" });
-      const second = await runSpoolSession({ session, store, winterHome, projectKey: "project-beta", address: "claude:session:beta" });
+      const first = await runSpoolSession({ session, store, winterHome, projectKey: "project-alpha", address: "session:alpha" });
+      const second = await runSpoolSession({ session, store, winterHome, projectKey: "project-beta", address: "session:beta" });
 
       // Two generations, two backend ids.
       expect(first.sessionId).toBeDefined();
@@ -191,7 +193,7 @@ describeRuntime("WS-17 row 4 + row 15 — the spool, the staging root and the ve
       const winterHome = join(session.brandHome);
       const store = new WinterCompatibilitySessionStore({ winterHome });
 
-      const first = await runSpoolSession({ session, store, winterHome, projectKey: "project-resume", address: "claude:session:resume" });
+      const first = await runSpoolSession({ session, store, winterHome, projectKey: "project-resume", address: "session:resume" });
       expect(first.sessionId).toBeDefined();
       // A fresh generation is spool-resident, and the record says so.
       expect(first.observedConfigDir).toBe(session.spool);
@@ -202,7 +204,7 @@ describeRuntime("WS-17 row 4 + row 15 — the spool, the staging root and the ve
         store,
         winterHome,
         projectKey: "project-resume",
-        address: "claude:session:resume",
+        address: "session:resume",
         ...(first.sessionId === undefined ? {} : { resume: first.sessionId }),
       });
 
@@ -233,14 +235,14 @@ describeRuntime("WS-17 row 4 + row 15 — the spool, the staging root and the ve
       const winterHome = join(session.brandHome);
       const store = new WinterCompatibilitySessionStore({ winterHome });
 
-      const source = await runSpoolSession({ session, store, winterHome, projectKey: "project-fork", address: "claude:session:fork-source" });
+      const source = await runSpoolSession({ session, store, winterHome, projectKey: "project-fork", address: "session:fork-source" });
       expect(source.sessionId).toBeDefined();
       const forked = await runSpoolSession({
         session,
         store,
         winterHome,
         projectKey: "project-fork",
-        address: "claude:session:fork-child",
+        address: "session:fork-child",
         ...(source.sessionId === undefined ? {} : { resume: source.sessionId }),
         forkSession: true,
       });
@@ -265,7 +267,7 @@ describeRuntime("WS-17 row 4 + row 15 — the spool, the staging root and the ve
       const store = new WinterCompatibilitySessionStore({ winterHome });
       const sharedTempRoot = mkdtempSync(join(tmpdir(), "winter-rt-shared-temp-"));
 
-      await runSpoolSession({ session, store, winterHome, projectKey: "project-temp", address: "claude:session:temp", sharedTempRoot });
+      await runSpoolSession({ session, store, winterHome, projectKey: "project-temp", address: "session:temp", sharedTempRoot });
 
       // The engine appended its own vendor-named segment under the root we configured — exactly what
       // `vendorTempRootReport` tells a host it will do, and the reason the report exists.

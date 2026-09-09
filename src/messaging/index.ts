@@ -9,7 +9,7 @@
 // the composed door is the one the package leads with.
 export { createRuntimeDirectory } from "../directory/directory.ts";
 export type { DirectorySnapshot, RuntimeDirectoryHandle, RuntimeDirectoryOptions } from "../directory/directory.ts";
-export type { RuntimeDirectoryRecoveryHooks } from "../directory/recovery.ts";
+export type { RuntimeDirectoryRecoveryHooks, RuntimeDirectoryRetention } from "../directory/recovery.ts";
 export { entryToChildLike, entryToListedRuntimeObject, entryToListedRuntimeObjectList, isListableFrom, isLiveStatus, isResolvableFrom, mergeAdapterOwnedFields, owningSessionIdOf, parentAddressOf, sessionAddressOf } from "../directory/entries.ts";
 
 export { createGlobalMessaging, callerAddressOf, deriveMessageId } from "./router.ts";
@@ -25,8 +25,11 @@ export type { InboundPolicy, InboundPolicyDeps, InboundPolicyHooks, InboundVerdi
 export { createAttachedSessionRegistry } from "./sessions.ts";
 export type { AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession, LiveSessionStatus } from "./sessions.ts";
 export { renderAttributedTurn, renderOwnerQualifiedTurn, UnattributableSenderError } from "./attribution.ts";
-export { acceptNativeListAgentsArgs, acceptNativeSendMessageArgs, createMessagingToolHandlers, SEND_MESSAGE_SUMMARY_MAX } from "./handlers.ts";
-export type { MessagingToolCaller, MessagingToolHandler, MessagingToolHandlers, MessagingToolResult, NativeListAgentsArgs, NativeSendMessageArgs, NativeArgsResult } from "./handlers.ts";
+export { createMessagingToolHandlers, toolUseIdFromExtra, VENDOR_TOOL_USE_ID_META_KEY } from "./handlers.ts";
+export type { MessagingToolCaller, MessagingToolHandler, MessagingToolHandlers, MessagingToolResult } from "./handlers.ts";
+// The native schemas, their acceptors and their bounds are NOT here: they are WS-10 §10.1/§10.2's
+// model-facing contract, shared with the official branch's alias targets, and they live in
+// `src/native-args.ts` with one definition (review r4, N13). The package barrel exports them once.
 
 import { createRuntimeDirectory, type RuntimeDirectoryHandle, type RuntimeDirectoryOptions } from "../directory/directory.ts";
 import type { SeamContext } from "../seams/context.ts";

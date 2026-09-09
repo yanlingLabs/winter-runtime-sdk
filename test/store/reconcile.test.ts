@@ -15,6 +15,8 @@ import {
   scanLocalWriteRoot,
 } from "../../src/store/index.ts";
 import { sidecarPathFor, withStoreBed } from "./support.ts";
+import { WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
+import { createSupervisedSpawnProxy, type TranscriptReconcile } from "../../src/official/spawn-proxy.ts";
 
 /** Writes a transcript into a local-write root the way the official runtime's wrapper does. */
 function writeLocal(root: string, key: { projectKey: string; sessionId: string; subpath?: string }, entries: SessionStoreEntry[]): string {
@@ -205,6 +207,41 @@ describe("the hook Lane A's spawn proxy takes", () => {
       // A root that cannot be read at all still resolves — the exit must not be stranded.
       await expect(reconciler.hook({ observation: { root: { configDir: "\u0000" } }, exit: { code: 1, signal: null } })).resolves.toBeUndefined();
       expect(reconciler.reports[1]!.status).toBe("diverged");
+    });
+  });
+});
+
+// ====================================================================================================
+// N14 — THE CROSS-LANE ASSIGNABILITY THIS FILE'S COMMENT PROMISED AND DID NOT HAVE.
+//
+// `TranscriptReconcileHook` is a STRUCTURAL mirror of Lane A's `TranscriptReconcile`: this lane
+// declares the shape rather than importing it, so it stays buildable without the official lane's
+// module graph. That is the right call and it has one cost — nothing tells you when the mirror stops
+// matching. The comment claimed a test pinned it "once both lanes are in one tree"; both lanes have
+// been in one tree since the merge and no such test existed.
+//
+// THE PIN IS A COMPILE-TIME ONE, so it is written as an assignment rather than an assertion: if Lane
+// A reshapes `SpawnObservation.root`, or widens what `reconcile` is handed, this file stops
+// type-checking — which is the whole point, and is why `bun run typecheck` is the gate that carries
+// it rather than `bun test`.
+// ====================================================================================================
+describe("N14 — Lane C's reconciler drops into Lane A's proxy", () => {
+  test("the hook is assignable to the proxy's own `reconcile` option, and runs from it", async () => {
+    await withStoreBed(async (bed) => {
+      const reconciler = createTranscriptReconciler({ shared: bed.shared });
+      // THE ASSIGNMENT IS THE ASSERTION. `TranscriptReconcile` is Lane A's own declared option type.
+      const asProxyOption: TranscriptReconcile = reconciler.hook;
+      expect(typeof asProxyOption).toBe("function");
+
+      // …and it is accepted where the proxy actually takes it, with no cast at the call site.
+      const proxy = createSupervisedSpawnProxy({
+        brand: WINTER_BRAND,
+        profile: "fresh-spool",
+        configuredConfigDir: join(bed.home, "runtimes", "official-agent-spool"),
+        sink: { record: () => undefined },
+        reconcile: reconciler.hook,
+      });
+      expect(proxy).toBeDefined();
     });
   });
 });

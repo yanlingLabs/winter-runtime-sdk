@@ -28,6 +28,10 @@ import { OfficialConfigurationError } from "./errors.ts";
 import { officialBranchLabel } from "./branding.ts";
 // One definition of "the vendor's user-level home" for the whole package (review r2, NEW-4).
 import { VENDOR_HOME_SEGMENT_RE } from "./containment.ts";
+// One definition of the vendor's staging-root vocabulary for the whole package (review r4, N13):
+// this lane RECOGNISES a staging root, Lane C STAGES one, and both used to spell it themselves with
+// mirrored argument orders. See `src/vendor-paths.ts`'s header.
+import { isResumeStagingRoot } from "../vendor-paths.ts";
 
 /**
  * The spool's path segments under the brand home.
@@ -40,9 +44,6 @@ import { VENDOR_HOME_SEGMENT_RE } from "./containment.ts";
  * so a reuser inherits them unchanged and the brand gate has nothing to match.
  */
 export const SPOOL_SEGMENTS = ["runtimes", "official-agent-spool"] as const;
-
-/** The vendor's fixed staging prefix (WS-01 §5: disclosed, never faked, never rebranded). */
-export const RESUME_STAGING_PREFIX = "claude-resume-";
 
 /** WS-16's `activeLocalWriteRoot` kinds — one per launch profile. */
 export type LocalWriteRootKind = "official-spool" | "sdk-resume-staging";
@@ -64,24 +65,6 @@ export interface ObservedLocalWriteRoot {
 export function officialSpoolRoot(home: string): string {
   if (home.length === 0) throw new TypeError("officialSpoolRoot: the resolved brand home must not be empty");
   return [home, ...SPOOL_SEGMENTS].join("/");
-}
-
-/**
- * `<tmpdir>/claude-resume-<uuid>` — profile 2's shape.
- *
- * EXPORTED FOR RECOGNITION, NOT FOR CONFIGURATION. The wrapper builds this path itself and we never
- * set it: "`Options.env`/spawn hook are too late" (§2's controls table), and the only base the host
- * can move is the SDK PARENT's own process-level `TMPDIR`. A test that wants to prove the classifier
- * builds one with this function; a launch never does.
- */
-export function resumeStagingRoot(tmpdir: string, uuid: string): string {
-  return `${tmpdir.replace(/\/+$/, "")}/${RESUME_STAGING_PREFIX}${uuid}`;
-}
-
-/** True when a path is a `claude-resume-<uuid>` staging root (basename match, never a substring). */
-export function isResumeStagingRoot(path: string): boolean {
-  const basename = path.replace(/\/+$/, "").split("/").pop() ?? "";
-  return basename.startsWith(RESUME_STAGING_PREFIX) && basename.length > RESUME_STAGING_PREFIX.length;
 }
 
 /**

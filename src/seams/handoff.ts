@@ -13,7 +13,33 @@
 // match the recorded local-write root" is hiding the only fact the user can act on.
 import type { SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
-import type { RuntimeKind, RuntimeSelection } from "../selection/runtime-selection.ts";
+import type { RuntimeKind, RuntimeSelection, SelectionRefusal } from "../selection/runtime-selection.ts";
+import type { SelectionReview } from "../selection/select-runtime.ts";
+
+/**
+ * WHAT THE DESTINATION BRANCH WOULD ACTUALLY RUN — Lane D's door, consulted at plan time.
+ *
+ * WHY THE PLAN CARRIES THIS AT ALL. The barrier moves a session between two runtimes that do not
+ * serve the same providers, and until this field existed the plan simply carried the SOURCE's
+ * persisted provider fields with the destination's `runtimeKind` stamped over them. That is a plan a
+ * host can confirm and a destination must then refuse — a `gemini` row handed to the official
+ * runtime, or a Claude OAuth credential handed to Winter, which D28 says never routes there. The
+ * refusal arrived at the destination's `confirmInit`, after the lease, the drain and the staging.
+ *
+ * `refused` IS A TYPED REFUSAL, NEVER A SUBSTITUTION. The barrier does not invent a provider the
+ * destination can serve — "deciding a session serves a different provider is the selector's
+ * business" (WS-00 §2's D13) — so the plan says why, `plan.steps[7]` carries the same sentence as
+ * `knownUnprovable`, and `execute()` offers the visibly lossy fork WS-05 §12 asks for instead of
+ * moving ownership.
+ *
+ * `unreviewed` IS THE HONEST DEFAULT when the host supplies no catalog to review against: nothing was
+ * checked, the persisted record travels as it always did, and the plan says so rather than implying a
+ * check that did not happen.
+ */
+export type HandoffSelection =
+  | { kind: "servable"; selection: RuntimeSelection; review: SelectionReview }
+  | { kind: "refused"; refusal: SelectionRefusal; detail: string }
+  | { kind: "unreviewed"; selection: RuntimeSelection; detail: string };
 
 /** WS-05 §12's eight steps, by number, so an outcome can name exactly where it stopped. */
 export type HandoffStepNumber = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
@@ -39,6 +65,8 @@ export interface HandoffPlan {
   decorationDoor: "preferred" | "fallback";
   /** WS-05 §12 step 7 / §9.1: destination Winter ADOPTS the temp root; destination Claude gets a CLONE-COPY. */
   tempContinuity: "adopt" | "clone-copy";
+  /** What the DESTINATION would run this session on, or the typed refusal that says it cannot. */
+  selection: HandoffSelection;
 }
 
 export type HandoffOutcome =

@@ -22,6 +22,7 @@ import { assertOptionsInvariants, buildOfficialOptions } from "../../src/officia
 import { CONTAINMENT_FLOOR_MARK, carriesMark, isOurContainmentHook } from "../../src/official/callbacks.ts";
 import { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
 import type { SpawnedChildProcess } from "../../src/official/spawn-proxy.ts";
+import { UnaddressableEntryError } from "../../src/errors.ts";
 
 const SPOOL = "/home/.winter/runtimes/official-agent-spool";
 
@@ -97,7 +98,7 @@ const templateInput = (spawnProxy: OptionsTemplateInput["spawnProxy"]): OptionsT
 });
 
 const plan = (options: OfficialOptions): OfficialLaunchPlan => ({
-  address: "claude:session:test",
+  address: "session:test",
   selection,
   prompt: "hi",
   options,
@@ -210,7 +211,7 @@ describe("review r1, M3 — the wiring through the router's own door", () => {
     // …and §6 rule 2's record lands in the store the SPINE handed the adapter, with no explicit sink
     // and no `ready()` — the two things the owed wiring would have got wrong.
     // The seam's return type is `OfficialSession`; the supervisor rides on the handle Lane A returns.
-    const session = official?.launch({ ...plan(options as OfficialOptions), address: "claude:session:wired" }) as unknown as OfficialSessionHandle;
+    const session = official?.launch({ ...plan(options as OfficialOptions), address: "session:wired" }) as unknown as OfficialSessionHandle;
     // A REAL SPAWN, through the REAL default child starter and with no `ready()` call anywhere: that
     // is the half of M3 a fake `spawnChild` cannot prove. `/bin/cat` is a process that starts, has a
     // pid, and waits — which is all the record needs.
@@ -222,7 +223,7 @@ describe("review r1, M3 — the wiring through the router's own door", () => {
     } finally {
       child.kill("SIGTERM");
     }
-    const recorded = (await directoryStore.load()).find((entry) => entry.address === "claude:session:wired");
+    const recorded = (await directoryStore.load()).find((entry) => entry.address === "session:wired");
     expect(recorded?.configDir).toBe(SPOOL);
     expect(recorded?.processIdentity?.pid).toBeGreaterThan(0);
     // The seeded entry is a MINIMAL one — the real directory entry, when the host records it, owns
@@ -372,5 +373,53 @@ describe("WS-14 §11 — the standing MCP server on the official branch", () => 
     // review r1, n3: what the vendor's constructor cannot carry is named, not implied.
     expect(OFFICIAL_MATERIALIZATION_DROPS).toEqual(["outputSchema", "exposure"]);
     expect(descriptor.tools[1]?.outputSchema).toBeDefined();
+  });
+});
+
+// ====================================================================================================
+// NEW-13's WRITER END — the guard on the sink that produced the unaddressable row in the first place.
+//
+// The directory's `record()` door is pinned in `test/messaging/directory.test.ts`; this is the other
+// end, and it is the one that matters most for a host: the default record sink is where a
+// non-canonical address actually came from, and refusing at `launch()` means the bad row never exists
+// rather than being rejected later by a door the adapter does not call.
+// ====================================================================================================
+describe("NEW-13 / NEW-D — a launch under a non-canonical address is refused before anything spawns", () => {
+  test("`launch()` throws UnaddressableEntryError, and no child is started", () => {
+    let spawned = 0;
+    const { module } = fakeClaudeModule();
+    const adapter = createOfficialAdapter(context(module), {
+      spawnChild: () => {
+        spawned += 1;
+        return fakeChild();
+      },
+    });
+    const options = adapter.buildOptions(templateInput(adapter.spawnProxy));
+    expect(() => adapter.launch({ ...plan(options), address: "claude:session:not-canonical" })).toThrow(UnaddressableEntryError);
+    // BEFORE ANY SPAWN: the row a listing would advertise is never written, and no process was paid for.
+    expect(spawned).toBe(0);
+  });
+
+  test("the refusal names the two canonical forms and how to build one", () => {
+    const { module } = fakeClaudeModule();
+    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() });
+    const options = adapter.buildOptions(templateInput(adapter.spawnProxy));
+    try {
+      adapter.launch({ ...plan(options), address: "claude:session:not-canonical" });
+      throw new Error("unreachable: the launch should have refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(UnaddressableEntryError);
+      expect((error as Error).message).toContain("serializeRuntimeAddress");
+      expect((error as Error).message).toContain("session:<id>");
+    }
+  });
+
+  test("a host that supplies its OWN sink is unaffected — the guard belongs to the default sink", () => {
+    // The seam lets a host own the record; the address guard is the DEFAULT sink's, because that sink
+    // is the one writing into the directory this package also reads.
+    const { module } = fakeClaudeModule();
+    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild(), sink: { record: () => undefined } });
+    const options = adapter.buildOptions(templateInput(adapter.spawnProxy));
+    expect(() => adapter.launch({ ...plan(options), address: "claude:session:not-canonical" })).not.toThrow();
   });
 });

@@ -202,9 +202,18 @@ export function createOfficialMessagingAdapter(deps: OfficialMessagingAdapterDep
 
     async senderPermissionClass(address): Promise<PermissionClassLabel> {
       if (deps.permissionClass === undefined) return "unknown";
-      const entry = await deps.directory.get(serializeRuntimeAddress(address));
-      if (entry === undefined) return "unknown";
-      return deps.permissionClass(entry);
+      // A THROWING HOST HOOK IS AN ANSWER, NOT A CRASH (review r4, NEW-12). Same treatment as the
+      // Winter adapter's, and for the same reason: this hook is the ONLY way an official session's
+      // class is ever known (there is no facet to ask), it is documented as possibly being an IPC
+      // round trip, and an unhandled throw here reached the model-facing handler. Falling through to
+      // `unknown` keeps D2 fail-closed — the message is held until the class is known.
+      try {
+        const entry = await deps.directory.get(serializeRuntimeAddress(address));
+        if (entry === undefined) return "unknown";
+        return await deps.permissionClass(entry);
+      } catch {
+        return "unknown";
+      }
     },
   };
 }

@@ -7,7 +7,7 @@
 // `exports` entry, so a subpath here would fail it on the first publish.
 export { compareTraces, goldenTracePath, listGoldenTraces, loadGoldenTrace, normalizeTrace, runOfficialCapture } from "./conformance.ts";
 export type { ConformanceTraceEntry } from "./conformance.ts";
-export { anthropicFake, officialCaptureEnv, openaiResponsesFake, requestsTo, withLoopbackFake } from "./fakes.ts";
+export { anthropicFake, HERMETIC_TRAFFIC_OPT_OUTS, officialCaptureEnv, openaiResponsesFake, requestsTo, withLoopbackFake } from "./fakes.ts";
 export type { FakeRoute, FakeServer, RecordedRequest, StartFakeOptions } from "./fakes.ts";
 export { createFakeKeychain, withHermeticHomes, withTempDir } from "./hermetic.ts";
 export type { FakeKeychain } from "./hermetic.ts";

@@ -329,13 +329,11 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
       // `hold`: it cannot be classified at all, and the conservative answer is the whole point here.
       const facts = await receiverFacts(receiver);
       const decisions = new Map<string, CrossSessionInbound>();
-      const terminal = new Map<string, GlobalAgentMessage>();
       for (const record of durable) {
         // `senderKnown: true` — a held message was already accepted onto an authenticated route. The
         // hook may still say otherwise now, and NEW-10 is what happens to the message when it does.
         const decision = (await classifyDetailed(receiver, record.message, true, facts)).decision;
         decisions.set(record.messageId, decision);
-        if (decision === "refuse") terminal.set(record.messageId, record.message);
       }
       const promoted = mailbox.reevaluate(receiverKey, (entry) => decisions.get(entry.messageId) ?? "hold");
       const released: GlobalAgentMessage[] = [];
@@ -351,7 +349,12 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
         // …and the SENDER IS TOLD (review r3, NEW-10). The message is gone; leaving its durable
         // receipt reading `held` would make "held" a permanent lie about something that no longer
         // exists, which is the same harm NEW-5 names for the expiry sweep.
-        void terminal.delete(record.messageId);
+        //
+        // A `terminal` MAP USED TO BE BUILT HERE AND NEVER READ (review r4, NEW-15) — an unfinished
+        // intent that read like a guarantee. What it would have covered is real but narrow: a durable
+        // held record with no in-memory entry (rehydration's `mailbox.hold` can decline at the cap) is
+        // never promoted, so it is never swept. That is `mailbox.reevaluate`'s own boundary to fix, not
+        // a receipt to write from a map nothing consults, and it is recorded rather than half-built.
         await deps.onHoldTerminal?.(record.message, refusedOutcome(record.messageId, `the receiver re-evaluated this held message and refused it; refusal is terminal for this message id (WS-10 §13)`));
       }
       return { released, expired };
