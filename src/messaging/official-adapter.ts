@@ -72,10 +72,55 @@ export function createOfficialMessagingAdapter(deps: OfficialMessagingAdapterDep
     return status === "running" ? queued(messageId) : delivered(messageId);
   }
 
+  /**
+   * Deliver into one official object that HAS A SESSION OF ITS OWN: the live handle, else a resume.
+   * Reached by `deliverToSession` and by a cross-runtime child (see `childThroughOwner`).
+   */
+  async function deliverIntoSession(entry: RuntimeDirectoryEntry, message: GlobalAgentMessage): Promise<DeliveryOutcome> {
+    const key = entry.address;
+    if (entry.status === "archived") {
+      return refused(message.messageId, `${key} is archived; it refuses delivery until a deliberate user or product resume unarchives it (WS-15 §6.2)`);
+    }
+    const live = deps.sessions.get(key);
+    if (live !== undefined) {
+      return pushInto(live, renderAttributedTurn(message), message.messageId, live.status?.() ?? entry.status);
+    }
+    if (deps.resumeExited === undefined) {
+      return unavailable(
+        message.messageId,
+        false,
+        `${key} is not live in this process and no official resume was supplied; an exited official session is resumed by its backend session id through the official adapter, which builds the launch this messaging lane deliberately does not (WS-15 §6.2)`,
+      );
+    }
+    if (entry.backendSessionId === undefined) {
+      return unavailable(message.messageId, false, `${key} has no backend session id, so there is nothing to resume by (WS-15 §6.2 resumes an exited official session BY backendSessionId)`);
+    }
+    let resumed: AttachedOfficialSession | undefined;
+    try {
+      resumed = await deps.resumeExited(entry);
+    } catch (error) {
+      return unavailable(message.messageId, true, `the official resume failed before anything was delivered: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (resumed === undefined) return unavailable(message.messageId, true, `the official resume produced no live handle for ${key}, so nothing was delivered`);
+    const outcome = await pushInto(resumed, renderAttributedTurn(message), message.messageId, "idle");
+    // "`resumed_and_delivered` is returned only when resume AND delivery both completed" (WS-10 §12).
+    // A push that failed after the resume is still uncertain, and says so rather than claiming the pair.
+    return outcome.status === "delivered" || outcome.status === "queued" ? resumedAndDelivered(message.messageId) : outcome;
+  }
+
   async function childThroughOwner(address: RuntimeAddress, message: GlobalAgentMessage, door: "steer" | "resume"): Promise<DeliveryOutcome> {
     const key = serializeRuntimeAddress(address);
     const entry = await deps.directory.get(key);
     if (entry === undefined) return notFound(message.messageId, `no directory record for ${key}`);
+
+    // A CROSS-RUNTIME CHILD IS ITS OWN SESSION ON THIS RUNTIME (R-7b-1). A `claude`-family child of a
+    // WINTER parent is not a native official subagent living inside another official session — the
+    // router launched it here as an official session in its own right, with its own handle and its own
+    // backend id. `transport` is the field that says which of the two a child is (WS-15 §6.1):
+    // `claude-handle` is a session of its own, `claude-child` is a native subagent reachable only
+    // through the parent that owns it.
+    if (entry.transport === "claude-handle") return deliverIntoSession(entry, message);
+
     const parentAddress = parentAddressOf(entry);
     /* c8 ignore next */
     if (parentAddress === undefined) return notFound(message.messageId, `${key} is not a child, so it has no owning parent to route through`); // unreachable: called with an agent address
@@ -122,38 +167,9 @@ export function createOfficialMessagingAdapter(deps: OfficialMessagingAdapterDep
     },
 
     async deliverToSession(address, message) {
-      const key = serializeRuntimeAddress(address);
-      const entry = await deps.directory.get(key);
-      if (entry === undefined) return notFound(message.messageId, `no directory record for ${key}`);
-      if (entry.status === "archived") {
-        return refused(message.messageId, `${key} is archived; it refuses delivery until a deliberate user or product resume unarchives it (WS-15 §6.2)`);
-      }
-      const live = deps.sessions.get(key);
-      if (live !== undefined) {
-        return pushInto(live, renderAttributedTurn(message), message.messageId, live.status?.() ?? entry.status);
-      }
-      if (deps.resumeExited === undefined) {
-        return unavailable(
-          message.messageId,
-          false,
-          `${key} is not live in this process and no official resume was supplied; an exited official session is resumed by its backend session id through the official adapter, which builds the launch this messaging lane deliberately does not (WS-15 §6.2)`,
-        );
-      }
-      if (entry.backendSessionId === undefined) {
-        return unavailable(message.messageId, false, `${key} has no backend session id, so there is nothing to resume by (WS-15 §6.2 resumes an exited official session BY backendSessionId)`);
-      }
-      let resumed: AttachedOfficialSession | undefined;
-      try {
-        resumed = await deps.resumeExited(entry);
-      } catch (error) {
-        return unavailable(message.messageId, true, `the official resume failed before anything was delivered: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (resumed === undefined) return unavailable(message.messageId, true, `the official resume produced no live handle for ${key}, so nothing was delivered`);
-      const outcome = await pushInto(resumed, renderAttributedTurn(message), message.messageId, "idle");
-      // "`resumed_and_delivered` is returned only when resume AND delivery both completed" (WS-10 §12).
-      // A push that failed after the resume is still uncertain, and it says so rather than claiming the
-      // pair.
-      return outcome.status === "delivered" || outcome.status === "queued" ? resumedAndDelivered(message.messageId) : outcome;
+      const entry = await deps.directory.get(serializeRuntimeAddress(address));
+      if (entry === undefined) return notFound(message.messageId, `no directory record for ${serializeRuntimeAddress(address)}`);
+      return deliverIntoSession(entry, message);
     },
 
     async subscribeIdle(_address, request) {

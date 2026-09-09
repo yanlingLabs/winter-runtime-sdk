@@ -75,6 +75,33 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
     return status === "running" ? queued(messageId) : delivered(messageId);
   }
 
+  /**
+   * Deliver into one runtime object that HAS A SESSION OF ITS OWN — live handle first, cold resume
+   * otherwise. Reached both by `deliverToSession` and by a cross-runtime child (see `childDelivery`).
+   */
+  async function deliverIntoSession(entry: RuntimeDirectoryEntry, message: GlobalAgentMessage): Promise<DeliveryOutcome> {
+    const handle = deps.sessions.get(entry.address);
+    if (handle !== undefined) {
+      // THE FACET FIRST. It is the runtime's own attributed push: it renders on the far side with the
+      // same published escapes this package uses, enforces the owning-parent fence on the sender, and
+      // answers `unavailable` for a stream that has already ended — three things a bare writer cannot
+      // do. A router-held writer is the fallback for a session the router launched itself.
+      if (handle.messaging !== undefined) return handle.messaging.deliver(message);
+      if (handle.push !== undefined) {
+        try {
+          await handle.push(renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId }));
+        } catch (error) {
+          return deliveryUncertain(message.messageId, `the input-stream push failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return liveOutcome(message.messageId, liveStatus(entry, handle));
+      }
+    }
+    if (entry.status === "archived") {
+      return refused(message.messageId, `${entry.address} is archived; it refuses delivery until a deliberate user or product resume unarchives it (WS-15 §6.2)`);
+    }
+    return coldResume(entry, message);
+  }
+
   async function childDelivery(address: RuntimeAddress, message: GlobalAgentMessage, door: "steer" | "resume"): Promise<DeliveryOutcome> {
     const entry = await entryFor(address);
     if (entry === undefined) return notFound(message.messageId, `no directory record for ${serializeRuntimeAddress(address)}`);
@@ -87,6 +114,15 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
         if (outcome.kind === "unavailable") return unavailable(message.messageId, outcome.retryable, outcome.reason);
       }
     }
+    // A CROSS-RUNTIME CHILD IS ITS OWN SESSION ON THIS RUNTIME (R-7b-1). When a `claude`-family parent
+    // spawns a child whose own slot selects Winter, that child is not an engine inside the parent's
+    // process — the router launched it here, as a spawned session with its own handle, its own facet
+    // and its own backend id. `transport` is the field that says which it is (WS-15 §6.1), and it is
+    // the reason the field exists: `winter-session` is a session of its own, `winter-thread` is an
+    // in-process child with NO surface of its own, reachable only through its parent's
+    // steer/resume (Task 0 fix r2, concern 4). Same shape, two entirely different doors.
+    if (entry.transport === "winter-session") return deliverIntoSession(entry, message);
+
     const parentAddress = parentAddressOf(entry);
     /* c8 ignore next */
     if (parentAddress === undefined) return notFound(message.messageId, `${entry.address} is not a child, so it has no owning parent to route through`); // unreachable: entryFor was called with an agent address
@@ -165,29 +201,9 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
     },
 
     async deliverToSession(address, message) {
-      const key = serializeRuntimeAddress(address);
       const entry = await entryFor(address);
-      if (entry === undefined) return notFound(message.messageId, `no directory record for ${key}`);
-      const handle = deps.sessions.get(key);
-      if (handle !== undefined) {
-        // THE FACET FIRST. It is the runtime's own attributed push: it renders on the far side with
-        // the same escapes this package uses, enforces the owning-parent fence on the sender, and
-        // answers `unavailable` for a stream that has already ended — three things a bare writer
-        // cannot do. A router-held writer is the fallback for a session the router launched itself.
-        if (handle.messaging !== undefined) return handle.messaging.deliver(message);
-        if (handle.push !== undefined) {
-          try {
-            await handle.push(renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId }));
-          } catch (error) {
-            return deliveryUncertain(message.messageId, `the input-stream push failed: ${error instanceof Error ? error.message : String(error)}`);
-          }
-          return liveOutcome(message.messageId, liveStatus(entry, handle));
-        }
-      }
-      if (entry.status === "archived") {
-        return refused(message.messageId, `${key} is archived; it refuses delivery until a deliberate user or product resume unarchives it (WS-15 §6.2)`);
-      }
-      return coldResume(entry, message);
+      if (entry === undefined) return notFound(message.messageId, `no directory record for ${serializeRuntimeAddress(address)}`);
+      return deliverIntoSession(entry, message);
     },
 
     async subscribeIdle(address, request) {
