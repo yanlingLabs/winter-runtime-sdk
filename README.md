@@ -64,7 +64,9 @@ a supervised CHILD PROCESS with a durable row of its own, so the door needs thre
 no field for: the **session id** its directory row is addressed by (WS-14 §6 rule 2's record is written
 onto that address, and the messaging registry attaches under it), the **minimal OS environment**
 (WS-14 §3's child env is a REPLACEMENT built from an allowlist — nothing inherits, so nothing is read
-from `process.env` by this package), and the **vendored runtime path** (§5.1: never the user's
+from `process.env` by this package, and a `base` without `HOME` is **refused**, because the runtime
+resolves `os.homedir()` through the OS user database when it is missing and `CLAUDE_CONFIG_DIR` cannot
+scope that), and the **vendored runtime path** (§5.1: never the user's
 installed binary; give it once as `createRuntimeSdk({ vendoredOfficialRuntime })` or per query as
 `options.pathToClaudeCodeExecutable`). Everything else has a default that is either derived from the
 brand or read from the pinned contract you already fill in: credentials come from

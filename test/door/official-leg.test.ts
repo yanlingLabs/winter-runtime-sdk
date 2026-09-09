@@ -366,6 +366,32 @@ describe("the door's official leg — the inputs only a host can supply", () => 
 // with nothing behind it. No pinned runtime is needed to prove it — the refusal is the adapter's own,
 // for the most ordinary reason there is: no official peer was injected.
 // ====================================================================================================
+describe("the door's official leg — the two nits the review named", () => {
+  test("a child without HOME is refused rather than left to the OS user database", async () => {
+    await withDoorBed({ turns: [{ text: "unused" }], sessionId: "door-nohome" }, async (bed) => {
+      const options = bed.officialOptions() as Record<string, unknown>;
+      (options["runtime"] as { official: Record<string, unknown> }).official["base"] = { PATH: "/usr/bin" };
+      const failure: unknown = await drain(bed.sdk.query({ prompt: "hi", options }) as AsyncIterable<unknown>).then((): unknown => undefined, (error: unknown): unknown => error);
+      expect(failure).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((failure as Error).message).toContain("os.homedir()");
+      expect(bed.record.requests).toHaveLength(0);
+    });
+  }, DOOR_TIMEOUT);
+
+  test("a caller's prompt generator that THROWS ends the session `unavailable`, not `exited`", async () => {
+    await withDoorBed({ turns: [{ text: "one" }], sessionId: "door-promptfail" }, async (bed) => {
+      const turns = (async function* () {
+        yield "start";
+        throw new Error("the host's own generator failed");
+      })();
+      await drain(bed.sdk.query({ prompt: turns, options: bed.officialOptions() }));
+      // The vendor is mid-turn and cannot be un-asked, so the session still ends — but the ROW says a
+      // fault happened rather than reporting an ordinary completion for the host's own failure.
+      expect((await bed.sdk.directory.get(bed.address))?.status).toBe("unavailable");
+    });
+  }, DOOR_TIMEOUT);
+});
+
 describe("the door's official leg — a refused launch", () => {
   test("leaves no phantom row behind", async () => {
     // SHORT, so the DEFAULT transcript key fits the pin's 64-character rule (R-7b-13) and this test

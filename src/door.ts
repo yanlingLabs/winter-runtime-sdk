@@ -461,6 +461,17 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     if (cwd === undefined || cwd.length === 0) {
       throw new RuntimeLaunchInputError({ field: "options.cwd", reason: "the official branch's containment floor, its plugin root and its post-hoc sweep are all anchored on this session's working directory (WS-14 §8)" });
     }
+    // §3's child env is a REPLACEMENT, and a replacement without `HOME` is not one (review r1's nit).
+    // The runtime derives paths from `os.homedir()`, whose OS-level fallback is the user database —
+    // invisible to `CLAUDE_CONFIG_DIR` scoping, and on a developer machine it is the real vendor home
+    // this branch exists to be isolated from. A refusal is safer than a README sentence.
+    if (request.input.base?.["HOME"] === undefined || request.input.base["HOME"].length === 0) {
+      throw new RuntimeLaunchInputError({
+        field: "runtime.official.base.HOME",
+        reason:
+          "WS-14 §3's child environment is a REPLACEMENT built from an allowlist, and a child without HOME resolves `os.homedir()` through the OS user database — which `CLAUDE_CONFIG_DIR` cannot scope and which on a developer machine is the vendor home this branch is isolated from. Build it with `minimalOsEnvironmentFrom(process.env)`",
+      });
+    }
     const executable = request.options.pathToClaudeCodeExecutable ?? deps.vendoredOfficialRuntime;
     if (executable === undefined || executable.length === 0) {
       throw new RuntimeLaunchInputError({
@@ -584,7 +595,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // THE PUMP STARTS WITH THE LAUNCH, NOT WITH THE CALL. `query()` promises the Winter leg that a
     // caller's iterable is "never drained on the way past"; the official leg must drain it (the vendor
     // takes its own message shape), but not one element earlier than the session that consumes it.
-    if (stream !== undefined) pumpCallerPrompt(request.prompt as AsyncIterable<string>, stream);
+    if (stream !== undefined) pumpCallerPrompt(request.prompt as AsyncIterable<string>, stream, () => void markEnded("unavailable").catch(() => undefined));
     let session: OfficialSession;
     try {
       session = resume === undefined ? deps.official.launch(plan) : deps.official.resume({ ...plan, resume, ...(request.options.forkSession === undefined ? {} : { forkSession: request.options.forkSession }) });
@@ -668,12 +679,16 @@ async function* mapPrompt(stream: OfficialInputStream, sessionId: string): Async
  * SEPARATE FROM `mapPrompt` because the two ends have different owners: the caller's iterable decides
  * when the session's input is over, and the messaging registry writes into the same stream until it is.
  */
-export function pumpCallerPrompt(prompt: AsyncIterable<string>, stream: OfficialInputStream): void {
+export function pumpCallerPrompt(prompt: AsyncIterable<string>, stream: OfficialInputStream, onFailure?: (error: unknown) => void): void {
   void (async () => {
     try {
       for await (const text of prompt) await stream.push(text);
-    } catch {
-      /* the caller's own iterable failed; the session ends with the input it received */
+    } catch (error) {
+      // A HOST GENERATOR THAT THREW IS NOT A SESSION THAT SIMPLY ENDED (review r1's nit). Swallowing
+      // it left the caller watching a normal completion for a fault of their own making; the session
+      // still ends with the input it received — the vendor is mid-turn and cannot be un-asked — but the
+      // END is recorded as `unavailable` rather than `exited`, so the row says a fault happened.
+      onFailure?.(error);
     } finally {
       stream.close();
     }
