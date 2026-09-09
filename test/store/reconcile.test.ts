@@ -176,7 +176,7 @@ describe("the hook Lane A's spawn proxy takes", () => {
       expect(((await bed.shared.store.load(bed.key)) ?? []).length).toBe(2);
 
       // A root that cannot be read at all still resolves — the exit must not be stranded.
-      await expect(reconciler.hook({ observation: { root: { configDir: " " } }, exit: { code: 1, signal: null } })).resolves.toBeUndefined();
+      await expect(reconciler.hook({ observation: { root: { configDir: "\u0000" } }, exit: { code: 1, signal: null } })).resolves.toBeUndefined();
       expect(reconciler.reports[1]!.status).toBe("diverged");
     });
   });
