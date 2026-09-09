@@ -28,6 +28,7 @@
 // reaches a consumer unchanged through this package's contract re-export.
 import type { BrandProfile, SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
+import type { SerializedRuntimeAddress } from "./messaging-contract.ts";
 import type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, OfficialUserMessage } from "./official-sdk-shapes.ts";
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
 
@@ -82,6 +83,16 @@ export interface EnvInput {
 }
 
 export interface OfficialLaunchPlan {
+  /**
+   * The session's canonical directory address (P7b fix round 1, review r1 M3 — a granted seam edit).
+   *
+   * WITHOUT IT THE DEFAULT ADAPTER RECORDS NOTHING. §6 rule 2's durable record is written onto this
+   * session's `RuntimeDirectoryEntry` (`configDir`, `processIdentity`), and the entry is addressed —
+   * so an adapter built with no explicit sink had nowhere to write and silently defaulted to a no-op.
+   * Carrying the address on the plan is what lets `createOfficialAdapter(context)` default its sink to
+   * the directory store the spine already hands it.
+   */
+  address: SerializedRuntimeAddress;
   selection: RuntimeSelection;
   prompt: string | AsyncIterable<OfficialUserMessage>;
   options: OfficialOptions;

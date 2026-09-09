@@ -76,13 +76,26 @@ async function laneOfThrow(fn: () => unknown): Promise<string> {
 }
 
 describe("every stub throws NotImplementedYet, naming its lane", () => {
-  test("the official adapter is Lane A's, including the spawn proxy", async () => {
+  test("the official adapter STUB is Lane A's, including the spawn proxy", async () => {
     const adapter = stubOfficialAdapter(seamContext());
     expect(await laneOfThrow(() => adapter.launch({} as never))).toBe("lane-a");
     expect(await laneOfThrow(() => adapter.resume({} as never))).toBe("lane-a");
     expect(await laneOfThrow(() => adapter.buildOptions({} as never))).toBe("lane-a");
     expect(await laneOfThrow(() => adapter.buildChildEnv({} as never))).toBe("lane-a");
     expect(await laneOfThrow(() => adapter.spawnProxy({} as never))).toBe("lane-a");
+  });
+
+  test("…but the WIRED official seam is Lane A's real adapter — the stub above is no longer constructed", () => {
+    // Review r2, NEW-8. This file's header promises "nothing pretends to work", and it verified that
+    // by calling `stubOfficialAdapter` DIRECTLY — which stayed true after `src/sdk.ts` stopped wiring
+    // it, so the assertion was about a factory nothing constructs. Both facts are now stated: the stub
+    // is still honest, and the handle no longer uses it.
+    const { peer } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    const official = runtimeSdkInternals(sdk)?.official;
+    expect(official).toBeDefined();
+    // A real adapter builds options; the stub throws `NotImplementedYet` from every member.
+    expect(() => official?.buildChildEnv({} as never)).not.toThrow(NotImplementedYet);
   });
 
   test("the directory and the messaging router are Lane B's", async () => {
