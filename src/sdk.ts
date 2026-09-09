@@ -28,7 +28,7 @@
 import type { BrandProfile, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError } from "./errors.ts";
-import { isOfficialQuery, openOfficialLeg, type RouterOfficialInput, type RouterQuery } from "./door.ts";
+import { openOfficialLeg, type RouterOfficialInput, type RouterOfficialPolicy, type RouterQuery } from "./door.ts";
 import type { SeamContext, SeamContextWithDirectory } from "./seams/context.ts";
 import type { OfficialSdkModule } from "./seams/official-sdk-shapes.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
@@ -44,7 +44,7 @@ import type { GlobalMessagingOptions, RuntimeDirectoryOptions } from "./messagin
 import { createHandoffBarrier } from "./store/index.ts";
 import { materializedResumeReportForPin } from "./store/pinned-probes.ts";
 import type { HandoffBarrierDeps } from "./store/index.ts";
-import { createOfficialAdapter, type OfficialAdapterHandle, type OfficialAdapterPolicy } from "./official/adapter.ts";
+import { createOfficialAdapter } from "./official/adapter.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
@@ -120,7 +120,7 @@ export interface RuntimeSdkOptions {
    * door builds this branch's options and child environment from exactly those. `env.remoteConfig` is
    * the deployment-wide default for R-7b-11; a per-query `runtime.official.remoteConfig` wins over it.
    */
-  official?: OfficialAdapterPolicy;
+  official?: RouterOfficialPolicy;
   /**
    * The directory's and the router's own options (whole-branch review, F-3).
    *
@@ -394,7 +394,7 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
         return openOfficialLeg(
           {
             brand,
-            official: internals.official as OfficialAdapterHandle,
+            official: internals.official,
             directory,
             messaging,
             keychain: opts.keychain,

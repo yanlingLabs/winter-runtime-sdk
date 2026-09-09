@@ -41,17 +41,17 @@ import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from 
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "./errors.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
-import type { OfficialAdapterHandle, OfficialAdapterPolicy } from "./official/adapter.ts";
+import type { ContainmentPolicy } from "./official/containment.ts";
 import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
-import { buildOfficialChildEnv } from "./official/env-allowlist.ts";
+import { buildOfficialChildEnv, type OfficialEnvPolicy } from "./official/env-allowlist.ts";
 import { fetchAuthCredentials, authVariableSetKey, type AuthCredentialPlan } from "./official/auth.ts";
 import { buildOfficialOptions, type OptionsTemplatePolicy } from "./official/options-template.ts";
 import { officialSpoolRoot } from "./official/spool.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryEntry } from "./seams/directory-store.ts";
 import type { RuntimeAddress } from "./seams/messaging-contract.ts";
-import type { OfficialLaunchPlan, OfficialLaunchProfile, OfficialSession, RemoteConfigPolicy } from "./seams/official-adapter.ts";
+import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialSession, RemoteConfigPolicy } from "./seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialUserMessage } from "./seams/official-sdk-shapes.ts";
 import type { RuntimeSelection } from "./selection/runtime-selection.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
@@ -153,10 +153,37 @@ export interface RouterOfficialInput {
   options?: Omit<OptionsTemplatePolicy, "env" | "mcpServers" | "resume" | "forkSession" | "sessionId">;
 }
 
+/**
+ * The official branch's deployment-wide policy, as a host sets it on `createRuntimeSdk`.
+ *
+ * A SUBSET OF `OfficialAdapterPolicy`, DECLARED HERE RATHER THAN REFERENCED, and the reason is the
+ * published-declaration rule this package already lives by (`seams/official-sdk-shapes.ts`'s header):
+ * naming `OfficialAdapterPolicy` on an exported member pulls `official/adapter.d.ts` — and with it
+ * `spawn-proxy.d.ts`, whose child-process shape is written in Node's own types — into the declaration
+ * graph a CONSUMER type-checks, and a consumer without `@types/node` then fails to compile this
+ * package. The installed-tarball smoke is the gate that says so.
+ *
+ * WHAT IS LEFT OUT IS THE SUPERVISED-SPAWN INJECTION POINTS (`sink`, `reconcile`, `verifyCleanup`,
+ * `spawnChild`), and leaving them out is right on its own terms: the router DEFAULTS the record sink
+ * to the directory row addressed by the launch, which is the answer §6 rule 2 wants, and a host that
+ * genuinely needs to replace the spawn machinery builds its own adapter and reaches it through
+ * `runtimeSdkInternals`.
+ */
+export interface RouterOfficialPolicy {
+  /** §3's child-environment policy: declared extras, host prefixes, the two reviewed hatches, `remoteConfig`. */
+  env?: OfficialEnvPolicy;
+  /** §8's dispositions, threaded into the floor every launch installs. */
+  containment?: ContainmentPolicy;
+  /** The permission mode the bridge is built with when a query supplies no broker. */
+  permissionMode?: OfficialPermissionMode;
+  /** §2's template policy every official session in this deployment starts from. */
+  options?: OptionsTemplatePolicy;
+}
+
 /** The collaborators the leg composes. Built once by `createRuntimeSdk`; not part of any public shape. */
 export interface OfficialLegDeps {
   brand: BrandProfile;
-  official: OfficialAdapterHandle;
+  official: OfficialAdapter;
   directory: RuntimeDirectory;
   messaging: GlobalMessagingHandle;
   keychain: { read(ref: CredentialRef): Promise<string | undefined> };
@@ -165,7 +192,7 @@ export interface OfficialLegDeps {
   /** WS-14 §5.1's vendored runtime, from the constructor. A per-query `Options` value wins over it. */
   vendoredOfficialRuntime?: string;
   /** The adapter's own policy, so a host's `env`/`containment` choices reach the door's own builders. */
-  policy?: OfficialAdapterPolicy;
+  policy?: RouterOfficialPolicy;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -382,7 +409,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
 
     const templatePolicy: OptionsTemplatePolicy = {
       ...(request.input.options ?? {}),
-      ...(typeof deps.policy?.options === "function" ? {} : (deps.policy?.options ?? {})),
+      ...(deps.policy?.options ?? {}),
       advertisesHandoff: request.input.advertisesHandoff ?? true,
       env,
       ...(request.input.mcpServers === undefined ? {} : { mcpServers: request.input.mcpServers }),
