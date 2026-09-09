@@ -152,9 +152,27 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
     store,
     now,
     ...options,
-    // The receiver's class is asked of the runtime that HOLDS the receiver — the official branch
-    // answers `unknown` unless its host says otherwise, which WS-10 §13's matrix handles explicitly.
-    receiverClass: async (receiver) => (await adapters.get(receiver.runtimeKind)?.senderPermissionClass(receiver.parsed)) ?? "unknown",
+    /**
+     * The receiver's class, asked of the runtime that HOLDS the receiver — with the one substitution
+     * WS-10 §13's own table forces.
+     *
+     * THE MATRIX HAS NO "UNKNOWN RECEIVER" ROW. Its five rows are `prompts × {prompts, unknown,
+     * bypasses}` and `bypasses × {bypasses, prompts-or-unknown}`: `unknown` is a SENDER-side value,
+     * for "an authenticated route that cannot prove sender class". Feeding an unknown RECEIVER into
+     * `defaultInboundResult` lands it on the bypasses row, where every prompting sender is HELD — so a
+     * receiver whose mode this process cannot read would silently hold all of its mail, which is a
+     * policy nobody chose.
+     *
+     * The compatibility default is therefore `prompts`: both runtimes' own default permission mode is
+     * `default`, which §13 classifies as prompting. It is not a guess about the session — it is the
+     * documented default for a session that has not said otherwise, and a host that launched one in
+     * another mode says so through `explicitSetting` or the official adapter's `permissionClass` hook.
+     * A bypassing SENDER into such a receiver is still held, which is the protection the row exists for.
+     */
+    receiverClass: async (receiver) => {
+      const answered = (await adapters.get(receiver.runtimeKind)?.senderPermissionClass(receiver.parsed)) ?? "unknown";
+      return answered === "unknown" ? "prompts" : answered;
+    },
   });
 
   // INSTANCE-LEVEL, not per call: the loop guard is a memory of what was sent moments ago (WS-10 §12's
@@ -360,6 +378,20 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       await store.deliveries.put({ messageId, message: provisional, toGeneration: 0, updatedAt: new Date(now()).toISOString() });
 
       const snapshot = await snapshotFor(request.from);
+
+      // RULE 5 IS THE DIRECTORY'S TO APPLY, and it has to be applied HERE or not at all. The shared
+      // core resolves rule 5 over the children it can see — a live roster — which is the whole of the
+      // rule inside one conversation and none of it across a restart or after an object is forgotten.
+      // The directory holds the name-lease history that remembers a reused name, so the preflight asks
+      // it, over the SAME snapshot the core is about to resolve against. Only the stale answer is acted
+      // on: ambiguity and not-found are the core's, with its own candidate set.
+      const preflight = await directory.resolveIn(snapshot, request.to, { from: request.from });
+      if (preflight.kind === "stale-name") {
+        const outcome = refused(messageId, preflight.reason);
+        await persistReceipt(messageId, provisional, 0, undefined, outcome);
+        return { outcome };
+      }
+
       const seam = bindSeam(snapshot, undefined);
       const core = createMessagingRouter(depsFor(snapshot, seam, "resolve"));
       const result = await core.sendMessage(caller, {
