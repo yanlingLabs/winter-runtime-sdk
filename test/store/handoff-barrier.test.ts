@@ -1869,3 +1869,54 @@ describe("F-7 — the staging root a destination is mid-confirmInit on", () => {
     });
   });
 });
+
+// ====================================================================================================
+// N12 — `execute()` HAS THREE ARMS AND NO FOURTH, including the synchronous ones.
+//
+// r3's N10 moved every AWAIT inside the try and the round reported "everything is inside it now".
+// It was measured, and it was false: `sharedOf()` and `homeOf()` are SYNCHRONOUS, sat above the try,
+// and both resolve lazily — so a peer whose store class is missing (the spine's own fake, i.e. the
+// WIRED expression `createHandoffBarrier(context)` with no deps) or whose `resolveWinterHome` throws
+// (this lane's own bed peer) got a raw exception out of a seam that promises an outcome.
+// ====================================================================================================
+describe("N12 — the fourth arm, closed", () => {
+  test("a peer that exports no store class gets a step-1 fork, not a SharedStoreUnavailableError", async () => {
+    const { peer } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain: createFakeKeychain() });
+    const context = runtimeSdkInternals(sdk)!.context;
+    const barrier = createHandoffBarrier(context);
+    // Reading the store still throws — that is `barrier.shared`'s documented contract, unchanged.
+    expect(() => barrier.shared).toThrow(SharedStoreUnavailableError);
+    // But EXECUTING answers, because the seam's `Promise<HandoffOutcome>` is total or it is not.
+    const outcome = await barrier.execute({
+      session: { projectKey: "p", sessionId: "s" },
+      from: "winter-agent",
+      to: "claude-agent",
+      steps: [],
+      decorationDoor: "fallback",
+      tempContinuity: "clone-copy",
+      selection: { kind: "unreviewed", selection: selectionFor("claude-agent"), detail: "fixture" },
+    });
+    expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 1 });
+    expect(outcome.detail).toContain("shared session store could not be resolved");
+  });
+
+  test("a peer whose resolveWinterHome throws gets the same answer, not the peer's exception", async () => {
+    await withStoreBed(async (bed) => {
+      // The bed's peer HAS the store class and refuses to resolve a real home — the exact shape r4
+      // planted (44c). `deps` carries no `winterHome`, so `homeOf()` has to ask the peer.
+      const barrier = createHandoffBarrier(bed.context);
+      const outcome = await barrier.execute({
+        session: bed.key,
+        from: "winter-agent",
+        to: "claude-agent",
+        steps: [],
+        decorationDoor: "fallback",
+        tempContinuity: "clone-copy",
+        selection: { kind: "unreviewed", selection: selectionFor("claude-agent"), detail: "fixture" },
+      });
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 1 });
+      expect(outcome.detail).toContain("hermetic test must never resolve the real Winter home");
+    });
+  });
+});

@@ -328,9 +328,16 @@ function uniqueSessions(keys: SessionKey[]): SessionKey[] {
  * The shape of WS-14 §6 rule 3's reconcile hook, as `src/official/spawn-proxy.ts` declares it.
  *
  * DECLARED STRUCTURALLY HERE rather than imported, for the same reason the seams declare the official
- * module structurally: this lane must not depend on that lane's module graph to be buildable. The two
- * declarations are mutually assignable, and `test/store/reconcile.test.ts` pins that by assigning this
- * function INTO the proxy's own option type once both lanes are in one tree.
+ * module structurally: this lane must not depend on that lane's module graph to be buildable.
+ *
+ * ASSIGNABLE IN ONE DIRECTION, AND THAT IS THE DIRECTION PRODUCTION USES (review r4, N14 — the
+ * previous sentence claimed "mutually assignable", which is measurably false). This hook accepts LESS
+ * than `SpawnObservation` carries, so Lane C's `createTranscriptReconciler().hook` drops straight into
+ * `createSupervisedSpawnProxy({ reconcile })`; the reverse fails, because a `TranscriptReconcile` is
+ * handed the whole observation (`processIdentity`, `command`, `args`) and this type does not promise
+ * to supply it. Nothing needs the reverse. `test/store/reconcile.test.ts` now actually pins the
+ * forward direction — the comment promised a test that did not exist, which is how a structural
+ * declaration drifts from the thing it mirrors without anything noticing.
  */
 export type TranscriptReconcileHook = (input: {
   observation: { root: { configDir: string } };

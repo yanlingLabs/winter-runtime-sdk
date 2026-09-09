@@ -502,6 +502,21 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     };
 
     const session = plan.session;
+    // THE TWO LAZY RESOLVERS LIVE INSIDE THE TRY (review r4, N12 — N10's own residual). They are
+    // SYNCHRONOUS, which is why "every await is inside the try" was true while the property the seam
+    // promises was not: `sharedOf()` throws `SharedStoreUnavailableError` for a peer that exports no
+    // store class and `homeOf()` propagates whatever the peer's `resolveWinterHome` throws — and the
+    // WIRED expression, `createHandoffBarrier(context)` with no deps, is exactly such a peer in every
+    // spine test. So `execute()` really did have a fourth arm: a raw throw instead of an outcome.
+    let shared: SharedSessionStore;
+    let winterHome: string;
+    try {
+      shared = sharedOf();
+      winterHome = homeOf();
+    } catch (error) {
+      // Nothing has been touched — no lease, no marker, no copy — so this is a plain step-1 refusal.
+      return lossy(1, `the shared session store could not be resolved, so nothing about this session can be read or written: ${error instanceof Error ? error.message : String(error)}`);
+    }
     // A DESTINATION THAT CANNOT SERVE THIS SELECTION NEVER GETS THE SESSION (fix wave, item 20).
     // Refused BEFORE the lease, the drain and the staging, because `plan()` already knows: WS-05 §12's
     // rule for an unprovable step is "keep the source owner, offer a visibly lossy fork", and this is
@@ -510,13 +525,12 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     if (plan.selection.kind === "refused") {
       return lossy(8, plan.selection.refusal.detail);
     }
-    // EVERY AWAIT IS INSIDE THE TRY (review r3, N10). N3 wrapped the destination side and left the
-    // symmetric source-side calls — `loadEntry`, the source resolver, `owner.health()` — outside it, so
-    // `execute()` still had a fourth arm: an unknown session, an unreachable directory or a throwing
-    // `health()` escaped as a raw error. Nothing leaks on those paths (they precede the lease and the
-    // marker), but the seam's `Promise<HandoffOutcome>` is either total or it is not.
-    const shared = sharedOf();
-    const winterHome = homeOf();
+    // EVERY AWAIT — AND NOW EVERY THROWING SYNCHRONOUS CALL — IS INSIDE A TRY (review r3 N10, review
+    // r4 N12). N3 wrapped the destination side and left the symmetric source-side calls; r3 moved
+    // those; r4 found the two SYNCHRONOUS resolvers above, which is why the previous round's
+    // "everything is inside it now" was measured true and was false. Nothing leaks on any of those
+    // paths (they precede the lease and the marker), but the seam's `Promise<HandoffOutcome>` is
+    // either total or it is not.
     let lease: HandoffLease | undefined;
     let stagedRoot: string | undefined;
     /**
