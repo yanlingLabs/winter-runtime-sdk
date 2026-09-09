@@ -515,8 +515,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
           });
 
     const templatePolicy: OptionsTemplatePolicy = {
-      ...(request.input.options ?? {}),
+      // PER-QUERY WINS OVER DEPLOYMENT-WIDE (review r1, L-1), the same precedence `remoteConfig` has
+      // and the README documents. The spreads used to be the other way round, so a deployment default
+      // silently overrode the value a caller passed for THIS session.
       ...(deps.policy?.options ?? {}),
+      ...(request.input.options ?? {}),
       advertisesHandoff: request.input.advertisesHandoff ?? true,
       env,
       ...(request.input.mcpServers === undefined ? {} : { mcpServers: request.input.mcpServers }),
@@ -563,7 +566,20 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // PERSISTED SELECTION (D13), and a host asking `messaging.listReachable()` between the launch and
     // the first message must not be told the session does not exist. `record()` merges rather than
     // replaces, so the sink's later write lands on top of this one.
-    await deps.directory.record(directoryRowFor({ address, parsed, selection: request.selection, cwd, input: request.input, remoteConfig }));
+    await deps.directory.record(
+      directoryRowFor({
+        address,
+        parsed,
+        selection: request.selection,
+        cwd,
+        input: request.input,
+        remoteConfig,
+        // WS-15 §6.1 stamps every delivery with the target GENERATION so "a stale send cannot reach a
+        // replacement process". The barrier bumps it on a handoff; a plain `options.resume` is a
+        // replacement process too, and used to re-write `generation: 1` over the row (review r1, L-2).
+        generation: resume === undefined ? (existing?.generation ?? 1) : (existing?.generation ?? 0) + 1,
+      }),
+    );
 
     // THE PUMP STARTS WITH THE LAUNCH, NOT WITH THE CALL. `query()` promises the Winter leg that a
     // caller's iterable is "never drained on the way past"; the official leg must drain it (the vendor
@@ -618,7 +634,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
 }
 
 /** The launch's own directory row: identity, persisted selection (D13), and R-7b-11's recorded choice. */
-function directoryRowFor(args: { address: string; parsed: RuntimeAddress; selection: RuntimeSelection; cwd: string; input: RouterOfficialInput; remoteConfig: RemoteConfigPolicy }): RuntimeDirectoryEntry {
+function directoryRowFor(args: { address: string; parsed: RuntimeAddress; selection: RuntimeSelection; cwd: string; input: RouterOfficialInput; remoteConfig: RemoteConfigPolicy; generation: number }): RuntimeDirectoryEntry {
   return {
     address: args.address,
     parsed: args.parsed,
@@ -630,7 +646,7 @@ function directoryRowFor(args: { address: string; parsed: RuntimeAddress; select
     transport: "claude-handle",
     status: "running",
     mode: "code",
-    generation: 1,
+    generation: args.generation,
     selection: args.selection,
     remoteConfig: args.remoteConfig,
     cwd: args.cwd,
@@ -674,11 +690,15 @@ export function pumpCallerPrompt(prompt: AsyncIterable<string>, stream: Official
  * — or silently drop every member it did not know about, which is exactly "the contract loses a
  * member". Forwarding by trap loses nothing, including members added by a future pin.
  *
- * THE THREE NAMES THAT ARE NOT FORWARDED are `then`, `catch` and `finally`: a handle that answered
- * `then` with a function would be treated as a promise by `await` and by every combinator, so
- * `await sdk.query(...)` would hang or resolve to something that is not the query. Symbols other than
- * `Symbol.asyncIterator` are not forwarded either — a launch triggered by a `Symbol.toPrimitive` or an
- * inspector's probe would be a session started by a debugger.
+ * THE NAMES THAT ARE NOT FORWARDED are the ones a RUNTIME calls on its own, without a host meaning to
+ * call anything: `then`/`catch`/`finally` (a handle that answered `then` with a function would be
+ * treated as a promise by `await` and by every combinator, so `await sdk.query(...)` would hang or
+ * resolve to something that is not the query), and `toJSON`/`inspect`/`asymmetricMatch` (review r1,
+ * M-3 — `JSON.stringify(handle)` calls `toJSON` if it is a function, so the most common debug
+ * statement a host writes STARTED A SESSION: measured, one keychain read and one spawn from a
+ * `console.log(JSON.stringify(query))`). Symbols other than `Symbol.asyncIterator` are not forwarded
+ * either — a launch triggered by a `Symbol.toPrimitive` or an inspector's probe would be a session
+ * started by a debugger, which is this rule in its original form.
  */
 interface DeferredQueryHooks {
   start: () => Promise<OfficialQuery>;
@@ -688,6 +708,9 @@ interface DeferredQueryHooks {
   /** The generation ended — `"exited"` when the stream completed, `"unavailable"` when it threw. */
   onEnd?: (status: "exited" | "unavailable") => Promise<void>;
 }
+
+/** Names a RUNTIME calls on its own — never a host asking this session to do something (M-3). */
+const NEVER_FORWARDED: ReadonlySet<string> = new Set(["then", "catch", "finally", "toJSON", "inspect", "asymmetricMatch"]);
 
 function deferredOfficialQuery({ start, onClose, onMessage, onEnd }: DeferredQueryHooks): OfficialQuery {
   let started: Promise<OfficialQuery> | undefined;
@@ -727,7 +750,7 @@ function deferredOfficialQuery({ start, onClose, onMessage, onEnd }: DeferredQue
   const handle = new Proxy(target, {
     get(base, prop, receiver: unknown) {
       if (prop in base) return Reflect.get(base, prop, receiver);
-      if (typeof prop === "symbol" || prop === "then" || prop === "catch" || prop === "finally") return undefined;
+      if (typeof prop === "symbol" || NEVER_FORWARDED.has(prop)) return undefined;
       return (...args: unknown[]): Promise<unknown> => ready().then((query) => (query as unknown as Record<string, (...rest: unknown[]) => unknown>)[prop]?.(...args));
     },
   });
