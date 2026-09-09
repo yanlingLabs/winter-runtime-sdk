@@ -19,6 +19,8 @@ for release"; it is not implemented and not claimed.)
 
 **Probed:** 2026-09-09, Lane C, `darwin-arm64`, macOS 26.6.1, Bun 1.3.14, against
 `@yanlinglabs/winter-agent-sdk@0.0.2`'s `WinterCompatibilitySessionStore` on `mkdtemp` homes.
+**Re-probed after review round 1** (the (c) row below described work the code did not do — see "What
+changed in fix round 1").
 
 **Reproduce:** `bun test test/store/materialized-resume.test.ts` (the harness, its honesty in both
 directions, and the doors), or call `createMaterializedResumeDecorator(context, { shared }).probe()`,
@@ -46,7 +48,7 @@ fallback, it does not block release."*
 | --- | --- | --- | --- |
 | **(a)** neighbour-file survival | **not proven** | `load`, `append`, `forced compaction`, `store import/export round-trip` — all **PASS**: the sidecar's bytes are identical after each, no sidecar record ever surfaces as a transcript entry, and an export/import into a second session creates **no** sidecar at the destination | `fresh-process resume` (needs the pin) |
 | **(b)** no-wash-back | **not proven** | `reconciliation from a decorated copy` — **PASS**: canonical past bytes unchanged; the decoration never reaches the store; the turn written *after* the decoration lands **re-parented** onto the canonical chain | `mirror from a decorated copy` (needs the pin) |
-| **(c)** sidecar-present round-trip | **not proven** | `claude→winter→claude` and `winter→claude→winter` — both **PASS**: the Claude legs' lines are byte-identical in the final file, the parent chain is unbroken, the sidecar is populated and the producer record names the last producer | `the Claude legs on the pinned runtime` (needs the pin) |
+| **(c)** sidecar-present round-trip | **not proven** | `claude→winter→claude` and `winter→claude→winter` — both **PASS**: the Claude legs' lines are byte-identical in the final file, the parent chain is unbroken, the sidecar is populated and the producer record names the last producer. **Both legs are produced by the STORE, not by the pinned runtime** | `the Claude legs on the pinned runtime` — the same two round trips with the bed producing every Claude leg (needs the pin) |
 | **(d)** crash pairs | **PASS** | `record without entry is collectable`, `entry without record degrades, never corrupts` — the orphan record is classified collectable with the transcript untouched; the unanchored entry is classified degraded rather than dropped and the transcript still loads with its chain intact | — |
 
 `crash-pairs` is entirely a property of the store and the write-ahead ordering, which is why it is the
@@ -90,6 +92,34 @@ The PREFERRED path is written, tested and inert — the door is the only thing k
   suffix append) or an entry whose parent is unreachable in it — which WS-05 §12 step 5 would then
   refuse on the *next* handoff. This is the mechanism probe (b) measures rather than a hope that the
   vendor happens to behave.
+
+## What changed in fix round 1
+
+Review round 1 found that probe (c)'s pinned leg was a **hardcoded `passed: true`** whose evidence
+string described a re-run that never happened — the bed was not called at all — and that this record
+repeated the claim. Three things changed, and the verdict did not:
+
+1. **Every pinned leg goes through one helper.** No bed → `unexercised`. A bed that **throws** → a
+   FAILED LEG with the error as its evidence, not an aborted probe run. A bed that returns **without
+   producing an entry** → `unexercised` as well, because a leg that measured nothing is not a pass.
+   That last rule is what actually gates the door: a no-op bed used to open it.
+2. **Probe (c)'s pinned leg re-runs both round trips for real**, with `freshProcessResume` producing
+   every `claude-agent` leg, and derives its verdict from the same byte-and-order assertions the
+   store-side legs use.
+3. **This record says which producer wrote each leg.** The store-side rows of (c) are the STORE's
+   round trips, not the runtime's, and the table now says so.
+
+## Two things a future run with the real bed should watch for
+
+* **The store has no uuid-idempotent append.** `WinterCompatibilitySessionStore.append` writes what it
+  is given: re-sending two already-stored entries stores them twice. So if the pinned runtime's
+  dual-write mirror re-sends what it READ rather than only what it wrote, the canonical file gains
+  duplicate uuids — and step 5's uuid-uniqueness check would then refuse the session's *next* handoff.
+  That is the concrete failure mode probe (b)'s pinned leg is protecting against, and it is why the
+  leg is worth running rather than assuming.
+* **The router's own gate does not depend on the answer.** The decoration registry drops copy-only
+  entries and re-parents their children on every write to the canonical store, so reconciliation is
+  safe either way. What the pinned leg measures is the vendor's behaviour, not the router's.
 
 ## Re-running this record
 
