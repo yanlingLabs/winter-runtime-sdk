@@ -104,6 +104,19 @@ export function envelope(over: Partial<GlobalAgentMessage> = {}): GlobalAgentMes
   };
 }
 
+/**
+ * WHAT A HOST DECLARES ABOUT THE SESSIONS IT LAUNCHED — WS-10 §13's class, from the one party that
+ * knows it.
+ *
+ * Since review r1's D2 an UNKNOWN receiver class fails closed (the mail is held until the class is
+ * known), so a bed whose subject is DELIVERY declares one and a bed whose subject is the POLICY does
+ * not. A live Winter facet always wins over this; it is the answer for a session driven through a
+ * plain writer, and for every official session (the pinned SDK exposes no permission mode at all).
+ */
+export function declaredClasses(label: PermissionClassLabel = "prompts"): { winter: { permissionClass: () => PermissionClassLabel }; official: { permissionClass: () => PermissionClassLabel } } {
+  return { winter: { permissionClass: () => label }, official: { permissionClass: () => label } };
+}
+
 /** A clock the test moves by hand — no timers, no sleeps, no flake. */
 export function createClock(start = 1_000_000): { now: () => number; advance: (ms: number) => void; set: (ms: number) => void } {
   let value = start;

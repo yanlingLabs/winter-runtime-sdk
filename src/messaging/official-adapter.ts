@@ -27,7 +27,7 @@ import type { RuntimeDirectory } from "../seams/directory.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress } from "../seams/messaging-contract.ts";
 import type { RouterMessagingAdapter } from "./dispatch.ts";
-import { renderAttributedTurn, renderOwnerQualifiedTurn } from "./attribution.ts";
+import { renderAttributedTurn, renderOwnerQualifiedTurn, unattributableReason } from "./attribution.ts";
 import type { AttachedOfficialSession, AttachedSessionRegistry } from "./sessions.ts";
 
 export interface OfficialMessagingAdapterDeps {
@@ -82,9 +82,17 @@ export function createOfficialMessagingAdapter(deps: OfficialMessagingAdapterDep
     if (entry.status === "archived") {
       return refused(message.messageId, `${key} is archived; it refuses delivery until a deliberate user or product resume unarchives it (WS-15 §6.2)`);
     }
+    // ONE ENVELOPE, ONE ANSWER (review r1, D1): the SAME owner check the Winter branch applies, before
+    // any push and outside every `try`. Without it this branch delivered an envelope claiming to come
+    // from another session's child while the Winter branch refused the identical message — the answer
+    // depended only on which runtime the host had launched the receiver on. The owner-qualified CHILD
+    // relay below keeps its deliberate absence of an owner, because there the message is knowingly
+    // handed to a parent that does NOT own the sender.
+    const refusal = unattributableReason(message, { winterSessionId: entry.parsed.winterSessionId });
+    if (refusal !== undefined) return refused(message.messageId, refusal);
     const live = deps.sessions.get(key);
     if (live !== undefined) {
-      return pushInto(live, renderAttributedTurn(message), message.messageId, live.status?.() ?? entry.status);
+      return pushInto(live, renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId }), message.messageId, live.status?.() ?? entry.status);
     }
     if (deps.resumeExited === undefined) {
       return unavailable(
@@ -103,7 +111,7 @@ export function createOfficialMessagingAdapter(deps: OfficialMessagingAdapterDep
       return unavailable(message.messageId, true, `the official resume failed before anything was delivered: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (resumed === undefined) return unavailable(message.messageId, true, `the official resume produced no live handle for ${key}, so nothing was delivered`);
-    const outcome = await pushInto(resumed, renderAttributedTurn(message), message.messageId, "idle");
+    const outcome = await pushInto(resumed, renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId }), message.messageId, "idle");
     // "`resumed_and_delivered` is returned only when resume AND delivery both completed" (WS-10 §12).
     // A push that failed after the resume is still uncertain, and says so rather than claiming the pair.
     return outcome.status === "delivered" || outcome.status === "queued" ? resumedAndDelivered(message.messageId) : outcome;

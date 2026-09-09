@@ -31,28 +31,50 @@ export class UnattributableSenderError extends Error {
 }
 
 /**
- * The attributed turn, byte-for-byte as the Winter runtime renders it.
+ * THE OWNER CHECK ON ITS OWN — the reason this envelope cannot be attributed here, or `undefined`.
  *
- * `owner` is the session whose input stream this is going into. It is checked for the same reason the
- * runtime checks it: a claimed CHILD sender is only attributable by the session that owns that child
- * (WS-10 §10.3), so an `agent:` origin from somewhere else is refused rather than rendered with an
- * address this side cannot vouch for. Pass `undefined` to skip the check — for the official branch's
- * owner-qualified relay, where the message is deliberately being handed to a parent that does NOT own
- * the sender.
+ * SEPARATED FROM THE RENDERING (review r1, D1) because it is a DECISION and rendering is an effect,
+ * and the three delivery paths need the decision at a different moment than the string: before any
+ * push, outside every `try`, so that one envelope gets one answer whichever handle shape a host
+ * attached. Evaluated inside a `try` whose `catch` maps to `delivery_uncertain`, the same refusal
+ * became "the delivery may have occurred" for a message that provably never left the router — and
+ * WS-10 §12's recovery contract then forbids retrying it, so a clean side-effect-free "no" turned into
+ * a permanently ambiguous record.
+ *
+ * `owner` is the session whose input stream this is going into. A claimed CHILD sender is only
+ * attributable by the session that owns that child (WS-10 §10.3), so an `agent:` origin from somewhere
+ * else is refused rather than rendered with an address this side cannot vouch for. Pass `undefined` to
+ * skip the check — for the official branch's owner-qualified relay, where the message is deliberately
+ * being handed to a parent that does NOT own the sender.
  */
-export function renderAttributedTurn(message: GlobalAgentMessage, owner?: { winterSessionId: string }): string {
+export function unattributableReason(message: GlobalAgentMessage, owner?: { winterSessionId: string }): string | undefined {
   let from: string;
   try {
     from = serializeRuntimeAddress(message.from);
   } catch {
-    throw new UnattributableSenderError("the envelope's `from` is not a canonical address");
+    return "the envelope's `from` is not a canonical address";
   }
   if (owner !== undefined && message.from.objectKind === "agent") {
     const senderOwner = message.from.parentWinterSessionId ?? message.from.winterSessionId;
     if (senderOwner !== owner.winterSessionId) {
-      throw new UnattributableSenderError(`the envelope claims to come from "${from}", which this session does not own`);
+      return `the envelope claims to come from "${from}", which this session does not own`;
     }
   }
+  return undefined;
+}
+
+/**
+ * The attributed turn, byte-for-byte as the Winter runtime renders it.
+ *
+ * Throws `UnattributableSenderError` on the same condition `unattributableReason` names, so a caller
+ * that renders without checking still cannot produce an unattributable frame — but every caller in
+ * this package checks FIRST, because a throw at this point is an effect-free refusal and must be
+ * reported as one.
+ */
+export function renderAttributedTurn(message: GlobalAgentMessage, owner?: { winterSessionId: string }): string {
+  const refusal = unattributableReason(message, owner);
+  if (refusal !== undefined) throw new UnattributableSenderError(refusal);
+  const from = serializeRuntimeAddress(message.from);
   const summary = message.summary !== undefined ? `\n<summary>${escapeAttributionText(message.summary)}</summary>` : "";
   const open = `<${AGENT_MESSAGE_TAG} from="${escapeAttributionAttribute(from)}" message-id="${escapeAttributionAttribute(message.messageId)}" sender-permission-class="${escapeAttributionAttribute(message.senderPermissionClass)}">`;
   return `${open}${summary}\n${escapeAttributionText(message.body)}\n</${AGENT_MESSAGE_TAG}>`;

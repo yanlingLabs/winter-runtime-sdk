@@ -16,11 +16,20 @@ import { describe, expect, test } from "bun:test";
 
 import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { childEntry, createBed, createFakeOfficialSession, sessionEntry } from "./support.ts";
+import { childEntry, createBed, createFakeOfficialSession, sessionEntry, declaredClasses } from "./support.ts";
 
 function bedWith(options: GlobalMessagingOptions = {}) {
   const bed = createBed();
-  const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: { now: bed.clock.now, ...options } });
+  // The bed DECLARES the receivers' permission classes, because its subject is delivery: since D2 an
+  // unknown class fails closed and every one of these tests would otherwise measure the hold rather
+  // than the route. A test whose subject IS the unknown class builds its bed without them.
+  const messagingOptions = {
+    now: bed.clock.now,
+    ...options,
+    winter: { ...declaredClasses().winter, ...(options.winter ?? {}) },
+    official: { ...declaredClasses().official, ...(options.official ?? {}) },
+  };
+  const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: messagingOptions });
   return { ...bed, directory, messaging };
 }
 

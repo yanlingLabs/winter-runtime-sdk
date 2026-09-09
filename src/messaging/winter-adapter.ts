@@ -29,7 +29,7 @@ import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, Permissi
 import type { RouterMessagingAdapter } from "./dispatch.ts";
 import type { ChildSelectionInput } from "../selection/runtime-selection.ts";
 import { resumeChildSelection } from "../selection/child-runtime.ts";
-import { renderAttributedTurn } from "./attribution.ts";
+import { renderAttributedTurn, unattributableReason } from "./attribution.ts";
 import type { AttachedSessionRegistry, AttachedWinterSession } from "./sessions.ts";
 
 export interface WinterMessagingAdapterDeps {
@@ -55,6 +55,16 @@ export interface WinterMessagingAdapterDeps {
    * check only detects DRIFT, and a host with no catalogue has nothing to detect it against.
    */
   childResumeContext?: (entry: RuntimeDirectoryEntry) => Omit<ChildSelectionInput, "slot" | "model" | "provider"> | undefined;
+  /**
+   * The permission class of a session this process holds no FACET for — the host's own declaration.
+   *
+   * A live facet answers from the session's live permission mode and always wins. This is the fallback
+   * for a session the router drives through a plain input-stream writer, or one it has a record of and
+   * no handle at all: without it every such receiver is `unknown`, and since review r1's D2 made an
+   * unknown receiver FAIL CLOSED (its mail is held until the class is known), a host would have no way
+   * to say what it launched the session with.
+   */
+  permissionClass?: (entry: RuntimeDirectoryEntry) => Promise<PermissionClassLabel> | PermissionClassLabel;
 }
 
 /** The adapter plus the one thing the router attaches to it: the live-session registry. */
@@ -82,6 +92,12 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
    */
   async function deliverIntoSession(entry: RuntimeDirectoryEntry, message: GlobalAgentMessage): Promise<DeliveryOutcome> {
     const handle = deps.sessions.get(entry.address);
+    // ONE ENVELOPE, ONE ANSWER (review r1, D1). The owner check runs BEFORE any push and OUTSIDE every
+    // `try`, on every leg — the facet's, the writer's and the cold resume's — so an unattributable
+    // sender is the same typed `refused` whichever handle shape the host attached. Inside the writer's
+    // `try` it used to become `delivery_uncertain` for a message that had provably not been written.
+    const refusal = unattributableReason(message, { winterSessionId: entry.parsed.winterSessionId });
+    if (refusal !== undefined) return refused(message.messageId, refusal);
     if (handle !== undefined) {
       // THE FACET FIRST. It is the runtime's own attributed push: it renders on the far side with the
       // same published escapes this package uses, enforces the owning-parent fence on the sender, and
@@ -89,8 +105,9 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
       // do. A router-held writer is the fallback for a session the router launched itself.
       if (handle.messaging !== undefined) return handle.messaging.deliver(message);
       if (handle.push !== undefined) {
+        const rendered = renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId });
         try {
-          await handle.push(renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId }));
+          await handle.push(rendered);
         } catch (error) {
           return deliveryUncertain(message.messageId, `the input-stream push failed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -157,9 +174,13 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
     }
     const base = (await deps.resumeOptions?.(entry)) ?? ({} as Options);
     const options: Options = { ...base, resume: entry.backendSessionId };
+    // Rendered BEFORE the `try`, for D1's reason: an unattributable sender must not become "the
+    // resumed session could not be opened", which is a retryable answer about something that never
+    // happened. `deliverIntoSession` has already refused that case; this is the belt.
+    const prompt = renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId });
     let seen = 0;
     try {
-      const query = deps.peers.winter.query({ prompt: renderAttributedTurn(message, { winterSessionId: entry.parsed.winterSessionId }), options });
+      const query = deps.peers.winter.query({ prompt, options });
       for await (const sdkMessage of query) {
         seen += 1;
         if (sdkMessage.type === "assistant" || sdkMessage.type === "result") return resumedAndDelivered(message.messageId);
@@ -232,15 +253,25 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
     async senderPermissionClass(address): Promise<PermissionClassLabel> {
       // A CHILD ANSWERS WITH ITS OWNER'S CLASS, because it runs under the owning parent's permission
       // mode — there is no separate mode to report (WS-10 §10.3's "delivered inside the owning parent
-      // session"). A session with no live facet is `unknown`, which is WS-10 §13's own word for "an
-      // authenticated route that cannot prove sender class".
-      const owner = deps.sessions.get(sessionAddressOf(owningSessionIdOf(address)));
-      if (owner?.messaging === undefined) return "unknown";
-      try {
-        return await owner.messaging.senderClass();
-      } catch {
-        return "unknown";
+      // session").
+      const ownerId = owningSessionIdOf(address);
+      const owner = deps.sessions.get(sessionAddressOf(ownerId));
+      if (owner?.messaging !== undefined) {
+        try {
+          return await owner.messaging.senderClass();
+        } catch {
+          /* fall through to the host's declaration */
+        }
       }
+      // NO LIVE FACET: ask the HOST what it launched this session with, before answering `unknown`.
+      // `unknown` is now a FAIL-CLOSED answer (review r1, D2 — the receiver's mail is held until the
+      // class is known), so a session the router cannot read must have a way to be known, or a host
+      // that drives sessions through a plain input-stream writer could never receive anything.
+      if (deps.permissionClass !== undefined) {
+        const entry = await deps.directory.get(sessionAddressOf(ownerId));
+        if (entry !== undefined) return deps.permissionClass(entry);
+      }
+      return "unknown"; // WS-10 §13's own word for "an authenticated route that cannot prove sender class"
     },
   };
 }

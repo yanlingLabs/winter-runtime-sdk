@@ -60,6 +60,29 @@ export interface DispatchDeps {
    * row that changed in between.
    */
   view: "resolve" | "list";
+  /**
+   * WHERE A SUBSCRIBE GOES (review r1, M1). Absent = straight to the owner adapter.
+   *
+   * The shared core calls `adapter.subscribeIdle` for both the pure-subscription and the combined
+   * `SendMessage{notify_when_idle}` call — the MODEL-facing path. Delegating that to the owner adapter
+   * subscribes at the RUNTIME and writes nothing durable, so the router's own `store.subscriptions` —
+   * the only thing `noteIdle()` reads — stayed empty and the one notice WS-10 §14 promises could never
+   * be routed to anyone. The model was told `subscribed: true` and nothing ever arrived.
+   *
+   * So the core's dispatcher is given the ROUTER's own subscription door here, and only the router's
+   * door talks to the owner adapter (with this field absent, which is also what stops the two from
+   * recursing into each other).
+   */
+  subscribeIdleVia?: (target: RuntimeAddress, request: { messageId: string }) => Promise<DeliveryOutcome>;
+  /**
+   * The inbound decision has ALREADY been made for this envelope (review r1, low 2).
+   *
+   * Set when a HELD message is released: `InboundPolicy.reevaluate` decided it and removed its durable
+   * record, so re-running `decide` on the way out could produce a second, divergent answer that holds
+   * a message whose record is gone — losing it. The accepted-queue slot is still reserved, because
+   * that is the half a release genuinely changes.
+   */
+  inboundDecided?: boolean;
 }
 
 /** The generations a delivery is stamped with, read from the directory rather than from the sender. */
@@ -137,7 +160,7 @@ export function createDispatchingAdapter(deps: DispatchDeps): RuntimeMessagingAd
 
       // WS-15 §6.3, in the one position the whole rule depends on: before the adapter.
       const senderKnown = deps.snapshot.byAddress.has(serializeRuntimeAddress(envelope.from));
-      const verdict = await deps.policy.decide(entry, envelope, senderKnown);
+      const verdict = deps.inboundDecided === true ? deps.policy.reserveAccepted(entry.address, envelope.messageId) : await deps.policy.decide(entry, envelope, senderKnown);
       if (verdict.kind === "settled") return verdict.outcome;
 
       await claim(envelope, entry);
@@ -162,6 +185,10 @@ export function createDispatchingAdapter(deps: DispatchDeps): RuntimeMessagingAd
       // NOT A DELIVERY: no envelope, no claim, no receipt. WS-10 §14 is explicit that subscribing
       // "never starts a target turn", so recording it as an in-flight delivery would make WS-15 §6.4
       // step 5 reconcile a message that never existed.
+      //
+      // IT IS STILL DURABLE, THOUGH — through the router's own door (M1). Only the router's door
+      // itself passes no `subscribeIdleVia`, and that is what reaches the owner adapter.
+      if (deps.subscribeIdleVia !== undefined) return deps.subscribeIdleVia(address, request);
       return adapter.subscribeIdle(address, request);
     },
 

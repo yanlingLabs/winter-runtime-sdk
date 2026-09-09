@@ -18,13 +18,22 @@ import { describe, expect, test } from "bun:test";
 
 import { createRuntimeMessaging } from "../../src/messaging/index.ts";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { childAddress, childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle } from "./support.ts";
+import { childAddress, childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
 import { credentials, listing, NOW, VERSIONS } from "../selection/fixtures.ts";
 import type { SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 
 function bedWith(options: GlobalMessagingOptions = {}, messages?: SdkMessage[]) {
   const bed = createBed(messages === undefined ? {} : { messages });
-  const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: { now: bed.clock.now, ...options } });
+  // The bed DECLARES the receivers' permission classes, because its subject is delivery: since D2 an
+  // unknown class fails closed and every one of these tests would otherwise measure the hold rather
+  // than the route. A test whose subject IS the unknown class builds its bed without them.
+  const messagingOptions = {
+    now: bed.clock.now,
+    ...options,
+    winter: { ...declaredClasses().winter, ...(options.winter ?? {}) },
+    official: { ...declaredClasses().official, ...(options.official ?? {}) },
+  };
+  const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: messagingOptions });
   return { ...bed, directory, messaging };
 }
 

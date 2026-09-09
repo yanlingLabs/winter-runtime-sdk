@@ -105,11 +105,34 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
    * still holding it. `ever > current` means someone let it go — reuse — and that is rule 5.
    * `current > 1` is rule 4, and is left to `resolveTarget`, which builds the candidate set.
    */
-  async function nameHistory(to: string): Promise<{ ever: SerializedRuntimeAddress[]; current: SerializedRuntimeAddress[] }> {
+  async function nameHistory(to: string, callerOwningSessionId: string): Promise<{ ever: SerializedRuntimeAddress[]; current: SerializedRuntimeAddress[] }> {
+    // SCOPED TO THE CALLER'S CONVERSATION (review r1, M2). Both WS-10 §11 rule 5 and WS-15 §6.1 rule 5
+    // say "a name previously used by a different child IN THE SAME CONVERSATION" — and the shared
+    // core's own rule 5 is scoped exactly that way (it filters `ownChildren` by
+    // `callerParentSessionId` before counting distinct ids). This directory-level preflight exists to
+    // remember a name ACROSS a restart or after `forget()`, which the core cannot; its scope was
+    // wrong, and the two harms were real:
+    //
+    //   * FUNCTIONAL — a name that is unique and live inside one conversation became permanently
+    //     unaddressable because an unrelated conversation had once used it, and a lease has no expiry,
+    //     so the poisoning never lapsed.
+    //   * DISCLOSURE — the refusal text and the candidate rows carried another conversation's
+    //     canonical CHILD address, name, mode and status to the model, through the model-facing tool,
+    //     in a shape that told a hit from a miss. `ListAgents` refuses to enumerate that same child
+    //     and delivery refuses to reach it; the refusal text was the one door left open.
+    //
+    // A `session:` lease stays in scope for every caller, because a top-level session's name IS global
+    // — every caller resolves session names from the same peer set, so remembering that one is gone
+    // discloses nothing a listing would not.
     const leases: NameLeaseRecord[] = await store.names.lookup(to);
+    const inScope = leases.filter((lease) => {
+      const parsed = parseRuntimeAddress(lease.address);
+      if (parsed === undefined || parsed.objectKind !== "agent") return true;
+      return owningSessionIdOf(parsed) === callerOwningSessionId;
+    });
     return {
-      ever: [...new Set(leases.map((lease) => lease.address))],
-      current: [...new Set(leases.filter((lease) => lease.releasedAt === undefined).map((lease) => lease.address))],
+      ever: [...new Set(inScope.map((lease) => lease.address))],
+      current: [...new Set(inScope.filter((lease) => lease.releasedAt === undefined).map((lease) => lease.address))],
     };
   }
 
@@ -126,11 +149,32 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
       : `"${to}" referred to ${holders.join(", ")}, which is no longer reachable; address the one you mean by its canonical address from the listing`;
   }
 
-  function candidatesFor(snap: DirectorySnapshot, holders: readonly SerializedRuntimeAddress[]): ListedRuntimeObject[] {
+  /**
+   * The rows behind a set of holder addresses — through the CALLER's own eligibility (review r1, M2).
+   *
+   * `snap.byAddress` is every entry in the store, unfiltered; rendering out of it handed another
+   * conversation's child row to the model as a "candidate" it could never address. `isResolvableFrom`
+   * is the same fence `snapshot()` builds its views with, so a candidate is now by construction
+   * something the caller could actually have meant.
+   */
+  function candidatesFor(snap: DirectorySnapshot, holders: readonly SerializedRuntimeAddress[], callerOwningSessionId: string): ListedRuntimeObject[] {
     return holders.flatMap((address) => {
       const entry = snap.byAddress.get(address);
-      return entry === undefined ? [] : [entryToListedRuntimeObject(entry)];
+      if (entry === undefined || !isResolvableFrom(entry, callerOwningSessionId)) return [];
+      return [entryToListedRuntimeObject(entry)];
     });
+  }
+
+  /**
+   * A FREE FUNCTION, not a method read off `this` (review r1, n1).
+   *
+   * `RuntimeDirectory` is a published seam (`RuntimeSdk.directory`), and `const { record } =
+   * sdk.directory` is an ordinary thing for a host to write — which threw, because `record` reached
+   * its collaborator through `this`. The rule `inbound.ts` argues for in its own comment applies here
+   * too: a method that needs a sibling calls the function, never the object.
+   */
+  async function get(address: SerializedRuntimeAddress): Promise<RuntimeDirectoryEntry | undefined> {
+    return (await store.load()).find((entry) => entry.address === address);
   }
 
   async function resolveIn(snap: DirectorySnapshot, to: string, ctx: DirectoryResolutionContext): Promise<DirectoryResolution> {
@@ -148,9 +192,9 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     // identity that cannot be reused, so a stale-name history says nothing about them — which is
     // exactly why rule 5's own text ends "unless addressed canonically".
     if (!isCanonical && !isChildId) {
-      const history = await nameHistory(to);
+      const history = await nameHistory(to, callerOwner);
       if (history.ever.length > history.current.length) {
-        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever) };
+        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever, callerOwner) };
       }
     }
 
@@ -163,15 +207,15 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
       // renderer: the row a caller is shown must be the durable record (kind, mode, capabilities),
       // and a child rendered from a `ChildLike` would carry this module's placeholder permission mode
       // as its `mode` (see `entryToChildLike`).
-      return { kind: "ambiguous", candidates: candidatesFor(snap, resolved.candidates.map((candidate) => candidate.address)) };
+      return { kind: "ambiguous", candidates: candidatesFor(snap, resolved.candidates.map((candidate) => candidate.address), callerOwner) };
     }
     if (resolved.kind === "stale") return { kind: "stale-name", reason: resolved.message, candidates: [] };
     if (resolved.kind === "not_found") {
       // A name the directory REMEMBERS but cannot reach is stale, not unknown — the whole reason a
       // released lease outlives the row it named.
-      const history = await nameHistory(to);
+      const history = await nameHistory(to, callerOwner);
       if (history.ever.length > 0 && !isCanonical && !isChildId) {
-        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever) };
+        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever, callerOwner) };
       }
       return { kind: "not-found", reason: resolved.message };
     }
@@ -215,9 +259,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
       return entries.filter((entry) => entry.parentAddress === scope.parent);
     },
 
-    async get(address) {
-      return (await store.load()).find((entry) => entry.address === address);
-    },
+    get,
 
     /**
      * Upsert one row — MERGING the two adapter-owned fields rather than replacing them.
@@ -228,7 +270,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
      * revalidation input — with nothing failing at the time.
      */
     async record(entry) {
-      const existing = await this.get(entry.address);
+      const existing = await get(entry.address);
       const merged = mergeAdapterOwnedFields(entry, existing);
       await store.upsert(merged);
       await syncLeases(merged, existing);
@@ -243,7 +285,7 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
      * would erase that silently, and WS-15 §6.4 step 7's sweep is where held mail is accounted for.
      */
     async forget(address) {
-      const existing = await this.get(address);
+      const existing = await get(address);
       if (existing?.displayName !== undefined) {
         await store.names.release(existing.displayName, address, new Date(now()).toISOString());
       }

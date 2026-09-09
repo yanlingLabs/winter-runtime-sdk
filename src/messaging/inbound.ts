@@ -85,6 +85,16 @@ export interface InboundPolicy {
    * module never calls an adapter.
    */
   reevaluate(receiver: RuntimeDirectoryEntry): Promise<{ released: GlobalAgentMessage[]; expired: HeldEntry[] }>;
+  /**
+   * Take an accepted-queue slot WITHOUT re-running the decision (review r1, low 2).
+   *
+   * A RELEASED HOLD HAS ALREADY BEEN DECIDED, by `reevaluate`, which removed its durable record when
+   * it promoted it. Re-running `decide` on the way out would let a second, divergent answer hold a
+   * message whose record is gone — losing it — while still costing the host's hooks another call. The
+   * cap is still honoured, because that is the half a release genuinely changes: a held message
+   * occupies no accepted slot, and a delivered one does.
+   */
+  reserveAccepted(receiverKey: SerializedRuntimeAddress, messageId: string): InboundVerdict;
   /** WS-10 §13's 5-minute dialog expiry, applied on its own. Returns what it swept. */
   sweepExpired(receiverKey: SerializedRuntimeAddress): Promise<HeldEntry[]>;
   /** What is held for a receiver right now, durably. */
@@ -96,7 +106,7 @@ export interface InboundPolicy {
 
 export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
   const mailbox = createMailbox();
-  const rehydrated = new Set<SerializedRuntimeAddress>();
+  const rehydrated = new Map<SerializedRuntimeAddress, Promise<void>>();
 
   /**
    * Load a receiver's durable holds into the in-memory box, once.
@@ -106,11 +116,24 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
    * exactly the thing that must not silently grow.
    */
   async function ensureRehydrated(receiverKey: SerializedRuntimeAddress): Promise<void> {
-    if (rehydrated.has(receiverKey)) return;
-    rehydrated.add(receiverKey);
-    for (const record of await deps.store.mailboxes.listHeld(receiverKey)) {
-      mailbox.hold(receiverKey, toHeldEntry(record));
-    }
+    // THE FLAG IS A PROMISE, NOT A BOOLEAN (review r1, low 1). Marking the receiver rehydrated BEFORE
+    // awaiting the load let a second `decide()` for the same receiver proceed against a
+    // half-populated box — and the box is the cap, which is the one thing that must never
+    // under-count. Remembering the in-flight promise makes every later caller wait for the same load
+    // instead of skipping it; a load that FAILS is forgotten, so the next caller retries rather than
+    // inheriting an empty box forever.
+    const started = rehydrated.get(receiverKey);
+    if (started !== undefined) return started;
+    const loading = (async () => {
+      for (const record of await deps.store.mailboxes.listHeld(receiverKey)) {
+        mailbox.hold(receiverKey, toHeldEntry(record));
+      }
+    })().catch((error: unknown) => {
+      rehydrated.delete(receiverKey);
+      throw error;
+    });
+    rehydrated.set(receiverKey, loading);
+    return loading;
   }
 
   function toHeldEntry(record: HeldMessageRecord): HeldEntry {
@@ -150,6 +173,20 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
     // the envelope, stamped by the router at the sending end (WS-10 §13's matrix input). A caller-side
     // `accept` can therefore still come back `held` — the envelope's class is an input, never a verdict.
     const receiverClass = await deps.receiverClass(receiver);
+    // AN UNKNOWN RECEIVER CLASS FAILS CLOSED (review r1, D2). WS-10 §13's matrix has no `unknown`
+    // RECEIVER row — `unknown` is a sender-side value ("an authenticated route that cannot prove
+    // sender class") — so a receiver whose mode this process cannot read has to be answered by policy
+    // rather than by the table. Substituting `prompts` fails OPEN on the one row that matters: if the
+    // receiver was launched in `bypassPermissions`, §13's `bypasses x prompts -> hold` row (which
+    // exists precisely to stop a prompting sender's mail landing unreviewed in a bypassing receiver)
+    // never runs. So the mail is HELD until the class is known. A hold is visible, releasable and
+    // reversible; a delivery into a bypassing session is not.
+    //
+    // AN EXPLICIT SETTING STILL WINS, because §13 says it always does — a receiver that has said
+    // "accept" has answered the question the class was being asked to answer.
+    if (explicitSetting === undefined && authenticated && receiverClass === "unknown") {
+      return { decision: "hold", authenticated, explicitSetting, receiverClass };
+    }
     const decision = resolveInboundDecision({
       authenticated,
       ...(explicitSetting === undefined ? {} : { explicitSetting }),
@@ -157,6 +194,22 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
       senderClass: message.senderPermissionClass,
     });
     return { decision, authenticated, explicitSetting, receiverClass };
+  }
+
+  /** The accepted-queue reservation, shared by `decide` and by `reserveAccepted`. */
+  function acceptance(receiverKey: SerializedRuntimeAddress, messageId: string): InboundVerdict {
+    if (!mailbox.accept(receiverKey)) {
+      return { kind: "settled", outcome: refusedOutcome(messageId, `the receiver already has ${ACCEPTED_QUEUE_CAP} accepted messages waiting, the documented cap; this one was refused rather than dropped`) };
+    }
+    return {
+      kind: "accept",
+      release(outcome) {
+        // `queued` is the ONLY outcome that leaves a message sitting in the receiver's accepted queue
+        // (it is read at the next tool boundary). Everything else — delivered into a turn, refused,
+        // uncertain — is no longer occupying a slot, so the reservation is given back.
+        if (outcome.status !== "queued") mailbox.releaseAccepted(receiverKey, 1);
+      },
+    };
   }
 
   return {
@@ -194,7 +247,10 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
         const reason =
           explicitSetting === "hold"
             ? `the receiver holds cross-session messages for review (crossSessionInbound: "hold")`
-            : `the receiver's permission class (${receiverClass}) holds messages from a ${message.senderPermissionClass} sender by default (WS-10 §13)`;
+            : receiverClass === "unknown"
+              ? // D2: named exactly, because it is the one hold a HOST can clear by wiring a class.
+                `receiver class unknown: this process cannot read ${receiver.address}'s permission mode, so the message is held rather than delivered under a guessed class (WS-10 §13)`
+              : `the receiver's permission class (${receiverClass}) holds messages from a ${message.senderPermissionClass} sender by default (WS-10 §13)`;
         const entry = kind === "explicit" ? buildExplicitHoldEntry(message.messageId, reason, deps.now()) : buildDefaultHoldEntry(message.messageId, reason, deps.now());
         if (!mailbox.hold(receiverKey, entry)) {
           // OVERFLOW IS VISIBLE (WS-10 §13), never a silent drop — and it is `refused` rather than
@@ -213,18 +269,11 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
         return { kind: "settled", outcome: heldOutcome(message.messageId, reason) };
       }
 
-      if (!mailbox.accept(receiverKey)) {
-        return { kind: "settled", outcome: refusedOutcome(message.messageId, `the receiver already has ${ACCEPTED_QUEUE_CAP} accepted messages waiting, the documented cap; this one was refused rather than dropped`) };
-      }
-      return {
-        kind: "accept",
-        release(outcome) {
-          // `queued` is the ONLY outcome that leaves a message sitting in the receiver's accepted
-          // queue (it is read at the next tool boundary). Everything else — delivered into a turn,
-          // refused, uncertain — is no longer occupying a slot, so the reservation is given back.
-          if (outcome.status !== "queued") mailbox.releaseAccepted(receiverKey, 1);
-        },
-      };
+      return acceptance(receiverKey, message.messageId);
+    },
+
+    reserveAccepted(receiverKey, messageId) {
+      return acceptance(receiverKey, messageId);
     },
 
     async reevaluate(receiver) {

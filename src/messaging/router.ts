@@ -40,6 +40,7 @@ import {
   notFound,
   serializeRuntimeAddress,
   subscribed as subscribedOutcome,
+  DEFAULT_HOLD_EXPIRY_MS,
   DEFAULT_MESSAGE_TTL_MS,
   NOTIFY_IDLE_EXPIRY_MS,
 } from "@yanlinglabs/winter-agent-sdk/messaging";
@@ -153,26 +154,22 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
     now,
     ...options,
     /**
-     * The receiver's class, asked of the runtime that HOLDS the receiver — with the one substitution
-     * WS-10 §13's own table forces.
+     * The receiver's class, asked of the runtime that HOLDS the receiver — and `unknown` when it
+     * cannot say, which the policy then FAILS CLOSED on (review r1, D2).
      *
-     * THE MATRIX HAS NO "UNKNOWN RECEIVER" ROW. Its five rows are `prompts × {prompts, unknown,
-     * bypasses}` and `bypasses × {bypasses, prompts-or-unknown}`: `unknown` is a SENDER-side value,
-     * for "an authenticated route that cannot prove sender class". Feeding an unknown RECEIVER into
-     * `defaultInboundResult` lands it on the bypasses row, where every prompting sender is HELD — so a
-     * receiver whose mode this process cannot read would silently hold all of its mail, which is a
-     * policy nobody chose.
+     * This used to substitute `prompts`, on the reasoning that WS-10 §13's matrix has no unknown
+     * RECEIVER row and that both runtimes' own default mode classifies as prompting. The reasoning is
+     * sound and the substitution is still wrong, for one row: if the receiver was launched in
+     * `bypassPermissions`, §13's `bypasses x prompts -> hold` — the row that exists to stop a
+     * prompting sender's mail landing unreviewed in a bypassing session — never runs. A hold is
+     * visible, releasable and reversible; a delivery into a bypassing session is not.
      *
-     * The compatibility default is therefore `prompts`: both runtimes' own default permission mode is
-     * `default`, which §13 classifies as prompting. It is not a guess about the session — it is the
-     * documented default for a session that has not said otherwise, and a host that launched one in
-     * another mode says so through `explicitSetting` or the official adapter's `permissionClass` hook.
-     * A bypassing SENDER into such a receiver is still held, which is the protection the row exists for.
+     * So the substitution is gone: `inbound.ts` holds an unknown-class receiver's mail with a reason
+     * that names exactly that, and a host clears it by telling the adapter what it launched
+     * (`winter.permissionClass` / `official.permissionClass`) or by setting the receiver's own
+     * `crossSessionInbound`.
      */
-    receiverClass: async (receiver) => {
-      const answered = (await adapters.get(receiver.runtimeKind)?.senderPermissionClass(receiver.parsed)) ?? "unknown";
-      return answered === "unknown" ? "prompts" : answered;
-    },
+    receiverClass: async (receiver) => (await adapters.get(receiver.runtimeKind)?.senderPermissionClass(receiver.parsed)) ?? "unknown",
   });
 
   // INSTANCE-LEVEL, not per call: the loop guard is a memory of what was sent moments ago (WS-10 §12's
@@ -188,10 +185,13 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
     return directory.snapshot({ owningSessionId: owningSessionIdOf(from) });
   }
 
-  function depsFor(snapshot: DirectorySnapshot, seam: MessagingRouterSeam, view: "resolve" | "list"): MessagingRuntimeDeps {
+  function depsFor(snapshot: DirectorySnapshot, seam: MessagingRouterSeam, view: "resolve" | "list", from: RuntimeAddress): MessagingRuntimeDeps {
     return {
       seam,
-      adapter: createDispatchingAdapter({ snapshot, adapters, policy, store, now, view }),
+      // M1: the core's `subscribeIdle` goes through the ROUTER's durable door, not straight to the
+      // owner adapter. `from` is the caller the core is running for — the subscriber whose queue the
+      // eventual notice belongs to, and the field WS-10 §15's own adapter signature has nowhere to put.
+      adapter: createDispatchingAdapter({ snapshot, adapters, policy, store, now, view, subscribeIdleVia: (target, request) => handle.notifyWhenIdle(target, { from, messageId: request.messageId }) }),
       notifications,
       loopGuard,
       subscribers,
@@ -263,7 +263,7 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
    * Deliver an ALREADY-ADDRESSED envelope through the dispatcher, with no id allocation and no
    * resolution. The internal half of `deliver()`, and the path a released hold and a reply both take.
    */
-  async function dispatchEnvelope(message: GlobalAgentMessage): Promise<DeliveryOutcome> {
+  async function dispatchEnvelope(message: GlobalAgentMessage, dispatchOptions: { inboundDecided?: boolean } = {}): Promise<DeliveryOutcome> {
     const snapshot = await snapshotFor(message.from);
     const key = serializeRuntimeAddress(message.to);
     const entry = snapshot.byAddress.get(key);
@@ -282,7 +282,7 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       return refused(message.messageId, `the message exceeded the maximum hop count; a relay chain is stopped rather than followed (WS-10 §12's loop detection)`);
     }
 
-    const dispatcher = createDispatchingAdapter({ snapshot, adapters, policy, store, now, view: "resolve" });
+    const dispatcher = createDispatchingAdapter({ snapshot, adapters, policy, store, now, view: "resolve", ...(dispatchOptions.inboundDecided === true ? { inboundDecided: true } : {}) });
     let outcome: DeliveryOutcome;
     try {
       if (message.to.objectKind === "agent") {
@@ -335,7 +335,7 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
     bounds: {
       heldCap: policy.caps.held,
       acceptedCap: policy.caps.accepted,
-      holdExpiryMs: 5 * 60 * 1000,
+      holdExpiryMs: DEFAULT_HOLD_EXPIRY_MS,
       idleSubscriptionMs: NOTIFY_IDLE_EXPIRY_MS,
       messageTtlMs: DEFAULT_MESSAGE_TTL_MS,
     },
@@ -427,7 +427,7 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       }
 
       const seam = bindSeam(snapshot, undefined);
-      const core = createMessagingRouter(depsFor(snapshot, seam, "resolve"));
+      const core = createMessagingRouter(depsFor(snapshot, seam, "resolve", request.from));
       const result = await core.sendMessage(caller, {
         to: request.to,
         message: request.body,
@@ -493,7 +493,10 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
       if (entry === undefined) return [];
       const { released } = await policy.reevaluate(entry);
       const outcomes: DeliveryOutcome[] = [];
-      for (const message of released) outcomes.push(await dispatchEnvelope(message));
+      // ALREADY DECIDED by `reevaluate`, which removed the durable record when it promoted the
+      // message — so the delivery must not re-run the policy and risk a second answer that holds a
+      // message nothing is holding any more (review r1, low 2).
+      for (const message of released) outcomes.push(await dispatchEnvelope(message, { inboundDecided: true }));
       return outcomes;
     },
 

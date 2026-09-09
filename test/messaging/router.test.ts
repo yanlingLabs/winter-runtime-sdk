@@ -7,13 +7,22 @@
 import { describe, expect, test } from "bun:test";
 
 import { MAX_GLOBAL_MESSAGE_SIZE, MAX_HOP_COUNT, RAPID_REPEAT_WINDOW_MS, NOTIFY_IDLE_EXPIRY_MS } from "@yanlinglabs/winter-agent-sdk/messaging";
-import { createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { childEntry, createBed, createFakeFacet, envelope, sessionAddress, sessionEntry, winterHandle } from "./support.ts";
+import { childEntry, createBed, createFakeFacet, envelope, sessionAddress, sessionEntry, winterHandle, declaredClasses } from "./support.ts";
 
 function bedWith(options: GlobalMessagingOptions = {}) {
   const bed = createBed();
-  const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: { now: bed.clock.now, ...options } });
+  // The bed DECLARES the receivers' permission classes, because its subject is delivery: since D2 an
+  // unknown class fails closed and every one of these tests would otherwise measure the hold rather
+  // than the route. A test whose subject IS the unknown class builds its bed without them.
+  const messagingOptions = {
+    now: bed.clock.now,
+    ...options,
+    winter: { ...declaredClasses().winter, ...(options.winter ?? {}) },
+    official: { ...declaredClasses().official, ...(options.official ?? {}) },
+  };
+  const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: messagingOptions });
   return { ...bed, directory, messaging };
 }
 
@@ -327,6 +336,90 @@ describe("row 7 — TTL, generation, loop prevention and reply routing", () => {
     const outcome = await world.messaging.reply({ original: envelope({ from: sessionAddress("sender"), to: sessionAddress("receiver") }), body: "hi" });
     expect(outcome.status).toBe("refused");
     if (outcome.status === "refused") expect(outcome.reason).toContain("does not accept replies");
+  });
+});
+
+describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M1)", () => {
+  // THE DEFECT THIS BLOCK EXISTS FOR: the model's own `SendMessage{notify_when_idle}` reaches the
+  // shared core, which calls `adapter.subscribeIdle` — the dispatching adapter. That used to delegate
+  // straight to the owner adapter, so the subscription was made AT THE RUNTIME and the router's own
+  // `store.subscriptions` — the only thing `noteIdle()` reads — stayed empty. The model was told
+  // `subscribed: true` and the one notice WS-10 §14 promises could never be routed to anybody.
+  //
+  // Every idle test the lane had went through the HOST door (`messaging.notifyWhenIdle`), which did
+  // write the record — which is exactly why the suite could not see it.
+
+  async function watcherAndTarget(world: ReturnType<typeof bedWith>) {
+    const targetFacet = createFakeFacet();
+    const watcherFacet = createFakeFacet();
+    await world.directory.record(sessionEntry("watcher"));
+    await world.directory.record(sessionEntry("target"));
+    world.messaging.attachWinterSession("session:watcher", winterHandle(watcherFacet));
+    world.messaging.attachWinterSession("session:target", winterHandle(targetFacet));
+    return { targetFacet, watcherFacet };
+  }
+
+  test("a COMBINED SendMessage subscribes durably, and the target's idle notice actually arrives", async () => {
+    const world = bedWith();
+    const { targetFacet } = await watcherAndTarget(world);
+    const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_1" });
+
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "ping", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    expect(payload["status"]).toBe("queued");
+    expect(payload["notify"]).toEqual({ subscribed: true });
+    // …and the claim is backed by a durable record with the target's identity AND generation.
+    const stored = await world.store.subscriptions.list();
+    expect(stored.length).toBe(1);
+    expect(stored[0]?.subscriber).toBe("session:watcher");
+    expect(stored[0]?.target).toBe("session:target");
+    expect(stored[0]?.targetGeneration).toBe(1);
+
+    targetFacet.fireIdle({ subscriberSessionId: "host:target", notice: { notification_id: "note-1", origin: "session:target", queued_at: "t", content: "session:target is now idle" } });
+    await Bun.sleep(0);
+    const page = world.messaging.readNotifications("watcher");
+    expect(page.notifications.length).toBe(1);
+    expect(page.notifications[0]?.content).toContain("idle");
+  });
+
+  test("a PURE subscription (an empty message) does the same, and delivers nothing", async () => {
+    const world = bedWith();
+    const { targetFacet } = await watcherAndTarget(world);
+    const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_2" });
+
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    expect(payload["status"]).toBe("subscribed");
+    expect(targetFacet.delivered.length).toBe(0); // WS-10 §10.1: an empty message is the subscription
+    expect((await world.store.subscriptions.list()).length).toBe(1);
+
+    expect(await world.messaging.noteIdle("session:target")).toBe(1);
+    expect(world.messaging.readNotifications("watcher").notifications.length).toBe(1);
+  });
+
+  test("the subscription SURVIVES A RESTART — a new router over the same store still fires it", async () => {
+    const world = bedWith();
+    await watcherAndTarget(world);
+    const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_3" });
+    expect(JSON.parse((await handlers.sendMessage({ to: "session:target", message: "", notify_when_idle: true })).content[0]?.text ?? "{}")["status"]).toBe("subscribed");
+
+    // WS-15 §6.3: "survives restart only when DURABLY STORED with valid target identity/generation."
+    const restarted = createRuntimeMessaging(world.context, { directory: { now: world.clock.now }, messaging: { now: world.clock.now } });
+    const report = await restarted.directory.recover();
+    expect(report.steps[5]?.outcome).toContain("1 still valid");
+
+    expect(await restarted.messaging.noteIdle("session:target")).toBe(1);
+    expect(restarted.messaging.readNotifications("watcher").notifications.length).toBe(1);
+  });
+
+  test("a REFUSED model-facing subscribe leaves no durable record, and refuses the whole call", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("watcher"));
+    await world.directory.record(sessionEntry("official", { runtimeKind: "claude-agent" }));
+    world.messaging.attachOfficialSession("session:official", { push: () => undefined, status: () => "running" });
+    const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_4" });
+
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:official", message: "hi", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    expect(payload["status"]).toBe("refused");
+    expect((await world.store.subscriptions.list()).length).toBe(0);
   });
 });
 

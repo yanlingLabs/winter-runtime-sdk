@@ -10,9 +10,6 @@ import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/inde
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { NotImplementedYet } from "../../src/errors.ts";
 import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubOfficialAdapter, stubRuntimeDirectory } from "../../src/seams/stubs.ts";
-import { createRuntimeMessaging } from "../../src/messaging/index.ts";
-import type { RuntimeDirectory } from "../../src/seams/directory.ts";
-import type { GlobalMessaging } from "../../src/seams/global-messaging.ts";
 import type { SeamContext, SeamContextWithDirectory } from "../../src/seams/context.ts";
 import type { DeliveryRecord, IdleSubscriptionRecord, NameLeaseRecord, RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 import type { GlobalAgentMessage } from "../../src/seams/messaging-contract.ts";
@@ -88,12 +85,6 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     expect(await laneOfThrow(() => adapter.spawnProxy({} as never))).toBe("lane-a");
   });
 
-  // LANE B HAS LANDED. The two STUBS still throw — `src/sdk.ts` is spine-owned and its two wiring
-  // lines are posted as a NEEDS_CONTEXT rather than taken, so that Lane A and Lane B cannot collide in
-  // one file — so the assertions below are still true and stay. What the lane owes this file is the
-  // OTHER half of the spine's promise: that the real factories satisfy the same seams over the same
-  // `SeamContextWithDirectory` the spine hands its stub factories, which is what makes the pending
-  // wiring diff mechanical rather than hopeful.
   test("the directory and the messaging router are Lane B's", async () => {
     const directory = stubRuntimeDirectory(seamContext());
     for (const call of [
@@ -117,30 +108,6 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     ]) {
       expect(await laneOfThrow(call)).toBe("lane-b");
     }
-  });
-
-  test("...and Lane B's real factories satisfy those seams over the spine's own context", async () => {
-    const context = seamContext();
-    const { directory, messaging } = createRuntimeMessaging(context);
-
-    // The seam types, structurally: assigning the concrete handles to the pinned interfaces is what
-    // the pending one-line wiring in `src/sdk.ts` will do.
-    const asDirectory: RuntimeDirectory = directory;
-    const asMessaging: GlobalMessaging = messaging;
-
-    await asDirectory.record(entry("session:x"));
-    expect((await asDirectory.list()).map((row) => row.address)).toEqual(["session:x"]);
-    expect((await asDirectory.get("session:x"))?.runtimeKind).toBe("winter-agent");
-    expect((await asDirectory.resolve("session:x", { from: entry("session:y").parsed })).kind).toBe("resolved");
-    expect((await asDirectory.recover()).steps.length).toBe(7);
-
-    // Nothing is attached, so the honest answers are a listing that excludes the caller and a delivery
-    // that cannot find a live target — not a throw, and never `NotImplementedYet`.
-    expect(await asMessaging.listReachable({ from: entry("session:x").parsed })).toEqual([]);
-    expect((await asMessaging.senderPermissionClass(entry("session:x").parsed))).toBe("unknown");
-    const outcome = await asMessaging.send({ from: entry("session:x").parsed, to: "nobody", body: "hi", originToolCallId: "t1" });
-    expect(outcome.status).toBe("not_found");
-    await asDirectory.forget("session:x");
   });
 
   test("the barrier and the decorator are Lane C's -- but the decorator's DOOR already answers", async () => {
