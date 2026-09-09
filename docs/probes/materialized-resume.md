@@ -22,6 +22,10 @@ for release"; it is not implemented and not claimed.)
 **Re-probed after review round 1** (the (c) row below described work the code did not do — see "What
 changed in fix round 1").
 
+**RE-PROBED WITH THE PINNED RUNTIME, 2026-09-09 (P7b fix wave, items 11 + 23).** Lane A's bed is now
+in the same tree, so the three legs that name the pinned official runtime have RUN — see "The pinned
+run" below. The door is still `fallback`, and that is now a MEASUREMENT rather than a missing bed.
+
 **Reproduce:** `bun test test/store/materialized-resume.test.ts` (the harness, its honesty in both
 directions, and the doors), or call `createMaterializedResumeDecorator(context, { shared }).probe()`,
 which is what produced the table below.
@@ -42,7 +46,40 @@ file stays byte-pure across a Claude leg.
 That is the outcome WS-17 §8 itself anticipates: *"failing (b) demotes that leg to the barrier-append
 fallback, it does not block release."*
 
-## The table
+## The pinned run (2026-09-09, the fix wave)
+
+`test/joint/materialized-resume-probes.test.ts` drives `probe()` with `pinnedRuntimeProbeLegs()` —
+Lane A's real bed, hermetic (F-1's four traffic opt-outs), one real 0.3.250 process per leg, resuming
+from the staging root with the shared store attached as `Options.sessionStore`.
+
+| Probe | Verdict WITH the pinned runtime | What the pinned leg measured |
+| --- | --- | --- |
+| **(a)** neighbour-file survival | **PASS** | `fresh-process resume`: the resume added **6 entries** to the store and the sidecar's bytes were **identical** afterwards |
+| **(b)** no-wash-back | **PASS** | `mirror from a decorated copy`: a real resume FROM the decorated copy mirrored 6 entries; the canonical prefix was intact and the decoration **never** appeared in the store. This is the probe WS-17 §8 makes the PREFERRED door conditional on, and the vendor's mirror does **not** re-send the entries it read |
+| **(c)** sidecar-present round-trip | **FAIL** | `the Claude legs on the pinned runtime`: on `claude→winter→claude`, the Claude legs' lines are byte-identical in the final file (**true**) but **the parent chain is NOT unbroken** once a real Claude leg produced it. The store-produced version of the same round trip keeps the chain intact, so this is a property of what the runtime writes on a resume — not of the store |
+| **(d)** crash pairs | **PASS** | (no pinned leg — entirely a store property) |
+
+**Door: `fallback`.** Three of four pass with the real artifact; (c) fails, and WS-17 §8 requires all
+four. Nothing here is unexercised any more.
+
+**Two fixture defects were fixed to get this far, and both are worth naming** because each had been
+recording a bed failure that looked like a runtime verdict: the probe transcripts carried no
+`message` field, so the pinned runtime refused the resume outright (`undefined is not an object
+(evaluating 'e.message.content')`); and a round trip that STARTS on the Claude leg was handed an empty
+staging copy, which the runtime reports as `No conversation found with session ID`. A probe of the
+pinned runtime has to be resumable by the pinned runtime.
+
+**What (c)'s failure is and is not.** It is not a wash-back (that is (b), which passes) and it does not
+touch the sidecar (that is (a), which passes). What it says is that a transcript whose Claude legs were
+written by a real resume does not present an unbroken `parentUuid` chain end to end — the runtime
+re-anchors what it writes after a resume. Whether that is a defect, a fixture artefact of resuming a
+synthetic transcript, or simply how the vendor chains a resumed generation is **not** established here,
+and the honest consequence is the one WS-17 §8 already prescribes: the FALLBACK door ships, the
+canonical file gets one explicitly labelled entry at the barrier, and no `agent-state` or
+`full-filesystem` compatibility claim rests on this. **Owed:** a follow-up that reads the chain the
+runtime actually writes on a resume and decides which of the three it is.
+
+## The table (the earlier, bedless run — kept for the contrast)
 
 | Probe | Verdict | Legs that ran | Legs that did not |
 | --- | --- | --- | --- |
@@ -56,13 +93,18 @@ one probe that can be fully answered without the vendor's runtime.
 
 ## What "needs the pin" means, and how to close it
 
+**CLOSED, in the fix wave** — `test/joint/probe-legs.ts` is the collaborator, and the run above is the
+result. The paragraphs below describe what was owed and are kept because they say what each leg
+measures.
+
 `probe()` takes an optional `PinnedRuntimeProbeLegs` collaborator with one method,
 `freshProcessResume({ home, stagingRoot, key, shared })`: start the pinned official runtime on a
 store-backed resume from `stagingRoot`, with `shared.store` attached as `Options.sessionStore`, and
 return when the generation ends. Lane A's `test/official/support.ts` is exactly that bed — it resolves
 the platform package through the official package's own `require`, asserts the version equals the pin,
 and runs a session against a `127.0.0.1` fake in 1–3 s. **This lane did not have it in-tree** (Lane A
-had not merged when Lane C ran), so the three legs were left unexercised rather than simulated.
+had not merged when Lane C ran), so the three legs were left unexercised rather than simulated — until
+the fix wave, when it did.
 
 With the bed supplied, the three legs measure exactly:
 

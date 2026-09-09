@@ -356,10 +356,24 @@ async function withProbeHome<T>(context: SeamContext, fn: (bed: { home: string; 
 
 const PROBE_KEY: SessionKey = { projectKey: "probe-project", sessionId: "00000000-0000-4000-8000-000000000001" };
 
-/** A minimal, chain-valid dialect entry. */
+/**
+ * A minimal, chain-valid dialect entry — and, for a conversational type, a REAL `message`.
+ *
+ * THE MESSAGE IS NOT DECORATION (items 11/23). Three of the four probes now hand their transcript to
+ * the PINNED RUNTIME for a fresh-process resume, and the runtime reads these entries with its own
+ * parser: without `message.content` it fails the resume outright ("Failed to resume session: undefined
+ * is not an object (evaluating 'e.message.content')"), which recorded every pinned leg as a bed
+ * failure and kept the door shut for a reason that was about the FIXTURE rather than about the
+ * artifact. A probe of the pinned runtime has to be resumable BY the pinned runtime.
+ *
+ * Only conversational types get one: a `system`/`compact_boundary` entry legitimately has none, and
+ * inventing one would be a novel entry shape (WS-05 §13's closed corpus).
+ */
 function probeEntry(args: { uuid: string; parentUuid: string | null; type?: string; extra?: Record<string, unknown> }): SessionStoreEntry {
+  const type = args.type ?? "user";
+  const conversational = type === "user" || type === "assistant";
   return {
-    type: args.type ?? "user",
+    type,
     uuid: args.uuid,
     parentUuid: args.parentUuid,
     sessionId: PROBE_KEY.sessionId,
@@ -367,6 +381,7 @@ function probeEntry(args: { uuid: string; parentUuid: string | null; type?: stri
     cwd: "/probe",
     version: "0.0.0",
     isSidechain: false,
+    ...(conversational ? { message: { role: type === "assistant" ? "assistant" : "user", content: "a probe entry" } } : {}),
     ...(args.extra ?? {}),
   };
 }
@@ -604,7 +619,25 @@ async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedRes
             mkdirSync(dirname(copyPath), { recursive: true, mode: 0o700 });
             const canonicalPath = canonicalTranscriptPath(home, key);
             if (existsSync(canonicalPath)) copyFileSync(canonicalPath, copyPath);
-            else writeFile(copyPath, Buffer.alloc(0));
+            else {
+              // A ROUND TRIP THAT STARTS ON THE CLAUDE LEG HAS NOTHING TO RESUME YET, and an EMPTY
+              // staging copy is not "nothing to resume" to the pinned runtime — it is "no conversation
+              // found with session ID", which recorded a bed failure for a fixture problem (items
+              // 11/23). One chain-valid entry makes the resume possible; the leg's subject is whether
+              // the Claude legs' bytes survive the round trip, not whether an empty session resumes.
+              const seed = {
+                type: "user",
+                uuid: randomUUID(),
+                parentUuid: null,
+                sessionId: key.sessionId,
+                timestamp: new Date(0).toISOString(),
+                cwd: "/probe",
+                version: "0.0.0",
+                isSidechain: false,
+                message: { role: "user", content: "a probe entry" },
+              };
+              writeFile(copyPath, Buffer.from(`${JSON.stringify(seed)}\n`, "utf8"));
+            }
             await bed.freshProcessResume({ home, stagingRoot, key, shared });
           });
           if (!result.passed) return { passed: false, evidence: `${order.join(" -> ")}: ${result.evidence}` };
