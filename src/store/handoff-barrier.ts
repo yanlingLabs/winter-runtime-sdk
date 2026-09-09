@@ -25,6 +25,28 @@
 // store's copy is written AFTER, as a derived cache — a crash between them leaves the transcript's own
 // record authoritative, which is exactly the direction WS-05 §5.4 and WS-16 §4 already point.
 //
+// FIVE DECISIONS A READER WOULD OTHERWISE HAVE TO INFER, each with its reason (fix wave, item 13):
+//
+//   * STEP 6's ATOMICITY IS SINGLE-STORE. The producer record is one atomic append to the transcript's
+//     own summary; the DIRECTORY's copy is a derived cache written after, so a crash between them can
+//     leave the directory behind. That is survivable by design — `loadEntry`'s repair follows the
+//     authoritative record on the next `plan()`, and Lane B's `recover()` repairs the rest — and it is
+//     the honest alternative to pretending a distributed transaction exists.
+//   * PROBE (b)'s VENDOR-MIRROR LEG IS MEASURED, NEVER ASSUMED. "Does 0.3.250's mirror re-send the
+//     entries it READ, decoration among them?" is the one question inspection cannot answer, so it is
+//     a probe with a real runtime behind it. Measured in the fix wave: it does NOT — the decoration
+//     never reached the store (`docs/probes/materialized-resume.md`).
+//   * `sameRecord` TRUSTS `uuid` OVER BYTES. Two serializations of one entry can differ (key order, a
+//     re-encoded field) while naming the same entry; the uuid is the identity the dialect gives us, and
+//     comparing bytes would report a divergence where there is none.
+//   * THE TOOL-PAIRING CHECK HAS NO FINAL-ENTRY EXEMPTION, and an earlier version of this comment said
+//     it did. Fix round 1 removed it: an interrupted turn whose last entry is an unpaired `tool_use`
+//     FORKS at step 5 rather than being waved through, because "the transcript ends mid-tool-call" and
+//     "the transcript is fine" are not the same state and only one of them is safe to resume.
+//   * THE STAGING ROOT BELONGS TO THE DESTINATION FROM THE MOMENT IT IS HANDED OVER, not from the
+//     moment `confirmInit` answers: the destination spawns against that directory INSIDE the call, so
+//     unwinding must not delete it under a live child (whole-branch F-7).
+//
 // WHAT THIS FILE DOES NOT DO: ask the user anything. R-7b-3 splits WS-13 §8.2 — the router owns the
 // MECHANICS and the Claude-leg injection; "switch UX/confirmations" stay with the host (Phase 8,
 // D19c). `plan()` produces something a host can render and confirm; `execute()` acts on the plan it is
