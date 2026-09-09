@@ -290,6 +290,31 @@ describe("the official adapter", () => {
       expect((failure as Error).message).toContain("by recency");
     });
 
+    test("a SHARED spool root is never attributed to the most recent launch (review r1, M-1)", async () => {
+      const { module } = fakeClaudeModule();
+      const ctx = context(module);
+      const adapter = createOfficialAdapter(ctx, { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
+        lastDispatchedSupervisor?: { whenRecorded(): Promise<void> };
+      };
+      // TWO fresh sessions under the SAME spool — which is what `fresh-spool` means: one directory per
+      // home, shared by every fresh session (`spool.ts`'s own note). Before M-1 the map keyed by that
+      // root answered "whichever launched last", and a bare third dispatch was recorded on session B
+      // with the third session's pid — the recency guess item 6's own sentence forbids.
+      adapter.launch(launchPlan(officialOptionsFor(adapter), "session:A", SPOOL));
+      adapter.launch(launchPlan(officialOptionsFor(adapter), "session:B", SPOOL));
+      await ctx.directoryStore.upsert({ ...dispatchableEntry(SPOOL, "session:A") });
+      await ctx.directoryStore.upsert({ ...dispatchableEntry(SPOOL, "session:B") });
+
+      swallowStreamErrors(adapter.spawnProxy(spawnOptions(SPOOL)));
+      const failure: unknown = await adapter.lastDispatchedSupervisor?.whenRecorded().then((): unknown => undefined, (error: unknown): unknown => error);
+      expect(failure).toBeInstanceOf(OfficialConfigurationError);
+      expect((failure as Error).message).toContain("by recency");
+      // Neither launch's row was touched by a spawn that was not theirs.
+      for (const address of ["session:A", "session:B"]) {
+        expect((await ctx.directoryStore.load()).find((entry) => entry.address === address)?.processIdentity).toBeUndefined();
+      }
+    });
+
     test("an explicit `policy.sink` still wins — the default is a default", async () => {
       const { module } = fakeClaudeModule();
       const seen: string[] = [];

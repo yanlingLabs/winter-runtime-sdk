@@ -195,11 +195,21 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
   /**
    * WHICH SESSION A CONFIG DIR BELONGS TO — the map the DISPATCHER path needs (fix-wave concern 3).
    *
-   * `launch()`/`resume()` know both halves; the dispatcher knows only the root it observed. Every
-   * supported launch records the pair here (configured root AND, once the spawn happens, the observed
-   * one), so a host that follows §2's template — `buildOptions({ spawnProxy: adapter.spawnProxy })`
-   * and then the vendor's own `query()` — still gets §6 rule 2's durable record instead of the silent
-   * no-op it used to get.
+   * `launch()`/`resume()` know both halves; the dispatcher knows only the root it observed. A launch
+   * records the pair here so a host that follows §2's template — `buildOptions({ spawnProxy:
+   * adapter.spawnProxy })` and then the vendor's own `query()` — still gets §6 rule 2's durable record
+   * instead of the silent no-op it used to get.
+   *
+   * ONLY ROOTS THAT ARE UNIQUE PER GENERATION GO IN (review r1, M-1). §1's `fresh-spool` root is ONE
+   * DIRECTORY PER HOME, shared by every fresh session, so a map keyed by it answers "whichever session
+   * launched last" — which is the recency guess WS-14 §5 forbids, wearing this map as a hat. Measured
+   * on the head before this: two launches under the spool, then a bare dispatch of a THIRD session,
+   * recorded the third session's pid on the second session's row. A `claude-resume-<uuid>` staging root
+   * is unique per generation, so it is the only kind that can be attributed this way; a spool root has
+   * to be attributed by the directory, or refused.
+   *
+   * PRUNED WHEN THE GENERATION SETTLES, so a long-lived adapter's map does not grow by one entry per
+   * launch for ever.
    */
   const sinkByRoot = new Map<string, SpawnRecordSink>();
 
@@ -222,7 +232,11 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
       // THE LAUNCH'S OWN SINK, not merely its address — it carries the SEED, so a dispatch under a
       // root whose session has no directory row yet still records rather than failing on the
       // "no entry and no seed" branch a launch would never have hit.
-      const known = sinkByRoot.get(observedRoot);
+      //
+      // …AND ONLY FOR A ROOT THAT NAMES ONE GENERATION (M-1). A shared spool root skips the map
+      // entirely and must be attributed by the directory or refused, because "the most recent launch
+      // under the spool" is a guess about which session this spawn belongs to.
+      const known = classifyLocalWriteRoot(observedRoot).kind === "sdk-resume-staging" ? sinkByRoot.get(observedRoot) : undefined;
       if (known !== undefined) return known;
       const matches = (await context.directoryStore.load()).filter((entry) => entry.configDir === observedRoot);
       if (matches.length === 1) return directoryRecordSink({ store: context.directoryStore, address: (matches[0] as { address: string }).address });
@@ -385,14 +399,29 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     // because the caller's plan is theirs — and the ONLY field changed is the spawn hook.
     const launchSink = sinkFor(plan);
     const supervisor = makeProxy(plan.profile, plan.configDir, launchSink);
-    // The pair this launch knows and the dispatcher does not: both the CONFIGURED root and, once the
-    // wrapper hands the child a different one (§1 profile 2), the OBSERVED root, so a later bare
-    // dispatch under either can still be attributed to this session.
-    sinkByRoot.set(plan.configDir, launchSink);
+    // The pair this launch knows and the dispatcher does not: the CONFIGURED root and, once the
+    // wrapper hands the child a different one (§1 profile 2), the OBSERVED root — each registered only
+    // when it names ONE generation (M-1), which a `claude-resume-<uuid>` staging root does and the
+    // shared spool does not.
+    const registered: string[] = [];
+    const registerRoot = (root: string): void => {
+      if (classifyLocalWriteRoot(root).kind !== "sdk-resume-staging") return;
+      sinkByRoot.set(root, launchSink);
+      registered.push(root);
+    };
+    registerRoot(plan.configDir);
     void supervisor.whenRecorded().then(
       () => {
         const observed = supervisor.observation?.root.configDir;
-        if (observed !== undefined) sinkByRoot.set(observed, launchSink);
+        if (observed !== undefined) registerRoot(observed);
+      },
+      () => undefined,
+    );
+    // The generation is over: its roots name nothing any more, and the vendor deletes a staging root
+    // on the exit it observes.
+    void supervisor.whenSettled().then(
+      () => {
+        for (const root of registered.splice(0)) sinkByRoot.delete(root);
       },
       () => undefined,
     );
