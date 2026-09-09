@@ -130,7 +130,37 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
     return expired;
   }
 
+  /**
+   * WS-10 §13's decision, plus the three facts it was made from.
+   *
+   * A FREE FUNCTION, not a method, because `decide` needs it too and reaching it through `this` would
+   * break the moment a caller destructured the returned object — a shape that looks harmless and fails
+   * far from here. And it returns the FACTS rather than only the verdict, because `decide` has to name
+   * which half of the rule fired in its refusal, and asking the host's hooks a second time to find out
+   * would run a host's own code twice per message.
+   */
+  async function classifyDetailed(
+    receiver: RuntimeDirectoryEntry,
+    message: GlobalAgentMessage,
+    senderKnown: boolean,
+  ): Promise<{ decision: CrossSessionInbound; authenticated: boolean; explicitSetting: CrossSessionInbound | undefined; receiverClass: PermissionClassLabel }> {
+    const authenticated = deps.authenticatedRoute === undefined ? senderKnown : await deps.authenticatedRoute({ message, receiver, senderKnown });
+    const explicitSetting = deps.explicitSetting === undefined ? undefined : await deps.explicitSetting(receiver);
+    // The RECEIVER's class is asked of the runtime that holds the receiver; the SENDER's class rides on
+    // the envelope, stamped by the router at the sending end (WS-10 §13's matrix input). A caller-side
+    // `accept` can therefore still come back `held` — the envelope's class is an input, never a verdict.
+    const receiverClass = await deps.receiverClass(receiver);
+    const decision = resolveInboundDecision({
+      authenticated,
+      ...(explicitSetting === undefined ? {} : { explicitSetting }),
+      receiverClass,
+      senderClass: message.senderPermissionClass,
+    });
+    return { decision, authenticated, explicitSetting, receiverClass };
+  }
+
   return {
+    classify: async (receiver, message, senderKnown) => (await classifyDetailed(receiver, message, senderKnown)).decision,
     caps: { held: HELD_INBOX_CAP, accepted: ACCEPTED_QUEUE_CAP },
     mailbox,
     sweepExpired,
@@ -139,30 +169,11 @@ export function createInboundPolicy(deps: InboundPolicyDeps): InboundPolicy {
       return deps.store.mailboxes.listHeld(receiverKey);
     },
 
-    async classify(receiver, message, senderKnown) {
-      const authenticated = deps.authenticatedRoute === undefined ? senderKnown : await deps.authenticatedRoute({ message, receiver, senderKnown });
-      const explicitSetting = deps.explicitSetting === undefined ? undefined : await deps.explicitSetting(receiver);
-      // The RECEIVER's class is asked of the runtime that holds the receiver; the SENDER's class rides
-      // on the envelope, stamped by the router at the sending end (WS-10 §13's matrix input). A
-      // caller-side `accept` can therefore still come back `held` — the envelope's class is an input,
-      // never a verdict.
-      const receiverClass = await deps.receiverClass(receiver);
-      return resolveInboundDecision({
-        authenticated,
-        ...(explicitSetting === undefined ? {} : { explicitSetting }),
-        receiverClass,
-        senderClass: message.senderPermissionClass,
-      });
-    },
-
     async decide(receiver, message, senderKnown) {
       const receiverKey = receiver.address;
       await sweepExpired(receiverKey);
 
-      const authenticated = deps.authenticatedRoute === undefined ? senderKnown : await deps.authenticatedRoute({ message, receiver, senderKnown });
-      const explicitSetting = deps.explicitSetting === undefined ? undefined : await deps.explicitSetting(receiver);
-      const receiverClass = await deps.receiverClass(receiver);
-      const decision = await this.classify(receiver, message, senderKnown);
+      const { decision, authenticated, explicitSetting, receiverClass } = await classifyDetailed(receiver, message, senderKnown);
 
       if (decision === "refuse") {
         // "Refusal is terminal for that message ID" (WS-10 §13). Nothing is held, nothing is retried,
