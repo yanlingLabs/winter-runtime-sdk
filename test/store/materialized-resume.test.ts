@@ -11,9 +11,8 @@ import {
   HANDOFF_ENTRY_LABEL,
   materializedTranscriptPath,
   MaterializedResumeError,
-  RESUME_STAGING_PREFIX,
-  resumeStagingRoot,
 } from "../../src/store/index.ts";
+import { RESUME_STAGING_PREFIX, resumeStagingRoot } from "../../src/vendor-paths.ts";
 import type { MaterializedResumeProbeDetail } from "../../src/store/index.ts";
 import { sidecarPathFor, withStoreBed } from "./support.ts";
 

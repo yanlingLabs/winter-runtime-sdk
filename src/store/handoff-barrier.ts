@@ -41,7 +41,8 @@ import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffStep, HandoffS
 import type { MaterializedResumeDoor } from "../seams/materialized-resume.ts";
 import type { SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import type { RuntimeKind, RuntimeSelection } from "../selection/runtime-selection.ts";
-import { createMaterializedResumeDecorator, materializedTranscriptPath, resumeStagingRoot, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
+import { createMaterializedResumeDecorator, materializedTranscriptPath, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
+import { resumeStagingRoot } from "../vendor-paths.ts";
 import { canonicalTranscriptPath, compareTranscriptTail, localTranscriptPath, reconcileLocalWriteRoot, scanLocalWriteRoot } from "./reconcile.ts";
 import { materializeTempContinuity, resolveEngineTempLayout, tempContinuityModeFor, type EngineTempLayout } from "./temp-continuity.ts";
 import { lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";

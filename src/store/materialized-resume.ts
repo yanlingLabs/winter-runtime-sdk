@@ -36,6 +36,11 @@ import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sd
 
 
 import { RuntimeSdkError } from "../errors.ts";
+// The vendor's staging-root vocabulary, defined ONCE for the whole package (review r4, N13): this
+// lane STAGES a root and Lane A's `src/official/spool.ts` RECOGNISES an observed one, so the two
+// cannot drift — they are the same function. See `src/vendor-paths.ts`'s header for the argument
+// order and why a mirrored second copy was a real hazard rather than a tidiness complaint.
+import { resumeStagingRoot } from "../vendor-paths.ts";
 import type { SeamContext } from "../seams/context.ts";
 import type {
   MaterializedResumeDecorator,
@@ -50,9 +55,6 @@ import { canonicalTranscriptPath } from "./reconcile.ts";
 import { reconcileLocalWriteRoot } from "./reconcile.ts";
 import { createSharedSessionStore, lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";
 
-/** The vendor's own staging prefix (WS-14 §1, WS-05 §9). A Claude-mirroring literal, never rebranded. */
-export const RESUME_STAGING_PREFIX = "claude-resume-";
-
 /** The provider-state sidecar's suffix (WS-05 §13). Named here only so the probes can leave it alone. */
 export const PROVIDER_STATE_SUFFIX = ".provider-state.jsonl";
 
@@ -64,17 +66,6 @@ export class MaterializedResumeError extends RuntimeSdkError {
   constructor(reason: string) {
     super(`winter-runtime-sdk: the handoff decoration could not be produced — ${reason}`);
   }
-}
-
-/**
- * The staging root a store-backed resume reads from: `<os.tmpdir()>/claude-resume-<uuid>`.
- *
- * WS-05 §9: "Store-backed resume still stages under SDK-parent `os.tmpdir()/claude-resume-<uuid>`."
- * Lane A's `src/official/spool.ts` builds the same path for the launch side and classifies an OBSERVED
- * one; `test/store/materialized-resume.test.ts` asserts the two agree, so the two lanes cannot drift.
- */
-export function resumeStagingRoot(uuid: string, base: string = tmpdir()): string {
-  return join(base, `${RESUME_STAGING_PREFIX}${uuid}`);
 }
 
 /** Where inside a staging root the destination runtime reads this session's transcript. */

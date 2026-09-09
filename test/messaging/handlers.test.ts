@@ -11,7 +11,8 @@
 // NOT enumerate exited transcripts on disk".
 import { describe, expect, test } from "bun:test";
 
-import { acceptNativeListAgentsArgs, acceptNativeSendMessageArgs, createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { acceptNativeListAgentsArgs, acceptNativeSendMessageArgs } from "../../src/native-args.ts";
 import { childEntry, createBed, createFakeFacet, sessionEntry, winterHandle } from "./support.ts";
 
 function bedWith() {

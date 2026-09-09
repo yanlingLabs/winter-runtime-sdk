@@ -64,8 +64,9 @@ export {
   materializedTranscriptPath,
   MaterializedResumeError,
   PROVIDER_STATE_SUFFIX,
-  RESUME_STAGING_PREFIX,
-  resumeStagingRoot,
+  // `RESUME_STAGING_PREFIX`/`resumeStagingRoot` are NOT here: they are the vendor's own vocabulary,
+  // shared with Lane A, and they live in `src/vendor-paths.ts` with one definition and one argument
+  // order (review r4, N13). The package barrel exports them once.
 } from "./materialized-resume.ts";
 export type {
   CrashPairClassification,

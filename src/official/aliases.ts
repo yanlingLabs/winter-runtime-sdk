@@ -50,114 +50,29 @@ export function aliasTargetFor(builtin: AliasedBuiltin, brand: Pick<BrandProfile
 }
 
 // --------------------------------------------------------------------------------------------------
-// The NATIVE argument schemas (WS-10 §10.1/§10.2), mirrored so the handler can accept them exactly.
+// The NATIVE argument schemas (WS-10 §10.1/§10.2) live in `src/native-args.ts`, ONCE.
 // --------------------------------------------------------------------------------------------------
 //
-// INDEPENDENTLY AUTHORED, and a deliberate MIRROR of the Winter branch's own descriptors rather than
-// a variant: the two branches must present "this EXACT model-facing schema" (WS-10 §10.1), and the
-// alias makes that a hard requirement rather than a nicety — the model emits the native block and the
-// canonical handler is what receives it.
-
-/** WS-10 §10.1's constraints on `to`: required, ≤300 chars, no newline, and never the broadcast star. */
-export const SEND_MESSAGE_TO_MAX = 300;
-export const SEND_MESSAGE_SUMMARY_MAX = 200;
-
-export const NATIVE_SEND_MESSAGE_SCHEMA = {
-  type: "object",
-  properties: {
-    to: { type: "string", maxLength: SEND_MESSAGE_TO_MAX, description: 'no newline, no "*" broadcast' },
-    message: { type: "string", description: 'required; defaults "" for pure idle subscription' },
-    summary: { type: "string", maxLength: SEND_MESSAGE_SUMMARY_MAX },
-    notify_when_idle: { type: "boolean", description: "one-shot; main conversation -> same-machine session only" },
-  },
-  required: ["to", "message"],
-} as const;
-
-export const NATIVE_LIST_AGENTS_SCHEMA = {
-  type: "object",
-  properties: {
-    channel: { type: "string", maxLength: 256, description: "reserved" },
-    q: { type: "string", maxLength: 256, description: "reserved" },
-  },
-} as const;
-
-/** WS-10 §10.2: "`ListAgents` output is EXACTLY `{ listing: string }`." */
-export const NATIVE_LIST_AGENTS_OUTPUT_SCHEMA = {
-  type: "object",
-  properties: { listing: { type: "string" } },
-  required: ["listing"],
-} as const;
-
-/** The native `SendMessage` arguments, after validation. */
-export interface NativeSendMessageArgs {
-  to: string;
-  message: string;
-  summary?: string;
-  notify_when_idle?: boolean;
-}
-
-export interface NativeListAgentsArgs {
-  channel?: string;
-  q?: string;
-}
-
-export type NativeArgsResult<T> = { ok: true; args: T } | { ok: false; reason: string };
-
-/**
- * Accepts the native `SendMessage` arguments EXACTLY — no more, no less.
- *
- * "No more" matters as much as "no less": an alias target that quietly accepted an extra field would
- * be a second, undocumented schema reachable only through the alias, which is precisely the
- * "incompatible alias target" §7 forbids. A refusal is DATA rather than a throw, because the handler
- * turns it into a tool_result the model can read and correct.
- */
-export function acceptNativeSendMessageArgs(input: unknown): NativeArgsResult<NativeSendMessageArgs> {
-  if (typeof input !== "object" || input === null) return { ok: false, reason: "expected an object of SendMessage arguments" };
-  const record = input as Record<string, unknown>;
-  const known = new Set(Object.keys(NATIVE_SEND_MESSAGE_SCHEMA.properties));
-  const extra = Object.keys(record).filter((key) => !known.has(key));
-  if (extra.length > 0) return { ok: false, reason: `unknown argument(s): ${extra.join(", ")}` };
-  const { to, message, summary, notify_when_idle: notifyWhenIdle } = record;
-  if (typeof to !== "string" || to.length === 0) return { ok: false, reason: "`to` is required and must be a string" };
-  if (to.length > SEND_MESSAGE_TO_MAX) return { ok: false, reason: `\`to\` must be at most ${SEND_MESSAGE_TO_MAX} characters` };
-  if (to.includes("\n")) return { ok: false, reason: "`to` must not contain a newline" };
-  if (to === "*") return { ok: false, reason: "broadcast is not addressable: `to` must name one recipient" };
-  if (typeof message !== "string") return { ok: false, reason: "`message` is required and must be a string" };
-  if (summary !== undefined && (typeof summary !== "string" || summary.length > SEND_MESSAGE_SUMMARY_MAX)) {
-    return { ok: false, reason: `\`summary\` must be a string of at most ${SEND_MESSAGE_SUMMARY_MAX} characters` };
-  }
-  if (notifyWhenIdle !== undefined && typeof notifyWhenIdle !== "boolean") return { ok: false, reason: "`notify_when_idle` must be a boolean" };
-  return {
-    ok: true,
-    args: {
-      to,
-      message,
-      ...(summary === undefined ? {} : { summary }),
-      ...(notifyWhenIdle === undefined ? {} : { notify_when_idle: notifyWhenIdle }),
-    },
-  };
-}
-
-/** The same treatment for `ListAgents`: both fields are reserved, both optional, nothing else. */
-export function acceptNativeListAgentsArgs(input: unknown): NativeArgsResult<NativeListAgentsArgs> {
-  if (input === undefined || input === null) return { ok: true, args: {} };
-  if (typeof input !== "object") return { ok: false, reason: "expected an object of ListAgents arguments" };
-  const record = input as Record<string, unknown>;
-  const known = new Set(Object.keys(NATIVE_LIST_AGENTS_SCHEMA.properties));
-  const extra = Object.keys(record).filter((key) => !known.has(key));
-  if (extra.length > 0) return { ok: false, reason: `unknown argument(s): ${extra.join(", ")}` };
-  for (const field of ["channel", "q"] as const) {
-    const value = record[field];
-    if (value !== undefined && (typeof value !== "string" || value.length > 256)) return { ok: false, reason: `\`${field}\` must be a string of at most 256 characters` };
-  }
-  return {
-    ok: true,
-    args: {
-      ...(typeof record["channel"] === "string" ? { channel: record["channel"] } : {}),
-      ...(typeof record["q"] === "string" ? { q: record["q"] } : {}),
-    },
-  };
-}
+// This lane authored its own copy first, and the whole-branch gate is why it no longer has one
+// (review r4, N13): the Winter branch's canonical handler had a second acceptor for the same
+// model-facing contract, and the two had already drifted — one refused a bare `"*"`, the other
+// refused `"*"` anywhere, and they returned different prose for the same refusal. WS-10 §10.1 says
+// BOTH branches present "this exact model-facing schema", and the alias is what makes that a hard
+// requirement rather than a nicety: the model emits the NATIVE block and the canonical handler is
+// what receives it. Two copies is precisely how that stops being true, invisibly, in the one place
+// neither lane's tests look. Re-exported here so this module still reads as the alias contract's
+// home; `src/official/index.ts` does not re-export them (the package barrel does, once).
+export {
+  LIST_AGENTS_FIELD_MAX,
+  NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
+  NATIVE_LIST_AGENTS_SCHEMA,
+  NATIVE_SEND_MESSAGE_SCHEMA,
+  SEND_MESSAGE_SUMMARY_MAX,
+  SEND_MESSAGE_TO_MAX,
+  acceptNativeListAgentsArgs,
+  acceptNativeSendMessageArgs,
+} from "../native-args.ts";
+export type { NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } from "../native-args.ts";
 
 /**
  * How the canonical duplicates are exposed (§7's "SHOULD be deferred/hidden").

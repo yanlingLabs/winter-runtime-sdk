@@ -25,8 +25,11 @@ export type { InboundPolicy, InboundPolicyDeps, InboundPolicyHooks, InboundVerdi
 export { createAttachedSessionRegistry } from "./sessions.ts";
 export type { AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession, LiveSessionStatus } from "./sessions.ts";
 export { renderAttributedTurn, renderOwnerQualifiedTurn, UnattributableSenderError } from "./attribution.ts";
-export { acceptNativeListAgentsArgs, acceptNativeSendMessageArgs, createMessagingToolHandlers, SEND_MESSAGE_SUMMARY_MAX } from "./handlers.ts";
-export type { MessagingToolCaller, MessagingToolHandler, MessagingToolHandlers, MessagingToolResult, NativeListAgentsArgs, NativeSendMessageArgs, NativeArgsResult } from "./handlers.ts";
+export { createMessagingToolHandlers } from "./handlers.ts";
+export type { MessagingToolCaller, MessagingToolHandler, MessagingToolHandlers, MessagingToolResult } from "./handlers.ts";
+// The native schemas, their acceptors and their bounds are NOT here: they are WS-10 §10.1/§10.2's
+// model-facing contract, shared with the official branch's alias targets, and they live in
+// `src/native-args.ts` with one definition (review r4, N13). The package barrel exports them once.
 
 import { createRuntimeDirectory, type RuntimeDirectoryHandle, type RuntimeDirectoryOptions } from "../directory/directory.ts";
 import type { SeamContext } from "../seams/context.ts";

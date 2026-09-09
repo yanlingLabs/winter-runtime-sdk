@@ -53,7 +53,13 @@ describe("WS-14 §7 — the alias map", () => {
       expect(acceptNativeSendMessageArgs({ to: "r", message: "m", priority: "high" })).toEqual({ ok: false, reason: "unknown argument(s): priority" });
       expect(acceptNativeSendMessageArgs({ message: "m" }).ok).toBe(false);
       expect(acceptNativeSendMessageArgs({ to: "r" }).ok).toBe(false);
-      expect(acceptNativeSendMessageArgs({ to: "*", message: "m" })).toEqual({ ok: false, reason: "broadcast is not addressable: `to` must name one recipient" });
+      // `to` is validated by the SDK subpath's own `validateToField` since review r4's N13 unified
+      // the two acceptors, so the REASON is the subpath's prose — and its rule is the stricter one:
+      // `"*"` is refused ANYWHERE in `to`, not only as the whole field.
+      const broadcast = acceptNativeSendMessageArgs({ to: "*", message: "m" });
+      expect(broadcast.ok).toBe(false);
+      if (!broadcast.ok) expect(broadcast.reason).toContain("broadcast");
+      expect(acceptNativeSendMessageArgs({ to: "a*b", message: "m" }).ok).toBe(false);
       expect(acceptNativeSendMessageArgs({ to: "a\nb", message: "m" }).ok).toBe(false);
       expect(acceptNativeSendMessageArgs({ to: "x".repeat(301), message: "m" }).ok).toBe(false);
       expect(acceptNativeSendMessageArgs({ to: "r", message: "m", summary: "s".repeat(201) }).ok).toBe(false);

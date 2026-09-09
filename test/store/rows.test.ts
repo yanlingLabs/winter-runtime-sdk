@@ -20,12 +20,12 @@ import {
   localTranscriptPath,
   materializeTempContinuity,
   resolveEngineTempLayout,
-  RESUME_STAGING_PREFIX,
   tempContinuityDisclosure,
   type CompatibilityLevel,
   type EngineTempLayout,
   type HandoffSourceOwner,
 } from "../../src/store/index.ts";
+import { RESUME_STAGING_PREFIX } from "../../src/vendor-paths.ts";
 import { selectionFor, withStoreBed, type StoreBed } from "./support.ts";
 
 const LEVELS: CompatibilityLevel[] = ["conversation", "agent-state", "full-filesystem"];

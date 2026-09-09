@@ -16,87 +16,13 @@
 // outcome. Resolution, policy, the ledger and the adapters are all above/below them, once, for both
 // branches — which is what makes the two branches' behaviour the same behaviour rather than the same
 // intention.
-import { validateToField } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { DeliveryOutcome } from "@yanlinglabs/winter-agent-sdk/messaging";
 
 import { callerAddressOf, type GlobalMessagingHandle } from "./router.ts";
-
-/** WS-10 §10.1's pinned bounds. `to` is validated by the subpath's own `validateToField`. */
-export const SEND_MESSAGE_SUMMARY_MAX = 200;
-
-/** The native `SendMessage` arguments (WS-10 §10.1), after validation. */
-export interface NativeSendMessageArgs {
-  to: string;
-  message: string;
-  summary?: string;
-  notify_when_idle?: boolean;
-}
-
-/** The native `ListAgents` arguments (WS-10 §10.2). Both fields are reserved in the pinned build. */
-export interface NativeListAgentsArgs {
-  channel?: string;
-  q?: string;
-}
-
-export type NativeArgsResult<T> = { ok: true; args: T } | { ok: false; reason: string };
-
-const SEND_MESSAGE_FIELDS = new Set(["to", "message", "summary", "notify_when_idle"]);
-const LIST_AGENTS_FIELDS = new Set(["channel", "q"]);
-
-/**
- * Accept the native `SendMessage` arguments EXACTLY.
- *
- * `to`'s own rules (required, ≤300 chars, no newline, never the `"*"` broadcast) come from the
- * subpath's `validateToField` rather than from a second copy here — the Winter branch's tool surface
- * validates with the same function, so "both runtime branches MUST present this exact model-facing
- * schema" (WS-10 §10.1) is true by construction rather than by review.
- */
-export function acceptNativeSendMessageArgs(input: unknown): NativeArgsResult<NativeSendMessageArgs> {
-  if (typeof input !== "object" || input === null) return { ok: false, reason: "expected an object of SendMessage arguments" };
-  const record = input as Record<string, unknown>;
-  const extra = Object.keys(record).filter((key) => !SEND_MESSAGE_FIELDS.has(key));
-  if (extra.length > 0) return { ok: false, reason: `unknown argument(s): ${extra.join(", ")}` };
-  const to = record["to"];
-  const validated = validateToField(to);
-  if (!validated.ok) return { ok: false, reason: validated.message };
-  const message = record["message"];
-  if (typeof message !== "string") return { ok: false, reason: "`message` is required and must be a string (an empty string is a pure idle subscription)" };
-  const summary = record["summary"];
-  if (summary !== undefined && (typeof summary !== "string" || summary.length > SEND_MESSAGE_SUMMARY_MAX)) {
-    return { ok: false, reason: `\`summary\` must be a string of at most ${SEND_MESSAGE_SUMMARY_MAX} characters` };
-  }
-  const notify = record["notify_when_idle"];
-  if (notify !== undefined && typeof notify !== "boolean") return { ok: false, reason: "`notify_when_idle` must be a boolean" };
-  return {
-    ok: true,
-    args: {
-      to: to as string,
-      message,
-      ...(summary === undefined ? {} : { summary: summary as string }),
-      ...(notify === undefined ? {} : { notify_when_idle: notify }),
-    },
-  };
-}
-
-/** The same treatment for `ListAgents`: two reserved optional fields, both ≤256 chars, nothing else. */
-export function acceptNativeListAgentsArgs(input: unknown): NativeArgsResult<NativeListAgentsArgs> {
-  if (input === undefined || input === null) return { ok: true, args: {} };
-  if (typeof input !== "object") return { ok: false, reason: "expected an object of ListAgents arguments" };
-  const record = input as Record<string, unknown>;
-  const extra = Object.keys(record).filter((key) => !LIST_AGENTS_FIELDS.has(key));
-  if (extra.length > 0) return { ok: false, reason: `unknown argument(s): ${extra.join(", ")}` };
-  for (const field of ["channel", "q"] as const) {
-    const value = record[field];
-    if (value !== undefined && (typeof value !== "string" || value.length > 256)) return { ok: false, reason: `\`${field}\` must be a string of at most 256 characters` };
-  }
-  return {
-    ok: true,
-    args: {
-      ...(typeof record["channel"] === "string" ? { channel: record["channel"] } : {}),
-      ...(typeof record["q"] === "string" ? { q: record["q"] } : {}),
-    },
-  };
-}
+// ONE definition of the model-facing schemas and their acceptors, shared with the official branch's
+// alias targets (review r4, N13). WS-10 §10.1 requires "this exact model-facing schema" on BOTH
+// branches, and two copies is how that stops being true; see `src/native-args.ts`'s header.
+import { acceptNativeListAgentsArgs, acceptNativeSendMessageArgs } from "../native-args.ts";
 
 /** The MCP result shape both branches return — structurally the descriptor's own (WS-14 §11). */
 export interface MessagingToolResult {

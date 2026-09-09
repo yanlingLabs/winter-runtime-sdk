@@ -25,7 +25,8 @@ import type { RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
 import { directoryRecordSink, type SpawnObservation } from "../../src/official/spawn-proxy.ts";
-import { isResumeStagingRoot, vendorTempRootReport } from "../../src/official/spool.ts";
+import { vendorTempRootReport } from "../../src/official/spool.ts";
+import { isResumeStagingRoot } from "../../src/vendor-paths.ts";
 import { cleanupHermetic, decoyUntouched, hermeticSession, officialRuntimeBed, scriptedLoopback, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();

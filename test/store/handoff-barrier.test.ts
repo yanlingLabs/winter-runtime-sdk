@@ -16,7 +16,6 @@ import {
   localTranscriptPath,
   releaseHandoffLease,
   resolveEngineTempLayout,
-  RESUME_STAGING_PREFIX,
   validateSessionTranscript,
   type HandoffBarrierDeps,
   type HandoffSourceOwner,
@@ -27,6 +26,7 @@ import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { createInMemoryRuntimeDirectoryStore, type RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import { createSharedSessionStore, HandoffWiringError } from "../../src/store/index.ts";
+import { RESUME_STAGING_PREFIX } from "../../src/vendor-paths.ts";
 import { selectionFor, sidecarPathFor, withStoreBed, type StoreBed } from "./support.ts";
 
 const OK: HandoffStepReport = { ok: true };

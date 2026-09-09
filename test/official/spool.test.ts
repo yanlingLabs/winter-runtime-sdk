@@ -8,14 +8,13 @@ import { WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
 
 import { OfficialConfigurationError } from "../../src/official/errors.ts";
 import {
-  RESUME_STAGING_PREFIX,
   classifyLocalWriteRoot,
-  isResumeStagingRoot,
   officialSpoolRoot,
-  resumeStagingRoot,
   validateObservedConfigDir,
   vendorTempRootReport,
 } from "../../src/official/spool.ts";
+// ONE definition, shared with Lane C, and ONE argument order — `(uuid, base)` (review r4, N13).
+import { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "../../src/vendor-paths.ts";
 
 const brand = WINTER_BRAND;
 
@@ -27,8 +26,8 @@ describe("WS-14 §1 — launch profiles and the authoritative root", () => {
   });
 
   test("a staging root is recognised by BASENAME, never by substring", () => {
-    expect(isResumeStagingRoot(resumeStagingRoot("/tmp", "a1e35775"))).toBe(true);
-    expect(resumeStagingRoot("/tmp/", "u")).toBe(`/tmp/${RESUME_STAGING_PREFIX}u`);
+    expect(isResumeStagingRoot(resumeStagingRoot("a1e35775", "/tmp"))).toBe(true);
+    expect(resumeStagingRoot("u", "/tmp/")).toBe(`/tmp/${RESUME_STAGING_PREFIX}u`);
     // a project directory that merely CONTAINS the prefix higher up is not a staging root
     expect(isResumeStagingRoot("/tmp/claude-resume-9/projects/key")).toBe(false);
     // the bare prefix with no uuid is not one either
