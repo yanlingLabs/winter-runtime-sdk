@@ -37,10 +37,14 @@ import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } fr
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
-import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffStep, HandoffStepNumber } from "../seams/handoff.ts";
+import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffSelection, HandoffStep, HandoffStepNumber } from "../seams/handoff.ts";
 import type { MaterializedResumeDoor } from "../seams/materialized-resume.ts";
 import type { SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
-import type { RuntimeKind, RuntimeSelection } from "../selection/runtime-selection.ts";
+import type { RuntimeKind, RuntimeSelection, SelectionInput } from "../selection/runtime-selection.ts";
+// LANE D'S DOOR, and the one consumer it was owed (fix wave, item 20). `reviewPersistedSelection`
+// answers "what would a fresh decision say about this session today" without ever rewriting the
+// record — which is exactly the question a handoff has to ask before it moves ownership.
+import { reviewPersistedSelection } from "../selection/select-runtime.ts";
 import { createMaterializedResumeDecorator, materializedTranscriptPath, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
 import { resumeStagingRoot } from "../vendor-paths.ts";
 import { canonicalTranscriptPath, compareTranscriptTail, localTranscriptPath, reconcileLocalWriteRoot, scanLocalWriteRoot } from "./reconcile.ts";
@@ -188,6 +192,15 @@ export interface HandoffBarrierDeps {
   stagingRootFor?: (uuid: string) => string;
   /** The temp layout for a session. Defaults to D18's derivation from the resolved brand. */
   tempLayoutFor?: (entry: RuntimeDirectoryEntry, session: SessionKey) => EngineTempLayout;
+  /**
+   * The catalog and credentials a FRESH selection decision needs, so `plan()` can ask Lane D whether
+   * the destination branch can actually serve this session (fix wave, item 20).
+   *
+   * ABSENT MEANS UNREVIEWED, NOT ASSUMED-FINE. Only the host has the model catalog and the credential
+   * presence map; the barrier will not synthesise them, and a plan built without them says
+   * `selection.kind === "unreviewed"` in so many words rather than implying a check that never ran.
+   */
+  selectionInputFor?: (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }) => SelectionInput | Promise<SelectionInput>;
   /** The handoff note's text. The host owns the wording; this is the default. */
   noteText?: (args: { from: RuntimeKind; to: RuntimeKind; session: SessionKey }) => string;
   now?: () => Date;
@@ -368,6 +381,81 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     return markers;
   };
 
+  /**
+   * CAN THE DESTINATION BRANCH SERVE THIS SESSION'S SELECTION? (fix wave, item 20 — Lane D's door
+   * gains the consumer Lane C's report said it was owed.)
+   *
+   * THE TEST IS ASYMMETRIC BECAUSE THE TWO BRANCHES ARE. `decideRuntime`'s own table is the authority
+   * for the official branch: it returns `claude-agent` for exactly the rows that branch serves (the
+   * Claude family, in a mode that allows it, over a backend the official runtime speaks, with a peer
+   * present) and `winter-agent` for every other row. So "the fresh decision would route this session
+   * to the official runtime" IS "the official runtime can serve it", and nothing else here has to
+   * re-derive that rule. Winter, by contrast, serves whatever the catalog serves — with ONE exception
+   * the table states unconditionally: a Claude OAuth credential "never routes to winter" (D28,
+   * WS-13c §0), which is the one refusal a `winter-agent` destination can earn.
+   *
+   * A REFUSAL IS NEVER A SUBSTITUTION. The barrier does not pick a different provider for the
+   * destination — that is the selector's business — so a session whose row is gone entirely
+   * (`fresh-refused`) travels with Lane D's own refusal object, verbatim.
+   */
+  const reviewSelectionFor = async (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }): Promise<HandoffSelection> => {
+    const { persisted, to } = args;
+    const stamped = { ...persisted, runtimeKind: to };
+    if (deps.selectionInputFor === undefined) {
+      return {
+        kind: "unreviewed",
+        selection: stamped,
+        detail: `no selection input was supplied, so nothing checked whether ${to} can serve ${persisted.providerId}/${persisted.modelRef}; the destination's own init is the first thing that will (supply \`selectionInputFor\` to review it here instead)`,
+      };
+    }
+    const supplied = await deps.selectionInputFor(args);
+    // THE REQUEST IS PINNED TO THE RECORDED ROW, and this is the whole correctness of the check.
+    // `reviewPersistedSelection` re-decides from `input.requested`, which for a HOST's input means
+    // "what would this session ask for if it were new" — a question whose answer is about a different
+    // row entirely (with an empty request it falls through to the listing's ACTIVE slot set, so a
+    // session persisted on Gemini would be reviewed against a Claude row and pass). What a handoff
+    // has to ask is "is the row this session is RECORDED on still servable, and where does it route
+    // today", so the recorded provider and model are pinned into the resolution — the same technique
+    // `resumeChildSelection` uses for the same question, and for the same reason (WS-10's Phase 6.6
+    // amendment: "the resolved provider id must equal the recorded one").
+    const input: SelectionInput = { ...supplied, requested: { provider: persisted.providerId, model: persisted.modelRef } };
+    const review = reviewPersistedSelection({ ...input, persisted });
+    if (review.kind === "fresh-refused") {
+      return {
+        kind: "refused",
+        refusal: review.refusal,
+        detail: `this session's persisted selection is no longer servable at all: ${review.refusal.detail}`,
+      };
+    }
+    if (to === "winter-agent" && persisted.authFamily === "claude-oauth") {
+      return {
+        kind: "refused",
+        refusal: {
+          refused: true,
+          reason: "runtime-unavailable",
+          detail: `${persisted.modelRef} is persisted under a Claude OAuth credential, which never routes to the Winter runtime (D28, WS-13c §0); handing this session to winter-agent would require a different credential, and choosing one is the selector's business rather than the barrier's`,
+        },
+        detail: "a Claude OAuth credential never routes to the Winter runtime (D28)",
+      };
+    }
+    if (to === "claude-agent" && review.fresh.runtimeKind !== "claude-agent") {
+      return {
+        kind: "refused",
+        refusal: {
+          refused: true,
+          reason: "runtime-unavailable",
+          detail: `a fresh decision over this host's catalog routes ${persisted.providerId}/${persisted.modelRef} to ${review.fresh.runtimeKind} (${review.fresh.reason}), so the official runtime does not serve it; the barrier will not invent a provider the destination can serve (WS-00 §2, D13)`,
+        },
+        detail: `the official runtime does not serve ${persisted.providerId}/${persisted.modelRef}`,
+      };
+    }
+    // THE SELECTION THAT TRAVELS IS THE PERSISTED ONE, with the destination's runtime stamped on it —
+    // never `review.fresh`. D13 makes the persisted choice authoritative and a handoff moves the
+    // RUNTIME, not the model: adopting a fresh provider here would be the silent rewrite D13 forbids.
+    // `review` is carried beside it so a host can render `handoff-required`'s proposal itself.
+    return { kind: "servable", selection: stamped, review };
+  };
+
   const plan = async (session: SessionKey, to: RuntimeKind): Promise<HandoffPlan> => {
     const entry = await loadEntry(session);
     assertOneDecoratorStore();
@@ -375,6 +463,11 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     const owner = (await deps.participants?.source?.(session, from)) ?? undefined;
     const health = owner?.health === undefined ? undefined : await owner.health();
     const markers = markersFor({ entry, to, session, ...(health === undefined ? {} : { health }) });
+    const selection = await reviewSelectionFor({ session, from, to, persisted: entry.selection });
+    // A DESTINATION THAT CANNOT SERVE THE SELECTION MAKES STEP 8 KNOWN-UNPROVABLE, which is exactly
+    // what `knownUnprovable` is for: a host renders "this will be a fork, here is why" BEFORE it
+    // confirms, instead of after the lease, the drain and the staging have all run.
+    if (selection.kind === "refused") markers.set(8, selection.refusal.detail);
     const steps: HandoffStep[] = HANDOFF_STEPS.map(({ step, name }) => {
       const knownUnprovable = markers.get(step);
       return knownUnprovable === undefined ? { step, name } : { step, name, knownUnprovable };
@@ -386,6 +479,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       steps,
       decorationDoor: decoratorOf().door,
       tempContinuity: tempContinuityModeFor(to),
+      selection,
     };
   };
 
@@ -404,6 +498,14 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     };
 
     const session = plan.session;
+    // A DESTINATION THAT CANNOT SERVE THIS SELECTION NEVER GETS THE SESSION (fix wave, item 20).
+    // Refused BEFORE the lease, the drain and the staging, because `plan()` already knows: WS-05 §12's
+    // rule for an unprovable step is "keep the source owner, offer a visibly lossy fork", and this is
+    // the cheapest possible way to obey it. The step is 8 — the destination's own — so the outcome
+    // names the obstacle rather than the moment it was noticed.
+    if (plan.selection.kind === "refused") {
+      return lossy(8, plan.selection.refusal.detail);
+    }
     // EVERY AWAIT IS INSIDE THE TRY (review r3, N10). N3 wrapped the destination side and left the
     // symmetric source-side calls — `loadEntry`, the source resolver, `owner.health()` — outside it, so
     // `execute()` still had a fourth arm: an unknown session, an unreachable directory or a throwing
@@ -626,13 +728,14 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         ...(stagingRoot === undefined ? {} : { stagingRoot, profile: "store-backed-resume" as const }),
         effectiveTempDir: continuity.effectiveTempDir,
         door: decorated.door,
-        // The persisted selection, with the RUNTIME it is being handed to (review r2, nit 3: the target
-        // used to say `runtimeKind: <source>` while the `resumed` outcome said `<destination>`). The
-        // provider, model and auth family are NOT rewritten — WS-00 §2's D13 makes the persisted choice
-        // authoritative, and deciding a session serves a different provider is the selector's business,
-        // never the barrier's. A destination whose branch cannot serve this selection is the host's
-        // question, asked before it calls `handoff()`.
-        selection: { ...entry.selection, runtimeKind: plan.to },
+        // The selection the PLAN carries, which is the persisted one with the destination's runtime
+        // stamped on it (review r2, nit 3: the target used to say `runtimeKind: <source>` while the
+        // `resumed` outcome said `<destination>`). The provider, model and auth family are NOT
+        // rewritten — WS-00 §2's D13 makes the persisted choice authoritative, and deciding a session
+        // serves a different provider is the selector's business, never the barrier's. What IS new
+        // (fix wave, item 20) is that a destination which cannot serve it never reaches this line:
+        // `plan()` asked Lane D and `execute()` refused at the top.
+        selection: plan.selection.selection,
       };
       const destination = (await deps.participants?.destination?.(session, plan.to)) ?? undefined;
       if (destination === undefined) {
@@ -698,7 +801,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
 
       return {
         kind: "resumed",
-        selection: { ...entry.selection, runtimeKind: plan.to },
+        selection: plan.selection.selection,
         step: 8,
         detail: `the session resumed on ${plan.to} at level ${level} through the ${decorated.door} decoration door${notes.length === 0 ? "" : ` — ${notes.join("; ")}`}`,
         target,
@@ -715,7 +818,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // root it now owns, and this arm is one of the two that can leak one deliberately.
         return {
           kind: "resumed",
-          selection: { ...entry.selection, runtimeKind: plan.to },
+          selection: plan.selection.selection,
           step: 8,
           detail: `the session resumed on ${plan.to}, but the barrier failed afterwards: ${detail}`,
           ...(target === undefined ? {} : { target }),

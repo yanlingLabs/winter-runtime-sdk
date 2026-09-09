@@ -28,6 +28,10 @@ import { createInMemoryRuntimeDirectoryStore, type RuntimeDirectoryStore } from 
 import { createSharedSessionStore, HandoffWiringError } from "../../src/store/index.ts";
 import { RESUME_STAGING_PREFIX } from "../../src/vendor-paths.ts";
 import { selectionFor, sidecarPathFor, withStoreBed, type StoreBed } from "./support.ts";
+// Lane D's own fixtures, so the review is measured against the catalog shape the selector really
+// takes rather than against a second hand-rolled one (fix wave, item 20).
+import { NOW, VERSIONS, credentials, listing } from "../selection/fixtures.ts";
+import type { RuntimeSelection, SelectionInput } from "../../src/selection/runtime-selection.ts";
 
 const OK: HandoffStepReport = { ok: true };
 
@@ -1537,5 +1541,173 @@ describe("fix round 3 — the last four edges", () => {
       },
       { store: RefusesTheProducerRecord, policy: { backoffMs: 1 } },
     );
+  });
+});
+
+// ====================================================================================================
+// ITEM 20 — LANE D's DOOR, AND THE ONE CONSUMER IT WAS OWED.
+//
+// `reviewPersistedSelection` shipped with Lane D and had no caller anywhere in the package; the
+// barrier, meanwhile, stamped the destination's `runtimeKind` over the SOURCE's provider fields and
+// left "can that branch actually serve this?" to the destination's own `confirmInit` — i.e. to a
+// point AFTER the lease, the drain, the producer-record window and the staged copy. The two facts
+// were one gap. `plan()` now asks, and a destination that cannot serve the selection never gets the
+// session.
+//
+// THE TEST IS ASYMMETRIC BECAUSE THE BRANCHES ARE: `decideRuntime` returns `claude-agent` for exactly
+// the rows the official runtime serves, so "a fresh decision routes this elsewhere" IS "the official
+// branch cannot serve it"; Winter serves the whole catalog except the one row D28 forbids it.
+// ====================================================================================================
+describe("item 20 — plan() reviews the persisted selection against the DESTINATION branch", () => {
+  const claudeSelection = (over: Partial<RuntimeSelection> = {}): RuntimeSelection => ({
+    runtimeKind: "winter-agent",
+    providerId: "anthropic",
+    modelRef: "anthropic/claude-opus-5",
+    family: "claude",
+    authFamily: "api-key",
+    sdkVersion: "0.0.2",
+    reason: "persisted by the fixture",
+    decidedAt: NOW,
+    ...over,
+  });
+
+  const inputFor = (over: Partial<SelectionInput> = {}): SelectionInput => ({
+    mode: "code",
+    requested: {},
+    families: listing("claude"),
+    credentials: credentials(["anthropic", "google"]),
+    hasClaudePeer: true,
+    claudeOauthApproved: false,
+    versions: VERSIONS,
+    now: NOW,
+    ...over,
+  });
+
+  test("with no selection input, the plan says UNREVIEWED rather than implying a check that never ran", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      const plan = await barrierFor(bed, { participants: { source: () => idleOwner() } }).plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("unreviewed");
+      if (plan.selection.kind === "unreviewed") {
+        expect(plan.selection.detail).toContain("no selection input");
+        // The persisted record still travels, with the destination's runtime stamped on it.
+        expect(plan.selection.selection.runtimeKind).toBe("claude-agent");
+      }
+      // …and nothing is marked unprovable on its account.
+      expect(plan.steps[7]?.knownUnprovable).toBeUndefined();
+    });
+  });
+
+  test("a Claude row the official branch DOES serve is servable, and the record is not rewritten", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection() });
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner() }, selectionInputFor: () => inputFor() });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("servable");
+      if (plan.selection.kind === "servable") {
+        // THE PERSISTED PROVIDER AND MODEL SURVIVE — D13 makes the persisted choice authoritative, so a
+        // handoff moves the RUNTIME and nothing else. The fresh proposal rides beside it, unapplied.
+        expect(plan.selection.selection.providerId).toBe("anthropic");
+        expect(plan.selection.selection.modelRef).toBe("anthropic/claude-opus-5");
+        expect(plan.selection.selection.runtimeKind).toBe("claude-agent");
+        expect(plan.selection.review.kind === "fresh-refused" ? undefined : plan.selection.review.fresh.runtimeKind).toBe("claude-agent");
+      }
+      expect(plan.steps[7]?.knownUnprovable).toBeUndefined();
+    });
+  });
+
+  test("a NON-Claude row handed to the official runtime is a typed refusal, and step 8 says so BEFORE anything runs", async () => {
+    await withStoreBed(async (bed) => {
+      const gemini = claudeSelection({ providerId: "google", modelRef: "google/gemini-3-pro", family: "gemini" });
+      await bed.record({ selection: gemini });
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner() }, selectionInputFor: () => inputFor() });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("refused");
+      if (plan.selection.kind === "refused") {
+        expect(plan.selection.refusal.refused).toBe(true);
+        expect(plan.selection.refusal.reason).toBe("runtime-unavailable");
+        expect(plan.selection.refusal.detail).toContain("google/gemini-3-pro");
+        // NEVER A SUBSTITUTION: no provider the destination CAN serve is offered in its place.
+        expect(plan.selection.refusal.detail).toContain("will not invent a provider");
+      }
+      expect(plan.steps[7]?.knownUnprovable).toContain("does not serve");
+    });
+  });
+
+  test("…and execute() offers the lossy fork instead of moving ownership — before the lease exists", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection({ providerId: "google", modelRef: "google/gemini-3-pro", family: "gemini" }) });
+      let confirmed = 0;
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({
+            runtimeKind: "claude-agent" as const,
+            confirmInit: () => {
+              confirmed += 1;
+              return OK;
+            },
+          }),
+        },
+        selectionInputFor: () => inputFor(),
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+      expect(outcome.detail).toContain("does not serve it");
+      // THE SOURCE KEEPS THE SESSION, and the destination was never asked: no lease, no drain, no copy.
+      expect(confirmed).toBe(0);
+      expect(existsSync(join(bed.home, "runtimes", "handoff-leases"))).toBe(false);
+      expect((await bed.directoryStore.load())[0]?.runtimeKind).toBe("winter-agent");
+    });
+  });
+
+  test("a Claude OAuth credential handed to WINTER is refused — D28's one unconditional direction", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: claudeSelection({ runtimeKind: "claude-agent", authFamily: "claude-oauth" }) });
+      const barrier = barrierFor(bed, {
+        participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }), destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }) },
+        selectionInputFor: () => inputFor({ claudeOauthApproved: true }),
+      });
+      const plan = await barrier.plan(bed.key, "winter-agent");
+      expect(plan.selection.kind).toBe("refused");
+      if (plan.selection.kind === "refused") expect(plan.selection.refusal.detail).toContain("never routes to the Winter runtime");
+    });
+  });
+
+  test("a session whose row is GONE travels with Lane D's own refusal, verbatim", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection() });
+      const barrier = barrierFor(bed, {
+        participants: { source: () => idleOwner() },
+        // The credential for this session's provider is gone: a fresh decision cannot be made at all.
+        selectionInputFor: () => inputFor({ credentials: credentials(["google"]) }),
+      });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("refused");
+      if (plan.selection.kind === "refused") {
+        expect(plan.selection.detail).toContain("no longer servable at all");
+        expect(["slot-unservable", "runtime-unavailable", "claude-oauth-not-approved", "mode-forbids-runtime"]).toContain(plan.selection.refusal.reason);
+      }
+    });
+  });
+
+  test("the RESUMED outcome and the target carry the same reviewed selection object", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection() });
+      await bed.append(1);
+      const seen: { target?: unknown } = {};
+      const barrier = barrierFor(bed, {
+        participants: { source: () => idleOwner(), destination: () => confirmingDestination(seen) },
+        selectionInputFor: () => inputFor(),
+      });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect(plan.selection.kind).toBe("servable");
+      if (plan.selection.kind === "refused") throw new Error("unreachable: the fixture is servable");
+      const expected = plan.selection.selection;
+      const outcome = await barrier.execute(plan);
+      expect(outcome.kind).toBe("resumed");
+      if (outcome.kind === "resumed") expect(outcome.selection).toEqual(expected);
+      expect((seen.target as { selection: RuntimeSelection }).selection).toEqual(expected);
+    });
   });
 });
