@@ -89,31 +89,41 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
   }
 
   /**
-   * WS-10 §11 rule 5, the half a live roster cannot answer.
+   * WS-10 §11 rule 5, the half a live roster cannot answer — and the line between it and rule 4.
    *
-   * `resolveTarget` implements rule 5 over the children it is handed: a name used by more than one
-   * DISTINCT child currently in the roster is refused. A directory outlives rosters — an object is
-   * removed, a daemon restarts — and rule 5 is about what a name HAS MEANT ("a name previously used
-   * by a different child in the same conversation"), so the lease history is the memory that makes
-   * the refusal survivable. Two shapes, both stale, and telling them apart is the whole point of
-   * keeping released leases (`NameLeaseStore.release` stamps, never deletes):
+   * Rules 4 and 5 both fire on a name more than one object has owned, and they answer DIFFERENTLY:
    *
-   *   * the name has been claimed by MORE THAN ONE address → refuse even if exactly one is live now,
-   *     because a plain name can no longer identify which was meant;
-   *   * the name is known but nothing reachable holds it → "that name referred to something that has
-   *     since gone", which is a different answer from "no such agent" and is the one rule 5 requires.
+   *   * rule 4 is TWO LIVE HOLDERS AT ONCE — "ambiguity returns candidates, the router never chooses
+   *     arbitrarily". Both objects are addressable; the caller picks.
+   *   * rule 5 is REUSE OVER TIME — "a name previously used by a DIFFERENT child in the same
+   *     conversation triggers a stale-name refusal unless addressed canonically". There may be exactly
+   *     one live holder, and that is precisely when the refusal matters: a plain name would resolve,
+   *     confidently, to something the sender may not have meant.
+   *
+   * The lease history is what tells them apart, and it is the reason `NameLeaseStore.release` STAMPS
+   * rather than deletes: `ever` counts every address that has held the name, `current` counts those
+   * still holding it. `ever > current` means someone let it go — reuse — and that is rule 5.
+   * `current > 1` is rule 4, and is left to `resolveTarget`, which builds the candidate set.
    */
-  async function nameStaleness(to: string): Promise<{ reason: string; holders: readonly SerializedRuntimeAddress[] } | undefined> {
+  async function nameHistory(to: string): Promise<{ ever: SerializedRuntimeAddress[]; current: SerializedRuntimeAddress[] }> {
     const leases: NameLeaseRecord[] = await store.names.lookup(to);
-    if (leases.length === 0) return undefined;
-    const holders = [...new Set(leases.map((lease) => lease.address))];
-    if (holders.length > 1) {
-      return {
-        reason: `"${to}" has been used by more than one runtime object (${holders.join(", ")}); address the one you mean by its canonical address from the listing`,
-        holders,
-      };
-    }
-    return { reason: `"${to}" referred to ${holders.join(", ")}, which is no longer reachable; address the one you mean by its canonical address from the listing`, holders };
+    return {
+      ever: [...new Set(leases.map((lease) => lease.address))],
+      current: [...new Set(leases.filter((lease) => lease.releasedAt === undefined).map((lease) => lease.address))],
+    };
+  }
+
+  /**
+   * The refusal a stale name earns, in the two shapes it comes in.
+   *
+   * They are different sentences because they are different facts, and a sender acts on them
+   * differently: a name that meant SEVERAL things needs the canonical address of the one meant, while
+   * a name that meant ONE thing that is gone needs to know the object is gone.
+   */
+  function staleReason(to: string, holders: readonly SerializedRuntimeAddress[]): string {
+    return holders.length > 1
+      ? `"${to}" has been used by more than one runtime object (${holders.join(", ")}); address the one you mean by its canonical address from the listing`
+      : `"${to}" referred to ${holders.join(", ")}, which is no longer reachable; address the one you mean by its canonical address from the listing`;
   }
 
   function candidatesFor(snap: DirectorySnapshot, holders: readonly SerializedRuntimeAddress[]): ListedRuntimeObject[] {
@@ -138,13 +148,16 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     // identity that cannot be reused, so a stale-name history says nothing about them — which is
     // exactly why rule 5's own text ends "unless addressed canonically".
     if (!isCanonical && !isChildId) {
-      const stale = await nameStaleness(to);
-      if (stale !== undefined && stale.holders.length > 1) {
-        return { kind: "stale-name", reason: stale.reason, candidates: candidatesFor(snap, stale.holders) };
+      const history = await nameHistory(to);
+      if (history.ever.length > history.current.length) {
+        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever) };
       }
     }
 
-    const resolved = resolveTarget({ to, callerParentSessionId: callerOwner, children: snap.children, peers: snap.resolvable });
+    // `peers` is SESSION ROWS ONLY — the same filter the shared core applies to its own
+    // `listReachable` answer before resolving. Handing children in on both sides would make a child
+    // its own second candidate and turn every child name into a rule-4 ambiguity with itself.
+    const resolved = resolveTarget({ to, callerParentSessionId: callerOwner, children: snap.children, peers: snap.resolvable.filter((row) => row.objectKind === "session") });
     if (resolved.kind === "ambiguous") {
       // The candidates come back through the DIRECTORY rather than through the subpath's own child
       // renderer: the row a caller is shown must be the durable record (kind, mode, capabilities),
@@ -154,9 +167,11 @@ export function createRuntimeDirectory(context: SeamContext, options: RuntimeDir
     }
     if (resolved.kind === "stale") return { kind: "stale-name", reason: resolved.message, candidates: [] };
     if (resolved.kind === "not_found") {
-      const stale = await nameStaleness(to);
-      if (stale !== undefined && !isCanonical && !isChildId) {
-        return { kind: "stale-name", reason: stale.reason, candidates: candidatesFor(snap, stale.holders) };
+      // A name the directory REMEMBERS but cannot reach is stale, not unknown — the whole reason a
+      // released lease outlives the row it named.
+      const history = await nameHistory(to);
+      if (history.ever.length > 0 && !isCanonical && !isChildId) {
+        return { kind: "stale-name", reason: staleReason(to, history.ever), candidates: candidatesFor(snap, history.ever) };
       }
       return { kind: "not-found", reason: resolved.message };
     }
