@@ -519,6 +519,20 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     const winterHome = homeOf();
     let lease: HandoffLease | undefined;
     let stagedRoot: string | undefined;
+    /**
+     * True from the instant `confirmInit` is INVOKED — not from the instant it answers (F-7).
+     *
+     * The destination spawns its runtime against `target.stagingRoot` INSIDE `confirmInit` (the
+     * official branch's spawn is lazy: it happens on the first pull). A `confirmInit` that starts a
+     * process against that root and then throws — or that is racing an abort — used to have the root
+     * `rmSync`'d out from under a live child, which the proxy then reports as a crash class rather
+     * than as the barrier's own refusal, i.e. the wrong diagnosis of the wrong event.
+     *
+     * So once the destination has been HANDED the root, the barrier stops owning it. A copy left
+     * behind is the same deliberate, locatable leak as the one after a post-confirm commit failure —
+     * `outcome.target.stagingRoot` names it, and the host's retention pass owns it.
+     */
+    let destinationHoldsRoot = false;
     let pendingWritten = false;
     /** True once the producer record has landed: from that instant the handoff IS committed. */
     let committed = false;
@@ -531,10 +545,11 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
      * IT NEVER THROWS: it runs on the failure path, and a failure inside the cleanup of a failure would
      * replace an outcome the host can act on with an exception it cannot.
      *
-     * IT NEVER DELETES A CONFIRMED DESTINATION'S STAGING ROOT (review r2, N2.2). The barrier hands the
-     * root to `confirmInit` itself, so a destination that answered `ok` is by definition reading it;
-     * `stagedRoot` is cleared the instant that happens, and a copy leaked by a later failure is the
-     * right outcome.
+     * IT NEVER DELETES A STAGING ROOT THE DESTINATION HAS BEEN HANDED (review r2 N2.2, widened by the
+     * whole-branch review's F-7). N2.2 cleared `stagedRoot` when `confirmInit` ANSWERED `ok`; F-7 is
+     * the window before that — the destination spawns against the root inside `confirmInit`, so a
+     * throw there, or an abort racing it, met an `rmSync` on a directory a live process was using.
+     * The flag is therefore set BEFORE the call, not after it.
      */
     const unwind = async (): Promise<void> => {
       try {
@@ -543,7 +558,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           await shared.settle(session);
           pendingWritten = false;
         }
-        if (stagedRoot !== undefined) {
+        if (stagedRoot !== undefined && !destinationHoldsRoot) {
           rmSync(stagedRoot, { recursive: true, force: true });
           stagedRoot = undefined;
         }
@@ -746,7 +761,16 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         await unwind();
         return lossy(8, "no destination runtime confirmed the resumed session and level, and the next user message must not be delivered until one does");
       }
+      // FROM HERE THE ROOT IS THE DESTINATION'S (F-7). It is about to start a runtime against that
+      // exact directory, and whether it answers, throws or never returns, deleting it under a live
+      // child is not a cleanup — it is a second failure that hides the first.
+      destinationHoldsRoot = true;
       const confirmed = await destination.confirmInit(target);
+      // A RETURNED `ok: false` IS THE DESTINATION REPORTING IT IS DONE WITH THE ROOT — it answered, it
+      // did not take the session, and a clean refusal should not leak a directory. The window F-7 is
+      // about is the one where `confirmInit` THROWS or is aborted: nothing has reported anything, a
+      // child may be live against that root, and the flag stays set so `unwind()` leaves it alone.
+      destinationHoldsRoot = false;
       if (!confirmed.ok) {
         await unwind();
         return lossy(8, confirmed.reason);

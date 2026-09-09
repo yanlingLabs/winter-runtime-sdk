@@ -1816,3 +1816,56 @@ describe("F-2 — the destination's launch record survives the commit", () => {
     });
   });
 });
+
+// ====================================================================================================
+// F-7 — A DESTINATION MID-`confirmInit` OWNS THE ROOT IT WAS HANDED.
+//
+// The official branch's spawn is LAZY: the runtime starts on the first pull, which happens inside
+// `confirmInit`, against `target.stagingRoot`. So there is a window in which a child is live on that
+// directory and the barrier has not yet been told anything. `unwind()` used to `rmSync` it in that
+// window — removing a live child's `CLAUDE_CONFIG_DIR`, which the proxy then reports as a crash
+// class rather than as the barrier's own refusal: the wrong diagnosis of the wrong event.
+//
+// THE LINE IS BETWEEN "ANSWERED" AND "DID NOT ANSWER", not between ok and not-ok. A returned
+// `{ ok: false }` is the destination reporting it is done, and that root is still cleaned up (the two
+// F1 tests above pin exactly that). A THROW is not a report.
+// ====================================================================================================
+describe("F-7 — the staging root a destination is mid-confirmInit on", () => {
+  test("a confirmInit that READ the root and then threw does not have it deleted under it", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(2);
+      const staged: string[] = [];
+      let sawRoot = "";
+      const barrier = barrierFor(bed, {
+        stagingRootFor: (uuid) => {
+          const root = join(bed.home, "staging", `${RESUME_STAGING_PREFIX}${uuid}`);
+          staged.push(root);
+          return root;
+        },
+        participants: {
+          source: () => idleOwner(),
+          destination: () => ({
+            runtimeKind: "claude-agent" as const,
+            confirmInit(target: { stagingRoot?: string }) {
+              // The destination has started against the root — this read stands in for the spawn.
+              sawRoot = target.stagingRoot ?? "";
+              expect(existsSync(sawRoot)).toBe(true);
+              throw new Error("the destination runtime crashed while starting");
+            },
+          }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome.kind).toBe("lossy-fork-offered");
+      // OWNERSHIP DID NOT MOVE — the throw is still a refusal, and the source keeps the session.
+      expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
+      // …and the directory the destination may still be reading is INTACT.
+      expect(staged).toHaveLength(1);
+      expect(existsSync(sawRoot)).toBe(true);
+      // The leak is deliberate and locatable, which is what makes it a retention question rather
+      // than an orphan: the same shape as the post-confirm commit failure's.
+      expect(sawRoot).toContain(RESUME_STAGING_PREFIX);
+    });
+  });
+});

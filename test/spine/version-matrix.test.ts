@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { createFakeClaudePeer, createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
-import { assertVersionMatrix, createRuntimeSdk, parseVersion, readExportedVersion, readResolvedManifestVersion, satisfiesRange, SUPPORTED, SUPPORTED_PROTOCOL_VERSIONS } from "../../src/index.ts";
+import { assertVersionMatrix, createRuntimeSdk, parseVersion, readExportedVersion, readResolvedManifestVersion, runtimeSdkInternals, satisfiesRange, SUPPORTED, SUPPORTED_PROTOCOL_VERSIONS } from "../../src/index.ts";
 import { RuntimeSdkVersionError } from "../../src/errors.ts";
 import type { RuntimeSdkPeers } from "../../src/sdk.ts";
 
@@ -176,5 +176,46 @@ describe("the matrix and the manifest never drift", () => {
     // The official peer is OPTIONAL, which is what makes "no claude peer" a configuration rather
     // than a broken install.
     expect(manifest.peerDependenciesMeta["@anthropic-ai/claude-agent-sdk"]?.optional).toBe(true);
+  });
+});
+
+// ====================================================================================================
+// F-8 — THE ONE LINE EVERY HOST WILL RUN, AND THAT NO TEST RAN.
+//
+// Every `createRuntimeSdk(...)` under `test/` receives `createFakeWinterPeer().peer`; the real module
+// was imported only for a namespace comparison and for its store class. So the construction path a
+// host actually takes — the real Winter SDK as the injected peer — was unexercised: the version
+// matrix's real-peer leg used a hand-built `{ PROTOCOL_VERSION }` object, and brand threading and the
+// facet's presence were asserted on the fake. This costs one import and no network.
+// ====================================================================================================
+describe("F-8 — the handle constructed over the REAL Winter SDK module instance", () => {
+  test("it constructs, and the matrix resolves the peer's version from its installed manifest", async () => {
+    const winter = await import("@yanlinglabs/winter-agent-sdk");
+    const sdk = createRuntimeSdk({ peers: { winter }, keychain: createFakeKeychain() });
+    // The peer exports no version identity of its own (SDK 0.0.3 carry), so the matrix falls back to
+    // the resolved manifest — which is the source this asserts, not a value that could drift.
+    expect(sdk.versions.winterAgentSdk.source).toBe("resolved-manifest");
+    // NOT VACUOUS: the version it resolved really is inside the matrix's own supported range.
+    expect(satisfiesRange(sdk.versions.winterAgentSdk.packageVersion, SUPPORTED.winterAgentSdk)).toBe(true);
+  });
+
+  test("the brand it resolves is the module's own WINTER_BRAND, through the module's own resolveBrand", async () => {
+    const winter = await import("@yanlinglabs/winter-agent-sdk");
+    const sdk = createRuntimeSdk({ peers: { winter }, keychain: createFakeKeychain() });
+    expect(sdk.brand).toEqual(winter.WINTER_BRAND);
+  });
+
+  test("the internals are populated, and the messaging facet's doors are present on the handle", async () => {
+    const winter = await import("@yanlinglabs/winter-agent-sdk");
+    const sdk = createRuntimeSdk({ peers: { winter }, keychain: createFakeKeychain() });
+    const internals = runtimeSdkInternals(sdk);
+    expect(internals).toBeDefined();
+    expect(internals?.official).toBeDefined();
+    expect(internals?.barrier).toBeDefined();
+    expect(internals?.decorator).toBeDefined();
+    // The two doors F-3 widened the field for, over the real peer.
+    expect(typeof sdk.messaging.attachWinterSession).toBe("function");
+    expect(typeof sdk.messaging.attachOfficialSession).toBe("function");
+    expect(typeof sdk.directory.record).toBe("function");
   });
 });
