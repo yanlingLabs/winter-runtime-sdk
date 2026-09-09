@@ -17,6 +17,9 @@
       "@yanlinglabs/winter-agent-sdk": [
         "../winter-agent-sdk/packages/sdk/src/index.ts"
       ],
+      "@yanlinglabs/winter-agent-sdk/messaging": [
+        "../winter-agent-sdk/packages/sdk/src/messaging/index.ts"
+      ],
       "@yanlinglabs/winter-conformance": [
         "../winter-agent-sdk/packages/conformance/src/index.ts"
       ],

@@ -53,3 +53,12 @@ export * from "./seams/index.ts";
 // --- typed errors ----------------------------------------------------------------------------------
 export { NotImplementedYet, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError } from "./errors.ts";
 export type { LaneId } from "./errors.ts";
+
+// --- WS-15 §6.1–6.4: the directory and the cross-runtime messaging router (Lane B; the three doors a host needs + their vocabulary) ---
+export { createRuntimeMessaging, createMessagingToolHandlers, createAttachedSessionRegistry } from "./messaging/index.ts";
+export type {
+  AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession,
+  DirectorySnapshot, GlobalMessagingHandle, GlobalMessagingOptions, MessagingToolCaller,
+  MessagingToolHandlers, MessagingToolResult, ReplyRequest, RouterMessagingAdapter,
+  RuntimeDirectoryHandle, RuntimeDirectoryOptions, RuntimeDirectoryRecoveryHooks,
+} from "./messaging/index.ts";

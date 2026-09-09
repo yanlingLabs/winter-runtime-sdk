@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { NotImplementedYet } from "../../src/errors.ts";
+import { HandoffPlanError } from "../../src/store/index.ts";
 import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubOfficialAdapter, stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { SeamContext, SeamContextWithDirectory } from "../../src/seams/context.ts";
 import type { DeliveryRecord, IdleSubscriptionRecord, NameLeaseRecord, RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
@@ -170,10 +171,13 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     expect(decided.providerId).toBe("local");
   });
 
+  // LANE C HAS LANDED (controller wiring): the handle's `handoff()` reaches the real barrier, whose
+  // `plan()` refuses a session the directory has never heard of with a typed `HandoffPlanError` --
+  // not a `NotImplementedYet`. The barrier's own behaviour is proven in `test/store/`.
   test("the handle's handoff() reaches Lane C's barrier", async () => {
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
-    expect(await laneOfThrow(() => sdk.handoff({ projectKey: "p", sessionId: "s" }, "claude-agent"))).toBe("lane-c");
+    await expect(sdk.handoff({ projectKey: "p", sessionId: "s" }, "claude-agent")).rejects.toThrow(HandoffPlanError);
   });
 
   test("a NotImplementedYet says what it is about, not just that it is missing", () => {

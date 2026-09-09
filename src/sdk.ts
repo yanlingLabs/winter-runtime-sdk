@@ -38,7 +38,8 @@ import type { OfficialAdapter } from "./seams/official-adapter.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryStore } from "./seams/directory-store.ts";
 import { createInMemoryRuntimeDirectoryStore } from "./seams/directory-store.ts";
-import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubRuntimeDirectory } from "./seams/stubs.ts";
+import { createRuntimeMessaging } from "./messaging/index.ts";
+import { createHandoffBarrier } from "./store/index.ts";
 import { createOfficialAdapter } from "./official/adapter.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
@@ -209,8 +210,14 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     directoryStore,
     ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
   };
-  const directory = stubRuntimeDirectory(base);
+  // LANES B AND C ARE LANDED (controller wiring, one commit): the directory and the messaging router
+  // come from ONE factory (the directory's child view delivers through the router while the router
+  // resolves through the directory -- a real circularity closed by a late binding inside
+  // `createRuntimeMessaging`); the barrier OWNS its decorator so one store, one decoration registry
+  // and one door are structural (`decorator: barrier.decorator` is load-bearing, not a shortcut).
+  const { directory, messaging } = createRuntimeMessaging(base);
   const context: SeamContextWithDirectory = { ...base, directory };
+  const barrier = createHandoffBarrier(context);
 
   // ONE WIRING LINE PER SEAM. A lane replaces the right-hand side and nothing else in this file
   // moves; see `seams/stubs.ts`'s own header for why the indirection exists.
@@ -220,8 +227,8 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     // on first use) and defaults §6 rule 2's durable record to the directory store in `context`,
     // addressed by `OfficialLaunchPlan.address`.
     official: createOfficialAdapter(context),
-    barrier: stubHandoffBarrier(context),
-    decorator: stubMaterializedResumeDecorator(context),
+    barrier,
+    decorator: barrier.decorator,
     context,
   };
 
@@ -235,7 +242,7 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     versions,
     brand,
     directory,
-    messaging: stubGlobalMessaging(context),
+    messaging,
     query(args) {
       assertLive("query");
       // ROUTES TO THE WINTER PEER FOR NOW (Task 1's own scope): Lane D's selector decides the branch

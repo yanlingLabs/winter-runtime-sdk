@@ -31,6 +31,8 @@ export interface SeamContext {
   directoryStore: RuntimeDirectoryStore;
   /** WS-14 §5.1: `pathToClaudeCodeExecutable` — the host vendors it; tests point at node_modules. */
   vendoredOfficialRuntime?: string;
+  /** Lane C: an explicit home for the shared store's lazy resolver (defaults to the peer's own resolution under `brand`). */
+  winterHome?: string;
 }
 
 /** What every OTHER seam needs: the same, plus the directory, which is built first. */
