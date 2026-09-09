@@ -54,6 +54,12 @@ export interface RouterRow {
 
 const SELECTION = "../selection";
 const GATES = "../gates";
+const OFFICIAL = "../official";
+const MESSAGING = "../messaging";
+const STORE = "../store";
+// The bed that belongs to neither lane (fix wave, item 14). A row whose two halves were proven
+// against each other's DOUBLES is cited here as well as to each lane, because the join is the row.
+const JOINT = "../joint";
 
 /**
  * The thirteen rows R-7b-7 names. Rows 6, 9, 10, 16 and 18 are excluded by WS-17 §8 itself (they are
@@ -64,56 +70,132 @@ export const ROUTER_ROWS: RouterRow[] = [
   {
     id: "WS17-1",
     bullet: "Real model-emitted `SendMessage` through the TS alias reaches `mcp__winter__send_message` with native args and returns the visible result.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane B (the handlers the official branch's aliases reach), with Lane A's `toolAliases`",
+    citations: [
+      { file: `${JOINT}/rows-1-2.test.ts`, testName: "row 1 — a model-emitted SendMessage is delivered by the REAL router, and the router's typed outcome is what the model sees" },
+      { file: `${JOINT}/rows-1-2.test.ts`, testName: "row 1 — a refusal is rendered as a classified failure the model can act on, not as a crash" },
+      { file: `${JOINT}/rows-1-2.test.ts`, testName: "the REVERSE direction — a peer's message reaches the live official session's own row, through the router" },
+      { file: `${OFFICIAL}/runtime-aliases.test.ts`, testName: "row 1: a model-emitted `SendMessage` reaches the canonical handler with NATIVE args, and its result is what the model sees" },
+      { file: `${MESSAGING}/handlers.test.ts`, testName: "a retry with the SAME vendor tool-use id returns the stored outcome, not a second delivery" },
+    ],
+    note:
+      "PROVEN WHOLE-ROW IN THE FIX WAVE (item 14). Each lane's half was already green against a DOUBLE of the other — Lane A's alias test used a recording handler, Lane B's router tests used a scripted caller — and the row is the join. `test/joint/` drives one real 0.3.250 process through its own `toolAliases` into Lane B's real handler and router, and the delivered frame, the class, the summary and the typed outcome are read at the far end. The joint run also established what no report knew: the WS-10 §12 retry key survives the whole path, because the caller is bound with NO tool-use id and the message id still carries the model's own (item 15).",
   },
   {
     id: "WS17-2",
     bullet: "`ListAgents` aliasing; canonical MCP duplicate deferred/hidden visibility; behavior without Tool Search.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane B (handlers), with Lane A's alias table",
+    citations: [
+      { file: `${JOINT}/rows-1-2.test.ts`, testName: "row 2 — a model-emitted ListAgents renders the REAL directory, and both canonical twins are advertised" },
+      { file: `${OFFICIAL}/runtime-aliases.test.ts`, testName: "row 2: `ListAgents` aliases the same way, and the advertised set records what 0.3.250 actually does" },
+      { file: `${OFFICIAL}/aliases-containment.test.ts`, testName: "the canonical duplicates are DEFERRED rather than hidden — they stay addressable by name" },
+    ],
+    note:
+      "The visibility half is RECORDED, not asserted-as-wished: with no Tool Search active the pinned runtime advertises the native name AND the canonical twin, so `deferred` is this package's intent and the runtime's own decision is what the test writes down. Re-measured under the hermetic child env (F-1), where the advertised set is the artifact's own 21 names rather than 25 including three remotely-flagged tools.",
   },
   {
     id: "WS17-3",
     bullet: "`disallowedTools` + permission floor cover harness-internal/direct paths aliases miss.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane A (aliases + deny floor, WS-14 §7)",
+    citations: [
+      { file: `${OFFICIAL}/runtime-aliases.test.ts`, testName: "row 3: the paths the alias does not cover — the canonical name direct, and where a deny rule must be spelled" },
+      { file: `${OFFICIAL}/aliases-containment.test.ts`, testName: "the floor is a PATH rule, so it covers tools no disposition anticipated" },
+    ],
+    note:
+      "The measurement behind it: denying only the built-in leaves the alias resolving and the handler RUNNING, because the deny check happens after alias resolution. `aliasDenyNames` is the door that stops a host tripping over it, and row 3 is why it exists.",
   },
   {
     id: "WS17-4",
     bullet: "Two official sessions under the spool: isolated discovery, delivery, hold/refuse, idle wake, zero visibility into `~/.claude`.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane A (spool isolation, WS-14 §1) with Lane B (delivery, hold/refuse, idle wake)",
+    citations: [
+      { file: `${OFFICIAL}/runtime-spool.test.ts`, testName: "row 4: two sessions under ONE spool stay isolated, and neither can see the vendor home" },
+      { file: `${MESSAGING}/official-pair.test.ts`, testName: "DISCOVERY is isolated: each sees the other session and its OWN children, never the other's" },
+      { file: `${MESSAGING}/official-pair.test.ts`, testName: "DELIVERY between the two lands in the receiver's own handle, attributed to the sender" },
+      { file: `${MESSAGING}/official-pair.test.ts`, testName: "HOLD and REFUSE are the receiver's, and neither delivers anything" },
+      { file: `${MESSAGING}/official-pair.test.ts`, testName: "IDLE WAKE: an idle official session starts one turn (`delivered`), a running one queues" },
+      { file: `${JOINT}/rows-4-5.test.ts`, testName: "two live official sessions get DIFFERENT config dirs, each under its own spool" },
+      { file: `${JOINT}/rows-4-5.test.ts`, testName: "a model in one official session DISCOVERS and ADDRESSES the other, and the delivery lands in it" },
+      { file: `${JOINT}/rows-4-5.test.ts`, testName: "a receiver whose permission class cannot be known is HELD, not delivered — fail-closed, with the real runtime as the sender" },
+      { file: `${JOINT}/rows-4-5.test.ts`, testName: "notify_when_idle against an OFFICIAL target refuses the whole call — measured, because this branch has no idle signal" },
+    ],
+    note:
+      "Both halves are now measured against two REAL 0.3.250 processes sharing one directory (item 14), not one lane's real runtime beside the other lane's double. The `idle wake` clause resolves to WS-10 §14's WHOLE-CALL REFUSAL on this branch — the pinned SDK's `Query` exposes no session-status surface, so an adapter without a reliable idle signal must refuse rather than subscribe. That is a measurement about the artifact, not a gap in the row.",
   },
   {
     id: "WS17-5",
     bullet: "Official parent resume after restart restores completed children for native SendMessage resume.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane A (parent-restart child restoration, WS-14 §15) with Lane B (the resume route)",
+    citations: [
+      { file: `${MESSAGING}/official-pair.test.ts`, testName: "recovery keeps the completed children, and a native SendMessage to one routes through the resumed parent" },
+      { file: `${MESSAGING}/official-pair.test.ts`, testName: "before the parent is resumed, the same send is retryably unavailable rather than not-found" },
+      { file: `${JOINT}/rows-4-5.test.ts`, testName: "the children recorded before the restart are still addressable through the resumed parent" },
+    ],
+    note: "The joint half runs two real generations of the same address over one durable store, which is the only thing a restart leaves behind and therefore the only thing the row can be about.",
   },
   {
     id: "WS17-7",
     bullet: "Messaging: addressing, ambiguity/staleness, dedupe, queue bounds, TTL, retries, crash windows, loop prevention, reply routing, `notify_when_idle`.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane B (the messaging router, WS-15 §6.2–6.3 / WS-10 §11–§13)",
+    citations: [
+      { file: `${MESSAGING}/directory.test.ts`, testName: "rule 4 — ambiguity RETURNS CANDIDATES rather than choosing, and the candidates are directory rows" },
+      { file: `${MESSAGING}/directory.test.ts`, testName: "rule 5 — a name whose only holder is gone is STALE, not not-found (the lease outlives the row)" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "a retry of the same (sender, tool-call) pair returns the STORED outcome and starts no second turn" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "the dedupe survives a RESTART, because the id is derived rather than counted" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "the envelope and its resolved generation are persisted, and the delivery is CLAIMED, before the adapter runs" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "an adapter that THROWS is delivery_uncertain, and the record keeps the claim" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "an identical rapid repeat is suppressed with a VISIBLE outcome, and allowed again after the window" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "a reply chain is stopped at MAX_HOP_COUNT — the bound is machinery, not documentation" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "the subscription SURVIVES A RESTART — a new router over the same store still fires it" },
+      { file: `${MESSAGING}/recovery.test.ts`, testName: "step 5 turns every claimed-but-unreceipted delivery into delivery_uncertain, and redelivers nothing" },
+    ],
+    note: "Ten clauses, ten named proofs. The crash-window clause is the one worth reading twice: the envelope and the CLAIM are persisted before the adapter is invoked, so a crash between them is recoverable as `delivery_uncertain` rather than as silence.",
   },
   {
     id: "WS17-8",
     bullet: "Shared filesystem `SessionStore` + pinned dialect: Claude→Winter, Winter→Claude, and both round-trips at every advertised level.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane C (store wiring, WS-05 §6/§7)",
+    citations: [
+      { file: `${STORE}/rows.test.ts`, testName: "Claude -> Winter, Winter -> Claude and both round trips at level" },
+      { file: `${STORE}/rows.test.ts`, testName: "the subagent level round-trips too: a subkey survives both directions" },
+    ],
+    scoped: true,
+    note:
+      "SCOPED, and the scope is the honest half of this row: both legs are produced by the SHARED STORE over the pinned dialect, at every advertised level, over real `mkdtemp` homes. What is NOT claimed is a Claude leg written by the pinned runtime — `docs/probes/materialized-resume.md` records what happened when one was tried in the fix wave (probe (c) FAILED: the parent chain does not come back unbroken), which is exactly why no `agent-state` or `full-filesystem` compatibility claim rests on this row today.",
   },
   {
     id: "WS17-11",
     bullet: "Delete/rebuild of the disposable `sessions/index.db` preserves runtime mappings, backend IDs, cursors.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane C (store wiring)",
+    citations: [
+      { file: `${STORE}/rows.test.ts`, testName: "runtime mappings, backend ids and cursors all survive, because none of them live there" },
+      { file: `${STORE}/rows.test.ts`, testName: "the router never reads the product index: its name appears nowhere in this lane's source" },
+    ],
+    note: "Proven the strong way and the structural way: the data survives a delete/rebuild BECAUSE none of it lives in the index, and a source scan pins that the router never reads the index at all.",
   },
   {
     id: "WS17-12",
     bullet: "Documented message-size, 50-accepted/100-held queues, 5-minute dialog expiry, 12-hour idle subscription, permission-class behavior; inert `@` mentions retained.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane B (the inbound policy and the mailbox, WS-10 §13)",
+    citations: [
+      { file: `${MESSAGING}/router.test.ts`, testName: "a body over MAX_GLOBAL_MESSAGE_SIZE is refused before anything is resolved" },
+      { file: `${MESSAGING}/policy.test.ts`, testName: "a DELIVERED message (an idle receiver, one turn started) frees its slot; a QUEUED one does not" },
+      { file: `${MESSAGING}/policy.test.ts`, testName: "the held cap survives a RESTART — the in-memory box is rehydrated from the durable store" },
+      { file: `${MESSAGING}/policy.test.ts`, testName: "a DEFAULT-class hold expires after five minutes; an EXPLICIT hold never does" },
+      { file: `${MESSAGING}/router.test.ts`, testName: "a subscription past its 12-hour expiry fires nothing and is swept" },
+      { file: `${MESSAGING}/policy.test.ts`, testName: "prompts receiver x BYPASSES sender holds, visibly, with the envelope kept durably" },
+      { file: `${MESSAGING}/policy.test.ts`, testName: "`@` mentions and slash-command text survive the router's own rendering byte-identically" },
+    ],
+    note: "The expiry clause carries one interim behaviour a host must know and the README states: the sweep is LAZY — a held message's receipt is rewritten to `refused` when something next addresses that receiver, not on a timer of its own.",
   },
   {
     id: "WS17-13",
@@ -132,14 +214,35 @@ export const ROUTER_ROWS: RouterRow[] = [
   {
     id: "WS17-14",
     bullet: "Native + aliased Agent/worktree, durable Cron, workflow, saved-approval, plan-mode, and arbitrary file/shell paths cannot create `CLAUDE.md`, `.claude/`, or `~/.claude/plans` under strict policy.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane A (builtin-path containment, WS-14 §8)",
+    citations: [
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "the native writers: every §8 row is EXERCISED, and the tally says which containment stopped it" },
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "arbitrary file and shell paths: an approving broker does not lift the floor" },
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r2, NEW-3: a command that BUILDS the name is caught post-hoc — swept, reported, and the call blocked" },
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r3, NEW-9: a command whose side effect precedes a FAILURE is swept too" },
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r3, NEW-11: the saved-approval path, for real — the durable update is stripped and no vendor settings file appears" },
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r4, NEW-18 (a): a host hook stamped with the exported floor mark does not REPLACE the floor — the floor is recognised by identity" },
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "the whole session's writes stay inside the spool, the cwd and the product home" },
+    ],
+    note: "Two layers, and the scope is exact. PRE-HOC: the permission floor refuses any call whose arguments name a forbidden target — path fields (case-folded, NFKC), command text (un-normalized, quote-stripped), and the §8 writers with no path argument at all — installed by `launch()` itself on EVERY launch — merged ahead of the caller's own hooks and never replaced by one of them (the floor is recognised by IDENTITY: a hook merely stamped with the exported floor mark is not the floor, and a genuine floor built under a looser template policy does not stand in for the adapter's own) — and required by `assertOptionsInvariants` by that same identity, not merely offered by the options builder. POST-HOC: a sweep registered on PostToolUse, PostToolUseFailure and PostToolBatch snapshots the forbidden names under the session's cwd AND the child's HOME, to a bounded depth (6 by default), around every filesystem-touching call; it removes exactly what that call created, records a typed containment breach, and ends the turn. SCOPE, stated rather than implied: shell-escape and constructed-name spellings are caught POST-HOC by the sweep, never pre-hoc; the sweep sees the SYNCHRONOUSLY-VISIBLE effects of the call it brackets (a background write that lands later is caught opportunistically by the next swept call); it does not look outside cwd and HOME, nor below its depth bound; and the TURN ends only for a call that SUCCEEDS — for a failing call the guarantee is that the artifact does not survive it.",
   },
   {
     id: "WS17-15",
     bullet: "Canonical memory + the D18 temp layout, cross-engine temp continuity, vendor temp roots reported honestly, supervised pre-cleanup reconciliation, default-spawn `mirror_error` handoff refusal, entire-adapter projection, `$bunfs` extraction avoided or tested.",
-    status: "unproven",
+    status: "proven",
     owner: "Lane C (temp continuity and the barrier) with Lane A (the supervised proxy)",
+    scoped: true,
+    citations: [
+      { file: `${STORE}/rows.test.ts`, testName: "the temp home stabilizes in the vendor engine dir across a full round trip" },
+      { file: `${STORE}/rows.test.ts`, testName: "the vendor temp roots are reported honestly, including the one a copy left behind" },
+      { file: `${STORE}/rows.test.ts`, testName: "supervised PRE-CLEANUP reconciliation: the entries are in the store before the staging root is deleted" },
+      { file: `${STORE}/rows.test.ts`, testName: "a DEFAULT-SPAWN session with a mirror error is refused, never reconciled by guesswork" },
+      { file: `${OFFICIAL}/runtime-spool.test.ts`, testName: "row 15: the vendor temp root is what we configured PLUS the engine's own segment, reported honestly" },
+      { file: `${OFFICIAL}/runtime-spool.test.ts`, testName: "§1 profile 2 + §6 rules 2/3: a store-backed resume is observed as a staging root, and reconciliation runs BEFORE cleanup" },
+    ],
+    note:
+      "SCOPED: six of the row's seven clauses are proven, four of them against the pinned runtime. The seventh — `$bunfs` extraction avoided or tested — is NOT claimed here: it is a property of how a HOST packages this package (a single-file Bun executable extracting its own embedded runtime), and nothing in this repository builds one. A row that counted it would be counting somebody else's build. The `entire-adapter projection` clause is likewise the projector's (Phase 8, WS-15 §4), and what this row proves for it is the durable half — the roots and records a projector reads.",
   },
   {
     id: "WS17-17",

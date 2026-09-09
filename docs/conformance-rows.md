@@ -12,18 +12,18 @@ router-owned row is unproven.** Rows 6, 9, 10, 16 and 18 are excluded by WS-17 �
 
 | Row | Status | Owner | Obligation | Scope / note |
 | --- | --- | --- | --- | --- |
-| WS17-1 | unproven | Lane B (the handlers the official branch's aliases reach), with Lane A's `toolAliases` | Real model-emitted `SendMessage` through the TS alias reaches `mcp__winter__send_message` with native args and returns the visible result. | — |
-| WS17-2 | unproven | Lane B (handlers), with Lane A's alias table | `ListAgents` aliasing; canonical MCP duplicate deferred/hidden visibility; behavior without Tool Search. | — |
-| WS17-3 | unproven | Lane A (aliases + deny floor, WS-14 §7) | `disallowedTools` + permission floor cover harness-internal/direct paths aliases miss. | — |
-| WS17-4 | unproven | Lane A (spool isolation, WS-14 §1) with Lane B (delivery, hold/refuse, idle wake) | Two official sessions under the spool: isolated discovery, delivery, hold/refuse, idle wake, zero visibility into `~/.claude`. | — |
-| WS17-5 | unproven | Lane A (parent-restart child restoration, WS-14 §15) with Lane B (the resume route) | Official parent resume after restart restores completed children for native SendMessage resume. | — |
-| WS17-7 | unproven | Lane B (the messaging router, WS-15 §6.2–6.3 / WS-10 §11–§13) | Messaging: addressing, ambiguity/staleness, dedupe, queue bounds, TTL, retries, crash windows, loop prevention, reply routing, `notify_when_idle`. | — |
-| WS17-8 | unproven | Lane C (store wiring, WS-05 §6/§7) | Shared filesystem `SessionStore` + pinned dialect: Claude→Winter, Winter→Claude, and both round-trips at every advertised level. | — |
-| WS17-11 | unproven | Lane C (store wiring) | Delete/rebuild of the disposable `sessions/index.db` preserves runtime mappings, backend IDs, cursors. | — |
-| WS17-12 | unproven | Lane B (the inbound policy and the mailbox, WS-10 §13) | Documented message-size, 50-accepted/100-held queues, 5-minute dialog expiry, 12-hour idle subscription, permission-class behavior; inert `@` mentions retained. | — |
+| WS17-1 | **proven** | Lane B (the handlers the official branch's aliases reach), with Lane A's `toolAliases` | Real model-emitted `SendMessage` through the TS alias reaches `mcp__winter__send_message` with native args and returns the visible result. | PROVEN WHOLE-ROW IN THE FIX WAVE (item 14). Each lane's half was already green against a DOUBLE of the other — Lane A's alias test used a recording handler, Lane B's router tests used a scripted caller — and the row is the join. `test/joint/` drives one real 0.3.250 process through its own `toolAliases` into Lane B's real handler and router, and the delivered frame, the class, the summary and the typed outcome are read at the far end. The joint run also established what no report knew: the WS-10 §12 retry key survives the whole path, because the caller is bound with NO tool-use id and the message id still carries the model's own (item 15). |
+| WS17-2 | **proven** | Lane B (handlers), with Lane A's alias table | `ListAgents` aliasing; canonical MCP duplicate deferred/hidden visibility; behavior without Tool Search. | The visibility half is RECORDED, not asserted-as-wished: with no Tool Search active the pinned runtime advertises the native name AND the canonical twin, so `deferred` is this package's intent and the runtime's own decision is what the test writes down. Re-measured under the hermetic child env (F-1), where the advertised set is the artifact's own 21 names rather than 25 including three remotely-flagged tools. |
+| WS17-3 | **proven** | Lane A (aliases + deny floor, WS-14 §7) | `disallowedTools` + permission floor cover harness-internal/direct paths aliases miss. | The measurement behind it: denying only the built-in leaves the alias resolving and the handler RUNNING, because the deny check happens after alias resolution. `aliasDenyNames` is the door that stops a host tripping over it, and row 3 is why it exists. |
+| WS17-4 | **proven** | Lane A (spool isolation, WS-14 §1) with Lane B (delivery, hold/refuse, idle wake) | Two official sessions under the spool: isolated discovery, delivery, hold/refuse, idle wake, zero visibility into `~/.claude`. | Both halves are now measured against two REAL 0.3.250 processes sharing one directory (item 14), not one lane's real runtime beside the other lane's double. The `idle wake` clause resolves to WS-10 §14's WHOLE-CALL REFUSAL on this branch — the pinned SDK's `Query` exposes no session-status surface, so an adapter without a reliable idle signal must refuse rather than subscribe. That is a measurement about the artifact, not a gap in the row. |
+| WS17-5 | **proven** | Lane A (parent-restart child restoration, WS-14 §15) with Lane B (the resume route) | Official parent resume after restart restores completed children for native SendMessage resume. | The joint half runs two real generations of the same address over one durable store, which is the only thing a restart leaves behind and therefore the only thing the row can be about. |
+| WS17-7 | **proven** | Lane B (the messaging router, WS-15 §6.2–6.3 / WS-10 §11–§13) | Messaging: addressing, ambiguity/staleness, dedupe, queue bounds, TTL, retries, crash windows, loop prevention, reply routing, `notify_when_idle`. | Ten clauses, ten named proofs. The crash-window clause is the one worth reading twice: the envelope and the CLAIM are persisted before the adapter is invoked, so a crash between them is recoverable as `delivery_uncertain` rather than as silence. |
+| WS17-8 | **proven** (router-scoped — see the note) | Lane C (store wiring, WS-05 §6/§7) | Shared filesystem `SessionStore` + pinned dialect: Claude→Winter, Winter→Claude, and both round-trips at every advertised level. | SCOPED, and the scope is the honest half of this row: both legs are produced by the SHARED STORE over the pinned dialect, at every advertised level, over real `mkdtemp` homes. What is NOT claimed is a Claude leg written by the pinned runtime — `docs/probes/materialized-resume.md` records what happened when one was tried in the fix wave (probe (c) FAILED: the parent chain does not come back unbroken), which is exactly why no `agent-state` or `full-filesystem` compatibility claim rests on this row today. |
+| WS17-11 | **proven** | Lane C (store wiring) | Delete/rebuild of the disposable `sessions/index.db` preserves runtime mappings, backend IDs, cursors. | Proven the strong way and the structural way: the data survives a delete/rebuild BECAUSE none of it lives in the index, and a source scan pins that the router never reads the index at all. |
+| WS17-12 | **proven** | Lane B (the inbound policy and the mailbox, WS-10 §13) | Documented message-size, 50-accepted/100-held queues, 5-minute dialog expiry, 12-hour idle subscription, permission-class behavior; inert `@` mentions retained. | The expiry clause carries one interim behaviour a host must know and the README states: the sweep is LAZY — a held message's receipt is rewritten to `refused` when something next addresses that receiver, not on a timer of its own. |
 | WS17-13 | **proven** (router-scoped — see the note) | the spine (the packing and source gates), with this file's lockfile-integrity check | No verbatim all-rights-reserved artifacts in the Winter distribution; ephemeral CI fetch only. | Scoped to the ROUTER's own distribution: the artifact exists only in gitignored `node_modules`, is pinned by lockfile integrity (the plan's Global Constraints), and is rejected by the pack scan if it ever reaches a tarball. WS-02 §6's checksum-verified ephemeral FETCH is the SDK repository's own harness gate and stays there. |
-| WS17-14 | unproven | Lane A (builtin-path containment, WS-14 §8) | Native + aliased Agent/worktree, durable Cron, workflow, saved-approval, plan-mode, and arbitrary file/shell paths cannot create `CLAUDE.md`, `.claude/`, or `~/.claude/plans` under strict policy. | — |
-| WS17-15 | unproven | Lane C (temp continuity and the barrier) with Lane A (the supervised proxy) | Canonical memory + the D18 temp layout, cross-engine temp continuity, vendor temp roots reported honestly, supervised pre-cleanup reconciliation, default-spawn `mirror_error` handoff refusal, entire-adapter projection, `$bunfs` extraction avoided or tested. | — |
+| WS17-14 | **proven** | Lane A (builtin-path containment, WS-14 §8) | Native + aliased Agent/worktree, durable Cron, workflow, saved-approval, plan-mode, and arbitrary file/shell paths cannot create `CLAUDE.md`, `.claude/`, or `~/.claude/plans` under strict policy. | Two layers, and the scope is exact. PRE-HOC: the permission floor refuses any call whose arguments name a forbidden target — path fields (case-folded, NFKC), command text (un-normalized, quote-stripped), and the §8 writers with no path argument at all — installed by `launch()` itself on EVERY launch — merged ahead of the caller's own hooks and never replaced by one of them (the floor is recognised by IDENTITY: a hook merely stamped with the exported floor mark is not the floor, and a genuine floor built under a looser template policy does not stand in for the adapter's own) — and required by `assertOptionsInvariants` by that same identity, not merely offered by the options builder. POST-HOC: a sweep registered on PostToolUse, PostToolUseFailure and PostToolBatch snapshots the forbidden names under the session's cwd AND the child's HOME, to a bounded depth (6 by default), around every filesystem-touching call; it removes exactly what that call created, records a typed containment breach, and ends the turn. SCOPE, stated rather than implied: shell-escape and constructed-name spellings are caught POST-HOC by the sweep, never pre-hoc; the sweep sees the SYNCHRONOUSLY-VISIBLE effects of the call it brackets (a background write that lands later is caught opportunistically by the next swept call); it does not look outside cwd and HOME, nor below its depth bound; and the TURN ends only for a call that SUCCEEDS — for a failing call the guarantee is that the artifact does not survive it. |
+| WS17-15 | **proven** (router-scoped — see the note) | Lane C (temp continuity and the barrier) with Lane A (the supervised proxy) | Canonical memory + the D18 temp layout, cross-engine temp continuity, vendor temp roots reported honestly, supervised pre-cleanup reconciliation, default-spawn `mirror_error` handoff refusal, entire-adapter projection, `$bunfs` extraction avoided or tested. | SCOPED: six of the row's seven clauses are proven, four of them against the pinned runtime. The seventh — `$bunfs` extraction avoided or tested — is NOT claimed here: it is a property of how a HOST packages this package (a single-file Bun executable extracting its own embedded runtime), and nothing in this repository builds one. A row that counted it would be counting somebody else's build. The `entire-adapter projection` clause is likewise the projector's (Phase 8, WS-15 §4), and what this row proves for it is the durable half — the roots and records a projector reads. |
 | WS17-17 | **proven** | Lane D | Two identical raw model IDs behind different providers keep distinct provider-qualified identity/credentials/continuation/resume routes. | The fixture mirrors the generated catalog, where `claude-opus-5` really is six rows behind six providers. |
 
 ## Phase 7b rulings discharged (not WS-17 rows)
@@ -38,12 +38,101 @@ router-owned row is unproven.** Rows 6, 9, 10, 16 and 18 are excluded by WS-17 �
 
 ## Citations
 
+### WS17-1
+
+- `test/joint/rows-1-2.test.ts` — `row 1 — a model-emitted SendMessage is delivered by the REAL router, and the router's typed outcome is what the model sees`
+- `test/joint/rows-1-2.test.ts` — `row 1 — a refusal is rendered as a classified failure the model can act on, not as a crash`
+- `test/joint/rows-1-2.test.ts` — `the REVERSE direction — a peer's message reaches the live official session's own row, through the router`
+- `test/official/runtime-aliases.test.ts` — `row 1: a model-emitted `SendMessage` reaches the canonical handler with NATIVE args, and its result is what the model sees`
+- `test/messaging/handlers.test.ts` — `a retry with the SAME vendor tool-use id returns the stored outcome, not a second delivery`
+
+### WS17-2
+
+- `test/joint/rows-1-2.test.ts` — `row 2 — a model-emitted ListAgents renders the REAL directory, and both canonical twins are advertised`
+- `test/official/runtime-aliases.test.ts` — `row 2: `ListAgents` aliases the same way, and the advertised set records what 0.3.250 actually does`
+- `test/official/aliases-containment.test.ts` — `the canonical duplicates are DEFERRED rather than hidden — they stay addressable by name`
+
+### WS17-3
+
+- `test/official/runtime-aliases.test.ts` — `row 3: the paths the alias does not cover — the canonical name direct, and where a deny rule must be spelled`
+- `test/official/aliases-containment.test.ts` — `the floor is a PATH rule, so it covers tools no disposition anticipated`
+
+### WS17-4
+
+- `test/official/runtime-spool.test.ts` — `row 4: two sessions under ONE spool stay isolated, and neither can see the vendor home`
+- `test/messaging/official-pair.test.ts` — `DISCOVERY is isolated: each sees the other session and its OWN children, never the other's`
+- `test/messaging/official-pair.test.ts` — `DELIVERY between the two lands in the receiver's own handle, attributed to the sender`
+- `test/messaging/official-pair.test.ts` — `HOLD and REFUSE are the receiver's, and neither delivers anything`
+- `test/messaging/official-pair.test.ts` — `IDLE WAKE: an idle official session starts one turn (`delivered`), a running one queues`
+- `test/joint/rows-4-5.test.ts` — `two live official sessions get DIFFERENT config dirs, each under its own spool`
+- `test/joint/rows-4-5.test.ts` — `a model in one official session DISCOVERS and ADDRESSES the other, and the delivery lands in it`
+- `test/joint/rows-4-5.test.ts` — `a receiver whose permission class cannot be known is HELD, not delivered — fail-closed, with the real runtime as the sender`
+- `test/joint/rows-4-5.test.ts` — `notify_when_idle against an OFFICIAL target refuses the whole call — measured, because this branch has no idle signal`
+
+### WS17-5
+
+- `test/messaging/official-pair.test.ts` — `recovery keeps the completed children, and a native SendMessage to one routes through the resumed parent`
+- `test/messaging/official-pair.test.ts` — `before the parent is resumed, the same send is retryably unavailable rather than not-found`
+- `test/joint/rows-4-5.test.ts` — `the children recorded before the restart are still addressable through the resumed parent`
+
+### WS17-7
+
+- `test/messaging/directory.test.ts` — `rule 4 — ambiguity RETURNS CANDIDATES rather than choosing, and the candidates are directory rows`
+- `test/messaging/directory.test.ts` — `rule 5 — a name whose only holder is gone is STALE, not not-found (the lease outlives the row)`
+- `test/messaging/router.test.ts` — `a retry of the same (sender, tool-call) pair returns the STORED outcome and starts no second turn`
+- `test/messaging/router.test.ts` — `the dedupe survives a RESTART, because the id is derived rather than counted`
+- `test/messaging/router.test.ts` — `the envelope and its resolved generation are persisted, and the delivery is CLAIMED, before the adapter runs`
+- `test/messaging/router.test.ts` — `an adapter that THROWS is delivery_uncertain, and the record keeps the claim`
+- `test/messaging/router.test.ts` — `an identical rapid repeat is suppressed with a VISIBLE outcome, and allowed again after the window`
+- `test/messaging/router.test.ts` — `a reply chain is stopped at MAX_HOP_COUNT — the bound is machinery, not documentation`
+- `test/messaging/router.test.ts` — `the subscription SURVIVES A RESTART — a new router over the same store still fires it`
+- `test/messaging/recovery.test.ts` — `step 5 turns every claimed-but-unreceipted delivery into delivery_uncertain, and redelivers nothing`
+
+### WS17-8
+
+- `test/store/rows.test.ts` — `Claude -> Winter, Winter -> Claude and both round trips at level`
+- `test/store/rows.test.ts` — `the subagent level round-trips too: a subkey survives both directions`
+
+### WS17-11
+
+- `test/store/rows.test.ts` — `runtime mappings, backend ids and cursors all survive, because none of them live there`
+- `test/store/rows.test.ts` — `the router never reads the product index: its name appears nowhere in this lane's source`
+
+### WS17-12
+
+- `test/messaging/router.test.ts` — `a body over MAX_GLOBAL_MESSAGE_SIZE is refused before anything is resolved`
+- `test/messaging/policy.test.ts` — `a DELIVERED message (an idle receiver, one turn started) frees its slot; a QUEUED one does not`
+- `test/messaging/policy.test.ts` — `the held cap survives a RESTART — the in-memory box is rehydrated from the durable store`
+- `test/messaging/policy.test.ts` — `a DEFAULT-class hold expires after five minutes; an EXPLICIT hold never does`
+- `test/messaging/router.test.ts` — `a subscription past its 12-hour expiry fires nothing and is swept`
+- `test/messaging/policy.test.ts` — `prompts receiver x BYPASSES sender holds, visibly, with the envelope kept durably`
+- `test/messaging/policy.test.ts` — ``@` mentions and slash-command text survive the router's own rendering byte-identically`
+
 ### WS17-13
 
 - `test/gates/release-gates.test.ts` — `nothing tracked is the pinned package, its bundle, or a vendored copy`
 - `test/gates/scripts.test.ts` — `an embedded Anthropic artifact is rejected, by directory name and by file name`
 - `test/gates/scripts.test.ts` — `rule 7: the OPTIONAL peer named in a REACHABLE declaration is rejected -- and only there`
 - `test/conformance/rows.test.ts` — `row 13's other half — the pinned artifact is fetched by integrity hash into a gitignored tree`
+
+### WS17-14
+
+- `test/official/runtime-containment.test.ts` — `the native writers: every §8 row is EXERCISED, and the tally says which containment stopped it`
+- `test/official/runtime-containment.test.ts` — `arbitrary file and shell paths: an approving broker does not lift the floor`
+- `test/official/runtime-containment.test.ts` — `review r2, NEW-3: a command that BUILDS the name is caught post-hoc — swept, reported, and the call blocked`
+- `test/official/runtime-containment.test.ts` — `review r3, NEW-9: a command whose side effect precedes a FAILURE is swept too`
+- `test/official/runtime-containment.test.ts` — `review r3, NEW-11: the saved-approval path, for real — the durable update is stripped and no vendor settings file appears`
+- `test/official/runtime-containment.test.ts` — `review r4, NEW-18 (a): a host hook stamped with the exported floor mark does not REPLACE the floor — the floor is recognised by identity`
+- `test/official/runtime-containment.test.ts` — `the whole session's writes stay inside the spool, the cwd and the product home`
+
+### WS17-15
+
+- `test/store/rows.test.ts` — `the temp home stabilizes in the vendor engine dir across a full round trip`
+- `test/store/rows.test.ts` — `the vendor temp roots are reported honestly, including the one a copy left behind`
+- `test/store/rows.test.ts` — `supervised PRE-CLEANUP reconciliation: the entries are in the store before the staging root is deleted`
+- `test/store/rows.test.ts` — `a DEFAULT-SPAWN session with a mirror error is refused, never reconciled by guesswork`
+- `test/official/runtime-spool.test.ts` — `row 15: the vendor temp root is what we configured PLUS the engine's own segment, reported honestly`
+- `test/official/runtime-spool.test.ts` — `§1 profile 2 + §6 rules 2/3: a store-backed resume is observed as a staging root, and reconciliation runs BEFORE cleanup`
 
 ### WS17-17
 
@@ -103,14 +192,4 @@ router-owned row is unproven.** Rows 6, 9, 10, 16 and 18 are excluded by WS-17 �
 
 ## Still unproven
 
-- **WS17-1** — Lane B (the handlers the official branch's aliases reach), with Lane A's `toolAliases`
-- **WS17-2** — Lane B (handlers), with Lane A's alias table
-- **WS17-3** — Lane A (aliases + deny floor, WS-14 §7)
-- **WS17-4** — Lane A (spool isolation, WS-14 §1) with Lane B (delivery, hold/refuse, idle wake)
-- **WS17-5** — Lane A (parent-restart child restoration, WS-14 §15) with Lane B (the resume route)
-- **WS17-7** — Lane B (the messaging router, WS-15 §6.2–6.3 / WS-10 §11–§13)
-- **WS17-8** — Lane C (store wiring, WS-05 §6/§7)
-- **WS17-11** — Lane C (store wiring)
-- **WS17-12** — Lane B (the inbound policy and the mailbox, WS-10 §13)
-- **WS17-14** — Lane A (builtin-path containment, WS-14 §8)
-- **WS17-15** — Lane C (temp continuity and the barrier) with Lane A (the supervised proxy)
+None — every row above carries at least one machine-verified citation.
