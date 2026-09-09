@@ -28,7 +28,7 @@
 import type { BrandProfile, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError } from "./errors.ts";
-import { openOfficialLeg, type RouterOfficialInput, type RouterOfficialPolicy, type RouterQuery } from "./door.ts";
+import { officialLegAddress, openOfficialLeg, sessionLedgerKey, type RouterOfficialInput, type RouterOfficialPolicy, type RouterQuery } from "./door.ts";
 import type { SeamContext, SeamContextWithDirectory } from "./seams/context.ts";
 import type { OfficialSdkModule } from "./seams/official-sdk-shapes.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
@@ -376,12 +376,20 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       // `Query`, not a promise for one, so a durable read cannot gate the Winter leg without turning
       // the pass-through into a wrapper. The official leg checks the DURABLE row too, inside its own
       // launch, before a credential is read or a child is spawned.
-      const sessionId = runtime?.official?.sessionId ?? runtime?.sessionId;
-      if (decided !== undefined && sessionId !== undefined) {
-        const known = persistedRuntime.get(sessionId);
-        if (known !== undefined && known !== decided.runtimeKind) throw new RuntimeHandoffRequiredError({ from: known, to: decided.runtimeKind, address: `session:${sessionId}` });
-        persistedRuntime.set(sessionId, decided.runtimeKind);
+      //
+      // IT IS READ HERE AND WRITTEN WHEN A LEG ACTUALLY OPENS (review r1, I-1). Writing it on the
+      // DECISION poisoned every path that then refused — a claude-agent selection with no
+      // `runtime.official` threw, and the session's own correct Winter runtime was refused ever after.
+      // KEYED BY ADDRESS, not by the bare session id (L-3): a Winter session `x` and a claude child `x`
+      // of some parent are different objects and must not share a slot.
+      const ledgerKey = runtime?.official !== undefined ? officialLegAddress(runtime.official) : runtime?.sessionId === undefined ? undefined : sessionLedgerKey(runtime.sessionId);
+      if (decided !== undefined && ledgerKey !== undefined) {
+        const known = persistedRuntime.get(ledgerKey);
+        if (known !== undefined && known !== decided.runtimeKind) throw new RuntimeHandoffRequiredError({ from: known, to: decided.runtimeKind, address: ledgerKey });
       }
+      const noteOpened = (kind: RuntimeKind): void => {
+        if (ledgerKey !== undefined) persistedRuntime.set(ledgerKey, kind);
+      };
       if (decided !== undefined && decided.runtimeKind === "claude-agent") {
         const official = runtime?.official;
         if (official === undefined) {
@@ -401,11 +409,15 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
             shared: () => barrier.shared,
             ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
             ...(opts.official === undefined ? {} : { policy: opts.official }),
+            onOpened: noteOpened,
           },
           { prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand), input: official, selection: decided },
         );
       }
-      return opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand) });
+      const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand) });
+      // AFTER the peer returned, because that is when the Winter leg actually opened (I-1).
+      noteOpened("winter-agent");
+      return winterQuery;
   };
 
   const sdk: RuntimeSdk & { [INTERNALS]: RuntimeSdkInternals } = {
@@ -427,7 +439,7 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       // offer or a refusal did NOT move the session, so the door must go on refusing the new runtime —
       // updating the ledger on anything but `resumed` would turn a failed handoff into the silent
       // switch the ledger exists to prevent.
-      if (outcome.kind === "resumed") persistedRuntime.set(session.sessionId, to);
+      if (outcome.kind === "resumed") persistedRuntime.set(sessionLedgerKey(session.sessionId), to);
       return outcome;
     },
     async dispose() {

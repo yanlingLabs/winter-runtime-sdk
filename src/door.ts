@@ -53,7 +53,7 @@ import type { RuntimeDirectoryEntry } from "./seams/directory-store.ts";
 import type { RuntimeAddress } from "./seams/messaging-contract.ts";
 import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialSession, RemoteConfigPolicy } from "./seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialUserMessage } from "./seams/official-sdk-shapes.ts";
-import type { RuntimeSelection } from "./selection/runtime-selection.ts";
+import type { RuntimeKind, RuntimeSelection } from "./selection/runtime-selection.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
 
@@ -180,6 +180,24 @@ export interface RouterOfficialPolicy {
   options?: OptionsTemplatePolicy;
 }
 
+/**
+ * The canonical address this leg's session is recorded under — `session:<id>`, or R-7b-1's
+ * `agent:<parent>:<id>` for a cross-runtime child.
+ *
+ * EXPORTED because the door is not the only party that needs it: `query()`'s in-process ledger is
+ * keyed by ADDRESS rather than by the bare session id (review r1, L-3), since a top-level Winter
+ * session `x` and a claude child `x` of some parent are different objects that would otherwise share
+ * one slot and refuse each other as `handoff-required`.
+ */
+export function officialLegAddress(input: Pick<RouterOfficialInput, "sessionId" | "parentSessionId">): string {
+  return serializeRuntimeAddress(input.parentSessionId === undefined ? buildSessionAddress(input.sessionId) : buildChildAddress(input.parentSessionId, input.sessionId));
+}
+
+/** The same key for a session named on either leg — the Winter leg has no parent to name. */
+export function sessionLedgerKey(sessionId: string): string {
+  return serializeRuntimeAddress(buildSessionAddress(sessionId));
+}
+
 /** The collaborators the leg composes. Built once by `createRuntimeSdk`; not part of any public shape. */
 export interface OfficialLegDeps {
   brand: BrandProfile;
@@ -193,6 +211,22 @@ export interface OfficialLegDeps {
   vendoredOfficialRuntime?: string;
   /** The adapter's own policy, so a host's `env`/`containment` choices reach the door's own builders. */
   policy?: RouterOfficialPolicy;
+  /**
+   * "A leg opened on this runtime" — the door's in-process ledger, told only when it is true
+   * (review r1, I-1).
+   *
+   * CALLED AFTER THE LAUNCH RETURNS, never before. `query()` used to write the ledger the moment it
+   * DECIDED, which poisoned it on every path that then refused: a claude-agent selection with no
+   * `runtime.official` threw, and the session's own correct Winter runtime was refused ever after with
+   * `from=claude-agent`. Worse on the restart path — the durable row says `winter-agent`, the official
+   * leg is correctly refused by the row, and the honest follow-up (a Winter query) was then refused by
+   * a ledger that contradicted the row the door had just read. The session was wedged on both legs and
+   * `sdk.handoff()` could not move it, because it had never been where the ledger claimed.
+   *
+   * It is also called with the ROW's runtime when the durable check refuses, so the ledger learns the
+   * truth it just read rather than keeping a guess.
+   */
+  onOpened?: (runtimeKind: RuntimeKind) => void;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -333,7 +367,7 @@ export interface OfficialLegRequest {
 export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegRequest): OfficialQuery {
   const branchLabel = officialBranchLabel(deps.brand);
   const parsed = request.input.parentSessionId === undefined ? buildSessionAddress(request.input.sessionId) : buildChildAddress(request.input.parentSessionId, request.input.sessionId);
-  const address = serializeRuntimeAddress(parsed);
+  const address = officialLegAddress(request.input);
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
   const stream = typeof request.prompt === "string" ? undefined : createOfficialInputStream();
   let detach: (() => void) | undefined;
@@ -348,6 +382,9 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // the time anyone noticed.
     const existing = await deps.directory.get(address);
     if (existing !== undefined && existing.runtimeKind !== "claude-agent") {
+      // THE LEDGER LEARNS WHAT THE ROW SAYS (I-1). Without this the next query for this session — on
+      // the runtime the row actually names — met a ledger that still held the refused answer.
+      deps.onOpened?.(existing.runtimeKind);
       throw new RuntimeHandoffRequiredError({ from: existing.runtimeKind, to: "claude-agent", address });
     }
     const shared = deps.shared();
@@ -463,6 +500,9 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // takes its own message shape), but not one element earlier than the session that consumes it.
     if (stream !== undefined) pumpCallerPrompt(request.prompt as AsyncIterable<string>, stream);
     const session: OfficialSession = resume === undefined ? deps.official.launch(plan) : deps.official.resume({ ...plan, resume, ...(request.options.forkSession === undefined ? {} : { forkSession: request.options.forkSession }) });
+    // THE LEG IS OPEN — now, and not one line earlier (I-1). Everything above this point can still
+    // refuse, and a ledger written before a refusal is a ledger that lies about where a session lives.
+    deps.onOpened?.("claude-agent");
 
     // ATTACHED ONLY WHEN THERE IS SOMETHING TO PUSH INTO (header note 3). A handle whose `push` could
     // only ever fail would make every delivery `delivery_uncertain` — "the write may have landed" —

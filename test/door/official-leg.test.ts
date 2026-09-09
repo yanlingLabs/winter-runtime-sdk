@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery } from "../../src/index.ts";
 import { TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../../src/official/env-allowlist.ts";
 import { cleanupHermetic, officialRuntimeBed } from "../official/support.ts";
-import { DOOR_TIMEOUT, drain, withDoorBed } from "./support.ts";
+import { DOOR_TIMEOUT, doorSelection, drain, withDoorBed } from "./support.ts";
 
 const describeRuntime = officialRuntimeBed() === undefined ? describe.skip : describe;
 
@@ -118,7 +118,7 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
           status: "idle",
           mode: "code",
           generation: 1,
-          selection: { ...(await import("./support.ts")).doorSelection, runtimeKind: "winter-agent" },
+          selection: { ...doorSelection, runtimeKind: "winter-agent" },
           capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
           updatedAt: new Date(0).toISOString(),
         });
@@ -131,6 +131,16 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
         expect((failure as Error).message).toContain("sdk.handoff");
         // Untouched: no model request was ever made.
         expect(bed.record.requests).toHaveLength(0);
+
+        // REVIEW r1, I-1 (the E4 arm) — THE LEDGER LEARNED WHAT THE ROW SAYS, not what was refused.
+        // The honest follow-up after this refusal is a query on the runtime the row actually names;
+        // before I-1 the ledger held `claude-agent` from the DECISION and refused that too, wedging the
+        // session on both legs with no `sdk.handoff()` able to move it (it had never been on claude).
+        const winterAfter = bed.sdk.query({
+          prompt: "continue where the row says",
+          options: { runtime: { sessionId: bed.sessionId, selection: { ...doorSelection, runtimeKind: "winter-agent" } } },
+        });
+        for await (const _ of winterAfter as AsyncIterable<unknown>) void _;
       });
     },
     DOOR_TIMEOUT,

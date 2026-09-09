@@ -254,6 +254,46 @@ describe("Task 6b — a mid-session runtime change is `handoff-required`", () =>
     expect(calls).toHaveLength(2);
   });
 
+  // ==================================================================================================
+  // REVIEW r1, I-1 — THE LEDGER RECORDS A LEG THAT OPENED, NEVER A DECISION THAT WAS THEN REFUSED.
+  //
+  // It used to be written the moment `query()` decided, which poisoned it on every path that then
+  // refused. The session was wedged on BOTH legs: the official one by whatever refused it, the Winter
+  // one by a ledger that named a runtime the session had never run on — and `sdk.handoff()` cannot
+  // move a session that was never there.
+  // ==================================================================================================
+  test("a claude-agent query that REFUSED for want of `runtime.official` does not wedge the Winter leg", async () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    expect(() => sdk.query({ prompt: "one", options: { runtime: { sessionId: "led-1", selection: selectionFor("claude-agent") } } })).toThrow(RuntimeLaunchInputError);
+    // THE POINT: nothing was served, so nothing is persisted — and the session's own correct runtime
+    // is still available to it.
+    for await (const _ of sdk.query({ prompt: "two", options: { runtime: { sessionId: "led-1", selection: selectionFor("winter-agent") } } })) void _;
+    expect(calls).toHaveLength(1);
+  });
+
+  test("the ledger is keyed by ADDRESS: a session `x` and a child `x` of some parent do not collide", async () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    for await (const _ of sdk.query({ prompt: "one", options: { runtime: { sessionId: "x", selection: selectionFor("winter-agent") } } })) void _;
+    // `agent:p:x` is a different object from `session:x` — the claude child of a Winter parent
+    // (R-7b-1). Before L-3 the bare id `x` made these one slot, and the second call was refused
+    // outright. The official leg is deferred, so the refusal (or its absence) is on the first pull.
+    const child = sdk.query({ prompt: "two", options: { cwd: "/work", runtime: { selection: selectionFor("claude-agent"), official: { sessionId: "x", parentSessionId: "p" } } } });
+    const failure: unknown = await (async (): Promise<unknown> => {
+      try {
+        for await (const _ of child as AsyncIterable<unknown>) void _;
+        return undefined;
+      } catch (error) {
+        return error;
+      }
+    })();
+    // It fails for want of a vendored runtime — NOT because the ledger thought this address was Winter.
+    expect(failure).not.toBeInstanceOf(RuntimeHandoffRequiredError);
+    expect((failure as Error).message).toContain("WinterCompatibilitySessionStore");
+    expect(calls).toHaveLength(1);
+  });
+
   test("without a session id the door has nothing to hold a caller to, and says nothing", async () => {
     // The honest boundary: the ledger is keyed by session, and a caller that names no session is
     // asking for a fresh one. This test exists so the boundary is a decision rather than a gap.
