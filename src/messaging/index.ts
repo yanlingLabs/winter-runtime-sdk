@@ -25,7 +25,7 @@ export type { InboundPolicy, InboundPolicyDeps, InboundPolicyHooks, InboundVerdi
 export { createAttachedSessionRegistry } from "./sessions.ts";
 export type { AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession, LiveSessionStatus } from "./sessions.ts";
 export { renderAttributedTurn, renderOwnerQualifiedTurn, UnattributableSenderError } from "./attribution.ts";
-export { createMessagingToolHandlers } from "./handlers.ts";
+export { createMessagingToolHandlers, toolUseIdFromExtra, VENDOR_TOOL_USE_ID_META_KEY } from "./handlers.ts";
 export type { MessagingToolCaller, MessagingToolHandler, MessagingToolHandlers, MessagingToolResult } from "./handlers.ts";
 // The native schemas, their acceptors and their bounds are NOT here: they are WS-10 §10.1/§10.2's
 // model-facing contract, shared with the official branch's alias targets, and they live in

@@ -30,7 +30,37 @@ export interface MessagingToolResult {
   isError?: boolean;
 }
 
-export type MessagingToolHandler = (args: unknown) => Promise<MessagingToolResult>;
+export type MessagingToolHandler = (args: unknown, extra?: unknown) => Promise<MessagingToolResult>;
+
+/**
+ * WS-10 §12's RETRY KEY, on the official branch — and it exists, which was not known until it was
+ * measured (item 15; `test/official/runtime-aliases.test.ts` is the measurement).
+ *
+ * §12 wants a message id derived from (sender session, TOOL-CALL id) so "a retry allocates the SAME
+ * id" and returns the stored outcome instead of starting a second turn. On the Winter branch the
+ * caller binds `toolUseId` at registration. On the official branch the handler is inside the vendor's
+ * in-process MCP server, where the only per-call channel is the second argument the vendor passes —
+ * and the reasonable expectation was that it carries MCP request context (a JSON-RPC request id,
+ * `_meta`) rather than an Anthropic-API `tool_use_id`, which is one layer up.
+ *
+ * THE PINNED RUNTIME BRIDGES THEM. Measured on 0.3.250: `extra._meta["claudecode/toolUseId"]` is the
+ * exact id the model emitted. So the official branch gets a real §12 key rather than depending on the
+ * rapid-repeat guard, and the vendor's own namespaced `_meta` name is read rather than guessed at.
+ *
+ * A VENDOR-NAMESPACED KEY IS NEVER REBRANDED (WS-01 §5): `claudecode/toolUseId` is the vendor's name
+ * for the vendor's field, exactly like `CLAUDE_CONFIG_DIR`. It is read defensively — an absent or
+ * non-string value simply falls back to the bound caller's id — because a future pin may move it, and
+ * losing the key must degrade to today's behaviour rather than to a crash.
+ */
+export const VENDOR_TOOL_USE_ID_META_KEY = "claudecode/toolUseId";
+
+export function toolUseIdFromExtra(extra: unknown): string | undefined {
+  if (typeof extra !== "object" || extra === null) return undefined;
+  const meta = (extra as { _meta?: unknown })._meta;
+  if (typeof meta !== "object" || meta === null) return undefined;
+  const id = (meta as Record<string, unknown>)[VENDOR_TOOL_USE_ID_META_KEY];
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
 
 export interface MessagingToolHandlers {
   sendMessage: MessagingToolHandler;
@@ -68,10 +98,16 @@ export function createMessagingToolHandlers(messaging: GlobalMessagingHandle, ca
   const identity = (): MessagingToolCaller => (typeof caller === "function" ? caller() : caller);
 
   return {
-    async sendMessage(rawArgs) {
+    async sendMessage(rawArgs, extra) {
       const accepted = acceptNativeSendMessageArgs(rawArgs);
       if (!accepted.ok) return text(accepted.reason, true);
-      const who = identity();
+      const bound = identity();
+      // THE PER-CALL TOOL-USE ID WINS (item 15). On the official branch the caller is bound once at
+      // registration and cannot know it; the vendor's `extra` carries the id of THIS call, which is
+      // exactly what §12's retry key is derived from. On the Winter branch there is no `extra` and
+      // the bound value is already the right one, so this is additive in both directions.
+      const perCall = toolUseIdFromExtra(extra);
+      const who: MessagingToolCaller = perCall === undefined ? bound : { ...bound, toolUseId: perCall };
       const from = callerAddressOf(who);
       const result = await messaging.sendDetailed({
         from,
