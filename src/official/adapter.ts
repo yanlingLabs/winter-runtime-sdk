@@ -192,6 +192,59 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     });
   };
 
+  /**
+   * WHICH SESSION A CONFIG DIR BELONGS TO — the map the DISPATCHER path needs (fix-wave concern 3).
+   *
+   * `launch()`/`resume()` know both halves; the dispatcher knows only the root it observed. Every
+   * supported launch records the pair here (configured root AND, once the spawn happens, the observed
+   * one), so a host that follows §2's template — `buildOptions({ spawnProxy: adapter.spawnProxy })`
+   * and then the vendor's own `query()` — still gets §6 rule 2's durable record instead of the silent
+   * no-op it used to get.
+   */
+  const sinkByRoot = new Map<string, SpawnRecordSink>();
+
+  /**
+   * §6 rule 2's record on the DISPATCHER path: the directory sink when the root can be attributed to
+   * exactly one session, a TYPED REFUSAL when it cannot.
+   *
+   * A REFUSAL AND NOT A NO-OP, because the failure a no-op produces is the worst kind this branch has:
+   * a session whose `claude-resume-<uuid>` staging root is never written down, which after a crash can
+   * only be found by scanning temp directories by recency — the thing `officialHandoffEligibility`
+   * refuses to do, for the reason it gives. Better to fail at the spawn, where the host can pass
+   * `policy.sink` or use `launch()`, than to discover it during a handoff.
+   *
+   * THE RESOLUTION IS ASYNC AND THE DISPATCHER IS NOT, so it happens inside `record()`: `launch()`'s
+   * own map first, then the directory's rows by `configDir`, and only when exactly one row matches —
+   * two sessions under one root is precisely the ambiguity a recency scan would resolve by guessing.
+   */
+  const dispatcherSink = (): SpawnRecordSink => {
+    const resolve = async (observedRoot: string): Promise<SpawnRecordSink> => {
+      // THE LAUNCH'S OWN SINK, not merely its address — it carries the SEED, so a dispatch under a
+      // root whose session has no directory row yet still records rather than failing on the
+      // "no entry and no seed" branch a launch would never have hit.
+      const known = sinkByRoot.get(observedRoot);
+      if (known !== undefined) return known;
+      const matches = (await context.directoryStore.load()).filter((entry) => entry.configDir === observedRoot);
+      if (matches.length === 1) return directoryRecordSink({ store: context.directoryStore, address: (matches[0] as { address: string }).address });
+      throw new OfficialConfigurationError({
+        option: "spawnProxy",
+        reason:
+          matches.length === 0
+            ? `this spawn came through the bare dispatcher and its config dir (${observedRoot}) belongs to no session this adapter launched and to no directory row, so §6 rule 2's record has no address to be written under; launch through launch()/resume() (which carry the address on the plan) or pass policy.sink`
+            : `its config dir (${observedRoot}) matches ${matches.length} directory rows, so the record cannot be attributed to one session — and attributing it by recency is the guess WS-14 §5 forbids`,
+        branchLabel,
+      });
+    };
+    return {
+      async record(observation) {
+        await (await resolve(observation.root.configDir)).record(observation);
+      },
+      async clear(observation) {
+        await (await resolve(observation.root.configDir)).clear?.(observation);
+      },
+    };
+  };
+
   const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string, sink: SpawnRecordSink): SupervisedSpawnProxy =>
     createSupervisedSpawnProxy({
       brand,
@@ -221,7 +274,10 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
       throw new OfficialConfigurationError({ option: "env.CLAUDE_CONFIG_DIR", reason: "a spawn with no config dir has no recoverable transcript root (WS-14 §1/§6)", branchLabel });
     }
     const classified = classifyLocalWriteRoot(observed);
-    lastDispatched = makeProxy(classified.profile, observed, policy.sink ?? { record: () => undefined });
+    // NEVER `{ record: () => undefined }` ANY MORE (fix-wave concern 3). The default read as "the
+    // record is on" and on this one path it was off — for exactly the host that followed the
+    // documented template. It is now the directory sink, or a refusal that says which door to use.
+    lastDispatched = makeProxy(classified.profile, observed, policy.sink ?? dispatcherSink());
     return lastDispatched.spawn(spawnOptions);
   };
   let lastDispatched: SupervisedSpawnProxy | undefined;
@@ -327,7 +383,19 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
 
     // ONE SUPERVISOR PER GENERATION, bound into the options this generation is started with. A copy,
     // because the caller's plan is theirs — and the ONLY field changed is the spawn hook.
-    const supervisor = makeProxy(plan.profile, plan.configDir, sinkFor(plan));
+    const launchSink = sinkFor(plan);
+    const supervisor = makeProxy(plan.profile, plan.configDir, launchSink);
+    // The pair this launch knows and the dispatcher does not: both the CONFIGURED root and, once the
+    // wrapper hands the child a different one (§1 profile 2), the OBSERVED root, so a later bare
+    // dispatch under either can still be attributed to this session.
+    sinkByRoot.set(plan.configDir, launchSink);
+    void supervisor.whenRecorded().then(
+      () => {
+        const observed = supervisor.observation?.root.configDir;
+        if (observed !== undefined) sinkByRoot.set(observed, launchSink);
+      },
+      () => undefined,
+    );
     const options: OfficialOptions = {
       ...withFloor,
       ...(resume === undefined ? {} : { resume: resume.resume, ...(resume.forkSession === undefined ? {} : { forkSession: resume.forkSession }) }),
