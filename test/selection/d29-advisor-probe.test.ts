@@ -56,6 +56,77 @@ const ADVISOR = /advisor/i;
 /** How long one condition may take before the probe gives up on the runtime and skips. */
 const CONDITION_TIMEOUT_MS = 60_000;
 
+/**
+ * A LOOPBACK PROXY THAT RECORDS AND REFUSES — the egress tripwire (fix-wave re-review, NEW-G).
+ *
+ * WHY THE FAKE CANNOT DO THIS. The fake sees requests that reach IT; a request to another host is
+ * invisible to it by definition, which is exactly how "no network" survived as a false claim through
+ * a whole branch. What this listener adds is the negative: the child is handed
+ * `HTTPS_PROXY`/`HTTP_PROXY` pointing at it, so any attempt to reach an external host arrives HERE as
+ * a `CONNECT` line and is refused. `NO_PROXY=127.0.0.1,localhost` keeps the model endpoint direct, so
+ * the session still runs normally.
+ *
+ * MEASURED BOTH WAYS on this pin: with the four traffic opt-outs set it records NOTHING; with them
+ * unset it records `CONNECT api.anthropic.com:443`. So an empty recording is a real observation rather
+ * than a listener that was never wired.
+ */
+async function withEgressProxy<T>(fn: (proxy: { env: Record<string, string>; port: number; lines: string[] }) => Promise<T>): Promise<T> {
+  const lines: string[] = [];
+  const server = Bun.listen<undefined>({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        const first = new TextDecoder().decode(data).split("\r\n")[0] ?? "";
+        if (first.length > 0) lines.push(first);
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      },
+      error() {
+        /* a refused connection is the point */
+      },
+    },
+  });
+  try {
+    const url = `http://127.0.0.1:${server.port}`;
+    return await fn({ env: { HTTPS_PROXY: url, HTTP_PROXY: url, NO_PROXY: "127.0.0.1,localhost" }, port: server.port, lines });
+  } finally {
+    server.stop(true);
+  }
+}
+
+/**
+ * Proves the listener above RECORDS, without reaching anything outside this machine.
+ *
+ * An empty recording is only evidence if a non-empty one was possible. Rather than take that from a
+ * non-hermetic control run, the test connects to the listener itself and checks the line lands — so
+ * "the child opened nothing" is distinguishable from "the listener was never wired".
+ */
+async function proveEgressListenerRecords(port: number): Promise<string[]> {
+  const seen: string[] = [];
+  await new Promise<void>((resolve) => {
+    void Bun.connect<undefined>({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) {
+          socket.write("CONNECT self-check.invalid:443 HTTP/1.1\r\n\r\n");
+        },
+        data() {
+          resolve();
+        },
+        close() {
+          resolve();
+        },
+        error() {
+          resolve();
+        },
+      },
+    }).catch(() => resolve());
+    setTimeout(resolve, 2_000);
+  });
+  return seen;
+}
+
 interface ConditionResult {
   label: string;
   /** What the session was configured with, for the record. */
@@ -72,9 +143,13 @@ interface ConditionResult {
   kinds: string[];
   /** The runtime's own `user-agent` on the endpoint request — which artifact actually ran. */
   userAgent: string;
+  /** Request lines an egress proxy saw, when one was attached. Empty is the hermetic answer. */
+  egress: string[];
+  /** Whether a deliberate self-connection was recorded — an empty `egress` means nothing without it. */
+  selfCheckRecorded?: boolean;
 }
 
-type Probe = { ok: true; sdkVersion: string; binary: string; results: ConditionResult[]; remote: ConditionResult[] } | { ok: false; reason: string };
+type Probe = { ok: true; sdkVersion: string; binary: string; results: ConditionResult[]; remote: ConditionResult[]; egressControl?: ConditionResult } | { ok: false; reason: string };
 
 /**
  * The ONE non-hermetic leg, off by default (F-1).
@@ -169,6 +244,7 @@ async function runCondition(
   binary: string,
   spec: ConditionSpec,
   allowRemoteConfig = false,
+  proxy?: { env: Record<string, string>; port: number; lines: string[] },
 ): Promise<ConditionResult> {
   const root = mkdtempSync(join(tmpdir(), "winter-d29-"));
   try {
@@ -191,7 +267,7 @@ async function runCondition(
               // WS-14 §5.1 / R-7b-6: the package's own bundled runtime, never the user's.
               pathToClaudeCodeExecutable: binary,
               abortController,
-              env: { ...officialCaptureEnv({ baseUrl: fake.url, claudeConfigDir, home, allowRemoteConfig }), ...spec.env },
+              env: { ...officialCaptureEnv({ baseUrl: fake.url, claudeConfigDir, home, allowRemoteConfig }), ...(proxy?.env ?? {}), ...spec.env },
               ...spec.options,
             },
           });
@@ -223,6 +299,7 @@ async function runCondition(
           label: allowRemoteConfig ? `${spec.label} [REMOTE CONFIG ALLOWED]` : spec.label,
           conditions: spec.conditions,
           userAgent: messagesRequest?.headers["user-agent"] ?? "(none observed)",
+          egress: [...(proxy?.lines ?? [])],
           initTools,
           wireTools: [...wireTools],
           paths: [...new Set(fake.requests.map((r) => `${r.method} ${r.path}`))],
@@ -265,6 +342,24 @@ async function prepareProbe(): Promise<Probe> {
       return { ok: false, reason: `condition ${spec.label} could not run: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
+  // THE EGRESS CONTROL (NEW-G): one hermetic condition re-run behind a recording, refusing loopback
+  // proxy. Condition E is the one that used to produce the advisor, so it is the one worth watching.
+  let egressControl: ConditionResult | undefined;
+  const eSpec = CONDITIONS.find((candidate) => candidate.label.startsWith("E "));
+  if (eSpec !== undefined) {
+    try {
+      egressControl = await withEgressProxy(async (proxy) => {
+        const result = await runCondition(sdk, binary, eSpec, false, proxy);
+        // The child's own answer is captured; now prove the listener could have captured one.
+        const before = proxy.lines.length;
+        await proveEgressListenerRecords(proxy.port);
+        return { ...result, egress: [...result.egress], selfCheckRecorded: proxy.lines.length > before };
+      });
+    } catch (error) {
+      return { ok: false, reason: `the egress control could not run: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
   const remote: ConditionResult[] = [];
   if (ALLOW_REMOTE_CONFIG) {
     for (const spec of CONDITIONS.filter((candidate) => ["E ", "F ", "G "].some((prefix) => candidate.label.startsWith(prefix)))) {
@@ -275,7 +370,7 @@ async function prepareProbe(): Promise<Probe> {
       }
     }
   }
-  return { ok: true, sdkVersion, binary, results, remote };
+  return { ok: true, sdkVersion, binary, results, remote, ...(egressControl === undefined ? {} : { egressControl }) };
 }
 
 const probe = await prepareProbe();
@@ -358,6 +453,27 @@ describe("D29 — does the pinned official runtime expose an advisor server tool
     const offenders = probe.results.filter((result) => [...result.wireTools, ...result.initTools].some((name) => ADVISOR.test(name)));
     expect(offenders.map((result) => result.label)).toEqual([]);
     expect(probe.results.length).toBe(CONDITIONS.length);
+  });
+
+  test("NEW-G — the child opens NO connection to anything but the fake, observed rather than inferred", () => {
+    // WHAT THE OTHER TESTS CANNOT SEE. The fake records requests that reach IT; a request to another
+    // host is invisible to it by construction, which is precisely how "no network" survived as a false
+    // claim through a whole branch. Here the child is handed a loopback proxy that RECORDS and REFUSES,
+    // with `NO_PROXY` keeping the model endpoint direct — so an external attempt lands as a `CONNECT`
+    // line rather than as silence.
+    const control = probe.egressControl;
+    expect(control).toBeDefined();
+    console.log(`[d29] egress control (${control?.label}): proxy request lines = ${JSON.stringify(control?.egress ?? [])}`);
+    // NOT VACUOUS: the session really ran behind the proxy — it reached the fake and got its tools.
+    expect(control?.kinds).toContain("system/init");
+    expect((control?.wireTools ?? []).length).toBeGreaterThan(0);
+    // …and the listener REALLY RECORDS: a deliberate self-connection after the session lands on it, so
+    // an empty `egress` is "the child opened nothing" rather than "nothing was wired". (Measured the
+    // other way on this pin too: with the opt-outs removed the same listener records
+    // `CONNECT api.anthropic.com:443` — that run is non-hermetic and is not part of the suite.)
+    expect(control?.selfCheckRecorded).toBe(true);
+    expect(control?.egress).toEqual([]);
+    expect(control?.wireTools.filter((name) => ADVISOR.test(name))).toEqual([]);
   });
 
   test("the remote-configuration leg, when it is explicitly enabled, shows what the CDN adds", () => {
