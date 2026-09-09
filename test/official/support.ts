@@ -25,6 +25,7 @@
 //      DECOY vendor home under the temp `HOME`, so "nothing was written there" is an assertion about
 //      a directory that exists rather than about one that never could.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -58,19 +59,26 @@ export interface OfficialRuntimeBed {
 }
 
 /**
- * THE ENV POLICY EVERY REAL-RUNTIME BED USES (whole-branch review, F-1).
+ * THE ENV POLICY EVERY REAL-RUNTIME BED USES (whole-branch review, F-1; R-7b-11).
  *
- * The four traffic opt-outs ride the `configuredExtras` door, which is a POSITIVE allowlist over the
- * pinned artifact's own non-credential registry — all four names are declared there, so this is the
- * door working as designed rather than an exception carved for tests. Without them the child fetches
- * remote feature configuration and the advertised tool inventory changes under the same pin: measured
- * at 25 tools with the fetch, 21 without, the four extra being `DesignSync`, `Monitor`,
- * `PushNotification` and `advisor_20260301:advisor`. A proof about "what 0.3.250 does" that moves
- * with a CDN is not a proof about 0.3.250.
+ * NOW EMPTY, AND THAT IS THE POINT. The four traffic opt-outs used to ride the `configuredExtras`
+ * door from here, which meant the beds were hermetic and a shipped session was not — the pin's tool
+ * surface stayed remotely mutable for every host. R-7b-11 moved them into the production env builder
+ * as branch-owned defaults, so a bed that passes NOTHING now gets exactly what a host gets. The
+ * function stays because the beds call it and because a future bed-wide policy has somewhere to live;
+ * an empty object here is the evidence that the default carries the behaviour.
+ *
+ * Without them the child fetches remote feature configuration and the advertised tool inventory
+ * changes under the same pin: measured at 25 tools with the fetch, 21 without, the four extra being
+ * `DesignSync`, `Monitor`, `PushNotification` and `advisor_20260301:advisor`. A proof about "what
+ * 0.3.250 does" that moves with a CDN is not a proof about 0.3.250.
  */
-export function hermeticEnvPolicy(): { env: { configuredExtras: Record<string, string> } } {
-  return { env: { configuredExtras: { ...HERMETIC_TRAFFIC_OPT_OUTS } } };
+export function hermeticEnvPolicy(): { env: Record<string, never> } {
+  return { env: {} };
 }
+
+/** The four names the production builder sets — re-exported so a bed can assert on them. */
+export { HERMETIC_TRAFFIC_OPT_OUTS };
 
 let cached: OfficialRuntimeBed | undefined;
 let resolutionFailure: string | undefined;
@@ -155,6 +163,17 @@ export interface HermeticSessionOptions {
    * refusal a measurement rather than a coincidence.
    */
   git?: boolean;
+  /**
+   * SHORT paths, because the pinned artifact caps `CLAUDE_CODE_PROJECT_DIR_NAME` at 64 characters
+   * (R-7b-13) and macOS's temp root spends 47 of them before this helper adds anything.
+   *
+   * The door derives that key from the working directory (the Winter SDK's own
+   * `transcriptProjectKey(cwd)`), so a bed with the ordinary prefix produces an 86-character key the
+   * runtime would REJECT — and a test bed that cannot exercise the default is a bed that measures a
+   * different door from the one a host runs. `w-<mkdtemp>/w` fits with room to spare on both
+   * platforms, and it is still `mkdtemp` under `tmpdir()`, so the hermeticity rule is untouched.
+   */
+  compact?: boolean;
 }
 
 export interface HermeticSession {
@@ -173,13 +192,36 @@ export interface HermeticSession {
 const roots: string[] = [];
 
 /** Creates one hermetic set of directories. Every root is removed by `cleanupHermetic()`. */
+/**
+ * A temp base short enough that a compact session's derived transcript key fits the pin's 64 (nit (a)).
+ *
+ * THE BED MUST NOT DEPEND ON THE OS TEMP PATH. macOS's `tmpdir()` is 48 characters here, which leaves
+ * five of headroom after `/w-XXXXXX/w`; a machine with a longer `TMPDIR` would fail EVERY
+ * real-runtime door test with an opaque key refusal that says nothing about the bed. So the base is
+ * chosen by measurement — `tmpdir()` when the projected key fits, else `/tmp` — and if neither fits the
+ * failure names the cause instead of arriving as a refusal 200 lines away.
+ */
+function compactTempBase(): string {
+  const projected = (base: string): number => transcriptProjectKey(join(base, "w-XXXXXX", "w")).length;
+  for (const base of [tmpdir(), "/tmp"]) {
+    if (existsSync(base) && projected(base) <= COMPACT_KEY_LIMIT) return base;
+  }
+  throw new Error(
+    `the door beds need a temp root short enough for the pinned runtime's ${COMPACT_KEY_LIMIT}-character CLAUDE_CODE_PROJECT_DIR_NAME rule: ` +
+      `${tmpdir()} projects a ${projected(tmpdir())}-character key and /tmp a ${existsSync("/tmp") ? projected("/tmp") : NaN}-character one. Set TMPDIR to a shorter path to run the real-runtime door tests.`,
+  );
+}
+
+/** The pinned artifact's own cap, spelled here so the bed's failure names the same number the refusal does. */
+const COMPACT_KEY_LIMIT = 64;
+
 export function hermeticSession(prefix = "official", options: HermeticSessionOptions = {}): HermeticSession {
-  const root = mkdtempSync(join(tmpdir(), `winter-rt-${prefix}-`));
+  const root = mkdtempSync(join(options.compact === true ? compactTempBase() : tmpdir(), options.compact === true ? "w-" : `winter-rt-${prefix}-`));
   roots.push(root);
   const home = join(root, "home");
   const brandHome = join(home, ".winter");
   const spool = join(brandHome, "runtimes", "official-agent-spool");
-  const cwd = join(root, "work");
+  const cwd = join(root, options.compact === true ? "w" : "work");
   const decoyVendorHome = join(home, ".claude");
   for (const dir of [home, brandHome, spool, cwd, decoyVendorHome]) mkdirSync(dir, { recursive: true });
   // The decoy carries a file, so "unchanged" is checkable rather than vacuous.

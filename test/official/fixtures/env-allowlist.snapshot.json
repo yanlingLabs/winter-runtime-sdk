@@ -62,5 +62,12 @@
   ],
   "refusedProxyTelemetryPrefixes": [
     "OTEL_"
-  ]
+  ],
+  "trafficOptOuts": [
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_TELEMETRY",
+    "DISABLE_ERROR_REPORTING",
+    "DISABLE_AUTOUPDATER"
+  ],
+  "projectDirNamePattern": "^[A-Za-z0-9_-]{1,64}$"
 }

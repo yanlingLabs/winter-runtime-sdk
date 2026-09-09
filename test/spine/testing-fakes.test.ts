@@ -102,24 +102,22 @@ describe("the loopback fakes", () => {
     });
   });
 
-  test("all four names are declared by the PINNED artifact's own registry, so they ride the extras door", () => {
-    // They are not an exception carved for tests: `configuredExtras` is a positive allowlist over the
-    // runtime's own non-credential registry, and every opt-out is in it. If a future pin dropped one,
-    // this fails here rather than silently un-hermeticising every real-runtime bed.
+  test("the capture env's four ARE the production builder's four, by identity", () => {
+    // R-7b-11 MOVED THEM. They used to be a test-only copy handed to `configuredExtras`; a copy is
+    // exactly how a bed and a shipped session end up measuring two different artifacts, so the testing
+    // constant is now a re-export of the one the env builder sets, and the builder sets it by default.
+    const built = buildOfficialChildEnv({
+      selection: { runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-opus-5", family: "claude", authFamily: "api-key", sdkVersion: "0.0.2", reason: "f-1 fixture", decidedAt: new Date(0).toISOString() },
+      configDir: "/tmp/f1-config",
+      brand: WINTER_BRAND,
+      credentials: { ANTHROPIC_API_KEY: "k" },
+      base: { PATH: "/usr/bin:/bin", HOME: "/tmp/f1-home" },
+    });
+    // NO POLICY AT ALL — the default is what carries it.
+    for (const [name, value] of Object.entries(HERMETIC_TRAFFIC_OPT_OUTS)) expect({ name, value: built[name] }).toEqual({ name, value });
+    // …and they are still names the pinned artifact's own registry declares, so they are not inert.
     const folded = new Set(NON_CREDENTIAL_ENV_REGISTRY.map((name) => name.toUpperCase()));
     for (const name of Object.keys(HERMETIC_TRAFFIC_OPT_OUTS)) expect({ name, declared: folded.has(name) }).toEqual({ name, declared: true });
-    // …and the env builder really admits them together, in one child environment.
-    const built = buildOfficialChildEnv(
-      {
-        selection: { runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-opus-5", family: "claude", authFamily: "api-key", sdkVersion: "0.0.2", reason: "f-1 fixture", decidedAt: new Date(0).toISOString() },
-        configDir: "/tmp/f1-config",
-        brand: WINTER_BRAND,
-        credentials: { ANTHROPIC_API_KEY: "k" },
-        base: { PATH: "/usr/bin:/bin", HOME: "/tmp/f1-home" },
-      },
-      { configuredExtras: { ...HERMETIC_TRAFFIC_OPT_OUTS } },
-    );
-    for (const [name, value] of Object.entries(HERMETIC_TRAFFIC_OPT_OUTS)) expect({ name, value: built[name] }).toEqual({ name, value });
   });
 
   test("withHermeticHomes removes what it created", async () => {

@@ -9,7 +9,7 @@
 // `options` VALUES it was handed (by reference — `test/spine/query-passthrough.test.ts` asserts
 // identity, not deep equality) and yields exactly the messages it was scripted with, so "the stream
 // passes through verbatim" is checkable rather than assumed.
-import { InvalidBrandError, resolveBrand } from "@yanlinglabs/winter-agent-sdk";
+import { InvalidBrandError, resolveBrand, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import type { AccountInfo, ModelFamilyListing, ModelInfo, Options, PermissionMode, Query, RewindFilesResult, SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 
 import type { RuntimeSdkPeers } from "../sdk.ts";
@@ -116,6 +116,11 @@ export function createFakeWinterPeer(options: FakeWinterPeerOptions = {}): FakeW
     // own class), and a fake that answered differently would make every brand test measure the fake.
     resolveBrand,
     InvalidBrandError,
+    // THE REAL derivation too, for the same reason (R-7b-13). The door reads the transcript project
+    // key off the INJECTED peer so both branches write under one project directory for one cwd; a
+    // fake that answered differently — or not at all — would make every door test measure a key no
+    // host will ever see.
+    transcriptProjectKey,
     query: (args: { prompt: string | AsyncIterable<string>; options: Options }): Query => {
       calls.push({ prompt: args.prompt, options: args.options });
       return options.query === undefined ? scriptedQuery(scripted) : options.query(args);

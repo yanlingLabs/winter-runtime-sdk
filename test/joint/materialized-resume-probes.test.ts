@@ -17,7 +17,7 @@ import { WinterCompatibilitySessionStore, WINTER_BRAND } from "@yanlinglabs/wint
 import { createInMemoryRuntimeDirectoryStore } from "../../src/index.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import type { SeamContext } from "../../src/seams/context.ts";
-import { createMaterializedResumeDecorator } from "../../src/store/index.ts";
+import { createMaterializedResumeDecorator, materializedResumeReportForPin } from "../../src/store/index.ts";
 import type { MaterializedResumeProbeDetail } from "../../src/store/index.ts";
 import type { MaterializedResumeProbeReport } from "../../src/seams/index.ts";
 import { cleanupHermetic, officialRuntimeBed } from "../official/support.ts";
@@ -34,6 +34,7 @@ describeRuntime("WS-17 §8 — the four materialized-resume probes, driven again
     async () => {
       const legs = pinnedRuntimeProbeLegs();
       expect(legs).toBeDefined();
+      const bed = officialRuntimeBed();
       const { peer } = createFakeWinterPeer();
       // THE REAL STORE CLASS, spread onto the spine's fake: the probes build their own throwaway
       // stores from `context.peers`, and WS-05 §6's "the identical package/version on both legs" is a
@@ -73,12 +74,29 @@ describeRuntime("WS-17 §8 — the four materialized-resume probes, driven again
       const allPassed = results.every((result) => result.passed);
       expect(report.door).toBe(allPassed ? "preferred" : "fallback");
 
-      // THE SHIPPED DEFAULT IS UNCHANGED BY THIS RUN, and that is the property worth pinning now that
-      // the probes pass: a decorator built the way the BARRIER builds it — no report, no probe — still
-      // reports `fallback`. Opening the door in production is a host supplying a measurement taken on
-      // its own pin and platform, never a side effect of this file going green.
+      // A DECORATOR GIVEN NOTHING STILL REPORTS `fallback`. R-7b-12 opens the door by handing the
+      // barrier the PIN's report, never by a decorator deciding for itself — so this stays true and is
+      // what makes `materializedResumeReportForPin` the single place the door is opened.
       const shipped = createMaterializedResumeDecorator(context, {});
       expect(shipped.door).toBe("fallback");
+
+      // ================================================================================================
+      // R-7b-12's TRIPWIRE — the recorded verdict is re-derived here, on the real artifact, per pin.
+      //
+      // `src/store/pinned-probes.ts` is what `createRuntimeSdk` reads to open PREFERRED, and it travels
+      // as DATA because each probe costs a process tree and the constructor is a startup path. Data that
+      // nothing re-measures is a claim, so this run compares itself to the record: a pin whose behaviour
+      // changed (a mirror that re-sends what it read, a runtime that re-anchors a resumed chain) fails
+      // here rather than opening a door onto a store step 5 would then refuse.
+      //
+      // A PIN BUMP FAILS THIS TOO, and deliberately: an unrecorded version has no report, so the
+      // comparison below has nothing to match and the bump is a reviewed event rather than a silent
+      // inheritance.
+      // ================================================================================================
+      const recorded = materializedResumeReportForPin(bed?.version);
+      expect({ pin: bed?.version, recorded: recorded !== undefined }).toEqual({ pin: bed?.version, recorded: true });
+      expect(recorded?.door).toBe(report.door);
+      expect(recorded?.results.map((entry) => `${entry.probe}:${entry.passed ? "pass" : "fail"}`).sort()).toEqual(results.map((entry) => `${entry.probe}:${entry.passed ? "pass" : "fail"}`).sort());
     },
     PROBE_TIMEOUT,
   );

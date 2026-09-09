@@ -21,27 +21,49 @@ export class RuntimeSdkError extends Error {
 }
 
 /**
- * The door was asked for a runtime it does not yet route to (whole-branch review, F-4).
+ * A session's runtime was changed MID-SESSION, and the door will not rewrite the past to serve it.
  *
- * WHY A REFUSAL AND NOT A FALLBACK. `query()` forwards to the Winter peer; a session whose persisted
- * selection names the official runtime was, until this class existed, served by Winter SILENTLY — no
- * error, no diagnostic, and no directory record saying which runtime actually ran. That is D13's
- * "never a silent rewrite" broken at the one door the package exists for, and it is worse than a
- * refusal in the specific way that matters: the host cannot tell it happened.
+ * D13's own words: "the certified handoff or a visible fork, never a silent rewrite". A persisted
+ * `RuntimeSelection` is a fact about a transcript that already exists — which runtime wrote it, in
+ * which dialect, against which backend session id. Honouring a different `runtimeKind` on the next
+ * `query()` would continue that transcript on a runtime that never wrote any of it, which is the
+ * silent rewrite, and it would do it at the one door where nothing else is watching.
  *
- * THE OFFICIAL BRANCH IS REACHABLE TODAY, just not through this door — `runtimeSdkInternals(sdk)
- * .official` is the adapter, and routing `query()` to it (building the launch plan from the
- * selection, the shared store from the store lane, the descriptors from the official lane, attaching
- * the session to the messaging registry) is its own task. The message says so, because a refusal that
- * does not name the way forward is just a wall.
+ * SO THE DOOR REFUSES AND NAMES THE TWO LEGITIMATE ROUTES. `sdk.handoff(session, to)` runs WS-05
+ * §12's eight steps — drain, compare, validate, persist, transfer the lease, confirm the destination
+ * — and produces a `HandoffOutcome` the host renders; a `forkSession` resume is the visible fork.
+ * Both leave evidence; neither pretends the change did not happen.
  */
-export class RuntimeNotRoutedError extends RuntimeSdkError {
-  readonly runtimeKind: string;
-  constructor(runtimeKind: string) {
+export class RuntimeHandoffRequiredError extends RuntimeSdkError {
+  /** The runtime this session is persisted on. */
+  readonly from: string;
+  /** The runtime the caller asked for. */
+  readonly to: string;
+  readonly address: string;
+  constructor(args: { from: string; to: string; address: string }) {
     super(
-      `winter-runtime-sdk: this session's selection names the ${runtimeKind} runtime, and \`query()\` routes only to the Winter peer today — serving it on Winter anyway would be the silent rewrite D13 forbids. Reach the official branch through \`runtimeSdkInternals(sdk).official\` until the door routes both branches`,
+      `winter-runtime-sdk: ${args.address} is persisted on the ${args.from} runtime and this query asks for ${args.to}. A runtime change mid-session is \`sdk.handoff(session, "${args.to}")\` — WS-05 §12's certified transfer — or a visible fork (\`forkSession\`); serving the new runtime on the old transcript would be the silent rewrite D13 forbids`,
     );
-    this.runtimeKind = runtimeKind;
+    this.from = args.from;
+    this.to = args.to;
+    this.address = args.address;
+  }
+}
+
+/**
+ * The official leg was asked for and something only the HOST can supply was missing.
+ *
+ * WHY ITS OWN CLASS RATHER THAN `OfficialConfigurationError`. That class is WS-14 §13's, and it is
+ * about an options object that is wrong — a field this branch refuses, a combination the runtime
+ * cannot run. This one is about the DOOR's own inputs: the session id its directory row is addressed
+ * by, the credential its auth family needs, the vendored runtime path §5.1 will not guess. A host
+ * catching it knows to fix a call site, not a configuration.
+ */
+export class RuntimeLaunchInputError extends RuntimeSdkError {
+  readonly field: string;
+  constructor(args: { field: string; reason: string }) {
+    super(`winter-runtime-sdk: the official leg needs \`${args.field}\` — ${args.reason}`);
+    this.field = args.field;
   }
 }
 

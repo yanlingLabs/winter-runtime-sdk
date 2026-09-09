@@ -78,6 +78,7 @@ export type {
   PinnedRuntimeProbeLegs,
 } from "./materialized-resume.ts";
 
+export { MATERIALIZED_RESUME_PROBE_REPORTS, materializedResumeReportForPin } from "./pinned-probes.ts";
 export { acquireHandoffLease, createHandoffBarrier, HANDOFF_STEPS, HandoffCommitError, HandoffLeaseError, HandoffPlanError, HandoffWiringError, releaseHandoffLease, validateSessionTranscript } from "./handoff-barrier.ts";
 export type {
   CompatibilityLevel,

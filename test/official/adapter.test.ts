@@ -13,16 +13,17 @@ import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/inde
 import type { SeamContextWithDirectory } from "../../src/seams/context.ts";
 import { stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { OfficialLaunchPlan, OptionsTemplateInput } from "../../src/seams/official-adapter.ts";
-import type { OfficialOptions, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions } from "../../src/seams/official-sdk-shapes.ts";
+import type { OfficialOptions, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions, OfficialSpawnedProcess } from "../../src/seams/official-sdk-shapes.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
-import { createOfficialAdapter, officialHandoffEligibility, type OfficialSessionHandle } from "../../src/official/index.ts";
+import { createOfficialAdapter, officialHandoffEligibility, TRAFFIC_OPT_OUT_VARIABLES, type OfficialSessionHandle } from "../../src/official/index.ts";
 import { OfficialConfigurationError, OfficialInvalidResumeError, OfficialMcpError } from "../../src/official/errors.ts";
 import { assertOptionsInvariants, buildOfficialOptions } from "../../src/official/options-template.ts";
 import { CONTAINMENT_FLOOR_MARK, carriesMark, isOurContainmentHook } from "../../src/official/callbacks.ts";
 import { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
 import type { SpawnedChildProcess } from "../../src/official/spawn-proxy.ts";
 import { UnaddressableEntryError } from "../../src/errors.ts";
+import type { RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 
 const SPOOL = "/home/.winter/runtimes/official-agent-spool";
 
@@ -107,6 +108,39 @@ const plan = (options: OfficialOptions): OfficialLaunchPlan => ({
   cwd: "/work/repo",
 });
 
+/** A minimal directory row a bare dispatch can be attributed to by its config dir. */
+const dispatchableEntry = (configDir: string, address = "session:dispatched"): RuntimeDirectoryEntry => ({
+  address,
+  parsed: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: address.slice("session:".length) },
+  runtimeKind: "claude-agent",
+  objectKind: "session",
+  transport: "claude-handle",
+  status: "running",
+  mode: "code",
+  generation: 1,
+  selection,
+  configDir,
+  capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+  updatedAt: new Date(0).toISOString(),
+});
+
+const launchPlan = (options: OfficialOptions, address: string, configDir: string): OfficialLaunchPlan => ({ ...plan(options), address, configDir });
+
+/**
+ * A refused record DESTROYS the returned stream (the proxy ends a generation whose transcript root
+ * nothing could find), so a test that provokes one needs the `error` listener a real consumer has.
+ * `OfficialSpawnedProcess.stdout` is `unknown` on the structural seam — deliberately, since the router
+ * never imports the vendor's stream types — so the listener is attached through a local shape.
+ */
+const swallowStreamErrors = (spawned: OfficialSpawnedProcess): OfficialSpawnedProcess => {
+  (spawned.stdout as { on(event: "error", listener: (error: Error) => void): void }).on("error", () => undefined);
+  return spawned;
+};
+
+/** The template options a launch needs, built through the adapter under test. */
+const officialOptionsFor = (adapter: { buildOptions(input: OptionsTemplateInput): OfficialOptions; spawnProxy: OptionsTemplateInput["spawnProxy"] }): OfficialOptions =>
+  adapter.buildOptions(templateInput(adapter.spawnProxy));
+
 const spawnOptions = (configDir = SPOOL): OfficialSpawnOptions => ({
   command: "/vendored/claude",
   args: [],
@@ -177,21 +211,129 @@ describe("the official adapter", () => {
     expect(() => adapter.launch(plan({ ...options, resume: "abc" }))).toThrow(/use resume\(\)/);
   });
 
-  test("the dispatcher classifies a spawn it was not launched into, and stays self-consistent", () => {
+  test("the dispatcher classifies a spawn it was not launched into, and stays self-consistent", async () => {
     const { module } = fakeClaudeModule();
-    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
-      lastDispatchedSupervisor?: { observation?: { root: { kind: string } } };
+    const ctx = context(module);
+    // THE DISPATCHER RECORDS TOO (fix-wave concern 3), so a root it can attribute needs a row to
+    // attribute it TO — here, one this adapter itself launched under the same config dir.
+    await ctx.directoryStore.upsert(dispatchableEntry("/tmp/claude-resume-abc"));
+    const adapter = createOfficialAdapter(ctx, { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
+      lastDispatchedSupervisor?: { observation?: { root: { kind: string } }; whenRecorded(): Promise<void> };
     };
     adapter.spawnProxy(spawnOptions("/tmp/claude-resume-abc"));
     expect(adapter.lastDispatchedSupervisor?.observation?.root.kind).toBe("sdk-resume-staging");
     expect(() => adapter.spawnProxy({ ...spawnOptions(), env: {} })).toThrow(OfficialConfigurationError);
   });
 
+  // ==================================================================================================
+  // FIX-WAVE CONCERN 3 — THE DOCUMENTED DISPATCHER PATH RECORDS, OR SAYS WHY IT CANNOT.
+  //
+  // `buildOptions({ spawnProxy: adapter.spawnProxy })` + the vendor's own `query()` is the shape §2's
+  // template invites, and its sink used to be `policy.sink ?? a no-op` — so the host that followed the
+  // documentation got NO §6 rule 2 record at all, silently, while the default read as "the record is
+  // on". A record that is absent is only discovered during a handoff, by which time the staging root
+  // is findable only by scanning temp directories by recency, which this branch refuses to do.
+  // ==================================================================================================
+  describe("the dispatcher path's record sink", () => {
+    test("a root that maps to exactly one directory row is recorded under that row", async () => {
+      const { module } = fakeClaudeModule();
+      const ctx = context(module);
+      await ctx.directoryStore.upsert(dispatchableEntry("/tmp/claude-resume-solo"));
+      const adapter = createOfficialAdapter(ctx, { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
+        lastDispatchedSupervisor?: { whenRecorded(): Promise<void> };
+      };
+      adapter.spawnProxy(spawnOptions("/tmp/claude-resume-solo"));
+      await adapter.lastDispatchedSupervisor?.whenRecorded();
+      const row = (await ctx.directoryStore.load()).find((entry) => entry.address === "session:dispatched");
+      expect(row?.configDir).toBe("/tmp/claude-resume-solo");
+      expect(row?.processIdentity?.pid).toBe(909);
+    });
+
+    test("a root that belongs to a LAUNCH is recorded under that launch's address, with no row to find it by", async () => {
+      const { module } = fakeClaudeModule();
+      const ctx = context(module);
+      const adapter = createOfficialAdapter(ctx, { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
+        lastDispatchedSupervisor?: { whenRecorded(): Promise<void> };
+      };
+      // The launch teaches the adapter the pair; the store still holds nothing.
+      adapter.launch(launchPlan(officialOptionsFor(adapter), "session:launched", "/tmp/claude-resume-known"));
+      adapter.spawnProxy(spawnOptions("/tmp/claude-resume-known"));
+      await adapter.lastDispatchedSupervisor?.whenRecorded();
+      const row = (await ctx.directoryStore.load()).find((entry) => entry.address === "session:launched");
+      expect(row?.configDir).toBe("/tmp/claude-resume-known");
+    });
+
+    test("an unattributable root is a TYPED REFUSAL, never a silent no-op", async () => {
+      const { module } = fakeClaudeModule();
+      const ctx = context(module);
+      const adapter = createOfficialAdapter(ctx, { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
+        lastDispatchedSupervisor?: { whenRecorded(): Promise<void> };
+      };
+      // A REFUSED RECORD DESTROYS THE STREAM (the proxy ends the generation rather than running one
+      // whose transcript root nothing can find), so the stream needs the listener a real consumer has.
+      swallowStreamErrors(adapter.spawnProxy(spawnOptions("/tmp/claude-resume-orphan")));
+      const failure: unknown = await adapter.lastDispatchedSupervisor?.whenRecorded().then((): unknown => undefined, (error: unknown): unknown => error);
+      expect(failure).toBeInstanceOf(OfficialConfigurationError);
+      expect((failure as Error).message).toContain("belongs to no session");
+    });
+
+    test("two rows under one root refuse rather than pick by recency", async () => {
+      const { module } = fakeClaudeModule();
+      const ctx = context(module);
+      await ctx.directoryStore.upsert(dispatchableEntry("/tmp/claude-resume-dup", "session:one"));
+      await ctx.directoryStore.upsert(dispatchableEntry("/tmp/claude-resume-dup", "session:two"));
+      const adapter = createOfficialAdapter(ctx, { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
+        lastDispatchedSupervisor?: { whenRecorded(): Promise<void> };
+      };
+      swallowStreamErrors(adapter.spawnProxy(spawnOptions("/tmp/claude-resume-dup")));
+      const failure: unknown = await adapter.lastDispatchedSupervisor?.whenRecorded().then((): unknown => undefined, (error: unknown): unknown => error);
+      expect((failure as Error).message).toContain("by recency");
+    });
+
+    test("a SHARED spool root is never attributed to the most recent launch (review r1, M-1)", async () => {
+      const { module } = fakeClaudeModule();
+      const ctx = context(module);
+      const adapter = createOfficialAdapter(ctx, { spawnChild: () => fakeChild() }) as ReturnType<typeof createOfficialAdapter> & {
+        lastDispatchedSupervisor?: { whenRecorded(): Promise<void> };
+      };
+      // TWO fresh sessions under the SAME spool — which is what `fresh-spool` means: one directory per
+      // home, shared by every fresh session (`spool.ts`'s own note). Before M-1 the map keyed by that
+      // root answered "whichever launched last", and a bare third dispatch was recorded on session B
+      // with the third session's pid — the recency guess item 6's own sentence forbids.
+      adapter.launch(launchPlan(officialOptionsFor(adapter), "session:A", SPOOL));
+      adapter.launch(launchPlan(officialOptionsFor(adapter), "session:B", SPOOL));
+      await ctx.directoryStore.upsert({ ...dispatchableEntry(SPOOL, "session:A") });
+      await ctx.directoryStore.upsert({ ...dispatchableEntry(SPOOL, "session:B") });
+
+      swallowStreamErrors(adapter.spawnProxy(spawnOptions(SPOOL)));
+      const failure: unknown = await adapter.lastDispatchedSupervisor?.whenRecorded().then((): unknown => undefined, (error: unknown): unknown => error);
+      expect(failure).toBeInstanceOf(OfficialConfigurationError);
+      expect((failure as Error).message).toContain("by recency");
+      // Neither launch's row was touched by a spawn that was not theirs.
+      for (const address of ["session:A", "session:B"]) {
+        expect((await ctx.directoryStore.load()).find((entry) => entry.address === address)?.processIdentity).toBeUndefined();
+      }
+    });
+
+    test("an explicit `policy.sink` still wins — the default is a default", async () => {
+      const { module } = fakeClaudeModule();
+      const seen: string[] = [];
+      const adapter = createOfficialAdapter(context(module), {
+        spawnChild: () => fakeChild(),
+        sink: { record: (observation) => void seen.push(observation.root.configDir) },
+      }) as ReturnType<typeof createOfficialAdapter> & { lastDispatchedSupervisor?: { whenRecorded(): Promise<void> } };
+      adapter.spawnProxy(spawnOptions("/tmp/claude-resume-hosted"));
+      await adapter.lastDispatchedSupervisor?.whenRecorded();
+      expect(seen).toEqual(["/tmp/claude-resume-hosted"]);
+    });
+  });
+
   test("buildChildEnv goes through the same allowlist the env module owns", () => {
     const { module } = fakeClaudeModule();
     const adapter = createOfficialAdapter(context(module));
     const env = adapter.buildChildEnv({ selection, configDir: SPOOL, brand: WINTER_BRAND, credentials: { ANTHROPIC_API_KEY: "k" }, base: { PATH: "/usr/bin", EDITOR: "vim" } });
-    expect(env).toEqual({ ANTHROPIC_API_KEY: "k", CLAUDE_CONFIG_DIR: SPOOL, PATH: "/usr/bin" });
+    // …including R-7b-11's four, which the env module now sets on every child by default.
+    expect(env).toEqual({ ANTHROPIC_API_KEY: "k", CLAUDE_CONFIG_DIR: SPOOL, PATH: "/usr/bin", ...TRAFFIC_OPT_OUT_VARIABLES });
   });
 });
 

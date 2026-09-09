@@ -29,6 +29,8 @@ import {
   officialEnvAllowlistNames,
   officialEnvAllowlistSnapshot,
   sanitizePathListValue,
+  TRAFFIC_OPT_OUT_VARIABLES,
+  TRAFFIC_OPT_OUT_VARIABLE_NAMES,
   type OfficialEnvInput,
 } from "../../src/official/env-allowlist.ts";
 import { fetchAuthCredentials, validateAuthEnvironment, authVariableSetKey, allowedAuthVariables } from "../../src/official/auth.ts";
@@ -68,6 +70,8 @@ describe("WS-14 §3 — the child environment", () => {
     );
     expect(env).toEqual({
       ANTHROPIC_API_KEY: "sk-fixture",
+      // R-7b-11's four, set by the BUILDER on every child unless `remoteConfig: "allow"` says otherwise.
+      ...TRAFFIC_OPT_OUT_VARIABLES,
       CLAUDE_CODE_PROJECT_DIR_NAME: "project-key-9",
       CLAUDE_CODE_TMPDIR: "/private/tmp/acme-501",
       CLAUDE_CONFIG_DIR: "/home/.acme/runtimes/official-agent-spool",
@@ -85,7 +89,7 @@ describe("WS-14 §3 — the child environment", () => {
 
   test("the two per-session vendor variables are omitted when the host has no value for them", () => {
     const env = buildOfficialChildEnv(input());
-    expect(Object.keys(env)).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]);
+    expect(Object.keys(env)).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", ...TRAFFIC_OPT_OUT_VARIABLE_NAMES].sort());
   });
 
   test("nothing inherits: the OS set comes from a source the CALLER passes", () => {
@@ -454,7 +458,54 @@ describe("item 22 / NEW-H — the execution/indirection class is refused BY NAME
 
   test("an ordinary non-credential extra is unaffected", () => {
     expect(buildOfficialChildEnv(input(), { configuredExtras: { NO_COLOR: "1" } })["NO_COLOR"]).toBe("1");
-    // …including the four traffic opt-outs every hermetic bed rides through this same door.
-    expect(buildOfficialChildEnv(input(), { configuredExtras: { DISABLE_TELEMETRY: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" } })["DISABLE_TELEMETRY"]).toBe("1");
+  });
+});
+
+// ====================================================================================================
+// R-7b-11 — THE PRODUCTION CHILD IS THE PIN'S CHILD.
+//
+// The four opt-outs used to be a TEST-BED habit (`configuredExtras` in `test/official/support.ts`),
+// which made every hermetic proof honest and every shipped session remotely mutable under the same
+// pin. They are now built-in, and the escape is one named policy value whose answer is recorded on
+// the session's directory row.
+// ====================================================================================================
+describe("R-7b-11 — the traffic opt-outs are the production default", () => {
+  test("every child gets all four, without the host asking for anything", () => {
+    const env = buildOfficialChildEnv(input());
+    for (const [name, value] of Object.entries(TRAFFIC_OPT_OUT_VARIABLES)) expect({ name, value: env[name] }).toEqual({ name, value });
+  });
+
+  test("`remoteConfig: \"allow\"` removes all four — and nothing else changes", () => {
+    const denied = buildOfficialChildEnv(input());
+    const allowed = buildOfficialChildEnv(input(), { remoteConfig: "allow" });
+    for (const name of TRAFFIC_OPT_OUT_VARIABLE_NAMES) expect({ name, present: name in allowed }).toEqual({ name, present: false });
+    expect(Object.keys(allowed)).toEqual(Object.keys(denied).filter((name) => !TRAFFIC_OPT_OUT_VARIABLE_NAMES.includes(name)));
+  });
+
+  test("the extras door refuses them by name and points at the knob whose answer is recorded", () => {
+    for (const name of TRAFFIC_OPT_OUT_VARIABLE_NAMES) {
+      expect(() => buildOfficialChildEnv(input(), { configuredExtras: { [name]: "0" } })).toThrow(/remoteConfig/);
+    }
+  });
+
+  test("R-7b-13's refusal names the rule, the length AND the remedy field", () => {
+    // The message is the whole surface a host has when this fires — the README's paragraph is not in
+    // the stack trace — so it names the field to set, not only what was wrong (re-review, nit (b)).
+    try {
+      buildOfficialChildEnv({ ...input(), projectKey: "k".repeat(70) });
+      throw new Error("unreachable: a 70-character key should be refused");
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).toContain("^[A-Za-z0-9_-]{1,64}$");
+      expect(message).toContain("70 characters");
+      expect(message).toContain("runtime.official.projectKey");
+    }
+  });
+
+  test("they are still names the PINNED artifact's own registry declares", () => {
+    // Not load-bearing for the door any more (they are branch-owned, not extras) — but if a pin bump
+    // dropped one, the variable would be inert and the child would silently regain the CDN's surface.
+    const folded = new Set(NON_CREDENTIAL_ENV_REGISTRY.map((name) => name.toUpperCase()));
+    for (const name of TRAFFIC_OPT_OUT_VARIABLE_NAMES) expect({ name, declared: folded.has(name) }).toEqual({ name, declared: true });
   });
 });

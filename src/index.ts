@@ -56,9 +56,14 @@ export type { SelectionReview, SelectionRuleId } from "./selection/select-runtim
 // neither sits on a lane barrel; `test/spine/barrel-exports.test.ts` pins that no name is exported by
 // two of them again.
 export { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "./vendor-paths.ts";
+// R-7b-12: the pin's own materialized-resume verdict, so a host can read WHY its handoffs decorate.
+export { MATERIALIZED_RESUME_PROBE_REPORTS, materializedResumeReportForPin } from "./store/pinned-probes.ts";
 // The README tells a host to READ this set rather than trust a description of it (round 3, NEW-H), so
 // it has to be reachable from the package a host installs — not only from the official lane's barrel.
 export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./official/env-allowlist.ts";
+// R-7b-11's four, for the same reason: the README says the router disables the runtime's remote
+// feature configuration by default, and a host should be able to READ the set rather than trust prose.
+export { TRAFFIC_OPT_OUT_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./official/env-allowlist.ts";
 export {
   LIST_AGENTS_FIELD_MAX,
   NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
@@ -75,7 +80,10 @@ export type { NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } fr
 export * from "./seams/index.ts";
 
 // --- typed errors ----------------------------------------------------------------------------------
-export { NotImplementedYet, RuntimeNotRoutedError, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError, UnaddressableEntryError } from "./errors.ts";
+export { NotImplementedYet, RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError, UnaddressableEntryError } from "./errors.ts";
+// --- the door's official leg (Task 6b) -------------------------------------------------------------
+export { createOfficialInputStream, isOfficialQuery, officialCredentialPlan, officialConnectionEnv, officialUserTurn } from "./door.ts";
+export type { OfficialInputStream, RouterOfficialInput, RouterOfficialPolicy, RouterQuery } from "./door.ts";
 export type { LaneId } from "./errors.ts";
 
 // --- WS-15 §6.1–6.4: the directory and the cross-runtime messaging router (Lane B; the three doors a host needs + their vocabulary) ---

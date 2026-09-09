@@ -43,6 +43,24 @@ export type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, Of
  */
 export type OfficialLaunchProfile = "fresh-spool" | "store-backed-resume";
 
+/**
+ * R-7b-11: whether this session lets the pinned runtime fetch its REMOTE FEATURE CONFIGURATION.
+ *
+ * `"deny"` IS THE DEFAULT AND IT IS A PIN QUESTION, not a privacy preference. Measured on 0.3.250,
+ * same binary, same options, same endpoint: with the four traffic opt-outs unset the runtime
+ * advertises 25 tools; with them set, 21 — `DesignSync`, `Monitor`, `PushNotification` and
+ * `advisor_20260301:advisor` appear only when a feature-flag CDN answers. So "the official branch's
+ * tool surface" is a property of the artifact ONLY when that fetch is off; with it on, one pin has as
+ * many tool surfaces as the CDN has days, and WS-02 §6.1's "a new official version is a reviewed
+ * compatibility event" is defeated without any version changing.
+ *
+ * `"allow"` is the host saying it wants the runtime's own remote configuration anyway — a deliberate,
+ * documented choice (WS-14 §3's "unless explicitly configured"), and one that is RECORDED on the
+ * session's directory entry (`RuntimeDirectoryEntry.remoteConfig`) so a later reader can tell which
+ * of the two surfaces a session actually ran with.
+ */
+export type RemoteConfigPolicy = "deny" | "allow";
+
 /** What `buildOptions` is given. Every field is something WS-14 §2/§5 pins as normative. */
 export interface OptionsTemplateInput {
   mode: "code" | "dispatch" | "chat";
@@ -99,6 +117,14 @@ export interface OfficialLaunchPlan {
   profile: OfficialLaunchProfile;
   configDir: string;
   cwd: string;
+  /**
+   * R-7b-11's choice for THIS session. Absent = `"deny"`, the shipped default.
+   *
+   * It travels on the plan rather than on the adapter's policy because it is a per-SESSION fact that
+   * has to be recorded on the session's own directory row — and because the env this plan carries was
+   * built with the same answer, so the two cannot drift apart without the plan saying so.
+   */
+  remoteConfig?: RemoteConfigPolicy;
 }
 
 export interface OfficialResumePlan extends OfficialLaunchPlan {
@@ -123,6 +149,8 @@ export interface OfficialSession {
   readonly configDir: string;
   readonly profile: OfficialLaunchProfile;
   readonly selection: RuntimeSelection;
+  /** R-7b-11: which of the pin's two tool surfaces this generation was configured for. */
+  readonly remoteConfig: RemoteConfigPolicy;
 }
 
 /** WS-14 §1–§13. Lane A implements; the spine pins the signature. */
