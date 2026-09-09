@@ -60,7 +60,7 @@ import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
 import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffSelection, HandoffStep, HandoffStepNumber } from "../seams/handoff.ts";
-import type { MaterializedResumeDoor } from "../seams/materialized-resume.ts";
+import type { MaterializedResumeDoor, MaterializedResumeProbeReport } from "../seams/materialized-resume.ts";
 import type { SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "../selection/runtime-selection.ts";
 // LANE D'S DOOR, and the one consumer it was owed (fix wave, item 20). `reviewPersistedSelection`
@@ -213,6 +213,16 @@ export interface HandoffBarrierDeps {
    * `barrier.decorator` instead of building a second one.
    */
   decorator?: MaterializedResumeDecoratorHandle;
+  /**
+   * R-7b-12: the pin's own probe report, which is what opens the PREFERRED door.
+   *
+   * Passed to the decorator the barrier BUILDS, so the one-store invariant above is untouched — a host
+   * that wanted PREFERRED used to have to construct a second decorator, which is exactly the wiring
+   * mistake `decorator` refuses. `createRuntimeSdk` fills it from
+   * `materializedResumeReportForPin(<the injected official peer's version>)`; absent, or a version with
+   * no recorded report, means `fallback`.
+   */
+  decorationReport?: MaterializedResumeProbeReport;
   participants?: HandoffParticipants;
   /** Where the handoff leases live. Defaults to `<winterHome>/runtimes/handoff-leases`. */
   leaseRoot?: string;
@@ -284,7 +294,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
    * the same store instance. The property is checked, not documented.
    */
   const decoratorOf = (): MaterializedResumeDecoratorHandle => {
-    if (decorator === undefined) decorator = createMaterializedResumeDecorator(context, { shared: sharedOf, now });
+    if (decorator === undefined) decorator = createMaterializedResumeDecorator(context, { shared: sharedOf, now, ...(deps.decorationReport === undefined ? {} : { report: deps.decorationReport }) });
     return decorator;
   };
 

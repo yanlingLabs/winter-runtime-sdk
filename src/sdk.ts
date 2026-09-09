@@ -42,6 +42,7 @@ import { createInMemoryRuntimeDirectoryStore } from "./seams/directory-store.ts"
 import { createRuntimeMessaging } from "./messaging/index.ts";
 import type { GlobalMessagingOptions, RuntimeDirectoryOptions } from "./messaging/index.ts";
 import { createHandoffBarrier } from "./store/index.ts";
+import { materializedResumeReportForPin } from "./store/pinned-probes.ts";
 import type { HandoffBarrierDeps } from "./store/index.ts";
 import { createOfficialAdapter, type OfficialAdapterHandle, type OfficialAdapterPolicy } from "./official/adapter.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
@@ -299,7 +300,16 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
   // and one door are structural (`decorator: barrier.decorator` is load-bearing, not a shortcut).
   const { directory, messaging } = createRuntimeMessaging(base, opts.messaging ?? {});
   const context: SeamContextWithDirectory = { ...base, directory };
-  const barrier = createHandoffBarrier(context, opts.handoff ?? {});
+  // R-7b-12: THE PREFERRED DOOR, KEYED TO THE PIN BY MEASUREMENT. The four WS-17 §8 probes pass
+  // against 0.3.250 on both supported platforms, so a handle over THAT peer gets the decorated
+  // materialized copy; a peer at any other version — or no official peer at all — gets `fallback`,
+  // which is the always-available door. The report travels as data because the probes cost a process
+  // tree each and `createRuntimeSdk` is a startup path; CI re-derives it against the real artifact.
+  const decorationReport = materializedResumeReportForPin(versions.claudeAgentSdk?.packageVersion);
+  const barrier = createHandoffBarrier(context, {
+    ...(opts.handoff ?? {}),
+    ...(opts.handoff?.decorationReport !== undefined || decorationReport === undefined ? {} : { decorationReport }),
+  });
 
   // ONE WIRING LINE PER SEAM. A lane replaces the right-hand side and nothing else in this file
   // moves; see `seams/stubs.ts`'s own header for why the indirection exists.
