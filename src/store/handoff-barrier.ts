@@ -38,10 +38,10 @@ import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
 import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffStep, HandoffStepNumber } from "../seams/handoff.ts";
-import type { MaterializedResumeDecorator, MaterializedResumeDoor } from "../seams/materialized-resume.ts";
+import type { MaterializedResumeDoor } from "../seams/materialized-resume.ts";
 import type { SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import type { RuntimeKind, RuntimeSelection } from "../selection/runtime-selection.ts";
-import { createMaterializedResumeDecorator, materializedTranscriptPath, resumeStagingRoot } from "./materialized-resume.ts";
+import { createMaterializedResumeDecorator, materializedTranscriptPath, resumeStagingRoot, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
 import { canonicalTranscriptPath, reconcileLocalWriteRoot, compareTranscriptTail } from "./reconcile.ts";
 import { materializeTempContinuity, resolveEngineTempLayout, tempContinuityModeFor, type EngineTempLayout } from "./temp-continuity.ts";
 import { lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";
@@ -162,7 +162,15 @@ export interface HandoffBarrierDeps {
   shared?: SharedSessionStore;
   /** Defaults to the peer's own `resolveWinterHome()` — the production answer, resolved at first use. */
   winterHome?: string;
-  decorator?: MaterializedResumeDecorator;
+  /**
+   * A decorator to use instead of the barrier's own.
+   *
+   * IT MUST BE OVER THE SAME STORE, and the barrier checks (review r1, F2) rather than trusting: two
+   * stores over one home means two decoration registries, and a decoration registered in one washes
+   * back through the other's canonical append gate. A host wiring both seams should take
+   * `barrier.decorator` instead of building a second one.
+   */
+  decorator?: MaterializedResumeDecoratorHandle;
   participants?: HandoffParticipants;
   /** Where the handoff leases live. Defaults to `<winterHome>/runtimes/handoff-leases`. */
   leaseRoot?: string;
@@ -179,6 +187,15 @@ export interface HandoffBarrierHandle extends HandoffBarrier {
   execute(plan: HandoffPlan): Promise<DetailedHandoffOutcome>;
   /** The shared store this barrier writes through — the same object both branches were given. */
   readonly shared: SharedSessionStore;
+  /** The decorator, over that same store. The spine wires `decorator: barrier.decorator`. */
+  readonly decorator: MaterializedResumeDecoratorHandle;
+}
+
+/** A barrier and a decorator that do not share one store — a wiring mistake, refused rather than run. */
+export class HandoffWiringError extends RuntimeSdkError {
+  constructor(reason: string) {
+    super(`winter-runtime-sdk: this handoff barrier is mis-wired — ${reason}`);
+  }
 }
 
 /**
@@ -197,8 +214,27 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   // `test/spine/*` case) inject a peer with no store class at all. See `lazySharedSessionStore`.
   const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(deps.winterHome === undefined ? {} : { winterHome: deps.winterHome }) }) : () => deps.shared!;
   const homeOf = (): string => deps.winterHome ?? sharedOf().identity.winterHome;
-  let decorator: MaterializedResumeDecorator | undefined = deps.decorator;
-  const decoratorOf = (): MaterializedResumeDecorator => (decorator ??= createMaterializedResumeDecorator(context, { shared: sharedOf, now }));
+  let decorator: MaterializedResumeDecoratorHandle | undefined = deps.decorator as MaterializedResumeDecoratorHandle | undefined;
+  /**
+   * ONE store for the barrier AND the decorator (review r1, F2).
+   *
+   * The wiring that was owed to the spine built them independently, each resolving its own store over
+   * the same home — two 100 ms batch queues interleaving appends into one file, and, worse, TWO
+   * decoration registries: a decoration registered in the decorator's was invisible to the canonical
+   * append gate, which consulted the barrier's, and washed straight back into the byte-pure file.
+   * So the barrier BUILDS the decorator by default, and REFUSES an injected one that does not report
+   * the same store instance. The property is checked, not documented.
+   */
+  const decoratorOf = (): MaterializedResumeDecoratorHandle => {
+    if (decorator === undefined) decorator = createMaterializedResumeDecorator(context, { shared: sharedOf, now });
+    const theirs = (decorator as { shared?: SharedSessionStore }).shared;
+    if (theirs !== undefined && theirs !== sharedOf()) {
+      throw new HandoffWiringError(
+        "the decorator was built over a DIFFERENT session store than the barrier's; two stores over one home means two decoration registries, and a decoration registered in one washes back through the other (WS-05 §6, WS-13 §8.2)",
+      );
+    }
+    return decorator;
+  };
   const leaseRootOf = (): string => deps.leaseRoot ?? join(homeOf(), "runtimes", "handoff-leases");
   const stagingRootFor = deps.stagingRootFor ?? ((uuid: string) => resumeStagingRoot(uuid));
 
@@ -213,31 +249,77 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     return match;
   };
 
-  const plan = async (session: SessionKey, to: RuntimeKind): Promise<HandoffPlan> => {
+  /**
+   * Reads the entry AND repairs an interrupted handoff (review r1, F1).
+   *
+   * The barrier's commit is two writes that cannot be one: the transcript's producer record (atomic,
+   * in the summary sidecar) and the host directory's derived copy. A crash between them used to leave
+   * them disagreeing forever. Now the state before the flip is marked with a `pendingHandoff` record,
+   * so the next `plan()` can tell the two cases apart:
+   *
+   *   * a pendingHandoff is present -> the flip never happened. The SOURCE still owns the session; the
+   *     marker is cleared and nothing moves.
+   *   * no marker, but the producer record and the directory disagree -> the flip's first write landed
+   *     and its second did not. The transcript's own record is authoritative (WS-05 §5.4, WS-16 §4),
+   *     so the directory is repaired to match it.
+   */
+  const loadEntry = async (session: SessionKey): Promise<RuntimeDirectoryEntry> => {
     const entry = await findEntry(session);
+    const shared = sharedOf();
+    const summary = await shared.canonical.readSessionSummary({ projectKey: session.projectKey, sessionId: session.sessionId });
+    if (summary === null) return entry;
+    const pending = summary["pendingHandoff"];
+    if (typeof pending === "object" && pending !== null) {
+      await shared.store.append(session, [{ type: DIALECT_RECORD_ENTRY_TYPE, pendingHandoff: null }]);
+      await shared.settle(session);
+      return entry;
+    }
+    const producer = summary["producerRuntime"];
+    if ((producer === "claude-agent" || producer === "winter-agent") && producer !== entry.runtimeKind) {
+      const repaired: RuntimeDirectoryEntry = { ...entry, runtimeKind: producer, generation: entry.generation + 1, updatedAt: now().toISOString() };
+      await context.directoryStore.upsert(repaired);
+      const cursor = summary["projectionCursor"];
+      if (typeof cursor === "string" && cursor.length > 0) await context.directoryStore.cursors.set(entry.address, cursor);
+      return repaired;
+    }
+    return entry;
+  };
+
+  /** The `knownUnprovable` markers, computed from CURRENT state — `plan()` renders them, `execute()` obeys them. */
+  const markersFor = (args: { entry: RuntimeDirectoryEntry; to: RuntimeKind; health?: HandoffOwnerHealth; session: SessionKey }): Map<HandoffStepNumber, string> => {
+    const markers = new Map<HandoffStepNumber, string>();
+    if (args.entry.runtimeKind === args.to) {
+      markers.set(1, `the session is already owned by ${args.to}; a handoff to the same runtime moves nothing`);
+    }
+    // BOTH health sources (review r1, F8). The owner reports its own; the shared store records the
+    // mirror failures the owner never hears about. A plan that consulted only the first told a host
+    // that step 4 was fine while the store already held a `repair-required` flag for the session.
+    const storeHealth = deps.shared === undefined ? undefined : deps.shared.health(args.session);
+    const unhealthy = args.health?.transcriptHealth === "repair-required" || storeHealth?.transcriptHealth === "repair-required";
+    if (unhealthy) {
+      markers.set(
+        4,
+        args.health?.recordedLocalWriteRoot === undefined
+          ? "the mirror is unhealthy and no local-write root was recorded, so there is nothing to reconcile the canonical store against"
+          : `the mirror is unhealthy; the canonical store must be reconciled against ${args.health.recordedLocalWriteRoot} first`,
+      );
+    }
+    if (deps.participants?.destination === undefined) {
+      markers.set(8, "no destination runtime was supplied, so nothing can confirm the resumed session and level");
+    }
+    return markers;
+  };
+
+  const plan = async (session: SessionKey, to: RuntimeKind): Promise<HandoffPlan> => {
+    const entry = await loadEntry(session);
     const from = entry.runtimeKind;
     const owner = (await deps.participants?.source?.(session, from)) ?? undefined;
     const health = owner?.health === undefined ? undefined : await owner.health();
-    const steps: HandoffStep[] = HANDOFF_STEPS.map(({ step, name }) => ({ step, name }));
-
-    // A plan a host can show HONESTLY: a step already known to be unprovable is marked before anything
-    // runs, so "this will be a fork, and here is why" is renderable rather than discoverable.
-    if (from === to) {
-      steps[0] = { ...steps[0]!, knownUnprovable: `the session is already owned by ${to}; a handoff to the same runtime moves nothing` };
-    }
-    if (health?.transcriptHealth === "repair-required") {
-      steps[3] = {
-        ...steps[3]!,
-        knownUnprovable:
-          health.recordedLocalWriteRoot === undefined
-            ? "the mirror is unhealthy and no local-write root was recorded, so there is nothing to reconcile the canonical store against"
-            : `the mirror is unhealthy; the canonical store must be reconciled against ${health.recordedLocalWriteRoot} first`,
-      };
-    }
-    if (deps.participants?.destination === undefined) {
-      steps[7] = { ...steps[7]!, knownUnprovable: "no destination runtime was supplied, so nothing can confirm the resumed session and level" };
-    }
-
+    const markers = markersFor({ entry, to, session, ...(health === undefined ? {} : { health }) });
+    const steps: HandoffStep[] = HANDOFF_STEPS.map(({ step, name }) => {
+      const knownUnprovable = markers.get(step);
+      return knownUnprovable === undefined ? { step, name } : { step, name, knownUnprovable };
+    });
     return {
       session,
       from,
@@ -263,18 +345,54 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     };
 
     const session = plan.session;
-    const entry = await findEntry(session);
-    const owner = (await deps.participants?.source?.(session, plan.from)) ?? undefined;
-
-    // ---- step 1: the handoff lease, and no new turns ------------------------------------------------
     const shared = sharedOf();
     const winterHome = homeOf();
+    const entry = await loadEntry(session);
+
+    // A STALE PLAN IS NOT EXECUTED (review r1, F9). Between `plan()` and `execute()` the session can
+    // change hands — a plan built when Winter owned it would otherwise run its whole eight steps
+    // against a record that has since moved, and report `resumed` for a transfer that never applied.
+    if (entry.runtimeKind !== plan.from) {
+      return lossy(1, `this plan was built when ${plan.from} owned the session and ${entry.runtimeKind} owns it now; re-plan against the current owner`);
+    }
+
+    const owner = (await deps.participants?.source?.(session, plan.from)) ?? undefined;
+    const healthNow = owner?.health === undefined ? undefined : await owner.health();
+
+    // PLAN AND EXECUTE AGREE BY CONSTRUCTION (review r1, F7). A step the plan already knows cannot be
+    // proven is refused here rather than run: `execute()` used to ignore the markers entirely and
+    // drive a same-runtime "handoff" to `resumed`, bumping the generation and rewriting the producer
+    // record for a transfer that moved nothing.
+    //
+    // STEP 4 IS THE ONE EXCEPTION, and it is not a loophole: its own logic below reaches the SAME
+    // refusal with the specific vocabulary WS-05 §12 gives it (`blocked: repair-required` /
+    // `mirror-error`), and collapsing that into a fork would lose the one distinction a host acts on.
+    const markers = new Map([...markersFor({ entry, to: plan.to, session, ...(healthNow === undefined ? {} : { health: healthNow }) })]);
+    for (const step of plan.steps) {
+      if (step.knownUnprovable !== undefined) markers.set(step.step, step.knownUnprovable);
+    }
+    for (const [step, reason] of [...markers.entries()].sort((a, b) => a[0] - b[0])) {
+      if (step === 4) continue;
+      return lossy(step, reason);
+    }
+
     let lease: HandoffLease;
     try {
       lease = acquireHandoffLease(leaseRootOf(), session);
     } catch (error) {
       return blocked(1, "lease-held", error instanceof Error ? error.message : String(error));
     }
+    let stagedRoot: string | undefined;
+    let pendingWritten = false;
+    /** Everything step 6's pending mark and step 7/8's staging left behind, undone. */
+    const unwind = async (): Promise<void> => {
+      if (pendingWritten) {
+        await shared.store.append(session, [{ type: DIALECT_RECORD_ENTRY_TYPE, pendingHandoff: null }]);
+        await shared.settle(session);
+      }
+      // A decorated copy nobody resumed from must not survive to be reconciled later.
+      if (stagedRoot !== undefined) rmSync(stagedRoot, { recursive: true, force: true });
+    };
     try {
       await owner?.stopNewTurns?.();
       record(1, true, "the handoff lease is held by this process and the source is not taking new turns");
@@ -292,7 +410,6 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       record(3, true, `${streamed.detail ?? "the stream reached its terminal result"}; ${settled.batchesCommitted} canonical append batch(es) settled`);
 
       // ---- step 4: canonical tail vs the recorded local-write root -----------------------------------
-      const health = owner?.health === undefined ? undefined : await owner.health();
       const eligibility = owner?.eligibility === undefined ? undefined : await owner.eligibility();
       if (eligibility !== undefined && !eligibility.eligible) {
         // Lane A's `officialHandoffEligibility` answers this for an official session. Its three reasons
@@ -302,7 +419,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         const reason = eligibility.reason === "default-spawn-mirror-error" ? "mirror-error" : "repair-required";
         return blocked(4, reason, eligibility.detail);
       }
-      const localRoot = health?.recordedLocalWriteRoot;
+      const localRoot = healthNow?.recordedLocalWriteRoot;
       const comparison = await compareAgainstLocalRoot({ shared, session, localRoot });
       if (comparison.kind === "canonical-behind") {
         // §12 step 4: "reconcile while state still exists". A LAG IS NOT A MISMATCH — the mirror is
@@ -316,10 +433,10 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       } else {
         record(4, true, comparison.reason);
       }
-      const healthNow = shared.health(session);
-      if (healthNow.transcriptHealth !== "ok") {
-        const cause = healthNow.errors[healthNow.errors.length - 1];
-        return blocked(4, "mirror-error", `the mirror recorded ${healthNow.errors.length} failure(s) for this session${cause === undefined ? "" : ` (last: ${cause.cause})`}, and it is not reconciled`);
+      const storeHealth = shared.health(session);
+      if (storeHealth.transcriptHealth !== "ok") {
+        const cause = storeHealth.errors[storeHealth.errors.length - 1];
+        return blocked(4, "mirror-error", `the mirror recorded ${storeHealth.errors.length} failure(s) for this session${cause === undefined ? "" : ` (last: ${cause.cause})`}, and it is not reconciled`);
       }
 
       // ---- step 5: validate the JSONL -----------------------------------------------------------------
@@ -327,20 +444,25 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       if (!validation.ok) return lossy(5, validation.reason);
       record(5, true, validation.detail);
 
-      // ---- step 6: close, persist, transfer -----------------------------------------------------------
+      // ---- step 6: close the owner, and MARK the handoff as pending ------------------------------------
+      //
+      // OWNERSHIP DOES NOT MOVE HERE (review r1, F1). The first version persisted the producer record,
+      // the cursor and the directory entry at step 6 — so every failure at 7 or 8 returned
+      // `lossy-fork-offered`, whose pinned meaning is "KEEP THE SOURCE OWNER", while the persisted
+      // state already named a destination that never started. What lands here is a marker; the flip is
+      // the last act of step 8.
       const closed = (await owner?.close()) ?? undefined;
       if (closed !== undefined && closed.ok === false) return lossy(6, closed.reason);
       const level = raiseLevel(await currentLevel(shared, session), entry);
-      let commit: CommitResult;
+      let staged: PendingCommit;
       try {
-        commit = await commitProducerRecord({ shared, session, entry, to: plan.to, level, versions: context, now: now() });
+        staged = await markHandoffPending({ shared, session, entry, plan, level, now: now() });
+        pendingWritten = true;
       } catch (error) {
         if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
-        return lossy(6, `the producer record could not be persisted: ${error instanceof Error ? error.message : String(error)}`);
+        return lossy(6, `the handoff could not be staged: ${error instanceof Error ? error.message : String(error)}`);
       }
-      await context.directoryStore.cursors.set(entry.address, commit.cursor);
-      await context.directoryStore.upsert({ ...entry, runtimeKind: plan.to, generation: entry.generation + 1, updatedAt: now().toISOString() });
-      record(6, true, `the producer record now names ${plan.to} at level ${level}, cursor ${commit.cursor}, and the writer lease is this process's`);
+      record(6, true, `the owner is closed, the writer lease is this process's, and a pending handoff to ${plan.to} at level ${level} is recorded — ownership has NOT moved`);
 
       // ---- step 7: temp continuity ---------------------------------------------------------------------
       let continuity;
@@ -352,6 +474,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           ...(owner?.effectiveTempDir === undefined ? {} : { recordedTempDir: owner.effectiveTempDir }),
         });
       } catch (error) {
+        await unwind();
         return lossy(7, `temp continuity could not be materialized: ${error instanceof Error ? error.message : String(error)}`);
       }
       record(
@@ -360,8 +483,9 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         `${continuity.mode}: the session's scratch is at ${continuity.effectiveTempDir}${continuity.supersededDir === undefined ? "" : `, superseding ${continuity.supersededDir} (retained)`}`,
       );
 
-      // ---- step 8: the destination, on the same backend uuid and project key ---------------------------
-      const stagingRoot = plan.to === "claude-agent" ? stagingRootFor(commit.stagingUuid) : undefined;
+      // ---- step 8: stage, confirm, and only THEN flip ---------------------------------------------------
+      const stagingRoot = plan.to === "claude-agent" ? stagingRootFor(staged.stagingUuid) : undefined;
+      if (stagingRoot !== undefined) stagedRoot = stagingRoot;
       const decorated = await decoratorOf().decorate({
         session,
         to: plan.to,
@@ -387,11 +511,40 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       };
       const destination = (await deps.participants?.destination?.(session, plan.to)) ?? undefined;
       if (destination === undefined) {
+        await unwind();
         return lossy(8, "no destination runtime confirmed the resumed session and level, and the next user message must not be delivered until one does");
       }
-      const confirmed = await destination.confirmInit(target);
-      if (!confirmed.ok) return lossy(8, confirmed.reason);
-      record(8, true, confirmed.detail ?? `the destination confirmed ${session.sessionId} at level ${level}`);
+      let confirmed: HandoffStepReport;
+      try {
+        confirmed = await destination.confirmInit(target);
+      } catch (error) {
+        await unwind();
+        return lossy(8, `the destination threw while confirming init: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!confirmed.ok) {
+        await unwind();
+        return lossy(8, confirmed.reason);
+      }
+
+      // THE FLIP, and it is the last act. Ownership moves only now — after a destination has confirmed
+      // the same session and level.
+      try {
+        await flipOwnership({ shared, context, session, entry, plan, level, staged, now: now() });
+      } catch (error) {
+        await unwind();
+        return lossy(8, `the destination confirmed init but ownership could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      stagedRoot = undefined; // the copy is the destination's now
+      pendingWritten = false;
+
+      // The FALLBACK note enters the canonical file HERE and nowhere else: §8.2's "sole case where
+      // injected handoff content enters the canonical file", after the destination that will read it
+      // has confirmed it started (review r1, F1/F2).
+      if (decorated.note !== undefined) {
+        await shared.store.append(session, [decorated.note]);
+        await shared.settle(session);
+      }
+      record(8, true, confirmed.detail ?? `the destination confirmed ${session.sessionId} at level ${level}, and ownership moved`);
 
       return {
         kind: "resumed",
@@ -411,6 +564,16 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     execute,
     get shared() {
       return sharedOf();
+    },
+    /**
+     * The decorator this barrier uses — over the SAME store (review r1, F2).
+     *
+     * This accessor is the wiring: `src/sdk.ts` writes `decorator: barrier.decorator` rather than
+     * building a second one, so one store, one registry and one door are structural instead of being
+     * a rule someone has to remember.
+     */
+    get decorator() {
+      return decoratorOf();
     },
   };
 }
@@ -523,23 +686,30 @@ export async function validateSessionTranscript(shared: SharedSessionStore, sess
   const sidecar = adjacentSidecarReport(winterHome, session);
   return {
     ok: true,
-    detail: `${lines.length} framed line(s), ${entries.length} entr(y|ies) with a unique uuid and a reachable parent, tool pairing and compaction boundaries intact, ${subkeys.length} subkey(s) loadable${sidecar}`,
+    detail: `${lines.length} framed line(s), ${chain.detail}, ${pairing.detail}, ${compaction.detail} intact, ${subkeys.length} subkey(s) loadable${sidecar}`,
   };
 }
 
+/**
+ * WS-05 §12's "UUID uniqueness, parent-chain REACHABILITY".
+ *
+ * THE SET IS BUILT INCREMENTALLY (review r1, F14). The first version collected every uuid in the file
+ * and then checked that each `parentUuid` was in that set — which is parent PRESENCE, not
+ * reachability: a forward reference (a child written before its parent) and a two-entry cycle both
+ * passed. Requiring the parent to have been SEEN ALREADY is the same loop with the set built as it
+ * goes, and it makes both impossible.
+ */
 function validateChain(entries: readonly SessionStoreEntry[]): TranscriptValidation {
   const seen = new Set<string>();
   for (const entry of entries) {
+    const parent = entry["parentUuid"];
+    if (typeof parent === "string" && !seen.has(parent)) {
+      return { ok: false, reason: `entry ${String(entry["uuid"])} has an unreachable parentUuid: ${parent} (it does not appear earlier in the transcript)` };
+    }
     const uuid = entry["uuid"];
     if (typeof uuid !== "string") continue;
     if (seen.has(uuid)) return { ok: false, reason: `duplicate uuid in the transcript: ${uuid}` };
     seen.add(uuid);
-  }
-  for (const entry of entries) {
-    const parent = entry["parentUuid"];
-    if (typeof parent === "string" && !seen.has(parent)) {
-      return { ok: false, reason: `entry ${String(entry["uuid"])} has an unreachable parentUuid: ${parent}` };
-    }
   }
   return { ok: true, detail: `${seen.size} uuid(s), all unique and reachable` };
 }
@@ -547,9 +717,12 @@ function validateChain(entries: readonly SessionStoreEntry[]): TranscriptValidat
 /**
  * Every `tool_use` has its `tool_result`, and every `tool_result` has its `tool_use`.
  *
- * THE FINAL ENTRY IS EXEMPT from the first half. A turn interrupted between the model's tool call and
- * the tool's answer leaves exactly that shape, and §12 step 2 has already drained to an idle boundary —
- * so a trailing unpaired call is the boundary itself, not a hole in the history.
+ * NO EXEMPTION FOR THE FINAL ENTRY (review r1, F3). The first version exempted a trailing unpaired
+ * call as "the idle boundary step 2 drained to" — and the FALLBACK door then appended its note after
+ * it, so the exemption stopped applying and the session could never be handed off again. The rule the
+ * barrier actually wants is the stricter one: an interrupted turn is not a valid terminal boundary, so
+ * it is a step-5 fork BEFORE anything is written, and the session becomes handoffable the moment its
+ * tool result lands.
  */
 function validateToolPairing(entries: readonly SessionStoreEntry[]): TranscriptValidation {
   const opened = new Map<string, number>();
@@ -560,10 +733,12 @@ function validateToolPairing(entries: readonly SessionStoreEntry[]): TranscriptV
       if (block["type"] === "tool_result" && typeof block["tool_use_id"] === "string") closed.add(block["tool_use_id"]);
     }
   });
-  for (const [id, index] of opened) {
+  for (const [id] of opened) {
     if (closed.has(id)) continue;
-    if (index === entries.length - 1) continue;
-    return { ok: false, reason: `tool_use ${id} has no tool_result and is not the transcript's final entry` };
+    return {
+      ok: false,
+      reason: `tool_use ${id} has no tool_result: the turn was interrupted at a tool call, which is not the idle terminal boundary a handoff needs`,
+    };
   }
   for (const id of closed) {
     if (!opened.has(id)) return { ok: false, reason: `tool_result ${id} has no tool_use to pair with` };
@@ -579,15 +754,60 @@ function contentBlocks(entry: SessionStoreEntry): Array<Record<string, unknown>>
   return content.filter((block): block is Record<string, unknown> => typeof block === "object" && block !== null);
 }
 
-/** WS-05 §5.1: a compaction boundary is preceded by exactly the summary it is a boundary for. */
+/**
+ * A compaction boundary, in EITHER of the two shapes a shared store really holds (review r1, F5).
+ *
+ * The first version matched a top-level `type: "compact_boundary"` and demanded a preceding
+ * `compact_summary` — a pairing the corpus does not have, on a shape the vendor does not write, so the
+ * step was inert on real data and would have refused data that does not exist.
+ *
+ * There are TWO real shapes and this recognises both, deliberately:
+ *   * `{type:"system", subtype:"compact_boundary", compact_metadata}` — WS-05 §5.1's observed corpus
+ *     lists `compact_boundary` under SYSTEM SUBTYPES (30 real transcripts), and the SDK's own
+ *     `SDKCompactBoundaryMessage` (`packages/sdk/src/protocol/frames.ts`) has exactly that shape.
+ *   * `{type:"compact_boundary", compact_metadata}` — what the Winter dialect's own transcript writer
+ *     emits (`packages/runtime/src/store/dialect.ts`'s `compactBoundaryEntry`).
+ * A shared compatibility store can hold both, so a validator that knew only one would be inert on half
+ * its input. Neither is "the" shape; the METADATA is what both carry and what is worth validating.
+ */
+function isCompactBoundary(entry: SessionStoreEntry): boolean {
+  if (entry["type"] === "compact_boundary") return true;
+  return entry["type"] === "system" && entry["subtype"] === "compact_boundary";
+}
+
+/**
+ * WS-05 §5.1's compaction linkage: `preserved_messages` supersedes `preserved_segment`, and a reader
+ * "looks each uuid up directly ... rather than walking the parentUuid chain" — which is a
+ * RESUME-CORRECTNESS requirement, so a boundary naming a uuid the transcript does not have is a
+ * boundary whose kept segment cannot be rebuilt.
+ */
 function validateCompaction(entries: readonly SessionStoreEntry[]): TranscriptValidation {
+  const uuids = new Set(entries.map((entry) => entry["uuid"]).filter((uuid): uuid is string => typeof uuid === "string"));
   let boundaries = 0;
-  for (const [index, entry] of entries.entries()) {
-    if (entry["type"] !== "compact_boundary") continue;
+  for (const entry of entries) {
+    if (!isCompactBoundary(entry)) continue;
     boundaries += 1;
-    const previous = entries[index - 1];
-    if (previous === undefined || previous["type"] !== "compact_summary") {
-      return { ok: false, reason: `compact_boundary ${String(entry["uuid"])} is not immediately preceded by its compact_summary` };
+    const metadata = entry["compact_metadata"];
+    if (typeof metadata !== "object" || metadata === null) {
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} carries no compact_metadata, so its kept segment cannot be rebuilt` };
+    }
+    const preserved = (metadata as { preserved_messages?: unknown }).preserved_messages;
+    if (preserved === undefined) continue; // "unset when compaction summarizes everything" — nothing kept
+    if (typeof preserved !== "object" || preserved === null) {
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed preserved_messages` };
+    }
+    const anchor = (preserved as { anchor_uuid?: unknown }).anchor_uuid;
+    const kept = (preserved as { uuids?: unknown }).uuids;
+    if (typeof anchor !== "string" || !Array.isArray(kept)) {
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed preserved_messages (anchor_uuid and uuids are required together)` };
+    }
+    if (!uuids.has(anchor)) {
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} anchors on ${anchor}, which is not in this transcript` };
+    }
+    for (const uuid of kept) {
+      if (typeof uuid !== "string" || !uuids.has(uuid)) {
+        return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} preserves ${String(uuid)}, which is not in this transcript` };
+      }
     }
   }
   return { ok: true, detail: `${boundaries} compaction boundar(y|ies)` };
@@ -605,9 +825,12 @@ function adjacentSidecarReport(winterHome: string, session: SessionKey): string 
 
 // --- step 6 -------------------------------------------------------------------------------------------
 
-interface CommitResult {
+/** What step 6 staged, carried to the flip at the end of step 8. */
+interface PendingCommit {
   cursor: string;
   stagingUuid: string;
+  /** The producer record the flip will write, complete except for the moment it happens. */
+  record: SessionStoreEntry;
 }
 
 async function currentLevel(shared: SharedSessionStore, session: SessionKey): Promise<CompatibilityLevel> {
@@ -624,22 +847,21 @@ function raiseLevel(recorded: CompatibilityLevel, entry: RuntimeDirectoryEntry):
 }
 
 /**
- * §12 step 6's atomic persist, as ONE `append()`.
+ * PHASE ONE of §12 step 6's commit: the writer lease, and a marker that says a handoff is in flight.
  *
- * The concrete store partitions a `winter_dialect_record` out of the transcript entirely and folds its
- * fields into `<sessionId>.summary.json` with a single write-temp-and-rename — so the producer record,
- * the projection cursor and the source generation's completion land together or not at all. WS-05 §5.2's
- * closed-corpus rule is satisfied by construction: not one byte of this reaches the JSONL.
+ * NOTHING HERE MOVES OWNERSHIP (review r1, F1). `producerRuntime` is not written, the directory is not
+ * touched, and the cursor is not advanced — the marker exists so a crash BEFORE the flip is
+ * distinguishable from a crash INSIDE it (see `loadEntry`'s repair). The record it returns is the one
+ * the flip will write, built now so the flip itself is a single append.
  */
-async function commitProducerRecord(args: {
+async function markHandoffPending(args: {
   shared: SharedSessionStore;
   session: SessionKey;
   entry: RuntimeDirectoryEntry;
-  to: RuntimeKind;
+  plan: HandoffPlan;
   level: CompatibilityLevel;
-  versions: SeamContextWithDirectory;
   now: Date;
-}): Promise<CommitResult> {
+}): Promise<PendingCommit> {
   // The writer lease, re-verified before anything is written: a DIFFERENT live process holding it is
   // exactly the "exactly one runtime owns a compatibility session at a time" violation, and the store's
   // own typed `WinterStoreLeaseError` is the honest way to learn it.
@@ -648,26 +870,61 @@ async function commitProducerRecord(args: {
   const entries = (await args.shared.store.load(args.session)) ?? [];
   const chainable = entries.filter((entry) => typeof entry["uuid"] === "string");
   const cursor = (chainable[chainable.length - 1]?.["uuid"] as string | undefined) ?? "";
-  const stagingUuid = cryptoRandomUuid();
+  const health = args.shared.health(args.session);
   const record: SessionStoreEntry = {
     type: DIALECT_RECORD_ENTRY_TYPE,
     // WS-05 §5.4's `TranscriptDialectRecord`, as far as this package can honestly fill it in.
     backendSessionId: args.session.sessionId,
     transcriptProjectKey: args.session.projectKey,
     dialectFamily: "claude-code-jsonl",
-    producerRuntime: args.to,
-    producerSdkVersion: args.shared.identity.packageVersion,
-    producerEngineVersion: args.entry.selection.engineVersion ?? args.shared.identity.packageVersion,
+    producerRuntime: args.plan.to,
+    // The DESTINATION's own versions, from its persisted selection (review r1, F11). The Winter peer's
+    // version is this PACKAGE's identity, not the producer's, and WS-05 §12's "a session produced by a
+    // newer unverified dialect is read-only until its consumer pair passes the corpus" reads this field.
+    producerSdkVersion: args.entry.selection.sdkVersion,
+    producerEngineVersion: args.entry.selection.engineVersion ?? args.entry.selection.sdkVersion,
     compatibilityLevel: args.level,
-    health: "clean",
-    // §12 step 6's other two facts, in the same atomic write.
+    // DERIVED from the store, not asserted (review r1, F11): step 4 guarantees `ok` on the path that
+    // reaches here, and reading it back is how the guarantee stays a fact rather than a comment.
+    health: health.transcriptHealth === "ok" ? "clean" : "repair-required",
+    // §12 step 6's other two facts, landing in the same atomic fold as the producer record — at the flip.
     projectionCursor: cursor,
     sourceGenerationCompleted: args.entry.generation,
     handoffAt: args.now.toISOString(),
+    pendingHandoff: null,
   };
-  await args.shared.store.append(args.session, [record]);
+  await args.shared.store.append(args.session, [
+    {
+      type: DIALECT_RECORD_ENTRY_TYPE,
+      pendingHandoff: { from: args.plan.from, to: args.plan.to, at: args.now.toISOString(), level: args.level, sourceGeneration: args.entry.generation, cursor },
+    },
+  ]);
   await args.shared.settle(args.session);
-  return { cursor, stagingUuid };
+  return { cursor, stagingUuid: cryptoRandomUuid(), record };
+}
+
+/**
+ * PHASE TWO: the flip, and the last act of the barrier.
+ *
+ * One atomic fold moves the producer record, the projection cursor and the source generation's
+ * completion together and clears the pending marker; the directory's derived copy follows. A crash
+ * between the two leaves the transcript's record authoritative and the directory behind, which is
+ * exactly the state `loadEntry` repairs on the next `plan()`.
+ */
+async function flipOwnership(args: {
+  shared: SharedSessionStore;
+  context: SeamContextWithDirectory;
+  session: SessionKey;
+  entry: RuntimeDirectoryEntry;
+  plan: HandoffPlan;
+  level: CompatibilityLevel;
+  staged: PendingCommit;
+  now: Date;
+}): Promise<void> {
+  await args.shared.store.append(args.session, [args.staged.record]);
+  await args.shared.settle(args.session);
+  await args.context.directoryStore.cursors.set(args.entry.address, args.staged.cursor);
+  await args.context.directoryStore.upsert({ ...args.entry, runtimeKind: args.plan.to, generation: args.entry.generation + 1, updatedAt: args.now.toISOString() });
 }
 
 function cryptoRandomUuid(): string {

@@ -25,23 +25,50 @@ function writeLocal(root: string, key: { projectKey: string; sessionId: string; 
 }
 
 describe("scanning a local-write root", () => {
-  test("finds the session's transcript and its subagents, and nothing else in the tree", async () => {
+  test("finds the session's transcript and its subagents, and NOTHING else that ends in .jsonl", async () => {
     await withStoreBed(async (bed) => {
       const root = join(bed.home, "spool");
       writeLocal(root, bed.key, [bed.entry()]);
       writeLocal(root, { ...bed.key, subpath: "subagents/agent-a1" }, [bed.entry()]);
-      // Everything a real config dir also holds.
+      // Everything a real config dir also holds — and, from review r1's PLANT 13, the neighbours a
+      // denylist keyed to one literal would have imported as sessions.
       writeFileSync(join(root, "settings.json"), "{}");
       mkdirSync(join(root, "projects", bed.key.projectKey, "statsig"), { recursive: true });
       writeFileSync(join(root, "projects", bed.key.projectKey, "statsig", "cache.jsonl"), "{}\n");
       writeFileSync(sidecarPathFor(root, bed.key), '{"payload":"opaque"}\n');
+      writeFileSync(join(root, "projects", bed.key.projectKey, `${bed.key.sessionId}.events.jsonl`), '{"type":"x"}\n');
+      // The one that matters: a neighbour holding opaque state. Imported as a session, it would put
+      // `encrypted_content` into a model-readable transcript.
+      writeFileSync(join(root, "projects", bed.key.projectKey, `${bed.key.sessionId}.reasoning.jsonl`), '{"encrypted_content":"ZZZ"}\n');
+      mkdirSync(join(root, "projects", bed.key.projectKey, bed.key.sessionId, "subagents"), { recursive: true });
+      writeFileSync(join(root, "projects", bed.key.projectKey, bed.key.sessionId, "subagents", "agent-a1.provider-state.jsonl"), '{"payload":"opaque"}\n');
+      writeFileSync(join(root, "projects", bed.key.projectKey, bed.key.sessionId, "subagents", "notes.jsonl"), '{"type":"x"}\n');
 
       const found = scanLocalWriteRoot(root);
       expect(found.map((t) => t.key.subpath ?? "<main>").sort()).toEqual(["<main>", "subagents/agent-a1"]);
-      expect(found.every((t) => isTranscriptPath(t.path))).toBe(true);
-      // The neighbour file ends in `.jsonl` too, and is the one file that must never be read.
-      expect(isTranscriptPath(sidecarPathFor(root, bed.key))).toBe(false);
+      expect(found.map((t) => t.key.sessionId)).toEqual([bed.key.sessionId, bed.key.sessionId]);
       expect(scanLocalWriteRoot(join(bed.home, "does-not-exist"))).toEqual([]);
+    });
+  });
+
+  test("the predicate is an ALLOWLIST over the store's own naming rule, not a list of things to avoid", async () => {
+    await withStoreBed(async (bed) => {
+      const dir = join(bed.home, "projects", bed.key.projectKey);
+      expect(isTranscriptPath(join(dir, `${bed.key.sessionId}.jsonl`))).toBe(true);
+      expect(isTranscriptPath(join(dir, "agent-a1.jsonl"), "subagent")).toBe(true);
+      for (const name of [
+        `${bed.key.sessionId}.provider-state.jsonl`,
+        `${bed.key.sessionId}.events.jsonl`,
+        `${bed.key.sessionId}.reasoning.jsonl`,
+        `${bed.key.sessionId}.jsonl.tail-quarantine`,
+        "cache.jsonl",
+        "index.jsonl",
+        "agent-a1.jsonl", // a subagent name is not a SESSION name
+      ]) {
+        expect(isTranscriptPath(join(dir, name)), `${name} must not read as a session transcript`).toBe(false);
+      }
+      expect(isTranscriptPath(join(dir, `${bed.key.sessionId}.jsonl`), "subagent")).toBe(false);
+      expect(isTranscriptPath(join(dir, "agent-a1.provider-state.jsonl"), "subagent")).toBe(false);
     });
   });
 });

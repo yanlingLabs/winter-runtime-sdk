@@ -17,6 +17,7 @@ import {
   SharedStoreUnavailableError,
   stripDecorations,
 } from "../../src/store/index.ts";
+import type { SharedSessionStore } from "../../src/store/index.ts";
 import { createFakeWinterPeer } from "../../src/testing/index.ts";
 import { storePeers, withStoreBed } from "./support.ts";
 
@@ -253,5 +254,75 @@ describe("the peer is the injection point", () => {
     const peers = storePeers();
     expect((peers.winter as unknown as { SDK_VERSION: string }).SDK_VERSION).toBe("0.0.2");
     expect((peers.winter as unknown as { WinterCompatibilitySessionStore: unknown }).WinterCompatibilitySessionStore).toBe(WinterCompatibilitySessionStore);
+  });
+});
+
+describe("the mirror cannot be poisoned (review r1, F10/F12)", () => {
+  test("a store that throws SYNCHRONOUSLY is recorded, not escaped — and the queue behind it survives", async () => {
+    let calls = 0;
+    class ThrowsSynchronously extends WinterCompatibilitySessionStore {
+      // Deliberately NOT `async`: the pinned store's own append is, but an injected store is a seam,
+      // and a synchronous throw used to escape the attempt loop entirely — leaving the FIFO tail
+      // rejected, `settle()` hanging forever and every later batch skipped.
+      override append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        calls += 1;
+        if (calls <= 3) throw new Error("EIO on open");
+        return super.append(key, entries);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.shared.store.append(bed.key, [bed.entry()]);
+        const first = await bed.shared.settle(bed.key);
+        expect(first.settled).toBe(true);
+        expect(first.transcriptHealth).toBe("repair-required");
+        expect(first.errors[0]!.cause).toBe("append-failed");
+
+        // The queue behind it still works: the mirror is degraded, never dead.
+        bed.shared.markReconciled(bed.key, "test");
+        const entry = bed.entry();
+        await bed.shared.store.append(bed.key, [entry]);
+        const second = await bed.shared.settle(bed.key);
+        expect(second.settled).toBe(true);
+        expect(((await bed.shared.store.load(bed.key)) ?? []).map((e) => e["uuid"])).toEqual([entry["uuid"]]);
+      },
+      { store: ThrowsSynchronously, policy: { backoffMs: 1 } },
+    );
+  });
+
+  test("`settle()` reports what it OBSERVED: a batch opened while it was draining leaves it unsettled", async () => {
+    await withStoreBed(async (bed) => {
+      let reentered = false;
+      let live: SharedSessionStore | undefined;
+      class Reenters extends WinterCompatibilitySessionStore {
+        override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+          await super.append(key, entries);
+          if (!reentered) {
+            reentered = true;
+            // A turn that lands one more frame WHILE the barrier is draining — step 3's own question
+            // is "has the canonical tail stopped moving", and the honest answer here is no.
+            void live!.store.append(bed.key, [bed.entry()]);
+          }
+        }
+      }
+      const shared = createSharedSessionStore({ peers: storePeers({ store: Reenters }), winterHome: bed.home });
+      live = shared;
+      await shared.store.append(bed.key, [bed.entry()]);
+      const report = await shared.settle(bed.key);
+      expect(report.settled).toBe(false);
+      // ...and a second settle, with nothing new arriving, is true.
+      expect((await shared.settle(bed.key)).settled).toBe(true);
+    });
+  });
+});
+
+describe("`attach()` is the one door WS-05 §6 is enforced at (review r1, nit 2)", () => {
+  test("options that already carry a DIFFERENT store are refused rather than silently overwritten", async () => {
+    await withStoreBed(async (bed) => {
+      const second = createSharedSessionStore({ peers: bed.peers, winterHome: bed.home });
+      expect(() => bed.shared.attach({ sessionStore: second.store })).toThrow(SharedStoreOptionsError);
+      // The same store is idempotent, not a conflict.
+      expect(bed.shared.attach({ sessionStore: bed.shared.store }).sessionStore).toBe(bed.shared.store);
+    });
   });
 });

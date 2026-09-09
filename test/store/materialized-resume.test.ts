@@ -47,10 +47,12 @@ describe("the door is a measurement, not a preference", () => {
   });
 });
 
-describe("FALLBACK — one labeled entry, appended at the barrier", () => {
-  test("the note enters the canonical file, is dialect-legal, and can never read as an ordinary message", async () => {
+describe("FALLBACK — one labeled entry, staged for the barrier to commit", () => {
+  test("the note is dialect-legal, can never read as an ordinary message, and does NOT touch the canonical file", async () => {
     await withStoreBed(async (bed) => {
       const [a] = await bed.append(1);
+      const canonicalPath = canonicalTranscriptPath(bed.home, bed.key);
+      const before = readFileSync(canonicalPath);
       const decorator = createMaterializedResumeDecorator(bed.context, { shared: bed.shared });
       const stagingRoot = join(bed.home, `${RESUME_STAGING_PREFIX}fallback`);
       const result = await decorator.decorate({
@@ -61,10 +63,13 @@ describe("FALLBACK — one labeled entry, appended at the barrier", () => {
       });
 
       expect(result.door).toBe("fallback");
-      expect(result.canonicalUntouched).toBe(false);
-      const entries = (await bed.shared.store.load(bed.key)) ?? [];
-      expect(entries).toHaveLength(2);
-      const note = entries[1]!;
+      // THE DECORATOR NEVER WRITES TO THE CANONICAL STORE (review r1, F1/F2). The note is handed back
+      // for the barrier to commit once the destination has confirmed it started.
+      expect(result.canonicalUntouched).toBe(true);
+      expect(readFileSync(canonicalPath)).toEqual(before);
+      expect(((await bed.shared.store.load(bed.key)) ?? [])).toHaveLength(1);
+
+      const note = result.note!;
       expect(note["type"]).toBe("user");
       expect(note["parentUuid"]).toBe(a!["uuid"] as string);
       expect(note["sessionId"]).toBe(bed.key.sessionId);
@@ -73,9 +78,11 @@ describe("FALLBACK — one labeled entry, appended at the barrier", () => {
       expect(String((note["message"] as { content: string }).content)).toContain("carry this over");
       // The closed corpus: nothing but dialect fields, no Winter-only marker.
       expect(Object.keys(note).sort()).toEqual(["cwd", "isSidechain", "message", "parentUuid", "sessionId", "timestamp", "type", "uuid", "version"]);
-      // The copy is staged for BOTH doors — a store-backed resume has nothing to read without one.
+      // The copy is staged under BOTH doors and carries the note under both — a destination that starts
+      // must see it whichever door is open.
       expect(readFileSync(result.resumePath, "utf8").trimEnd().split("\n")).toHaveLength(2);
-      expect(bed.shared.decorations.list(bed.key)).toEqual([]); // under this door the note IS canonical
+      // ...but under FALLBACK it is NOT registered as a decoration: it is destined for the canonical file.
+      expect(bed.shared.decorations.list(bed.key)).toEqual([]);
     });
   });
 });
@@ -98,6 +105,7 @@ describe("PREFERRED — the decoration lives only in the copy", () => {
 
       expect(result.door).toBe("preferred");
       expect(result.canonicalUntouched).toBe(true);
+      expect(result.note).toBeUndefined(); // nothing is owed to the canonical file under this door
       expect(readFileSync(canonicalPath)).toEqual(before);
       const copy = readFileSync(result.resumePath, "utf8").trimEnd().split("\n");
       expect(copy).toHaveLength(3);
@@ -224,5 +232,81 @@ describe("WS-05 §13's crash pairs", () => {
     expect(classifyCrashPairs({ entryUuids: ["a", "b"], anchorUuids: ["a", "orphan"] })).toEqual({ collectable: ["orphan"], degraded: ["b"] });
     // No sidecar at all is not "every entry degraded" — it is a session that never had foreign state.
     expect(classifyCrashPairs({ entryUuids: ["a", "b"], anchorUuids: [] })).toEqual({ collectable: [], degraded: [] });
+  });
+});
+
+describe("no probe leg is ever a hardcoded pass (review r1, F4/F13)", () => {
+  test("a bed whose `freshProcessResume` does NOTHING does not open the door", async () => {
+    await withStoreBed(async (bed) => {
+      let calls = 0;
+      const decorator = createMaterializedResumeDecorator(bed.context, {
+        shared: bed.shared,
+        runtimeLegs: {
+          label: "a bed that returns without producing anything",
+          async freshProcessResume() {
+            calls += 1;
+          },
+        },
+      });
+      const report = await decorator.probe();
+      expect(calls).toBeGreaterThan(0); // it WAS called — the leg is not skipping the bed
+      expect(report.door).toBe("fallback");
+      for (const probe of ["neighbor-file-survival", "no-wash-back", "sidecar-round-trip"] as const) {
+        const result = report.results.find((r) => r.probe === probe)! as MaterializedResumeProbeDetail;
+        const pinned = result.legs.find((leg) => leg.requiresPinnedRuntime)!;
+        expect(pinned.passed, `${probe}: ${pinned.evidence}`).toBe(false);
+        expect(pinned.evidence).toContain("unexercised");
+      }
+    });
+  });
+
+  test("a bed that THROWS records a failed leg rather than aborting the probe run", async () => {
+    await withStoreBed(async (bed) => {
+      const decorator = createMaterializedResumeDecorator(bed.context, {
+        shared: bed.shared,
+        runtimeLegs: {
+          label: "a bed that cannot start the pinned runtime",
+          async freshProcessResume() {
+            throw new Error("no platform binary for this host");
+          },
+        },
+      });
+      const report = await decorator.probe();
+      expect(report.results).toHaveLength(4);
+      expect(report.door).toBe("fallback");
+      const neighbour = report.results.find((r) => r.probe === "neighbor-file-survival")! as MaterializedResumeProbeDetail;
+      const pinned = neighbour.legs.find((leg) => leg.requiresPinnedRuntime)!;
+      expect(pinned.passed).toBe(false);
+      expect(pinned.evidence).toContain("no platform binary for this host");
+      // ...and the store-side legs still ran and still passed: one bad bed does not erase the run.
+      expect(neighbour.legs.filter((leg) => !leg.requiresPinnedRuntime).every((leg) => leg.passed)).toBe(true);
+    });
+  });
+
+  test("probe (c)'s pinned leg really drives the bed for every Claude leg", async () => {
+    await withStoreBed(async (bed) => {
+      const produced: string[] = [];
+      const decorator = createMaterializedResumeDecorator(bed.context, {
+        shared: bed.shared,
+        runtimeLegs: {
+          label: "a store-level stand-in",
+          async freshProcessResume({ key, shared }) {
+            const entries = (await shared.store.load(key)) ?? [];
+            const parent = entries[entries.length - 1]?.["uuid"] ?? null;
+            const uuid = crypto.randomUUID();
+            produced.push(uuid);
+            await shared.store.append(key, [{ type: "user", uuid, parentUuid: parent, sessionId: key.sessionId, cwd: "/probe", version: "0.0.0", isSidechain: false }]);
+            await shared.settle(key);
+          },
+        },
+      });
+      const report = await decorator.probe();
+      const roundTrip = report.results.find((r) => r.probe === "sidecar-round-trip")! as MaterializedResumeProbeDetail;
+      const pinned = roundTrip.legs.find((leg) => leg.requiresPinnedRuntime)!;
+      expect(pinned.passed, pinned.evidence).toBe(true);
+      // Two orders, three Claude legs between them — every one produced by the bed.
+      expect(produced.length).toBeGreaterThanOrEqual(3);
+      expect(report.door).toBe("preferred");
+    });
   });
 });

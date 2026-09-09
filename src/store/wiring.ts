@@ -342,6 +342,9 @@ export function assertStoreCompatibleOptions(options: StoreBearingOptions): void
       reason: "the store is a MIRROR of local transcript writes, and `persistSession: false` suppresses the local writes there is nothing left to mirror from (WS-14 §5.1)",
     });
   }
+  // `=== true`, and not `!== undefined`: §5.1 says the option "MUST NOT be set", but an explicit
+  // `false` sets nothing — it asks for the behaviour that is already the default, so refusing it would
+  // refuse a host for agreeing with the spec (review r1, nit 3).
   if (options.enableFileCheckpointing === true) {
     throw new SharedStoreOptionsError({
       option: "enableFileCheckpointing",
@@ -436,10 +439,15 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
   const commit = async (key: SessionKey, entries: SessionStoreEntry[]): Promise<void> => {
     for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const appended = canonical.append(key, entries);
-      appended.catch(() => undefined); // an abandoned attempt must never surface as unhandled
       const timedOut = Symbol("timed-out");
       try {
+        // INSIDE the try (review r1, F10). The pinned store's `append` is `async`, so it can only
+        // reject — but an injected store is a seam, and a non-conforming one that threw SYNCHRONOUSLY
+        // escaped this loop entirely: the batch's `done` never resolved, the FIFO tail stayed
+        // rejected, and every later batch was skipped while `settle()` — step 3's barrier — never
+        // returned. A mirror error must be recorded, never thrown.
+        const appended = canonical.append(key, entries);
+        appended.catch(() => undefined); // an abandoned attempt must never surface as unhandled
         const outcome = await Promise.race([
           appended.then(() => undefined),
           new Promise<typeof timedOut>((resolve) => {
@@ -487,7 +495,13 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
     if (batch === undefined) return Promise.resolve();
     batches.delete(id);
     if (batch.timer !== undefined) clearTimeout(batch.timer);
-    tail = tail.then(() => commit(key, batch.entries)).then(() => batch.resolve());
+    // `.catch` on BOTH links (review r1, F10): `commit` is written not to throw, but a tail that ever
+    // rejected would skip every batch queued behind it and hang `settle()` forever — the one failure
+    // mode a mirror must not have.
+    tail = tail
+      .then(() => commit(key, batch.entries))
+      .catch(() => undefined)
+      .then(() => batch.resolve());
     return batch.done;
   };
 
@@ -531,8 +545,12 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
       await flush(batch.key);
     }
     await tail;
+    // MEASURED, not asserted (review r1, F12). An append made while this loop was awaiting the tail
+    // opens a NEW batch for the same session, and the barrier's step 3 asks precisely whether the
+    // canonical tail has stopped moving — a hardcoded `true` made that refusal unreachable.
+    const stillPending = [...batches.values()].some((batch) => sessionOf(batch.key) === session);
     const state = stateFor(key);
-    return { settled: true, batchesCommitted: state.batchesCommitted, errors: [...state.errors], transcriptHealth: state.health };
+    return { settled: !stillPending, batchesCommitted: state.batchesCommitted, errors: [...state.errors], transcriptHealth: state.health };
   };
 
   /**
@@ -594,6 +612,15 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
     },
     attach(options) {
       assertStoreCompatibleOptions(options);
+      // WS-05 §6 ENFORCED AT THE ONE DOOR (review r1, nit 2). Silently replacing a store the caller
+      // already put there would hide exactly the "two stores over one home" configuration this module
+      // opens by declaring forbidden — and would hide it at the only place that could see it.
+      if (options.sessionStore !== undefined && options.sessionStore !== store) {
+        throw new SharedStoreOptionsError({
+          option: "sessionStore",
+          reason: "these options already carry a DIFFERENT session store; WS-05 §6 requires the identical instance on both branches, and replacing it here would hide the second one rather than refuse it",
+        });
+      }
       return { ...options, sessionStore: store };
     },
     assertImportAllowed(key) {

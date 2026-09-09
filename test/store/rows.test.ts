@@ -5,7 +5,8 @@
 // store on an `mkdtemp` home — the doubles are only ever the two participants (a live runtime cannot
 // be stood up hermetically), never the store, the transcript or the filesystem.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { WINTER_BRAND, envName, type SessionKey } from "@yanlinglabs/winter-agent-sdk";
@@ -196,6 +197,7 @@ function fileBackedDirectoryStore(path: string): RuntimeDirectoryStore {
 describe("WS-17 row 11 — deleting and rebuilding the disposable product index", () => {
   test("runtime mappings, backend ids and cursors all survive, because none of them live there", async () => {
     const statePath = ["placeholder"];
+    const stateRoot = ["placeholder"];
     await withStoreBed(
       async (bed) => {
         const entry = await bed.record();
@@ -232,14 +234,16 @@ describe("WS-17 row 11 — deleting and rebuilding the disposable product index"
       },
       {
         directoryStore: (() => {
-          // The bed's home does not exist yet when the store is built, so the state file lives beside
-          // it and its path is captured for the reopen above.
-          statePath[0] = join(process.env["TMPDIR"] ?? "/tmp", `runtime-state-${Math.random().toString(36).slice(2)}.json`);
+          // The bed's own home does not exist yet when the store is built, so this gets a `mkdtemp`
+          // root of its own rather than a name in the shared temp directory (review r1, nit 1): a
+          // failing test then leaves nothing behind but one directory this test removes.
+          stateRoot[0] = mkdtempSync(join(tmpdir(), "runtime-sdk-row11-"));
+          statePath[0] = join(stateRoot[0], "runtime-state.json");
           return fileBackedDirectoryStore(statePath[0]);
         })(),
       },
     );
-    rmSync(statePath[0]!, { force: true });
+    rmSync(stateRoot[0]!, { recursive: true, force: true });
   });
 
   test("the router never reads the product index: its name appears nowhere in this lane's source", async () => {

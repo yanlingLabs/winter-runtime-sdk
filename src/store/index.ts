@@ -7,6 +7,7 @@
 // own, because nothing outside this package was ever given one.
 export {
   assertOneSharedStore,
+  lazySharedSessionStore,
   assertStoreCompatibleOptions,
   BlindStoreImportError,
   createDecorationRegistry,
@@ -68,6 +69,7 @@ export {
 } from "./materialized-resume.ts";
 export type {
   CrashPairClassification,
+  StagedResumeResult,
   MaterializedResumeDecoratorHandle,
   MaterializedResumeDeps,
   MaterializedResumeProbeDetail,
@@ -75,7 +77,7 @@ export type {
   PinnedRuntimeProbeLegs,
 } from "./materialized-resume.ts";
 
-export { acquireHandoffLease, createHandoffBarrier, HANDOFF_STEPS, HandoffLeaseError, HandoffPlanError, releaseHandoffLease, validateSessionTranscript } from "./handoff-barrier.ts";
+export { acquireHandoffLease, createHandoffBarrier, HANDOFF_STEPS, HandoffLeaseError, HandoffPlanError, HandoffWiringError, releaseHandoffLease, validateSessionTranscript } from "./handoff-barrier.ts";
 export type {
   CompatibilityLevel,
   DetailedHandoffOutcome,

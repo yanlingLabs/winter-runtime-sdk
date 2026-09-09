@@ -55,12 +55,12 @@ export function scanLocalWriteRoot(root: string): LocalTranscript[] {
   for (const projectKey of readDirNames(projects, "dir")) {
     const projectDir = join(projects, projectKey);
     for (const name of readDirNames(projectDir, "file")) {
-      // `isTranscriptPath`, not `endsWith(".jsonl")`. The provider-state SIDECAR ends in `.jsonl`
-      // too — `<sessionId>.provider-state.jsonl` — and a scan that took it would hand it to
-      // reconciliation as a session called `<sessionId>.provider-state`, i.e. it would IMPORT the one
-      // file WS-17 §8's first probe requires to be left byte-untouched. (Found by the test below,
-      // which plants one.)
-      if (!isTranscriptPath(join(projectDir, name))) continue;
+      // `isTranscriptPath`, not `endsWith(".jsonl")`. Every neighbour in this directory ends in
+      // `.jsonl` too — the provider-state sidecar most dangerously — and a scan that took one would
+      // hand it to reconciliation as a SESSION named after the file, i.e. it would IMPORT the one file
+      // WS-17 §8's first probe requires to be left byte-untouched. The predicate is an allowlist over
+      // the store's own naming rule; see its own header.
+      if (!isTranscriptPath(join(projectDir, name), "session")) continue;
       const sessionId = name.slice(0, -JSONL.length);
       found.push({ path: join(projectDir, name), key: { projectKey, sessionId } });
     }
@@ -69,7 +69,7 @@ export function scanLocalWriteRoot(root: string): LocalTranscript[] {
     for (const sessionId of readDirNames(projectDir, "dir")) {
       const subagents = join(projectDir, sessionId, SUBAGENTS_DIR);
       for (const name of readDirNames(subagents, "file")) {
-        if (!isTranscriptPath(join(subagents, name))) continue; // a child has its own sidecar too
+        if (!isTranscriptPath(join(subagents, name), "subagent")) continue; // a child has its own sidecar too
         found.push({
           path: join(subagents, name),
           key: { projectKey, sessionId, subpath: `${SUBAGENTS_DIR}/${name.slice(0, -JSONL.length)}` },
@@ -403,13 +403,30 @@ export function localTranscriptPath(root: string, key: SessionKey): string {
   return join(base, key.sessionId, `${key.subpath}${JSONL}`);
 }
 
-/** True when `path` is a transcript this module would touch — the "transcript-only" rule, as a predicate. */
-export function isTranscriptPath(path: string): boolean {
+/**
+ * The two file names a transcript can have (WS-05 §4/§6).
+ *
+ * AN ALLOWLIST, and the second version of this function (review r1, F6). The first was a DENYLIST
+ * keyed to one literal — `!name.includes(".provider-state.")` — which excluded the sidecar the lane
+ * had just been burned by and nothing else. Every other `*.jsonl` neighbour under a local-write root
+ * was still scanned and would have been IMPORTED as a session: a planted `sess-1.reasoning.jsonl`
+ * holding `encrypted_content` became a canonical session named `sess-1.reasoning`, which is opaque
+ * state written into a model-readable transcript by the module whose header promises the opposite.
+ *
+ * A transcript's stem is therefore matched POSITIVELY: the session's own file is named by its backend
+ * session UUID, and a subagent's by its `agent-<id>` subkey. Anything else in that directory — a
+ * sidecar, a vendor cache, a file invented next year — is not a transcript, and the difference is
+ * decided by the store's own naming rule rather than by a list of things to avoid.
+ */
+const BACKEND_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// NO DOT in the stem: `agent-a1.provider-state` would otherwise match, and the child's own sidecar is
+// exactly the file this predicate exists to keep out (review r1, F6 — caught by its own test).
+const SUBAGENT_STEM_RE = /^agent-[A-Za-z0-9_-]+$/;
+
+export function isTranscriptPath(path: string, kind: "session" | "subagent" = "session"): boolean {
   if (!path.endsWith(JSONL)) return false;
-  const name = basename(path);
-  // `<id>.provider-state.jsonl` ends in `.jsonl` too, and is the one neighbour file that must never
-  // be read, rewritten or imported (WS-17 §8 probe (a)).
-  return !name.includes(".provider-state.");
+  const stem = basename(path).slice(0, -JSONL.length);
+  return kind === "subagent" ? SUBAGENT_STEM_RE.test(stem) : BACKEND_UUID_RE.test(stem);
 }
 
 /** Whether a path exists and is a regular file — used by the probes' byte-for-byte assertions. */

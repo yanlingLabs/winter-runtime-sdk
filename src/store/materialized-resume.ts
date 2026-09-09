@@ -34,6 +34,7 @@ import { dirname, join } from "node:path";
 
 import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 
+
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContext } from "../seams/context.ts";
 import type {
@@ -112,9 +113,32 @@ export interface MaterializedResumeDeps {
   now?: () => Date;
 }
 
+/**
+ * The pinned result, widened with the entry the FALLBACK door owes the canonical file.
+ *
+ * THE DECORATOR NEVER WRITES TO THE CANONICAL STORE (review r1, F1/F2). Under FALLBACK the note still
+ * belongs there — §8.2 calls it "the sole case where injected handoff content enters the canonical
+ * file" — but WHEN it goes in is the barrier's business, and the answer is "after the destination
+ * confirms init". A note appended before that leaves a durable, model-visible sentence saying the
+ * conversation continues on a runtime that never started.
+ */
+export interface StagedResumeResult extends MaterializedResumeResult {
+  /** Present only under FALLBACK: the labelled entry the barrier commits once step 8 confirms. */
+  note?: SessionStoreEntry;
+}
+
 export interface MaterializedResumeDecoratorHandle extends MaterializedResumeDecorator {
   /** The last report — from `deps.report` until `probe()` runs. */
   readonly report: MaterializedResumeProbeReport | undefined;
+  /**
+   * The store this decorator writes its registry into.
+   *
+   * EXPOSED so the barrier can ASSERT the two share one instance (review r1, F2): two stores over one
+   * home means two decoration registries, and a decoration registered in one is invisible to the
+   * other's canonical append gate — which is a wash-back caused by wiring rather than by the vendor.
+   */
+  readonly shared: SharedSessionStore;
+  decorate(input: MaterializedResumeInput): Promise<StagedResumeResult>;
 }
 
 /** WS-13 §8.2's doors. Lane C's implementation of the spine's seam. */
@@ -126,42 +150,39 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
 
   const doorOf = (): MaterializedResumeDoor => (report !== undefined && report.results.length > 0 && report.results.every((r) => r.passed) ? "preferred" : "fallback");
 
-  const decorate = async (input: MaterializedResumeInput): Promise<MaterializedResumeResult> => {
+  const decorate = async (input: MaterializedResumeInput): Promise<StagedResumeResult> => {
     const shared = sharedOf();
     const key = input.session;
     const canonicalPath = canonicalTranscriptPath(shared.identity.winterHome, key);
     const door = doorOf();
     // Captured BEFORE anything this call might write, so `canonicalUntouched` is a measurement of
-    // THIS call rather than of the two lines that follow it. (The first version read it after the
-    // FALLBACK append and reported `true` for the one door that is defined by writing there.)
+    // THIS call rather than of the lines that follow it.
     const canonicalAtEntry = readIfExists(canonicalPath);
 
     // A WINTER DESTINATION GETS NOTHING WRITTEN. §8.2's two doors exist because "the official runtime
     // builds its own requests, so render-time decoration is impossible there". The Winter leg renders
     // the note when it builds the request, so writing one into a file would be a second copy of the
-    // same content — and, under FALLBACK, a permanent one in the canonical file for no reason.
+    // same content.
     if (input.to === "winter-agent") {
       return { door, resumePath: canonicalPath, canonicalUntouched: true };
     }
 
     const note = await buildHandoffEntry({ shared, key, input, now: now(), ...(deps.anchor === undefined ? {} : { anchor: deps.anchor }) });
 
-    if (door === "fallback") {
-      // §8.2: "the sole case where injected handoff content enters the canonical file, and it is always
-      // explicitly labeled". It is NOT registered as a decoration — under this door it IS canonical
-      // content, and the registry's whole purpose is to keep copy-only entries out of the store.
-      await shared.store.append(key, [note]);
-      await shared.settle(key);
-    }
-
     const materializedPath = input.materializedPath;
     if (materializedPath === canonicalPath || materializedPath === "") {
-      return { door, resumePath: canonicalPath, canonicalUntouched: door === "preferred" };
+      // Nowhere to stage: there is no copy for the note to live in, and this decorator does not write
+      // to the canonical store under ANY door (see the header). The barrier commits the note itself,
+      // after the destination confirms.
+      return { door, resumePath: canonicalPath, canonicalUntouched: true, note };
     }
 
-    // THE COPY IS STAGED FOR BOTH DOORS. A `store-backed-resume` launch profile has no transcript to
-    // read without one — the staging root IS its `CLAUDE_CONFIG_DIR` — so the door decides only WHERE
-    // the note goes, never whether a copy exists.
+    // THE COPY IS STAGED FOR BOTH DOORS, and carries the note under both. A `store-backed-resume`
+    // launch has no transcript to read without one — the staging root IS its `CLAUDE_CONFIG_DIR` — and
+    // a destination that starts must see the note whichever door is open. The door decides only
+    // whether the note is COPY-ONLY (PREFERRED: registered as a decoration, so nothing can wash it
+    // back) or destined for the canonical file too (FALLBACK: not registered, and appended by the
+    // barrier once init confirms).
     const canonicalNow = readIfExists(canonicalPath);
     mkdirSync(dirname(materializedPath), { recursive: true, mode: 0o700 });
     if (canonicalNow === undefined) {
@@ -170,9 +191,8 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
       copyFileSync(canonicalPath, materializedPath);
       chmodSync(materializedPath, 0o600);
     }
-
+    appendLine(materializedPath, JSON.stringify(note));
     if (door === "preferred") {
-      appendLine(materializedPath, JSON.stringify(note));
       shared.decorations.record(key, { uuid: note["uuid"] as string, parentUuid: (note["parentUuid"] as string | null) ?? null });
     }
 
@@ -180,8 +200,10 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
     return {
       door,
       resumePath: materializedPath,
-      // Measured, not asserted: the canonical file's bytes before and after this call.
+      // Measured, not asserted: the canonical file's bytes before and after this call. Under BOTH
+      // doors it is now always true — this decorator has no path that writes there.
       canonicalUntouched: canonicalAtEntry === undefined ? canonicalAfter === undefined : canonicalAfter !== undefined && canonicalAtEntry.equals(canonicalAfter),
+      ...(door === "fallback" ? { note } : {}),
     };
   };
 
@@ -191,6 +213,9 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
     },
     get report() {
       return report;
+    },
+    get shared() {
+      return sharedOf();
     },
     async probe() {
       const fresh = await runProbes(context, deps);
@@ -256,6 +281,44 @@ export interface MaterializedResumeProbeDetail extends MaterializedResumeProbeRe
 }
 
 const PROBE_ORDER: MaterializedResumeProbeId[] = ["neighbor-file-survival", "no-wash-back", "sidecar-round-trip", "crash-pairs"];
+
+/**
+ * Every leg that names the pinned runtime goes through here, and NO leg is ever a hardcoded pass
+ * (review r1, F4/F13).
+ *
+ * Three rules, each of which a version of this code got wrong:
+ *   1. NO BED -> `unexercised`. A probe with an unexercised leg is not a pass, and the door stays shut.
+ *   2. A BED THAT THROWS -> a FAILED LEG, not an aborted probe run. The whole point of the report is to
+ *      say what was observed; a thrown bed observed "the bed cannot run", which is a result.
+ *   3. A BED THAT DID NOTHING -> `unexercised`. `freshProcessResume` that returns without producing a
+ *      single entry has measured nothing, and a leg that reported PASS for it would open the PREFERRED
+ *      gate on a no-op. Every leg below therefore checks that the transcript actually grew.
+ */
+async function pinnedLeg(
+  name: string,
+  deps: MaterializedResumeDeps,
+  run: (bed: PinnedRuntimeProbeLegs) => Promise<{ passed: boolean; evidence: string }>,
+): Promise<MaterializedResumeProbeLeg> {
+  if (deps.runtimeLegs === undefined) {
+    return { name, requiresPinnedRuntime: true, passed: false, evidence: "unexercised: no pinned-runtime bed was supplied to this probe run" };
+  }
+  try {
+    const result = await run(deps.runtimeLegs);
+    return { name, requiresPinnedRuntime: true, passed: result.passed, evidence: `${result.evidence} (bed: ${deps.runtimeLegs.label})` };
+  } catch (error) {
+    return {
+      name,
+      requiresPinnedRuntime: true,
+      passed: false,
+      evidence: `unexercised: the bed failed — ${error instanceof Error ? error.message : String(error)} (bed: ${deps.runtimeLegs.label})`,
+    };
+  }
+}
+
+/** How many chain entries the transcript holds — the "did the bed actually do anything" measure. */
+async function entryCount(shared: SharedSessionStore, key: SessionKey): Promise<number> {
+  return ((await shared.store.load(key)) ?? []).filter((entry) => typeof entry["uuid"] === "string").length;
+}
 
 async function runProbes(context: SeamContext, deps: MaterializedResumeDeps): Promise<MaterializedResumeProbeReport> {
   const results: MaterializedResumeProbeDetail[] = [];
@@ -359,11 +422,18 @@ async function probeNeighborFileSurvival(context: SeamContext, deps: Materialize
     await shared.settle(PROBE_KEY);
     legs.push({ name: "append", requiresPinnedRuntime: false, passed: readFileSync(path).equals(original), evidence: "the sidecar's bytes after a further append" });
 
-    const boundary = probeEntry({ uuid: randomUUID(), parentUuid: c["uuid"] as string, type: "compact_boundary" });
-    const summary = probeEntry({ uuid: randomUUID(), parentUuid: boundary["uuid"] as string, type: "compact_summary" });
-    await shared.store.append(PROBE_KEY, [boundary, summary]);
+    // The REAL boundary shape (review r1, F5): WS-05 §5.1's observed corpus lists `compact_boundary`
+    // under SYSTEM SUBTYPES, and the SDK's own `SDKCompactBoundaryMessage` carries
+    // `compact_metadata`. A leg written against a shape the corpus does not have simulates nothing.
+    const boundary = {
+      ...probeEntry({ uuid: randomUUID(), parentUuid: c["uuid"] as string }),
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: { trigger: "auto", pre_tokens: 100, preserved_messages: { anchor_uuid: a["uuid"] as string, uuids: [b["uuid"] as string, c["uuid"] as string] } },
+    };
+    await shared.store.append(PROBE_KEY, [boundary]);
     await shared.settle(PROBE_KEY);
-    legs.push({ name: "forced compaction", requiresPinnedRuntime: false, passed: readFileSync(path).equals(original), evidence: "the sidecar's bytes after a compaction boundary and summary" });
+    legs.push({ name: "forced compaction", requiresPinnedRuntime: false, passed: readFileSync(path).equals(original), evidence: "the sidecar's bytes after a real `system`/`compact_boundary` entry with its preserved-message metadata" });
 
     // Export/import: the transcript's entries into a second session, the way a store import would carry
     // them. The sidecar must neither move nor change.
@@ -378,20 +448,24 @@ async function probeNeighborFileSurvival(context: SeamContext, deps: Materialize
       evidence: "the source sidecar's bytes, and whether the import created one at the destination",
     });
 
-    if (deps.runtimeLegs === undefined) {
-      legs.push({ name: "fresh-process resume", requiresPinnedRuntime: true, passed: false, evidence: "unexercised: no pinned-runtime bed was supplied to this probe run" });
-      return legs;
-    }
-    const stagingRoot = resumeStagingRoot(randomUUID(), home);
-    mkdirSync(dirname(materializedTranscriptPath(stagingRoot, PROBE_KEY)), { recursive: true, mode: 0o700 });
-    copyFileSync(canonicalTranscriptPath(home, PROBE_KEY), materializedTranscriptPath(stagingRoot, PROBE_KEY));
-    await deps.runtimeLegs.freshProcessResume({ home, stagingRoot, key: PROBE_KEY, shared });
-    legs.push({
-      name: "fresh-process resume",
-      requiresPinnedRuntime: true,
-      passed: readFileSync(path).equals(original),
-      evidence: `the sidecar's bytes after a fresh-process resume on ${deps.runtimeLegs.label}`,
-    });
+    legs.push(
+      await pinnedLeg("fresh-process resume", deps, async (bed) => {
+        const stagingRoot = resumeStagingRoot(randomUUID(), home);
+        mkdirSync(dirname(materializedTranscriptPath(stagingRoot, PROBE_KEY)), { recursive: true, mode: 0o700 });
+        copyFileSync(canonicalTranscriptPath(home, PROBE_KEY), materializedTranscriptPath(stagingRoot, PROBE_KEY));
+        const before = await entryCount(shared, PROBE_KEY);
+        await bed.freshProcessResume({ home, stagingRoot, key: PROBE_KEY, shared });
+        await shared.settle(PROBE_KEY);
+        const after = await entryCount(shared, PROBE_KEY);
+        if (after <= before) {
+          return { passed: false, evidence: `unexercised: the resume produced no entries (${before} before, ${after} after), so the sidecar's survival was not put to any test` };
+        }
+        return {
+          passed: readFileSync(path).equals(original),
+          evidence: `the sidecar's bytes after a fresh-process resume that added ${after - before} entr(y|ies)`,
+        };
+      }),
+    );
     return legs;
   });
 }
@@ -431,22 +505,25 @@ async function probeNoWashBack(context: SeamContext, deps: MaterializedResumeDep
       evidence: `canonical past bytes unchanged=${pastUnchanged}; decoration absent from the store=${decorationAbsent}; the following turn landed re-parented onto the canonical chain=${turnPresent}`,
     });
 
-    if (deps.runtimeLegs === undefined) {
-      legs.push({ name: "mirror from a decorated copy", requiresPinnedRuntime: true, passed: false, evidence: "unexercised: no pinned-runtime bed was supplied to this probe run" });
-      return legs;
-    }
-    const canonicalBeforeResume = readFileSync(canonicalPath);
-    await deps.runtimeLegs.freshProcessResume({ home, stagingRoot, key: PROBE_KEY, shared });
-    await shared.settle(PROBE_KEY);
-    const canonicalAfterResume = readFileSync(canonicalPath);
-    const prefixIntact = canonicalAfterResume.subarray(0, canonicalBeforeResume.length).equals(canonicalBeforeResume);
-    const stillNoDecoration = ((await shared.store.load(PROBE_KEY)) ?? []).every((entry) => entry["uuid"] !== decoration["uuid"]);
-    legs.push({
-      name: "mirror from a decorated copy",
-      requiresPinnedRuntime: true,
-      passed: prefixIntact && stillNoDecoration,
-      evidence: `after a resume from the decorated copy on ${deps.runtimeLegs.label}: canonical prefix intact=${prefixIntact}; decoration still absent=${stillNoDecoration}`,
-    });
+    legs.push(
+      await pinnedLeg("mirror from a decorated copy", deps, async (bed) => {
+        const canonicalBeforeResume = readFileSync(canonicalPath);
+        const before = await entryCount(shared, PROBE_KEY);
+        await bed.freshProcessResume({ home, stagingRoot, key: PROBE_KEY, shared });
+        await shared.settle(PROBE_KEY);
+        const after = await entryCount(shared, PROBE_KEY);
+        if (after <= before) {
+          return { passed: false, evidence: `unexercised: the resume from the decorated copy produced no entries (${before} before, ${after} after), so no mirror write was observed` };
+        }
+        const canonicalAfterResume = readFileSync(canonicalPath);
+        const prefixIntact = canonicalAfterResume.subarray(0, canonicalBeforeResume.length).equals(canonicalBeforeResume);
+        const stillNoDecoration = ((await shared.store.load(PROBE_KEY)) ?? []).every((entry) => entry["uuid"] !== decoration["uuid"]);
+        return {
+          passed: prefixIntact && stillNoDecoration,
+          evidence: `after a resume from the decorated copy that mirrored ${after - before} entr(y|ies): canonical prefix intact=${prefixIntact}; decoration still absent=${stillNoDecoration}`,
+        };
+      }),
+    );
     return legs;
   });
 }
@@ -454,48 +531,92 @@ async function probeNoWashBack(context: SeamContext, deps: MaterializedResumeDep
 async function probeSidecarRoundTrip(context: SeamContext, deps: MaterializedResumeDeps): Promise<MaterializedResumeProbeLeg[]> {
   return withProbeHome(context, async ({ home, shared }) => {
     const legs: MaterializedResumeProbeLeg[] = [];
-    // WS-05 §12's gate matrix, store-side: the two round trips, each with a populated sidecar. A "leg"
-    // here is one producer's appends; the assertion is that the CLAUDE legs' bytes and their order are
-    // the same before and after the Winter leg in between.
-    for (const order of [
-      ["claude-agent", "winter-agent", "claude-agent"],
-      ["winter-agent", "claude-agent", "winter-agent"],
-    ] as const) {
+
+    /**
+     * One round trip. `produceClaudeLeg` decides who writes the Claude legs: the store itself (the
+     * store-side legs, which measure the STORE) or the pinned runtime's bed (the pinned leg, which
+     * measures the VENDOR). Everything else — the assertions — is identical, which is the point: the
+     * two legs differ in their producer and in nothing else.
+     */
+    const roundTrip = async (
+      order: readonly ("claude-agent" | "winter-agent")[],
+      produceClaudeLeg: ((key: SessionKey) => Promise<void>) | undefined,
+    ): Promise<{ passed: boolean; evidence: string }> => {
       const key: SessionKey = { projectKey: PROBE_KEY.projectKey, sessionId: randomUUID() };
+      const path = join(home, "projects", key.projectKey, `${key.sessionId}${PROVIDER_STATE_SUFFIX}`);
       let parent: string | null = null;
       const claudeLegBytes: string[] = [];
-      const path = join(home, "projects", key.projectKey, `${key.sessionId}${PROVIDER_STATE_SUFFIX}`);
+      let firstUuid: string | undefined;
       for (const producer of order) {
-        const uuid = randomUUID();
-        const entry = { ...probeEntry({ uuid, parentUuid: parent }), sessionId: key.sessionId };
-        await shared.store.append(key, [entry, { type: "winter_dialect_record", producerRuntime: producer, dialectFamily: "claude-code-jsonl", producerEngineVersion: "0.0.0" }]);
+        const before = await entryCount(shared, key);
+        if (producer === "claude-agent" && produceClaudeLeg !== undefined) {
+          await produceClaudeLeg(key);
+          await shared.settle(key);
+          const entries = (await shared.store.load(key)) ?? [];
+          if (entries.length <= before) {
+            return { passed: false, evidence: `unexercised: the bed produced no entry for the ${producer} leg (${before} before, ${entries.length} after)` };
+          }
+          const last = entries[entries.length - 1]!;
+          claudeLegBytes.push(JSON.stringify(last));
+          parent = last["uuid"] as string;
+        } else {
+          const uuid = randomUUID();
+          const entry = { ...probeEntry({ uuid, parentUuid: parent }), sessionId: key.sessionId };
+          await shared.store.append(key, [entry]);
+          await shared.settle(key);
+          if (producer === "claude-agent") claudeLegBytes.push(JSON.stringify(entry));
+          parent = uuid;
+        }
+        await shared.store.append(key, [{ type: "winter_dialect_record", producerRuntime: producer, dialectFamily: "claude-code-jsonl", producerEngineVersion: "0.0.0" }]);
         await shared.settle(key);
-        if (producer === "claude-agent") claudeLegBytes.push(JSON.stringify(entry));
-        if (parent === null) writeSidecar(path, [{ anchorUuid: uuid, kind: "native-state" }]);
-        parent = uuid;
+        if (firstUuid === undefined) {
+          firstUuid = parent ?? undefined;
+          if (firstUuid !== undefined) writeSidecar(path, [{ anchorUuid: firstUuid, kind: "native-state" }]);
+        }
       }
       const sidecarBytes = readFileSync(path);
       const lines = readFileSync(canonicalTranscriptPath(home, key), "utf8").trimEnd().split("\n");
       const claudeLegsIntact = claudeLegBytes.every((bytes) => lines.includes(bytes));
       const orderIntact = lines.length === order.length && lines.every((line, index) => index === 0 || parentOf(line) === uuidOf(lines[index - 1]!));
       const summary = await shared.canonical.readSessionSummary(key);
-      legs.push({
-        name: order.join(" -> "),
-        requiresPinnedRuntime: false,
+      return {
         passed: claudeLegsIntact && orderIntact && sidecarBytes.length > 0 && summary?.["producerRuntime"] === order[order.length - 1],
         evidence: `the Claude legs' lines are byte-identical in the final file=${claudeLegsIntact}; the parent chain is unbroken=${orderIntact}; the sidecar is populated and the producer record names the last producer`,
-      });
+      };
+    };
+
+    const ORDERS = [
+      ["claude-agent", "winter-agent", "claude-agent"],
+      ["winter-agent", "claude-agent", "winter-agent"],
+    ] as const;
+
+    for (const order of ORDERS) {
+      const result = await roundTrip(order, undefined);
+      legs.push({ name: order.join(" -> "), requiresPinnedRuntime: false, passed: result.passed, evidence: result.evidence });
     }
-    if (deps.runtimeLegs === undefined) {
-      legs.push({ name: "the Claude legs on the pinned runtime", requiresPinnedRuntime: true, passed: false, evidence: "unexercised: no pinned-runtime bed was supplied to this probe run" });
-    } else {
-      legs.push({
-        name: "the Claude legs on the pinned runtime",
-        requiresPinnedRuntime: true,
-        passed: true,
-        evidence: `the store-side round trips were re-run with ${deps.runtimeLegs.label} producing the Claude legs`,
-      });
-    }
+
+    // The pinned leg RE-RUNS the same two round trips with the bed producing every Claude leg, and
+    // derives its verdict from the same assertions (review r1, F4 — this was a hardcoded `true` that
+    // never called the bed at all).
+    legs.push(
+      await pinnedLeg("the Claude legs on the pinned runtime", deps, async (bed) => {
+        const evidence: string[] = [];
+        for (const order of ORDERS) {
+          const result = await roundTrip(order, async (key) => {
+            const stagingRoot = resumeStagingRoot(randomUUID(), home);
+            const copyPath = materializedTranscriptPath(stagingRoot, key);
+            mkdirSync(dirname(copyPath), { recursive: true, mode: 0o700 });
+            const canonicalPath = canonicalTranscriptPath(home, key);
+            if (existsSync(canonicalPath)) copyFileSync(canonicalPath, copyPath);
+            else writeFile(copyPath, Buffer.alloc(0));
+            await bed.freshProcessResume({ home, stagingRoot, key, shared });
+          });
+          if (!result.passed) return { passed: false, evidence: `${order.join(" -> ")}: ${result.evidence}` };
+          evidence.push(`${order.join(" -> ")}: ${result.evidence}`);
+        }
+        return { passed: true, evidence: evidence.join(" | ") };
+      }),
+    );
     return legs;
   });
 }
