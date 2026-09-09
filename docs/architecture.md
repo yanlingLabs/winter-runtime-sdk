@@ -85,7 +85,9 @@ These are the signatures every lane builds against. They are in `src/`; this tab
 
 | Interface | File |
 | --- | --- |
-| `RuntimeSdkPeers`, `RuntimeSdkOptions`, `RuntimeSdk`, `RouterOptions`, `createRuntimeSdk` | `src/sdk.ts` |
+| `RuntimeSdkPeers`, `RuntimeSdkOptions`, `RuntimeSdk`, `RouterOptions`, `RouterRuntimeInput`, `createRuntimeSdk` | `src/sdk.ts` |
+| `RouterOfficialInput`, `RouterQuery`, `isOfficialQuery`, `OfficialInputStream`, `officialCredentialPlan` — the door's official leg | `src/door.ts` |
+| `MATERIALIZED_RESUME_PROBE_REPORTS`, `materializedResumeReportForPin` — R-7b-12's per-pin verdict | `src/store/pinned-probes.ts` |
 | `SUPPORTED`, `SUPPORTED_PROTOCOL_VERSIONS`, `assertVersionMatrix`, `VersionMatrixReport` | `src/version-matrix.ts` |
 | `RuntimeKind`, `RuntimeSelection`, `SelectionInput`, `SelectionRefusal`, `selectRuntime`, `selectChildRuntime` | `src/selection/runtime-selection.ts` |
 | `RuntimeDirectoryStore`, `RuntimeDirectoryEntry`, `RuntimeTransport`, `CursorStore`, `MailboxStore`, `DeliveryRecordStore`, `IdleSubscriptionStore`, `NameLeaseStore`, `createInMemoryRuntimeDirectoryStore` | `src/seams/directory-store.ts` |
@@ -98,7 +100,7 @@ These are the signatures every lane builds against. They are in `src/`; this tab
 | `RuntimeDirectory`, `GlobalMessaging` | `src/seams/directory.ts`, `src/seams/global-messaging.ts` |
 | `RuntimeAddress`, `ListedRuntimeObject`, `DeliveryOutcome`, `GlobalAgentMessage`, `RuntimeMessagingAdapter` | `src/seams/messaging-contract.ts` — a re-export of the SDK's `messaging` subpath; no second definition of any contract type |
 
-### Four places the plan's pinned text had to change, and why
+### Five places the plan's pinned text had to change, and why
 
 Each is documented at the site as well; they are collected here so a reviewer sees them together.
 
@@ -134,6 +136,56 @@ Each is documented at the site as well; they are collected here so a reviewer se
    internals — those declarations are emitted but unreachable from `dist/index.d.ts`, so no consumer
    loads them. What must not happen is one of those types reaching an exported member of
    `src/index.ts`. Rule 7 is the enforcement, not the convention.
+5. **`query()` returns `Query` OR the official SDK's own `Query`, and is overloaded to say which**
+   (Task 6b). The plan writes `query(...): Query`. Once the door actually serves both runtimes, that
+   signature has only two possible readings and both are wrong: return a FACADE that translates the
+   official handle into the Winter one — the single thing D19b says this package must never be — or
+   declare a type that lies about a handle missing `messaging` and `listModelFamilies`. So the door
+   returns `RouterQuery = Query | OfficialQuery`, and the two overloads make the split cost a host
+   nothing it did not ask for: the official leg is reachable ONLY through `options.runtime`, so a call
+   without one is typed `Query` exactly as before, and a call with one is typed as the union.
+   `isOfficialQuery()` narrows it by registry rather than by structural sniffing.
+
+---
+
+## The door (Task 6b)
+
+`RuntimeSdk.query()` routes by the decided `RuntimeSelection`. The Winter leg is a pass-through: the
+caller's own `options` object is forwarded by reference when there is no router-owned key to remove,
+and the prompt is never drained on the way past. The official leg is a COMPOSITION of the four lanes,
+and it lives in `src/door.ts` so that `src/sdk.ts` keeps one line per leg.
+
+| What the leg does | Whose code |
+| --- | --- |
+| decide (persisted wins; a change is `handoff-required`) | Lane D, `src/selection/**` |
+| the Options template, the child env allowlist, the spool profile, the supervised launch | Lane A, `src/official/**` |
+| the one shared session store (and the winter home the spool hangs off) | Lane C, `src/store/**` |
+| the directory row (identity + persisted selection) and the messaging attachment | Lane B, `src/directory/**`, `src/messaging/**` |
+
+Four decisions the composition forced, each with its reasoning at the site:
+
+1. **The launch is deferred to the FIRST PULL.** WS-14 §12's "credentials are fetched at spawn" is a
+   `KeychainSeam.read`, which returns a promise, while `query()` returns a `Query` rather than a
+   promise for one. Deferring is also the vendor's own semantics — the pinned runtime spawns lazily
+   too — so a session that is never iterated has never started under either design.
+2. **The handle forwards every member of the vendor's `Query`,** by trap rather than by a facade that
+   would have to name them (this package never puts the vendor's types on its published surface).
+   `then`/`catch`/`finally` are never forwarded, because a thenable handle would be swallowed by any
+   `await`; `close()` is synchronous and cancels an unstarted launch.
+3. **The prompt IS the session's input stream** (R-7b-4). An `AsyncIterable<string>` prompt is pumped
+   into a stream the door owns, with the caller's backpressure preserved, and the messaging registry's
+   pushes interleave into the same stream — so the session is attached as a live receiver. A STRING
+   prompt has no stream (the vendor runs one turn and exits), so that session is recorded but not
+   attached, and delivery to it is `unavailable` rather than a push into nothing.
+4. **Credentials come from `Options.provider`,** the pinned contract's own credential surface, which a
+   host already fills for the Winter leg. Only families whose variable mapping is unambiguous are
+   derived (`api-key`, `console-oauth`, and the two that inject nothing); a cloud credential chain and
+   the open `custom` family name their own variables, because only the host knows them.
+
+R-7b-1's cross-runtime CHILD is the same leg with `runtime.official.parentSessionId`: the row is an
+`agent:<parent>:<child>` address with `transport: "claude-handle"` — a session in its own right rather
+than a native subagent of an official parent (`claude-child`), which is the field Lane B's adapter
+branches on.
 
 ---
 

@@ -20,18 +20,100 @@ Decision record: WS-00 D19 (2026-09-05). Boundaries that do not move:
   official runtime and no SDK is ever instantiated twice.
 - A `brand` profile flows through unchanged (Winter defaults); Claude Code's own literals stay fixed.
 
-Status: Phase 7b, all four lanes landed. The spine (the package scaffold, the contract re-export, the
-`createRuntimeSdk` constructor with its version matrix, the seams, the test harness and CI) and the
-four lanes behind those seams — the official-SDK adapter, the runtime directory and messaging router,
-the store wiring and handoff barrier, and runtime selection — are on `main`, with WS-17's eighteen
-router-owned rows proven and cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the
-ownership map, the pinned interfaces and how this package consumes the Winter SDK before its first
-publish.
+Status: Phase 7b, all four lanes landed and the door routed. The spine (the package scaffold, the
+contract re-export, the `createRuntimeSdk` constructor with its version matrix, the seams, the test
+harness and CI) and the four lanes behind those seams — the official-SDK adapter, the runtime
+directory and messaging router, the store wiring and handoff barrier, and runtime selection — are on
+`main`, with WS-17's eighteen router-owned rows proven and cited in `docs/conformance-rows.md`. See
+`docs/architecture.md` for the ownership map, the pinned interfaces and how this package consumes the
+Winter SDK before its first publish.
 
-**`query()` serves the Winter leg today.** A session whose selection names `claude-agent` is REFUSED
-with a typed `RuntimeNotRoutedError` rather than quietly served on Winter — D13's "the certified
-handoff or a visible fork, never a silent rewrite" applies to this door too. The official branch is
-reached through `runtimeSdkInternals(sdk).official` until the door routes both runtimes.
+---
+
+## The door: `query()` over both runtimes
+
+`RuntimeSdk.query()` routes by the session's DECIDED `RuntimeSelection`, and each leg returns its own
+runtime's handle untouched.
+
+```ts
+// The Winter leg: exactly what it always was. No runtime input, so nothing is decided and nothing
+// is stripped — the caller's own `options` object is forwarded by reference.
+for await (const message of sdk.query({ prompt: "hello" })) { /* SdkMessage */ }
+
+// The official leg: a `claude-agent` selection, plus what only a host can answer.
+const query = sdk.query({
+  prompt: turns,                                  // string, or an AsyncIterable<string>
+  options: {
+    cwd: "/work/repo",
+    provider: { providerId: "anthropic", authRef: { kind: "keychain", account: "anthropic:default" } },
+    runtime: {
+      selection,                                  // the session's PERSISTED choice (D13)
+      official: {
+        sessionId: "s-42",                        // its directory row is `session:s-42`
+        base: minimalOsEnvironmentFrom(process.env),
+        mcpServers: officialMcpServers({ /* … */ }),
+      },
+    },
+  },
+});
+```
+
+**What the host passes, and why the Winter leg needs none of it.** A `winter-agent` session is served
+in-process by an SDK that already reads everything it needs from `Options`. A `claude-agent` session is
+a supervised CHILD PROCESS with a durable row of its own, so the door needs three things `Options` has
+no field for: the **session id** its directory row is addressed by (WS-14 §6 rule 2's record is written
+onto that address, and the messaging registry attaches under it), the **minimal OS environment**
+(WS-14 §3's child env is a REPLACEMENT built from an allowlist — nothing inherits, so nothing is read
+from `process.env` by this package), and the **vendored runtime path** (§5.1: never the user's
+installed binary; give it once as `createRuntimeSdk({ vendoredOfficialRuntime })` or per query as
+`options.pathToClaudeCodeExecutable`). Everything else has a default that is either derived from the
+brand or read from the pinned contract you already fill in: credentials come from
+`options.provider.authRef` through your own `KeychainSeam`, the spool from the resolved Winter home,
+the session store from the one shared instance both branches use.
+
+**What the persisted selection means.** `runtime.selection` is "what this session's record says", so a
+selection that DISAGREES with the record is a request to change runtime — and D13 answers that with
+the certified handoff (`sdk.handoff(session, to)`) or a visible fork, never by serving the new runtime
+on the old transcript. The door refuses with `RuntimeHandoffRequiredError`: in-process on both legs
+(pass `runtime.sessionId` so it can hold you to it) and, on the official leg, against the DURABLE
+directory row before a credential is read or a child spawns. On a session with no record yet, the
+decided selection is PERSISTED at creation, by the door.
+
+**What each leg returns.** The Winter peer's `Query` on one side and the official SDK's own `Query` on
+the other — verbatim, both of them. They are different types (the Winter handle carries `messaging`
+and `listModelFamilies`; the official one carries a dozen members this package deliberately never
+names on its published surface), so `query()` is overloaded: a call with **no** `options.runtime` can
+only reach the Winter leg and is typed `Query`, and a call that passes one is typed
+`Query | OfficialQuery`. `isOfficialQuery(handle)` narrows it. On the official leg the launch happens
+at the FIRST PULL — the same lazy spawn the vendor's own `query()` performs — because WS-14 §12's
+"credentials are fetched at spawn" is asynchronous and `query()` returns a handle rather than a
+promise for one; `close()` before the first pull starts nothing at all.
+
+**A live session's input stream is how messages reach it.** R-7b-4: delivery into a live session of
+either runtime is a push into that session's input stream. Pass an `AsyncIterable<string>` prompt and
+the door owns that stream — your turns and the router's deliveries interleave in order, with your own
+backpressure preserved — and the session is attached to `sdk.messaging` as a live receiver. Pass a
+**string** prompt and the vendor runs one turn and exits: the session is still recorded in the
+directory, but there is nothing to push into, so it is not attached and delivery to it answers
+`unavailable` rather than pretending.
+
+**The official branch disables the runtime's remote feature configuration by default** (R-7b-11).
+Every official child gets `TRAFFIC_OPT_OUT_VARIABLES` — the four names are exported, so read them
+rather than trusting this sentence. Measured on the pin, same binary and same options: 25 advertised
+tools with the fetch, 21 without; `DesignSync`, `Monitor`, `PushNotification` and
+`advisor_20260301:advisor` appear only when a CDN answers. A tool surface that moves with no version
+moving is not a pinned artifact, so this is on unless you say otherwise: `remoteConfig: "allow"` (per
+query on `runtime.official`, or deployment-wide on `createRuntimeSdk({ official: { env: { … } } })`)
+opts back in, and the choice is recorded on the session's directory row as
+`RuntimeDirectoryEntry.remoteConfig`.
+
+**The materialized-resume PREFERRED door is open for the pinned runtime, by measurement** (R-7b-12).
+WS-17 §8's four probes pass against 0.3.250 on darwin-arm64 and linux-x64, so a handle over that peer
+decorates the materialized copy and leaves the canonical file byte-pure; any other version — or no
+official peer — gets the always-available FALLBACK door (one labelled entry appended after the
+destination confirms). The verdict is data (`materializedResumeReportForPin`), keyed by version and
+re-derived in CI against the real artifact, so a pin bump is a reviewed event rather than an inherited
+answer. A host that measured its own pin passes `handoff: { decorationReport }` and wins.
 
 ---
 

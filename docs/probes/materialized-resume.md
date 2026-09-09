@@ -36,21 +36,32 @@ which is what produced the table below.
 
 ## Verdict
 
-# **PREFERRED is MEASURED OPEN on this pin. The SHIPPED door is still FALLBACK.**
+# **PREFERRED is MEASURED OPEN on this pin, and SHIPS for this pin.**
 
-Two statements, and keeping them apart is the whole point:
+Two statements, and keeping them apart is still the whole point — they now agree, and they agree
+because someone joined them deliberately rather than because either moved on its own:
 
 * **Measured:** all four of WS-17 §8's probes pass against the pinned 0.3.250 — every pinned leg
   exercised, on `darwin-arm64` and on `linux-x64` in CI — and `probe()` returns `door: "preferred"`.
   Nothing is unexercised, nothing is simulated, no leg is a hardcoded pass.
-* **Shipped:** `createMaterializedResumeDecorator` reports `"fallback"` until it is GIVEN a report or
-  told to probe, and the handoff barrier builds it with neither. So the barrier stages an undecorated
-  copy and appends one **explicitly labeled** entry to the canonical file, exactly as before. Keying
-  the decorator to this pin's report is Task 6b's, under R-7b-12 — a deliberate act with a name, not
-  a side effect of this file turning green.
+* **Shipped (Task 6b, under R-7b-12):** the verdict above is recorded per official-runtime version in
+  `src/store/pinned-probes.ts`, `createRuntimeSdk` reads it from the INJECTED peer's own version, and
+  the barrier's own decorator is the one that receives it — so one store, one decoration registry and
+  one door stay structural. A handle over `0.3.250` therefore decorates the materialized copy and
+  leaves the canonical file byte-pure. **Any other version, and a host with no official peer, still
+  gets FALLBACK** — the always-available door, which stages an undecorated copy and appends one
+  explicitly labeled entry after the destination confirms.
 
-The two therefore CAN disagree today, and do. That is not a discrepancy to reconcile: a measurement
-taken here is not the host's measurement, and the door is designed to follow the second.
+`createMaterializedResumeDecorator` itself is unchanged: it still reports `"fallback"` until it is
+GIVEN a report or told to probe. The door is opened in exactly one place, by version, from this
+record — and a host that measured its own pin on its own platform overrides it with
+`createRuntimeSdk({ handoff: { decorationReport } })`.
+
+**The record is re-derived, not trusted.** `test/joint/materialized-resume-probes.test.ts` now runs the
+four probes against the real artifact and compares its own verdict to the one recorded here; a pin
+whose mirror re-sends what it read, or whose runtime re-anchors a resumed chain, fails the suite rather
+than opening a door that step 5 would then refuse. A pin BUMP fails it too, because an unrecorded
+version has no report to match — which is the point: a bump is a reviewed compatibility event.
 
 Round 1 of the fix wave recorded a different verdict — "CLOSED … no probe leg failed … this run had
 no bed" — which was true when written and is superseded twice over: the bed arrived (items 11/23),
@@ -197,10 +208,11 @@ repeated the claim. Three things changed, and the verdict did not:
 ## Re-running this record
 
 A future run replaces the tables above; `bun test test/joint/materialized-resume-probes.test.ts` is the
-run. Read the verdict as TWO lines, not one — what was measured, and what ships — because they are
-computed from different things: the measurement is this file's, and the shipped door is whatever
-report a host hands the decorator (today: none, hence `fallback`). A reader who checks only one of
-them will be wrong about the other.
+run, and it now also CHECKS this record against itself (see the verdict). Read the verdict as TWO
+lines, not one — what was measured, and what ships — because they are still computed from different
+things: the measurement is this file's, and the shipped door is `materializedResumeReportForPin(<the
+injected peer's version>)`, overridable by a host's own `decorationReport`. They agree for `0.3.250`
+and must not be assumed to agree for anything else.
 
 **What would make a future run FAIL, and can now be seen:** probe (b)'s pinned leg counts duplicate
 uuids in the canonical store after a resume from the decorated copy, and probe (c) applies BOTH of the
