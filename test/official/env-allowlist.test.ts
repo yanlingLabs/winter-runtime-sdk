@@ -29,7 +29,9 @@ import {
   sanitizePathListValue,
   type OfficialEnvInput,
 } from "../../src/official/env-allowlist.ts";
-import { fetchAuthCredentials, isAuthShapedVariable, validateAuthEnvironment, authVariableSetKey, allowedAuthVariables } from "../../src/official/auth.ts";
+import { fetchAuthCredentials, validateAuthEnvironment, authVariableSetKey, allowedAuthVariables } from "../../src/official/auth.ts";
+import { NON_CREDENTIAL_ENV_REGISTRY, PINNED_ENV_REGISTRY_SIZE } from "../../src/official/env-registry.ts";
+import { extractEnvRegistry, isCredentialByName } from "../../src/official/env-registry-rule.ts";
 import { createFakeKeychain } from "../../src/testing/index.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 
@@ -109,7 +111,9 @@ describe("WS-14 §3 — the child environment", () => {
     test("undeclared proxy and telemetry variables, declared ones passing", () => {
       expect(() => assertNoForbiddenChildVariables({ HTTPS_PROXY: "http://p" }, { brand })).toThrow(/proxy and telemetry/);
       expect(() => assertNoForbiddenChildVariables({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://c" }, { brand })).toThrow(/proxy and telemetry/);
-      expect(() => assertNoForbiddenChildVariables({ HTTPS_PROXY: "http://p" }, { brand, policy: { configuredExtras: { HTTPS_PROXY: "http://p" } } })).not.toThrow();
+      // review r3, NEW-10: a proxy is credential-bearing by the artifact's own classification, so the
+      // DECLARED form now needs the reviewed hatch as well — declaring it is no longer enough.
+      expect(() => assertNoForbiddenChildVariables({ HTTPS_PROXY: "http://p" }, { brand, policy: { configuredExtras: { HTTPS_PROXY: "http://p" }, reviewedCredentialShapedExtras: ["HTTPS_PROXY"] } })).not.toThrow();
     });
     test("ANY variable whose VALUE points into the vendor's user-level home", () => {
       expect(() => assertNoForbiddenChildVariables({ CLAUDE_CONFIG_DIR: "/Users/u/.claude" }, { brand })).toThrow(/vendor's user-level home/);
@@ -165,8 +169,9 @@ describe("WS-14 §12 — exactly one auth family, fetched at spawn", () => {
     // Plant 4: the same door pointed at the transcript root.
     expect(() => buildOfficialChildEnv(input(), { configuredExtras: { CLAUDE_CONFIG_DIR: "/Users/dev/elsewhere" } })).toThrow(/may not override a variable this branch owns/);
     expect(() => buildOfficialChildEnv(input(), { configuredExtras: { CLAUDE_CODE_TMPDIR: "/tmp/elsewhere" } })).toThrow(/may not override a variable this branch owns/);
-    // A declared extra that is neither a credential nor ours is still the documented door.
-    expect(buildOfficialChildEnv(input(), { configuredExtras: { HTTPS_PROXY: "http://corp" } })["HTTPS_PROXY"]).toBe("http://corp");
+    // A declared extra that is neither a credential nor ours is still the documented door — and after
+    // review r3's NEW-10 that means a name the artifact's own registry classifies as non-credential.
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { NO_COLOR: "1" } })["NO_COLOR"]).toBe("1");
     // …and the `custom` family is the one whose credential set is open by design.
     expect(() =>
       buildOfficialChildEnv(input({ selection: selection({ authFamily: "custom" }), credentials: { ANTHROPIC_API_KEY: "k", ANTHROPIC_BASE_URL: "http://127.0.0.1:1" } })),
@@ -196,7 +201,9 @@ describe("WS-14 §12 — exactly one auth family, fetched at spawn", () => {
     }
     // The SELECTED family's own variable rides the door, and so does an ordinary non-credential one.
     expect(buildOfficialChildEnv(input({ credentials: {} }), { configuredExtras: { ANTHROPIC_API_KEY: "k" } })["ANTHROPIC_API_KEY"]).toBe("k");
-    expect(buildOfficialChildEnv(input(), { configuredExtras: { HTTPS_PROXY: "http://corp" } })["HTTPS_PROXY"]).toBe("http://corp");
+    // A proxy is CREDENTIAL-BEARING by the artifact's own classification (review r3, NEW-10), so it
+    // rides only through the reviewed hatch now — the door itself is a positive allowlist.
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { HTTPS_PROXY: "http://corp" }, reviewedCredentialShapedExtras: ["HTTPS_PROXY"] })["HTTPS_PROXY"]).toBe("http://corp");
     // …and a deployment that has REVIEWED one names it, which is §12's reviewed compatibility event.
     expect(
       buildOfficialChildEnv(input(), { configuredExtras: { ANTHROPIC_BEDROCK_REGION_PREFIX: "eu" }, reviewedCredentialShapedExtras: ["ANTHROPIC_BEDROCK_REGION_PREFIX"] })["ANTHROPIC_BEDROCK_REGION_PREFIX"],
@@ -241,28 +248,73 @@ describe("WS-17's drift gate — the allowlist snapshot", () => {
     for (const name of officialEnvAllowlistNames()) expect(serialized).toContain(name);
   });
 
-  test("review r2, NEW-2: the REVERSE scan — no auth-shaped name in the artifact can ride the extras door", () => {
-    // §12's capture rule read in the other direction. The forward scan proves every name we inject
-    // still exists upstream; nothing proved that a credential-bearing name the artifact reads and our
-    // tables do not list is refused — and eight such names were measured going straight through. This
-    // asserts the property that matters (none of them rides the door) rather than curating a taxonomy
-    // of the ~160 auth-shaped names the artifact mentions, which no one would maintain.
-    const officialPkg = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk/package.json");
-    const artifact = readFileSync(join(dirname(officialPkg), "sdk.mjs"), "utf8");
-    const names = new Set<string>();
-    for (const match of artifact.matchAll(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){1,6}\b/g)) names.add(match[0]);
-    const authShaped = [...names].filter((name) => isAuthShapedVariable(name) && !["ANTHROPIC_API_KEY"].includes(name));
-    expect(authShaped.length).toBeGreaterThan(50); // non-vacuity: the scan really found them
-    const accepted: string[] = [];
-    for (const name of authShaped) {
+  test("review r3, NEW-10: the extras door is a POSITIVE allowlist — every credential-bearing registry name is refused", () => {
+    // The reviewer's seventeen, plus the lowercase twin and the two r2 stragglers. Each is a name the
+    // artifact's OWN registry declares an accessor for, and each rode the door when it was a denylist.
+    const credentialBearing = [
+      "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_CLIENT_CERT",
+      "CLAUDE_CODE_CLIENT_KEY",
+      "CLAUDE_CODE_CERT_STORE",
+      "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_CUSTOM_OAUTH_URL",
+      "CLAUDE_CODE_USE_LOCAL_OAUTH",
+      "CLAUDE_CODE_USE_STAGING_OAUTH",
+      "CLAUDE_CODE_MCP_OAUTH_CLIENT_METADATA_URL",
+      "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
+      "CLAUDE_BG_SOCKET_TOKENS_PATH",
+      "CLAUDE_BG_CLAIM_AUTH",
+      "CLAUDE_BG_PTY_AUTH",
+      "CLAUDE_BG_RV_AUTH",
+      "CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER",
+      "CLAUDE_CODE_FORCE_WINDOWS_CREDMAN",
+      "ENVIRONMENT_SERVICE_KEY",
+      "NODE_EXTRA_CA_CERTS",
+      "SSL_CERT_FILE",
+      // The sharpest one: its UPPERCASE twin is in the vertex family table and correctly refused on an
+      // api-key session, while this spelling rode the door by case alone.
+      "google_application_credentials",
+      "anthropic_api_key",
+      "ANTHROPIC_CUSTOM_HEADERS",
+    ];
+    const accepted = credentialBearing.filter((name) => {
       try {
         buildOfficialChildEnv(input({ credentials: { ANTHROPIC_API_KEY: "k" } }), { configuredExtras: { [name]: "x" } });
-        accepted.push(name);
+        return true;
       } catch {
-        /* refused, which is the point */
+        return false;
       }
-    }
+    });
     expect(accepted).toEqual([]);
+
+    // An UNKNOWN name — one the registry never declares — is refused too: nothing classified it.
+    expect(() => buildOfficialChildEnv(input(), { configuredExtras: { SOME_HOST_INVENTION: "x" } })).toThrow(/positive allowlist/);
+    // …while a genuinely non-credential registry name rides, and so does the family's own variable.
+    expect(buildOfficialChildEnv(input({ credentials: {} }), { configuredExtras: { NO_COLOR: "1" } })["NO_COLOR"]).toBe("1");
+    expect(buildOfficialChildEnv(input({ credentials: {} }), { configuredExtras: { ANTHROPIC_API_KEY: "k" } })["ANTHROPIC_API_KEY"]).toBe("k");
+    // …and the reviewed hatch still opens for a deployment that has looked at one.
+    expect(buildOfficialChildEnv(input(), { configuredExtras: { HTTPS_PROXY: "http://corp" }, reviewedCredentialShapedExtras: ["HTTPS_PROXY"] })["HTTPS_PROXY"]).toBe("http://corp");
+  });
+
+  test("review r3, NEW-10: the drift gate re-derives the allowlist from the artifact and fails on a difference", () => {
+    // THE SELECTOR IS NOT THE CLASSIFIER. The r2 test chose its universe with the same predicate it
+    // asserted, so it could not fail for any regex. This one re-runs the INDEPENDENT extraction and
+    // classification over the installed artifact and compares the RESULT with the committed file, so a
+    // runtime upgrade that adds a credential accessor — or removes a benign one — breaks a test.
+    const officialPkg = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk/package.json");
+    const artifact = readFileSync(join(dirname(officialPkg), "sdk.mjs"), "utf8");
+    const registry = extractEnvRegistry(artifact);
+    expect(registry.length).toBe(PINNED_ENV_REGISTRY_SIZE);
+    expect(registry.length).toBeGreaterThan(500); // non-vacuity: the extraction really found the registry
+    const derived = registry.filter((name) => !isCredentialByName(name)).sort();
+    expect(derived).toEqual([...NON_CREDENTIAL_ENV_REGISTRY]);
+    // The classifier is not vacuous either: it must reject a fair share of what it is shown.
+    expect(registry.length - derived.length).toBeGreaterThan(100);
+    // …and it classifies the names this round was about.
+    for (const name of ["CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_CLIENT_CERT", "NODE_EXTRA_CA_CERTS", "google_application_credentials"]) {
+      expect([name, isCredentialByName(name)]).toEqual([name, true]);
+    }
+    expect(isCredentialByName("NO_COLOR")).toBe(false);
   });
 
   test("every injected name still exists in the PINNED runtime artifact (§12's capture rule)", () => {

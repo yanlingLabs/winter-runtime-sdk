@@ -21,6 +21,9 @@ export {
 } from "./aliases.ts";
 export type { AliasedBuiltin, NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } from "./aliases.ts";
 
+export { NON_CREDENTIAL_ENV_REGISTRY, PINNED_ENV_REGISTRY_SIZE } from "./env-registry.ts";
+export { CREDENTIAL_NAME_KEYWORDS, extractEnvRegistry, isCredentialByName } from "./env-registry-rule.ts";
+
 export { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, AUTH_SHAPED_RE, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, authVariableSetKey, fetchAuthCredentials, isAuthShapedVariable, validateAuthEnvironment } from "./auth.ts";
 export type { AuthCredentialPlan, AuthFamily, AuthVariableSetKey, ClaudeOauthGate } from "./auth.ts";
 

@@ -25,6 +25,7 @@ import type { EnvInput } from "../seams/official-adapter.ts";
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
 import { ALL_AUTH_VARIABLES, AUTH_FAMILY_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES, allowedAuthVariables, isAuthShapedVariable, validateAuthEnvironment, type ClaudeOauthGate } from "./auth.ts";
 import { officialBranchLabel } from "./branding.ts";
+import { NON_CREDENTIAL_ENV_REGISTRY } from "./env-registry.ts";
 import { VENDOR_HOME_SEGMENT_RE } from "./containment.ts";
 import { OfficialConfigurationError } from "./errors.ts";
 
@@ -140,6 +141,9 @@ export interface OfficialEnvPolicy {
   claudeOauth?: ClaudeOauthGate;
 }
 
+/** The positive allowlist, folded once (review r3, NEW-10 — matching is case-insensitive). */
+const NON_CREDENTIAL_ENV_REGISTRY_FOLDED: ReadonlySet<string> = new Set(NON_CREDENTIAL_ENV_REGISTRY.map((name) => name.toUpperCase()));
+
 /** Picks the minimal OS set out of a caller-supplied source. The host passes `process.env`; we never do. */
 export function minimalOsEnvironmentFrom(source: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const out: Record<string, string> = {};
@@ -240,10 +244,33 @@ export function assertNoForbiddenChildVariables(
     // is a variable this session's own family sets — and for the `custom` family, whose credential set
     // is open by design, that means never through EXTRAS (its own credentials still go through
     // `credentials`, where the family check governs them).
-    if (declared.has(name) && isAuthShapedVariable(name) && !runtimeVariables.includes(name) && !(familyVariables ?? []).includes(name) && !reviewedExtras.includes(name)) {
+    // REVIEW r3, NEW-10 — THE EXTRAS DOOR IS A POSITIVE ALLOWLIST NOW, and the two rules stack: a
+    // name must be BOTH not-credential-shaped AND present in the artifact's own registry as a
+    // non-credential accessor. The shape rule alone was a denylist — seventeen names the registry
+    // declares (an API-key file descriptor, an mTLS client identity, the LOWERCASE twin of a vertex
+    // variable whose uppercase spelling the same door refused) rode through it, because `_KEY$`,
+    // `_CERT`, `CERT_`, `_FILE_DESCRIPTOR` and a non-initial `OAUTH` were simply absent from the
+    // shape and the regex had no `/i`.
+    //
+    // MATCHING IS CASE-INSENSITIVE for both rules, because the registry proves the runtime reads at
+    // least one credential variable in both cases.
+    // THE FAMILY MATCH IS EXACT, THE REFUSALS FOLD. A family table names the exact variables to SET;
+    // a differently-cased spelling is not that variable (`anthropic_api_key` is inert on this pin —
+    // the artifact never reads it), so it must not inherit the family's permission, while the checks
+    // that REFUSE must see through case because the registry proves the runtime reads both cases of
+    // at least one credential name.
+    const foldedName = name.toUpperCase();
+    const isThisFamilysVariable = (familyVariables ?? []).includes(name);
+    if (declared.has(name) && isAuthShapedVariable(foldedName) && !runtimeVariables.includes(name) && !isThisFamilysVariable && !reviewedExtras.includes(name)) {
       refuse(
         "it is credential-bearing by shape, and the configured-extras door carries non-credential variables only: the runtime resolves credentials by its own precedence order, so one of these re-points billing, rate limits and audit at an account this session's persisted selection does not name (WS-14 §12). " +
           "A deployment that has REVIEWED a specific auth-shaped variable and needs it names it in `reviewedCredentialShapedExtras` — a reviewed compatibility event under WS-17's drift gate, never a silent addition",
+      );
+    }
+    if (declared.has(name) && !runtimeVariables.includes(name) && !isThisFamilysVariable && !reviewedExtras.includes(name) && !NON_CREDENTIAL_ENV_REGISTRY_FOLDED.has(foldedName)) {
+      refuse(
+        "the configured-extras door is a positive allowlist: only names the PINNED artifact's own environment registry declares, and that an independent name rule classifies as non-credential, ride it. " +
+          "An unknown name is refused because nothing has classified it — name it in `reviewedCredentialShapedExtras` if this deployment has reviewed it (WS-14 §3/§12, review r3 NEW-10)",
       );
     }
     // REVIEW r1, M1 (the same hatch, the other target): a declared extra may not SHADOW a variable
