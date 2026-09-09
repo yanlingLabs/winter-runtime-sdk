@@ -4,11 +4,17 @@
 // through the one door. Nothing in this file calls a lane factory: if the door composed the lanes
 // wrongly, these tests are what notices.
 import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WinterCompatibilitySessionStore } from "@yanlinglabs/winter-agent-sdk";
 
-import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery, runtimeSdkInternals } from "../../src/index.ts";
+import { createRuntimeSdk, RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery, runtimeSdkInternals, type RuntimeSdkPeers } from "../../src/index.ts";
+import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../../src/official/env-allowlist.ts";
 import { cleanupHermetic, officialRuntimeBed } from "../official/support.ts";
-import { DOOR_TIMEOUT, doorSelection, drain, withDoorBed } from "./support.ts";
+import { envelope, sessionEntry } from "../messaging/support.ts";
+import { DOOR_CREDENTIAL, DOOR_TIMEOUT, doorSelection, drain, withDoorBed } from "./support.ts";
 
 const describeRuntime = officialRuntimeBed() === undefined ? describe.skip : describe;
 
@@ -99,15 +105,57 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
   );
 
   test(
-    "`sdk.messaging.listReachable` sees the session the door created",
+    "`sdk.messaging.listReachable` sees the session the door created — WHILE IT IS LIVE",
     async () => {
       await withDoorBed({ turns: [{ text: "listed" }], sessionId: "door-listed" }, async (bed) => {
-        await drain(bed.sdk.query({ prompt: "hi", options: bed.officialOptions() }));
+        // LISTED WHILE LIVE (review r1's last nit). Listing after the drain used to pass for I-3's
+        // reason — the row stayed `running` for ever — so the test was green about the wrong thing.
+        const query = bed.sdk.query({ prompt: "hi", options: bed.officialOptions() });
+        const iterator = (query as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+        await iterator.next();
         // Asked from a DIFFERENT session, because a listing never shows the asker itself.
-        const rows = await bed.sdk.messaging.listReachable({ from: { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: "someone-else" } });
+        const from = { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: "someone-else" } as const;
+        const rows = await bed.sdk.messaging.listReachable({ from });
         const listed = rows.find((row) => row.address === bed.address);
         expect(listed).toBeDefined();
         expect(listed?.runtimeKind).toBe("claude-agent");
+
+        // …and after the generation ends the row is NOT running and the listing drops it (I-3a).
+        while (!(await iterator.next()).done) void 0;
+        expect((await bed.sdk.directory.get(bed.address))?.status).toBe("exited");
+        const after = await bed.sdk.messaging.listReachable({ from });
+        expect(after.find((row) => row.address === bed.address)).toBeUndefined();
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
+  test(
+    "after a streaming session's input ended and the runtime exited, a delivery is `unavailable` — never uncertain",
+    async () => {
+      await withDoorBed({ turns: [{ text: "one turn" }], sessionId: "door-afterend" }, async (bed) => {
+        await bed.sdk.directory.record(sessionEntry("sender"));
+        const turns = (async function* () {
+          yield "start";
+        })();
+        // A STREAMING session, so the door owns the input stream and attaches the handle.
+        await drain(bed.sdk.query({ prompt: turns, options: bed.officialOptions() }));
+
+        const outcome = await bed.sdk.messaging.deliver(
+          envelope({
+            messageId: "after-end-1",
+            from: { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: "sender" },
+            to: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: bed.sessionId },
+            body: "anyone home?",
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 600_000,
+          }),
+        );
+        // BEFORE I-3 this was `delivery_uncertain` with `deliveryMayHaveOccurred: true` — "the write
+        // may have landed" for a session where nothing could land, and the stale handle also hid the
+        // honest route behind it.
+        expect(outcome.status).toBe("unavailable");
+        if (outcome.status === "unavailable") expect(outcome.retryable).toBe(false);
       });
     },
     DOOR_TIMEOUT,
@@ -222,5 +270,46 @@ describe("the door's official leg — the inputs only a host can supply", () => 
     // Covered end-to-end in `test/spine/query-passthrough.test.ts`; repeated here as the leg's own
     // contract, because "the door needs a session id" is the sentence a host reads first.
     expect(new RuntimeLaunchInputError({ field: "runtime.official", reason: "x" }).field).toBe("runtime.official");
+  });
+});
+
+// ====================================================================================================
+// REVIEW r1, I-3(c) — A GENERATION THAT NEVER EXISTED LEAVES NO ROW.
+//
+// The row is written BEFORE the launch on purpose: a host asking `listReachable()` between the launch
+// and the first message must not be told the session does not exist. But a launch that refuses
+// SYNCHRONOUSLY used to leave `status: "running"`, `runtimeKind: "claude-agent"` and a listing entry
+// with nothing behind it. No pinned runtime is needed to prove it — the refusal is the adapter's own,
+// for the most ordinary reason there is: no official peer was injected.
+// ====================================================================================================
+describe("the door's official leg — a refused launch", () => {
+  test("leaves no phantom row behind", async () => {
+    const root = mkdtempSync(join(tmpdir(), "winter-rt-door-phantom-"));
+    try {
+      const { peer } = createFakeWinterPeer();
+      const sdk = createRuntimeSdk({
+        // NO `claude` peer: `launch()` refuses with `OfficialConfigurationError: peers.claude`.
+        peers: { winter: { ...peer, WinterCompatibilitySessionStore } as unknown as RuntimeSdkPeers["winter"] },
+        keychain: createFakeKeychain([{ ref: DOOR_CREDENTIAL, material: "sk-ant-fake" }]),
+        vendoredOfficialRuntime: "/vendored/claude",
+        handoff: { winterHome: join(root, "home") },
+      });
+      const query = sdk.query({
+        prompt: "hi",
+        options: {
+          cwd: join(root, "work"),
+          runtime: {
+            selection: doorSelection,
+            official: { sessionId: "phantom", credentials: [{ variable: "ANTHROPIC_API_KEY", ref: DOOR_CREDENTIAL }], base: { HOME: join(root, "home"), PATH: "/usr/bin" } },
+          },
+        },
+      });
+      const failure: unknown = await drain(query as AsyncIterable<unknown>).then((): unknown => undefined, (error: unknown): unknown => error);
+      expect((failure as Error).message).toContain("peers.claude");
+      // THE POINT: nothing was launched, so nothing is listed.
+      expect(await sdk.directory.get("session:phantom")).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

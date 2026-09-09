@@ -372,6 +372,34 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   const stream = typeof request.prompt === "string" ? undefined : createOfficialInputStream();
   let detach: (() => void) | undefined;
   let sawInit = false;
+  let live = false;
+  let ended = false;
+
+  /**
+   * THE SESSION'S END, RECORDED (review r1, I-3).
+   *
+   * The door recorded a session's BIRTH and never its end, and three things followed from the one gap:
+   * the row stayed `running` for ever, so `listReachable` enumerated a finished session — which WS-10
+   * §10.2 forbids ("does NOT enumerate exited transcripts"); the messaging attachment outlived the
+   * stream, so a delivery to a session whose input had ended came back `delivery_uncertain` ("the
+   * write may have landed") for a session where nothing could possibly land, and the stale handle
+   * blocked the honest `resumeExited`/`unavailable` path behind it; and a launch that threw after the
+   * row was written left a phantom row with no session behind it.
+   *
+   * IDEMPOTENT, because it is reached from three directions — the iterator completing, the iterator
+   * throwing, and `close()` — and a session ends once.
+   */
+  const markEnded = async (status: "exited" | "unavailable"): Promise<void> => {
+    if (ended) return;
+    ended = true;
+    live = false;
+    detach?.();
+    detach = undefined;
+    stream?.close();
+    const current = await deps.directory.get(address);
+    if (current === undefined) return;
+    await deps.directory.record({ ...current, status, updatedAt: new Date().toISOString() });
+  };
 
   /**
    * THE BACKEND SESSION ID, THE MOMENT THE RUNTIME REPORTS IT (review r1, I-2).
@@ -526,17 +554,39 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // caller's iterable is "never drained on the way past"; the official leg must drain it (the vendor
     // takes its own message shape), but not one element earlier than the session that consumes it.
     if (stream !== undefined) pumpCallerPrompt(request.prompt as AsyncIterable<string>, stream);
-    const session: OfficialSession = resume === undefined ? deps.official.launch(plan) : deps.official.resume({ ...plan, resume, ...(request.options.forkSession === undefined ? {} : { forkSession: request.options.forkSession }) });
+    let session: OfficialSession;
+    try {
+      session = resume === undefined ? deps.official.launch(plan) : deps.official.resume({ ...plan, resume, ...(request.options.forkSession === undefined ? {} : { forkSession: request.options.forkSession }) });
+    } catch (error) {
+      // A GENERATION THAT NEVER EXISTED LEAVES NO ROW (I-3c). The row is written before the launch on
+      // purpose — a host asking `listReachable()` between the launch and the first message must not be
+      // told the session does not exist — but a launch that refuses synchronously (no official peer
+      // injected, an options object the invariants reject) would otherwise leave `status: "running"`
+      // and a listing entry nothing is behind. A row this call created is forgotten; a row that was
+      // already there (a resume) is put back exactly as it was.
+      ended = true;
+      stream?.close();
+      if (existing === undefined) await deps.directory.forget(address);
+      else await deps.directory.record(existing);
+      throw error;
+    }
     // THE LEG IS OPEN — now, and not one line earlier (I-1). Everything above this point can still
     // refuse, and a ledger written before a refusal is a ledger that lies about where a session lives.
+    live = true;
     deps.onOpened?.("claude-agent");
 
     // ATTACHED ONLY WHEN THERE IS SOMETHING TO PUSH INTO (header note 3). A handle whose `push` could
     // only ever fail would make every delivery `delivery_uncertain` — "the write may have landed" —
     // for a session where nothing could possibly land.
+    //
+    // `status()` IS THE LIVE VIEW, and it is what makes the adapter right BEFORE the row catches up
+    // (I-3): the durable row is written by an await inside `markEnded`, and between the runtime's last
+    // frame and that write the registry still holds this handle. Reporting `exited` from here closes
+    // that window rather than narrowing it.
     if (stream !== undefined) {
       detach = deps.messaging.attachOfficialSession(address, {
         push: (text) => stream.push(text),
+        status: () => (live ? "running" : "exited"),
       });
     }
     return session.query;
@@ -545,9 +595,9 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   return deferredOfficialQuery({
     start,
     onMessage: noteFrame,
+    onEnd: markEnded,
     onClose: () => {
-      detach?.();
-      stream?.close();
+      void markEnded("exited").catch(() => undefined);
     },
   });
 }
@@ -620,9 +670,11 @@ interface DeferredQueryHooks {
   onClose: () => void;
   /** Called for each message BEFORE it is yielded, so a row update lands before a host acts on it. */
   onMessage?: (message: unknown) => Promise<void>;
+  /** The generation ended — `"exited"` when the stream completed, `"unavailable"` when it threw. */
+  onEnd?: (status: "exited" | "unavailable") => Promise<void>;
 }
 
-function deferredOfficialQuery({ start, onClose, onMessage }: DeferredQueryHooks): OfficialQuery {
+function deferredOfficialQuery({ start, onClose, onMessage, onEnd }: DeferredQueryHooks): OfficialQuery {
   let started: Promise<OfficialQuery> | undefined;
   let closed = false;
   const ready = (): Promise<OfficialQuery> => {
@@ -633,10 +685,18 @@ function deferredOfficialQuery({ start, onClose, onMessage }: DeferredQueryHooks
   const target: OfficialQuery & { close(): void } = {
     async *[Symbol.asyncIterator]() {
       const query = await ready();
-      for await (const message of query) {
-        await onMessage?.(message);
-        yield message;
+      try {
+        for await (const message of query) {
+          await onMessage?.(message);
+          yield message;
+        }
+      } catch (error) {
+        // A generation that ENDED IN A FAULT is `unavailable`, not `exited`: the two are different
+        // answers to "can this be resumed", and WS-15 §6.4's restart recovery reads the difference.
+        await onEnd?.("unavailable");
+        throw error;
       }
+      await onEnd?.("exited");
     },
     interrupt: async () => (await ready()).interrupt(),
     close: () => {

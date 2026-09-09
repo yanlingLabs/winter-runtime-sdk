@@ -106,6 +106,15 @@ backpressure preserved — and the session is attached to `sdk.messaging` as a l
 directory, but there is nothing to push into, so it is not attached and delivery to it answers
 `unavailable` rather than pretending.
 
+**A session's END is recorded too**, and it changes what a delivery gets. When the message stream
+completes (or `close()` runs) the door detaches the handle, closes the stream and records the row
+`exited` — `unavailable` on a stream that ended in a fault. So a streaming session whose input has
+ended answers **`unavailable` (non-retryable)** exactly like a string-prompted one, never
+`delivery_uncertain`: "the write may have landed" is not an honest answer for a session where nothing
+can land. `sdk.messaging.listReachable` stops listing a session at the same moment (WS-10 §10.2: a
+listing does not enumerate exited transcripts), and a launch that refuses synchronously leaves no row
+at all.
+
 **The official branch disables the runtime's remote feature configuration by default** (R-7b-11).
 Every official child gets `TRAFFIC_OPT_OUT_VARIABLES` — the four names are exported, so read them
 rather than trusting this sentence. Measured on the pin, same binary and same options: 25 advertised
