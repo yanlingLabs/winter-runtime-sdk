@@ -1,0 +1,248 @@
+// WS-15 §6.1 (D19b's relocation): THE RUNTIME DIRECTORY, over the R-7b-2 persistence seam.
+//
+// The directory is the router's answer to "what is out there, and which of them is this name". Three
+// properties are what make it that rather than a cache:
+//
+//   1. IT IS THE ONLY AUTHOR OF RUNTIME KIND. "Runtime kind and backend IDs live in the directory
+//      record, never trusted from user or model text" (WS-10 §11). A serialized address carries
+//      neither, so every listing row this module builds carries the ENTRY's declared kind, and the
+//      shared `resolveTarget` carries that row's kind onto the resolved address — which is what the
+//      messaging router picks an adapter by.
+//   2. RESOLUTION IS A MUST-ORDER, NOT A HEURISTIC (WS-10 §11 rules 1–6). The order is implemented
+//      ONCE, in the SDK subpath's `resolveTarget`, shared with the Winter runtime's own in-process
+//      router; this module supplies the rows and owns the two things a live-roster resolver cannot
+//      know — the NAME-LEASE HISTORY behind rule 5's stale-name refusal, and the archived/exited
+//      eligibility split between "what a listing shows" and "what an address may still reach".
+//   3. IT NEVER OPENS THE HOST'S DATABASE (R-7b-2). Everything durable goes through
+//      `RuntimeDirectoryStore`; the in-memory default is the test store and the answer for a host
+//      with no durable state.
+import { parseRuntimeAddress, resolveTarget, serializeRuntimeAddress, validateToField } from "@yanlinglabs/winter-agent-sdk/messaging";
+import type { ChildLike } from "@yanlinglabs/winter-agent-sdk/messaging";
+
+import type { SeamContext } from "../seams/context.ts";
+import type { DirectoryResolution, DirectoryResolutionContext, RuntimeDirectory, RuntimeDirectoryRecovery } from "../seams/directory.ts";
+import type { NameLeaseRecord, RuntimeDirectoryEntry, RuntimeDirectoryStore } from "../seams/directory-store.ts";
+import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
+import { entryToChildLike, entryToListedRuntimeObject, entryToListedRuntimeObjectList, isListableFrom, isResolvableFrom, mergeAdapterOwnedFields, owningSessionIdOf } from "./entries.ts";
+import { recoverDirectory, type RuntimeDirectoryRecoveryHooks } from "./recovery.ts";
+
+/** What a caller may configure. Every field has an answer that is correct when it is absent. */
+export interface RuntimeDirectoryOptions extends RuntimeDirectoryRecoveryHooks {
+  /** Injected so a test never races a real clock. */
+  now?: () => number;
+  /**
+   * How a `ChildLike` built from a directory row delivers, for the two doors that interface requires.
+   *
+   * The router core never uses them (it calls `adapter.steerChild`/`resumeChild` and reads `ChildLike`
+   * only for `status()` and its record) — see `entryToChildLike`. Absent means those two doors answer
+   * a typed non-retryable `unavailable` rather than throwing, so a caller that used the interface it
+   * was handed gets an outcome instead of a crash.
+   */
+  deliverToChild?: (entry: RuntimeDirectoryEntry, message: GlobalAgentMessage) => Promise<DeliveryOutcome>;
+}
+
+/**
+ * The directory, plus the two views the messaging router needs and the seam does not name.
+ *
+ * `RuntimeDirectory` is what `RuntimeSdk.directory` exposes; a host needs nothing more. The router
+ * lives in the same package and needs the SAME snapshot resolution used, or its listing and its
+ * resolution could disagree about a row that changed between two `load()` calls.
+ */
+export interface RuntimeDirectoryHandle extends RuntimeDirectory {
+  /** One consistent read of the store, with the caller-scoped views built from it. */
+  snapshot(caller: { owningSessionId: string }): Promise<DirectorySnapshot>;
+  /** Resolve against an ALREADY-TAKEN snapshot — the router resolves and delivers over one read. */
+  resolveIn(snapshot: DirectorySnapshot, to: string, context: DirectoryResolutionContext): Promise<DirectoryResolution>;
+}
+
+export interface DirectorySnapshot {
+  /** Every entry the store held at the moment of the read. */
+  readonly entries: readonly RuntimeDirectoryEntry[];
+  readonly byAddress: ReadonlyMap<SerializedRuntimeAddress, RuntimeDirectoryEntry>;
+  /** WS-10 §11's resolution input: this caller's own children, as the shared `ChildLike` boundary. */
+  readonly children: readonly ChildLike[];
+  /** Every object this caller may ADDRESS (includes exited sessions — WS-15 §6.2 has a row for them). */
+  readonly resolvable: readonly ListedRuntimeObject[];
+  /** Every object a listing may SHOW (WS-10 §10.2 — never an exited session). */
+  readonly listable: readonly ListedRuntimeObject[];
+}
+
+const unavailableChildDelivery = async (): Promise<DeliveryOutcome> => ({
+  status: "unavailable",
+  messageId: "",
+  retryable: false,
+  reason: "this ChildLike was built for resolution only; deliver through the messaging router, which picks the child's own runtime adapter",
+});
+
+export function createRuntimeDirectory(context: SeamContext, options: RuntimeDirectoryOptions = {}): RuntimeDirectoryHandle {
+  const store: RuntimeDirectoryStore = context.directoryStore;
+  const now = options.now ?? (() => Date.now());
+  const deliverToChild = options.deliverToChild ?? unavailableChildDelivery;
+
+  async function snapshot(caller: { owningSessionId: string }): Promise<DirectorySnapshot> {
+    const entries = await store.load();
+    const byAddress = new Map(entries.map((entry) => [entry.address, entry]));
+    const children = entries.filter((entry) => entry.objectKind === "agent" && isResolvableFrom(entry, caller.owningSessionId)).map((entry) => entryToChildLike(entry, deliverToChild));
+    const resolvable = entryToListedRuntimeObjectList(entries.filter((entry) => isResolvableFrom(entry, caller.owningSessionId)));
+    const listable = entryToListedRuntimeObjectList(entries.filter((entry) => isListableFrom(entry, caller.owningSessionId)));
+    return { entries, byAddress, children, resolvable, listable };
+  }
+
+  /**
+   * WS-10 §11 rule 5, the half a live roster cannot answer.
+   *
+   * `resolveTarget` implements rule 5 over the children it is handed: a name used by more than one
+   * DISTINCT child currently in the roster is refused. A directory outlives rosters — an object is
+   * removed, a daemon restarts — and rule 5 is about what a name HAS MEANT ("a name previously used
+   * by a different child in the same conversation"), so the lease history is the memory that makes
+   * the refusal survivable. Two shapes, both stale, and telling them apart is the whole point of
+   * keeping released leases (`NameLeaseStore.release` stamps, never deletes):
+   *
+   *   * the name has been claimed by MORE THAN ONE address → refuse even if exactly one is live now,
+   *     because a plain name can no longer identify which was meant;
+   *   * the name is known but nothing reachable holds it → "that name referred to something that has
+   *     since gone", which is a different answer from "no such agent" and is the one rule 5 requires.
+   */
+  async function nameStaleness(to: string): Promise<{ reason: string; holders: readonly SerializedRuntimeAddress[] } | undefined> {
+    const leases: NameLeaseRecord[] = await store.names.lookup(to);
+    if (leases.length === 0) return undefined;
+    const holders = [...new Set(leases.map((lease) => lease.address))];
+    if (holders.length > 1) {
+      return {
+        reason: `"${to}" has been used by more than one runtime object (${holders.join(", ")}); address the one you mean by its canonical address from the listing`,
+        holders,
+      };
+    }
+    return { reason: `"${to}" referred to ${holders.join(", ")}, which is no longer reachable; address the one you mean by its canonical address from the listing`, holders };
+  }
+
+  function candidatesFor(snap: DirectorySnapshot, holders: readonly SerializedRuntimeAddress[]): ListedRuntimeObject[] {
+    return holders.flatMap((address) => {
+      const entry = snap.byAddress.get(address);
+      return entry === undefined ? [] : [entryToListedRuntimeObject(entry)];
+    });
+  }
+
+  async function resolveIn(snap: DirectorySnapshot, to: string, ctx: DirectoryResolutionContext): Promise<DirectoryResolution> {
+    // WS-10 §10.1's own `to` constraints. The tool layer validates them too (its refusal is what the
+    // model reads); this one is the door's own, so a host calling `resolve()` directly gets the same
+    // answer rather than an unbounded string reaching resolution.
+    const valid = validateToField(to);
+    if (!valid.ok) return { kind: "not-found", reason: valid.message };
+
+    const callerOwner = owningSessionIdOf(ctx.from);
+    const isCanonical = parseRuntimeAddress(to) !== undefined;
+    const isChildId = !isCanonical && snap.children.some((child) => child.record.id === to);
+
+    // RULE 5 BEFORE RULE 3, and only on the NAME branch. Rules 1 and 2 address an object by an
+    // identity that cannot be reused, so a stale-name history says nothing about them — which is
+    // exactly why rule 5's own text ends "unless addressed canonically".
+    if (!isCanonical && !isChildId) {
+      const stale = await nameStaleness(to);
+      if (stale !== undefined && stale.holders.length > 1) {
+        return { kind: "stale-name", reason: stale.reason, candidates: candidatesFor(snap, stale.holders) };
+      }
+    }
+
+    const resolved = resolveTarget({ to, callerParentSessionId: callerOwner, children: snap.children, peers: snap.resolvable });
+    if (resolved.kind === "ambiguous") {
+      // The candidates come back through the DIRECTORY rather than through the subpath's own child
+      // renderer: the row a caller is shown must be the durable record (kind, mode, capabilities),
+      // and a child rendered from a `ChildLike` would carry this module's placeholder permission mode
+      // as its `mode` (see `entryToChildLike`).
+      return { kind: "ambiguous", candidates: candidatesFor(snap, resolved.candidates.map((candidate) => candidate.address)) };
+    }
+    if (resolved.kind === "stale") return { kind: "stale-name", reason: resolved.message, candidates: [] };
+    if (resolved.kind === "not_found") {
+      const stale = await nameStaleness(to);
+      if (stale !== undefined && !isCanonical && !isChildId) {
+        return { kind: "stale-name", reason: stale.reason, candidates: candidatesFor(snap, stale.holders) };
+      }
+      return { kind: "not-found", reason: resolved.message };
+    }
+    const entry = snap.byAddress.get(serializeRuntimeAddress(resolved.address));
+    /* c8 ignore next */
+    if (entry === undefined) return { kind: "not-found", reason: `resolved "${to}" to an address with no directory record` }; // unreachable: every row resolution saw came from `snap`
+    return { kind: "resolved", entry };
+  }
+
+  /**
+   * The name-lease side of `record()` (WS-10 §11 rule 5, WS-15 §6.4 step 6).
+   *
+   * A lease is claimed when an object presents a name, and RELEASED — stamped, never deleted — the
+   * moment that object stops being able to answer to it: it was renamed, it lost its name, or it
+   * reached a terminal status. The stamp is the entire difference between "that name is stale" and
+   * "no such agent" once the row is gone.
+   */
+  async function syncLeases(incoming: RuntimeDirectoryEntry, previous: RuntimeDirectoryEntry | undefined): Promise<void> {
+    const stamp = new Date(now()).toISOString();
+    const terminal = incoming.status === "exited" || incoming.status === "archived" || incoming.status === "unavailable";
+    if (previous?.displayName !== undefined && (previous.displayName !== incoming.displayName || terminal)) {
+      await store.names.release(previous.displayName, previous.address, stamp);
+    }
+    if (incoming.displayName === undefined || terminal) return;
+    const held = (await store.names.lookup(incoming.displayName)).filter((lease) => lease.releasedAt === undefined && lease.address === incoming.address);
+    if (held.some((lease) => lease.generation === incoming.generation)) return;
+    // A NEW GENERATION IS A NEW HOLDER OF THE SAME NAME. Releasing the old lease first is what makes
+    // WS-15 §6.4 step 6's "expire stale name leases by generation" a sweep with something to find,
+    // rather than a row that quietly accumulates one held lease per restart.
+    for (const lease of held) await store.names.release(lease.name, lease.address, stamp);
+    await store.names.claim({ name: incoming.displayName, address: incoming.address, generation: incoming.generation, claimedAt: stamp });
+  }
+
+  const directory: RuntimeDirectoryHandle = {
+    snapshot,
+    resolveIn,
+
+    async list(scope) {
+      const entries = await store.load();
+      if (scope?.parent === undefined) return entries;
+      return entries.filter((entry) => entry.parentAddress === scope.parent);
+    },
+
+    async get(address) {
+      return (await store.load()).find((entry) => entry.address === address);
+    },
+
+    /**
+     * Upsert one row — MERGING the two adapter-owned fields rather than replacing them.
+     *
+     * See `mergeAdapterOwnedFields`: Lane A's spawn proxy writes `configDir`/`processIdentity` onto
+     * the same row through the store, and the store's `upsert` is a full replace, so a host recording
+     * a status change would otherwise drop WS-14 §6 rule 2's durable record and WS-15 §6.4 step 2's
+     * revalidation input — with nothing failing at the time.
+     */
+    async record(entry) {
+      const existing = await this.get(entry.address);
+      const merged = mergeAdapterOwnedFields(entry, existing);
+      await store.upsert(merged);
+      await syncLeases(merged, existing);
+    },
+
+    /**
+     * Forget one row. Its name leases are RELEASED (stamped), which is what turns the name into a
+     * stale-name refusal instead of a "no such agent".
+     *
+     * DELIBERATELY NOT TOUCHED: the row's cursor and any messages held for it. A held message is
+     * evidence that something was addressed to this object and never delivered; dropping it here
+     * would erase that silently, and WS-15 §6.4 step 7's sweep is where held mail is accounted for.
+     */
+    async forget(address) {
+      const existing = await this.get(address);
+      if (existing?.displayName !== undefined) {
+        await store.names.release(existing.displayName, address, new Date(now()).toISOString());
+      }
+      await store.remove(address);
+    },
+
+    async resolve(to, ctx) {
+      const snap = await snapshot({ owningSessionId: owningSessionIdOf(ctx.from) });
+      return resolveIn(snap, to, ctx);
+    },
+
+    async recover(): Promise<RuntimeDirectoryRecovery> {
+      return recoverDirectory({ store, now, hooks: options });
+    },
+  };
+  return directory;
+}
