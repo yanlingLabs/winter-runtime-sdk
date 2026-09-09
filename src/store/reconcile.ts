@@ -55,7 +55,12 @@ export function scanLocalWriteRoot(root: string): LocalTranscript[] {
   for (const projectKey of readDirNames(projects, "dir")) {
     const projectDir = join(projects, projectKey);
     for (const name of readDirNames(projectDir, "file")) {
-      if (!name.endsWith(JSONL)) continue;
+      // `isTranscriptPath`, not `endsWith(".jsonl")`. The provider-state SIDECAR ends in `.jsonl`
+      // too — `<sessionId>.provider-state.jsonl` — and a scan that took it would hand it to
+      // reconciliation as a session called `<sessionId>.provider-state`, i.e. it would IMPORT the one
+      // file WS-17 §8's first probe requires to be left byte-untouched. (Found by the test below,
+      // which plants one.)
+      if (!isTranscriptPath(join(projectDir, name))) continue;
       const sessionId = name.slice(0, -JSONL.length);
       found.push({ path: join(projectDir, name), key: { projectKey, sessionId } });
     }
@@ -64,7 +69,7 @@ export function scanLocalWriteRoot(root: string): LocalTranscript[] {
     for (const sessionId of readDirNames(projectDir, "dir")) {
       const subagents = join(projectDir, sessionId, SUBAGENTS_DIR);
       for (const name of readDirNames(subagents, "file")) {
-        if (!name.endsWith(JSONL)) continue;
+        if (!isTranscriptPath(join(subagents, name))) continue; // a child has its own sidecar too
         found.push({
           path: join(subagents, name),
           key: { projectKey, sessionId, subpath: `${SUBAGENTS_DIR}/${name.slice(0, -JSONL.length)}` },
