@@ -24,6 +24,8 @@ import { stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
 import { createApprovalBridge, type ApprovalBroker, type OfficialPermissionMode } from "../../src/official/callbacks.ts";
+import type { ContainmentBreach } from "../../src/official/sweep.ts";
+import type { OfficialOptions } from "../../src/seams/official-sdk-shapes.ts";
 import { cleanupHermetic, decoyUntouched, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
@@ -57,17 +59,22 @@ async function runContainment(args: {
   mode?: OfficialPermissionMode;
   /** The host broker. Default: approve everything — see this file's header. */
   broker?: ApprovalBroker;
+  /** Edit the options AFTER the template built them — the "host builds them by hand" case (NEW-1). */
+  mutateOptions?: (options: OfficialOptions) => OfficialOptions;
 }): Promise<{
   decisions: Array<{ tool: string; behavior: string; source: string }>;
   results: ReturnType<typeof toolResults>;
   /** The session's own `system/init`, for the surfaces §8 contains by NOT exposing them. */
   init: { tools?: string[]; slash_commands?: string[] } | undefined;
+  /** What the post-hoc sweep caught (review r2, NEW-3). */
+  breaches: readonly ContainmentBreach[];
 }> {
   /* c8 ignore next */
   if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
   const { routes, record } = scriptedLoopback(args.turns);
   const decisions: Array<{ tool: string; behavior: string; source: string }> = [];
   let init: { tools?: string[]; slash_commands?: string[] } | undefined;
+  let breaches: readonly ContainmentBreach[] = [];
 
   await withLoopbackFake({ routes }, async (fake) => {
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore: createInMemoryRuntimeDirectoryStore() };
@@ -94,7 +101,8 @@ async function runContainment(args: {
       credentials: { ANTHROPIC_BASE_URL: fake.url.replace(/\/$/, ""), ANTHROPIC_API_KEY: "sk-ant-loopback" },
       base: { HOME: args.session.home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
     });
-    const options = adapter.buildOptions(templateInput);
+    const built = adapter.buildOptions(templateInput);
+    const options = args.mutateOptions === undefined ? built : args.mutateOptions(built);
     const live = adapter.launch({
       address: "claude:session:containment",
       selection,
@@ -119,8 +127,9 @@ async function runContainment(args: {
       const typed = message as { type: string; subtype?: string; tools?: string[]; slash_commands?: string[] };
       if (typed.type === "system" && typed.subtype === "init") init = { ...(typed.tools === undefined ? {} : { tools: typed.tools }), ...(typed.slash_commands === undefined ? {} : { slash_commands: typed.slash_commands }) };
     }
+    breaches = live.containmentBreaches;
   });
-  return { decisions, results: toolResults(record), init };
+  return { decisions, results: toolResults(record), init, breaches };
 }
 
 /**
@@ -275,6 +284,77 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
       expect(decoyUntouched(session)).toBe(true);
       // eslint-disable-next-line no-console
       console.log(`[row 14 containment tally] ${JSON.stringify(tally)}`);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "review r2, NEW-1: a hand-built options object with NO hooks is floored anyway — the floor is an invariant of launch()",
+    async () => {
+      // The reviewer's plant, verbatim: build the options with the template and then delete the
+      // hooks, which is exactly the "host builds options by hand" case. Before this fix,
+      // `EnterWorktree` created `<cwd>/.claude/worktrees/feature` through the adapter's own door.
+      const session = hermeticSession("containment-invariant", { git: true });
+      const { results } = await runContainment({
+        session,
+        mutateOptions: (options) => {
+          const stripped = { ...options };
+          delete stripped["hooks"];
+          delete stripped["canUseTool"];
+          return stripped;
+        },
+        turns: [
+          { toolUses: [{ id: "w1", name: "EnterWorktree", input: { name: "feature" } }] },
+          { toolUses: [{ id: "w2", name: "Write", input: { file_path: join(session.cwd, "CLAUDE.md"), content: "x" } }] },
+          { text: "done" },
+        ],
+      });
+      const resultFor = (id: string): string => JSON.stringify(results.find((entry) => entry.tool_use_id === id)?.content ?? "").toLowerCase();
+      expect(resultFor("w1")).toContain("worktrees belong under .winter/worktrees");
+      expect(resultFor("w2")).toContain("may not create or modify");
+      expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
+      expect(vendorNamedArtifacts(session)).toEqual([]);
+      expect(decoyUntouched(session)).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "review r2, NEW-3: a command that BUILDS the name is caught post-hoc — swept, reported, and the call blocked",
+    async () => {
+      const session = hermeticSession("containment-sweep");
+      const { results, breaches } = await runContainment({
+        session,
+        turns: [
+          // (a) the two escape spellings the reviewer measured creating a real `.claude/`. These are
+          //     now caught PRE-hoc, by the un-normalized, quote-stripping command scan.
+          { toolUses: [{ id: "e1", name: "Bash", input: { command: "mkdir -p .cla\\ude && echo x > .cla\\ude/leak.txt" } }] },
+          { toolUses: [{ id: "e2", name: "Bash", input: { command: "mkdir -p .clau''de && echo y > .clau''de/leak2.txt" } }] },
+          { toolUses: [{ id: "e3", name: "Bash", input: { command: 'mkdir -p ".cl""aude" && echo z > ".cl""aude"/leak3.txt' } }] },
+          // (b) the one no scanner can read: the name never appears in the command at all. This is
+          //     what the POST-HOC sweep is for.
+          { toolUses: [{ id: "s1", name: "Bash", input: { command: 'D="$(printf %s .cla)$(printf %s ude)"; mkdir -p "$D" && echo boom > "$D/leak.txt"' } }] },
+          { text: "done" },
+        ],
+      });
+      const resultFor = (id: string): string => JSON.stringify(results.find((entry) => entry.tool_use_id === id)?.content ?? "").toLowerCase();
+      for (const id of ["e1", "e2", "e3"]) expect([id, resultFor(id).includes("may not create or modify")]).toEqual([id, true]);
+
+      // The substitution one RAN — and the sweep undid it, ended the turn, and recorded the breach.
+      expect(breaches.length).toBeGreaterThanOrEqual(1);
+      const breach = breaches[0];
+      expect(breach?.toolName).toBe("Bash");
+      expect(breach?.created.some((path) => path.toLowerCase().endsWith("/.claude"))).toBe(true);
+      expect(breach?.removed).toEqual(breach?.created ?? []);
+      // MEASURED: this runtime ignores every documented PostToolUse rewrite, so the model is not told
+      // by a rewritten result — it gets NO result for that call, because the turn ends first. The
+      // absence is the assertion.
+      expect(results.some((entry) => entry.tool_use_id === "s1")).toBe(false);
+
+      // ROW 14'S OWN PREDICATE, after a command the scanner could not read.
+      expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
+      expect(vendorNamedArtifacts(session)).toEqual([]);
+      expect(decoyUntouched(session)).toBe(true);
     },
     TIMEOUT,
   );

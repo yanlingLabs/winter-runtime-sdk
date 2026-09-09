@@ -152,10 +152,25 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
       `${toolName} created ${created.length === 1 ? "a path" : "paths"} whose name is the vendor's own (${created.join(", ")}). ` +
       `On this branch that name belongs to the vendor runtime and is never written by a session: the ${removed.length === created.length ? "artifact was" : "artifacts were"} removed and the call is refused (WS-14 §8). ` +
       `Spell the target under the product's own project directory instead.`;
+    // HOW A BREACH IS MADE VISIBLE, and it is a MEASUREMENT rather than a preference. Driven against
+    // the pinned 0.3.250 with a probe hook returning each shape in turn, none of the documented
+    // PostToolUse rewrites reached the model: `decision: "block"` + `reason`, `updatedToolOutput` as a
+    // string, and `updatedToolOutput` as a content block ALL left the tool_result exactly as the tool
+    // produced it (the hook ran in every case — it is the OUTPUT that is ignored on this pin). The one
+    // shape that changed anything was `continue: false`, which ends the turn before the tool_result is
+    // sent at all.
+    //
+    // So the sweep ends the turn, and carries the other three shapes anyway: if a later runtime honours
+    // a rewrite, the model gets the sentence; on this pin it gets no result for a call whose effect was
+    // undone, and the host gets the typed breach. A silent success — the call "working" while its
+    // effect is deleted underneath it — is the one outcome that is not acceptable.
     return {
+      continue: false,
+      stopReason: reason,
+      systemMessage: reason,
       decision: "block",
       reason,
-      hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput: reason },
+      hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput: reason, additionalContext: reason },
     };
   };
 

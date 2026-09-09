@@ -51,7 +51,11 @@ describe("the post-hoc containment sweep", () => {
 
     expect(existsSync(join(cwd, "CLAUDE.md"))).toBe(false);
     expect(existsSync(join(cwd, ".claude", "was-here-first.json"))).toBe(true);
+    // The turn is ENDED rather than the result rewritten — measured: this runtime ignores every
+    // documented PostToolUse rewrite, and `continue: false` is the one shape that changes anything.
+    expect(output["continue"]).toBe(false);
     expect(output["decision"]).toBe("block");
+    expect(String(output["stopReason"])).toContain("CLAUDE.md");
     expect(String(output["reason"])).toContain("CLAUDE.md");
     expect(breaches).toHaveLength(1);
     expect(breaches[0]?.removed.map((path) => path.replace(cwd, ""))).toEqual(["/CLAUDE.md"]);
@@ -76,7 +80,7 @@ describe("the post-hoc containment sweep", () => {
     await pre(sweep, "t3");
     mkdirSync(join(home, ".claude", "plans"), { recursive: true });
     const output = await post(sweep, "t3");
-    expect(output["decision"]).toBe("block");
+    expect(output["continue"]).toBe(false);
     expect(existsSync(join(home, ".claude"))).toBe(false);
   });
 
@@ -93,6 +97,6 @@ describe("the post-hoc containment sweep", () => {
     expect(existsSync(join(cwd, "CLAUDE.md"))).toBe(true);
     // …and a post with no matching pre treats everything present as pre-existing rather than deleting
     // a tree it never saw appear.
-    expect(await post(sweep, "never-seen")).toMatchObject({ decision: "block" });
+    expect(await post(sweep, "never-seen")).toMatchObject({ continue: false });
   });
 });
