@@ -248,12 +248,16 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
       // 2/3/4. THE REDIRECT WRITERS — stopped by the PRE-TOOL-USE HOOK, and the proof is that the
       //        model was handed OUR OWN sentence rather than one of the runtime's. None of them
       //        reaches `canUseTool` at all on this runtime, which is why the hook exists.
-      for (const [label, id, fragment] of [
-        ["EnterWorktree", "worktree", "worktrees belong under .winter/worktrees"],
-        ["Workflow", "workflow", "workflows resolve under .winter/workflows"],
-        ["Task(isolation:worktree)", "agent", "isolated agent worktree"],
+      for (const [label, id, fragment, tool] of [
+        ["EnterWorktree", "worktree", "worktrees belong under .winter/worktrees", "EnterWorktree"],
+        ["Workflow", "workflow", "workflows resolve under .winter/workflows", "Workflow"],
+        ["Task(isolation:worktree)", "agent", "isolated agent worktree", "Task"],
       ] as const) {
         expect([label, resultFor(id).includes(fragment.toLowerCase())]).toEqual([label, true]);
+        // ATTRIBUTION, not assumption (review r2, NEW-7): the tally says `pre-tool-use-hook`, so the
+        // BRIDGE must not have decided this call. The hook runs first, and for `Workflow` — which the
+        // callback IS consulted for — that is the only thing distinguishing the two layers.
+        expect([label, decisions.some((decision) => decision.tool === tool)]).toEqual([label, false]);
         tally[label] = "pre-tool-use-hook";
       }
       // …and the vendor's worktree directory, which the same call created before this fix, is absent.

@@ -243,7 +243,29 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
     stderrTail = (stderrTail + chunk).slice(-tailLimit);
   };
 
+  /**
+   * The hook, wrapped so that EVERY EXIT FROM IT SETTLES (review r2, NEW-5).
+   *
+   * `settleGate` is replaced per spawn and resolved inside `openGate()`, which needs an exit that a
+   * generation refused before it started will never produce — so a caller awaiting `whenSettled()`
+   * after a throw waited forever. r1's M4 asked for "`whenSettled()` always resolves"; the three
+   * plants it named are fixed and this class was not. A throw now resolves the gate and rejects
+   * `recorded` (so `whenRecorded()` fails rather than resolving for a generation that never ran)
+   * before it propagates.
+   */
   const spawn: OfficialSpawnClaudeCodeProcess = (spawnOptions: OfficialSpawnOptions): OfficialSpawnedProcess => {
+    try {
+      return spawnUnguarded(spawnOptions);
+    } catch (error) {
+      settleGate.resolve();
+      recorded = Promise.reject(error instanceof Error ? error : new Error(String(error)));
+      // Nobody may be awaiting it; an unhandled rejection would end the process.
+      recorded.catch(() => undefined);
+      throw error;
+    }
+  };
+
+  const spawnUnguarded = (spawnOptions: OfficialSpawnOptions): OfficialSpawnedProcess => {
     // RULE 2, FIRST HALF — VALIDATE. The observed value is authoritative (§1); a spawn we cannot
     // account for is refused before a process exists rather than after it has written a transcript.
     const root = validateObservedConfigDir({
@@ -258,6 +280,14 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
     const thisSettleGate = settleGate;
 
     const child = spawnChild({ ...spawnOptions, argv0: options.brand.processLabel });
+    // BEFORE THE RECORD (review r2, NEW-5): this refusal used to run AFTER `sink.record()`, so a
+    // generation that never started left a durable `configDir` + `processIdentity` on the directory
+    // entry — with no exit to reach the `clear` inside `openGate()` — and that stale pair is exactly
+    // what Lane B's `recover()` reads.
+    const childStdout = child.stdout;
+    if (childStdout === null) {
+      throw new OfficialConnectionError({ reason: "the child was started without a stdout pipe, so the runtime protocol has no channel", branchLabel });
+    }
     const pid = child.pid;
     if (pid === undefined) {
       throw new OfficialConnectionError({ reason: "the child started without a pid, so it can be neither supervised nor identified (WS-14 §9)", branchLabel });
@@ -324,10 +354,6 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
     child.stderr?.on("data", (chunk: unknown) => appendStderr(String(chunk)));
 
     // Stdout is piped only after the record settles; until then the SDK sees an open, silent stream.
-    const childStdout = child.stdout;
-    if (childStdout === null) {
-      throw new OfficialConnectionError({ reason: "the child was started without a stdout pipe, so the runtime protocol has no channel", branchLabel });
-    }
     recorded
       .then(() => {
         childStdout.on("data", (chunk: unknown) => stdout.write(chunk as Uint8Array));

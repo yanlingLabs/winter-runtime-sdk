@@ -456,6 +456,37 @@ describe("WS-14 §6 — the supervised spawn proxy", () => {
     expect(revalidateProcessIdentity(undefined, recorded)).toBe(false);
   });
 
+  test("review r2, NEW-5: every throw out of the hook still SETTLES, and records nothing", async () => {
+    const records: SpawnObservation[] = [];
+    const make = (over: { spawnChild?: () => SpawnedChildProcess; profile?: "fresh-spool" | "store-backed-resume" } = {}) =>
+      createSupervisedSpawnProxy({
+        brand: WINTER_BRAND,
+        profile: over.profile ?? "fresh-spool",
+        configuredConfigDir: SPOOL,
+        sink: { record: (o) => void records.push(o) },
+        spawnChild: over.spawnChild ?? (() => fakeChild()),
+      });
+
+    // (a) the observed config dir is refused — the generation never starts.
+    const a = make();
+    expect(() => a.spawn(spawnOptions({ env: {} }))).toThrow(OfficialConfigurationError);
+    await Promise.race([a.whenSettled(), new Promise<void>((_r, reject) => setTimeout(() => reject(new Error("whenSettled() never resolved")), 500))]);
+    await expect(a.whenRecorded()).rejects.toThrow();
+
+    // (b) a child with no pid.
+    const b = make({ spawnChild: () => fakeChild({ pid: undefined }) });
+    expect(() => b.spawn(spawnOptions())).toThrow(/pid/);
+    await Promise.race([b.whenSettled(), new Promise<void>((_r, reject) => setTimeout(() => reject(new Error("whenSettled() never resolved")), 500))]);
+
+    // (c) a child with no stdout pipe — and THIS one used to record first, leaving a durable root and
+    //     a process identity for a generation that never ran, with no exit to ever clear them.
+    const noStdout = (): SpawnedChildProcess => ({ ...fakeChild(), stdout: null });
+    const c = make({ spawnChild: noStdout });
+    expect(() => c.spawn(spawnOptions())).toThrow(/stdout pipe/);
+    await Promise.race([c.whenSettled(), new Promise<void>((_r, reject) => setTimeout(() => reject(new Error("whenSettled() never resolved")), 500))]);
+    expect(records).toEqual([]);
+  });
+
   test("a child that starts without a pid can be neither supervised nor identified", () => {
     const proxy = createSupervisedSpawnProxy({
       brand: WINTER_BRAND,

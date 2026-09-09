@@ -135,9 +135,14 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
 //
 // MEASURED, AND IT IS WHY THIS EXISTS (review r1, M2, and a finding beyond it). In a real git
 // repository, a model-emitted `EnterWorktree` CREATED `.claude/worktrees/feature` — and `canUseTool`
-// WAS NEVER CALLED FOR IT. The same is true of `Workflow` and of an `Agent`/`Task` with
-// `isolation: "worktree"`. The permission callback is not consulted for every tool on this runtime,
-// so a floor that lives only there cannot make row 14 true.
+// WAS NEVER CALLED FOR IT.
+//
+// THE EXACT SET, NARROWED BY MEASUREMENT (review r2, NEW-7). With the hook removed, the callback saw
+// NOTHING for `EnterWorktree`, `ExitWorktree`, `Task`/`Agent` with `isolation: "worktree"`, `Skill` or
+// `CronList` — but it DID see `Workflow`. So the true statement is narrower than "the callback is not
+// consulted for the redirect writers": it is not consulted for the WORKTREE/AGENT family, and it is
+// consulted for `Workflow`. Either way the conclusion stands — a floor that lives only in the
+// callback cannot make row 14 true — and the hook covers both kinds.
 //
 // §10 says exactly where must-see-every-call logic goes: "`dontAsk` never invokes the callback;
 // PreToolUse hooks are the enforcement point for must-see-every-call logic." So the containment floor
