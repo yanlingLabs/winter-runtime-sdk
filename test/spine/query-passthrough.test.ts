@@ -13,7 +13,7 @@ import { createRuntimeSdk, forwardableOptions, ROUTER_ONLY_OPTION_KEYS } from ".
 import { RuntimeSdkDisposedError } from "../../src/errors.ts";
 import type { RouterOptions } from "../../src/sdk.ts";
 import type { SdkMessage } from "@yanlinglabs/winter-agent-sdk";
-import { RuntimeNotRoutedError } from "../../src/errors.ts";
+import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "../../src/errors.ts";
 import type { RuntimeSelection, SelectionInput } from "../../src/selection/runtime-selection.ts";
 import { NOW, VERSIONS, credentials, listing } from "../selection/fixtures.ts";
 
@@ -123,19 +123,20 @@ describe("dispose()", () => {
 });
 
 // ====================================================================================================
-// F-4 — THE DOOR DECIDES, AND REFUSES WHAT IT CANNOT SERVE.
+// TASK 6b — THE DOOR DECIDES, AND SERVES BOTH RUNTIMES.
 //
-// `query()` forwards to the Winter peer, which is the scope this package shipped with. What it did
-// NOT do is notice the selection: a host passing the persisted choice the entire selection lane
-// exists to honour — `runtime.selection = { runtimeKind: "claude-agent", … }` — got a WINTER session,
-// with no error, no diagnostic and no record of which runtime ran. "Forwards to Winter" and "ignores
-// the selection" are not the same thing, and D13's "never a silent rewrite" is broken by the second.
+// F-4's finding was that `query()` STRIPPED the selection: a host passing the persisted choice the
+// whole selection lane exists to honour (`runtime.selection = { runtimeKind: "claude-agent", … }`) got
+// a WINTER session, with no error, no diagnostic and no record of which runtime ran — D13's "never a
+// silent rewrite" broken at the one door. The fix wave made that a typed refusal; this routes it.
 //
-// THE PASS-THROUGH IS UNCHANGED for everything the door CAN serve, which is what the rest of this
-// file pins: the additive key is still stripped, the options object is still forwarded by identity
-// when there is nothing to remove, and a query with no selection input at all still just goes.
+// THE PASS-THROUGH IS UNCHANGED for the Winter leg, which is what the rest of this file pins: the
+// additive key is still stripped, the options object is still forwarded by identity when there is
+// nothing to remove, and a query with no selection input at all still just goes. The tests below add
+// the OTHER half — that a claude-agent selection does not reach the Winter peer, and that the door
+// refuses rather than guesses what only a host can tell it.
 // ====================================================================================================
-describe("F-4 — a selection the door cannot route is a typed refusal, never a silent Winter session", () => {
+describe("Task 6b — a claude-agent selection leaves the Winter leg alone", () => {
   const selectionFor = (runtimeKind: "winter-agent" | "claude-agent"): RuntimeSelection => ({
     runtimeKind,
     providerId: "anthropic",
@@ -143,32 +144,33 @@ describe("F-4 — a selection the door cannot route is a typed refusal, never a 
     family: "claude",
     authFamily: "api-key",
     sdkVersion: "0.0.2",
-    reason: "f-4 fixture",
+    reason: "door fixture",
     decidedAt: new Date(0).toISOString(),
   });
 
-  test("a persisted `claude-agent` selection REFUSES, and nothing reaches the Winter peer", () => {
+  test("a persisted `claude-agent` selection never reaches the Winter peer", () => {
     const { peer, calls } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
-    expect(() => sdk.query({ prompt: "hello", options: { runtime: { selection: selectionFor("claude-agent") } } })).toThrow(RuntimeNotRoutedError);
-    // THE POINT: before F-4 this call produced a perfectly ordinary Winter session.
+    // No `runtime.official` at all: the door needs the session id its directory row is addressed by,
+    // and refuses rather than inventing one. THE POINT: before F-4 this produced a Winter session.
+    expect(() => sdk.query({ prompt: "hello", options: { runtime: { selection: selectionFor("claude-agent") } } })).toThrow(RuntimeLaunchInputError);
     expect(calls).toHaveLength(0);
   });
 
-  test("the refusal names the runtime and the door that does serve it", () => {
+  test("the refusal names the field a host must supply, and why the Winter leg needs none of it", () => {
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     try {
       sdk.query({ prompt: "hello", options: { runtime: { selection: selectionFor("claude-agent") } } });
       throw new Error("unreachable: the query should have refused");
     } catch (error) {
-      expect(error).toBeInstanceOf(RuntimeNotRoutedError);
-      expect((error as RuntimeNotRoutedError).runtimeKind).toBe("claude-agent");
-      expect((error as Error).message).toContain("runtimeSdkInternals");
+      expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((error as RuntimeLaunchInputError).field).toBe("runtime.official");
+      expect((error as Error).message).toContain("session id");
     }
   });
 
-  test("a `select` input is DECIDED, and a decision of claude-agent refuses the same way", () => {
+  test("a `select` input is DECIDED, and a decision of claude-agent takes the official leg", () => {
     const { peer, calls } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     const select: SelectionInput = {
@@ -183,7 +185,7 @@ describe("F-4 — a selection the door cannot route is a typed refusal, never a 
     };
     // The same input decided outside the door, so the test knows what it is asserting about.
     expect(sdk.selectRuntime(select).runtimeKind).toBe("claude-agent");
-    expect(() => sdk.query({ prompt: "hello", options: { runtime: { select } } })).toThrow(RuntimeNotRoutedError);
+    expect(() => sdk.query({ prompt: "hello", options: { runtime: { select } } })).toThrow(RuntimeLaunchInputError);
     expect(calls).toHaveLength(0);
   });
 
@@ -201,5 +203,64 @@ describe("F-4 — a selection the door cannot route is a typed refusal, never a 
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     for await (const _ of sdk.query({ prompt: "hello" })) void _;
     expect(calls).toHaveLength(1);
+  });
+});
+
+// ====================================================================================================
+// BRIEF ITEM 2 — A RUNTIME CHANGE MID-SESSION IS A HANDOFF, NEVER A REWRITE.
+//
+// `runtime.selection` is documented as "already persisted for this session", so a selection that
+// disagrees with the session's record is a REQUEST TO CHANGE RUNTIME. D13 answers that with the
+// certified handoff or a visible fork; serving the new runtime on the old transcript is the one answer
+// that destroys evidence, because the transcript then contains turns from a runtime that never wrote
+// any of it. The door refuses in-process on both legs (below) and, on the official leg, against the
+// DURABLE directory row before a credential is read (`test/door/official-leg.test.ts`).
+// ====================================================================================================
+describe("Task 6b — a mid-session runtime change is `handoff-required`", () => {
+  const selectionFor = (runtimeKind: "winter-agent" | "claude-agent"): RuntimeSelection => ({
+    runtimeKind,
+    providerId: "anthropic",
+    modelRef: "anthropic/claude-opus-5",
+    family: "claude",
+    authFamily: "api-key",
+    sdkVersion: "0.0.2",
+    reason: "door fixture",
+    decidedAt: new Date(0).toISOString(),
+  });
+
+  test("a second query naming the other runtime is refused, and points at `sdk.handoff()`", async () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    for await (const _ of sdk.query({ prompt: "one", options: { runtime: { sessionId: "s-1", selection: selectionFor("winter-agent") } } })) void _;
+    expect(calls).toHaveLength(1);
+    try {
+      sdk.query({ prompt: "two", options: { runtime: { sessionId: "s-1", selection: selectionFor("claude-agent"), official: { sessionId: "s-1" } } } });
+      throw new Error("unreachable: the change should have been refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeHandoffRequiredError);
+      expect((error as RuntimeHandoffRequiredError).from).toBe("winter-agent");
+      expect((error as RuntimeHandoffRequiredError).to).toBe("claude-agent");
+      expect((error as Error).message).toContain("sdk.handoff");
+    }
+    // NOTHING WAS SERVED: the refusal is before the peer, not after it.
+    expect(calls).toHaveLength(1);
+  });
+
+  test("the SAME runtime twice is not a change", async () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    for await (const _ of sdk.query({ prompt: "one", options: { runtime: { sessionId: "s-2", selection: selectionFor("winter-agent") } } })) void _;
+    for await (const _ of sdk.query({ prompt: "two", options: { runtime: { sessionId: "s-2", selection: selectionFor("winter-agent") } } })) void _;
+    expect(calls).toHaveLength(2);
+  });
+
+  test("without a session id the door has nothing to hold a caller to, and says nothing", async () => {
+    // The honest boundary: the ledger is keyed by session, and a caller that names no session is
+    // asking for a fresh one. This test exists so the boundary is a decision rather than a gap.
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    for await (const _ of sdk.query({ prompt: "one", options: { runtime: { selection: selectionFor("winter-agent") } } })) void _;
+    for await (const _ of sdk.query({ prompt: "two", options: { runtime: { selection: selectionFor("winter-agent") } } })) void _;
+    expect(calls).toHaveLength(2);
   });
 });

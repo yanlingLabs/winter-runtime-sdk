@@ -78,7 +78,10 @@ export type { NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } fr
 export * from "./seams/index.ts";
 
 // --- typed errors ----------------------------------------------------------------------------------
-export { NotImplementedYet, RuntimeNotRoutedError, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError, UnaddressableEntryError } from "./errors.ts";
+export { NotImplementedYet, RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError, UnaddressableEntryError } from "./errors.ts";
+// --- the door's official leg (Task 6b) -------------------------------------------------------------
+export { createOfficialInputStream, isOfficialQuery, officialCredentialPlan, officialConnectionEnv, officialUserTurn } from "./door.ts";
+export type { OfficialInputStream, RouterOfficialInput, RouterQuery } from "./door.ts";
 export type { LaneId } from "./errors.ts";
 
 // --- WS-15 §6.1–6.4: the directory and the cross-runtime messaging router (Lane B; the three doors a host needs + their vocabulary) ---

@@ -27,7 +27,8 @@
 // Both are in the Task 1 report under "what the pinned interfaces forced me to change".
 import type { BrandProfile, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
-import { RuntimeNotRoutedError, RuntimeSdkDisposedError } from "./errors.ts";
+import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError } from "./errors.ts";
+import { isOfficialQuery, openOfficialLeg, type RouterOfficialInput, type RouterQuery } from "./door.ts";
 import type { SeamContext, SeamContextWithDirectory } from "./seams/context.ts";
 import type { OfficialSdkModule } from "./seams/official-sdk-shapes.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
@@ -42,7 +43,7 @@ import { createRuntimeMessaging } from "./messaging/index.ts";
 import type { GlobalMessagingOptions, RuntimeDirectoryOptions } from "./messaging/index.ts";
 import { createHandoffBarrier } from "./store/index.ts";
 import type { HandoffBarrierDeps } from "./store/index.ts";
-import { createOfficialAdapter } from "./official/adapter.ts";
+import { createOfficialAdapter, type OfficialAdapterHandle, type OfficialAdapterPolicy } from "./official/adapter.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
@@ -110,6 +111,16 @@ export interface RuntimeSdkOptions {
    */
   handoff?: Omit<HandoffBarrierDeps, "shared" | "decorator">;
   /**
+   * The official adapter's own policy (Task 6b).
+   *
+   * WITHOUT IT THE OFFICIAL LEG IS UNCONFIGURABLE, in the same way F-3 found the other two seams to
+   * be: `createOfficialAdapter(context)` was called with no options at all, so a host could not name
+   * its `configuredExtras`, its containment dispositions, its crash hook or its reconciler — and the
+   * door builds this branch's options and child environment from exactly those. `env.remoteConfig` is
+   * the deployment-wide default for R-7b-11; a per-query `runtime.official.remoteConfig` wins over it.
+   */
+  official?: OfficialAdapterPolicy;
+  /**
    * The directory's and the router's own options (whole-branch review, F-3).
    *
    * WITHOUT THIS FIELD EVERY OFFICIAL RECEIVER WAS HELD FOREVER. `official.permissionClass` is the
@@ -134,6 +145,27 @@ export interface RouterRuntimeInput {
   selection?: RuntimeSelection;
   /** Everything needed to decide one when there is no persisted selection yet. */
   select?: SelectionInput;
+  /**
+   * This session's own id, on EITHER leg.
+   *
+   * WHAT IT BUYS: the door can hold a caller to the session's persisted choice. `selection` is
+   * documented as "already persisted for this session", so a `selection` that disagrees with the
+   * session's record is a REQUEST TO CHANGE RUNTIME, and D13 answers that with a certified handoff or
+   * a visible fork — never by serving the new runtime on the old transcript. With an id, the door
+   * refuses that in-process on both legs; the official leg additionally reads the durable directory
+   * row before it launches anything. Without one, the host is the only party holding the record.
+   *
+   * The official leg takes its id from `official.sessionId` (which it requires anyway); this field is
+   * for the Winter leg and for a host that prefers to say it once.
+   */
+  sessionId?: string;
+  /**
+   * What the OFFICIAL leg needs and only the host knows (Task 6b) — the session id its directory row
+   * is addressed by, its credential plan for families whose variables are the host's, the vendored
+   * runtime's neighbours. Ignored entirely on the Winter leg, where the pinned `Options` already say
+   * everything.
+   */
+  official?: RouterOfficialInput;
 }
 
 /** `Options` plus the router's own additive input. Nothing is removed and nothing is renamed. */
@@ -144,8 +176,18 @@ export interface RouterOptions extends Options {
 export interface RuntimeSdk {
   /** The resolved brand profile every Winter-owned name in this session derives from (I2). */
   readonly brand: BrandProfile;
-  /** The one door. See this module's header for the two deviations from the plan's pinned line. */
-  query(args: { prompt: string | AsyncIterable<string>; options?: RouterOptions }): Query;
+  /**
+   * The one door, over BOTH runtimes (Task 6b). See this module's header for the deviations from the
+   * plan's pinned line, and `src/door.ts` for the official leg's own composition.
+   *
+   * TWO OVERLOADS, AND THE SPLIT IS A FACT RATHER THAN A CONVENIENCE. The official leg is reachable
+   * ONLY through `options.runtime`, so a call that passes none can only ever produce the Winter peer's
+   * `Query` — and says so. A call that DOES pass one is decided at run time, and its type is the union
+   * of the two runtimes' own handles, because neither of them is the other and this package will not
+   * flatten them into a facade (see `RouterQuery`).
+   */
+  query(args: { prompt: string | AsyncIterable<string>; options?: Options & { runtime?: never } }): Query;
+  query(args: { prompt: string | AsyncIterable<string>; options: RouterOptions }): RouterQuery;
   /** D13/D28, pure. Throws `SelectionRefusedError` on a typed refusal (see that class's own note). */
   selectRuntime(input: SelectionInput): RuntimeSelection;
   /** WS-15 §6.1. */
@@ -266,15 +308,94 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     // `createOfficialAdapter` needs no initialization call (its child starter resolves synchronously
     // on first use) and defaults §6 rule 2's durable record to the directory store in `context`,
     // addressed by `OfficialLaunchPlan.address`.
-    official: createOfficialAdapter(context),
+    official: createOfficialAdapter(context, opts.official ?? {}),
     barrier,
     decorator: barrier.decorator,
     context,
   };
 
+  /**
+   * WHICH RUNTIME EACH SESSION THIS HANDLE HAS SERVED IS PERSISTED ON (D13).
+   *
+   * IN-PROCESS, and openly so: the durable answer is the directory row, and reading it is asynchronous
+   * while `query()` is not. What this catches is the case a live host actually produces — the same
+   * handle, the same session, a second `query()` naming a different runtime — and it catches it before
+   * anything at all has happened. Its only writers are `query()` (the runtime a session was served on)
+   * and `handoff()` (on a certified transfer, never on a fork offer).
+   */
+  const persistedRuntime = new Map<string, RuntimeKind>();
+
   let disposed = false;
   const assertLive = (method: string): void => {
     if (disposed) throw new RuntimeSdkDisposedError(method);
+  };
+
+  const decide = (input: SelectionInput): RuntimeSelection => {
+    const result = selectRuntimePure(input);
+    if (isSelectionRefusal(result)) throw new SelectionRefusedError(result);
+    return result;
+  };
+
+  /**
+   * The door's body, written once and typed by what it actually returns.
+   *
+   * IT IS CAST ONTO THE OVERLOADED MEMBER at the one site below, and the cast is the honest shape of
+   * the situation rather than a workaround: the overloads express a fact TypeScript cannot derive —
+   * that the official leg is reachable ONLY through `options.runtime`, so a call without one is a
+   * `Query` — while the body, which is checked against neither overload, returns the union it really
+   * produces. Narrowing the body's own type instead would require a cast at each return.
+   */
+  const queryImpl = (args: { prompt: string | AsyncIterable<string>; options?: RouterOptions }): RouterQuery => {
+      assertLive("query");
+      // THE DOOR DECIDES, AND SERVES BOTH RUNTIMES (Task 6b; whole-branch review F-4's interim refusal
+      // is gone).
+      //
+      // "Forwards to Winter" and "honours the selection" are not the same thing, and before F-4 they
+      // were conflated: a host passing the persisted choice the entire selection lane exists to
+      // honour (`runtime.selection = { runtimeKind: "claude-agent", … }`) got a WINTER session, with
+      // no error, no diagnostic and no record of which runtime ran — D13's "the certified handoff or a
+      // visible fork, never a silent rewrite", broken at the one door. F-4 made that a typed refusal;
+      // this routes it.
+      const options = args.options ?? {};
+      const runtime = (options as RouterOptions).runtime;
+      // The persisted selection WINS and is never re-decided (D13); `select` is decided here only when
+      // there is no persisted one — the same precedence `selectRuntime` itself implements.
+      const decided = runtime === undefined ? undefined : (runtime.selection ?? (runtime.select === undefined ? undefined : decide(runtime.select)));
+      // D13, AT THE DOOR: a change of runtime mid-session is a handoff or a visible fork, never a
+      // rewrite. The in-process ledger is what this side can answer synchronously — `query()` returns a
+      // `Query`, not a promise for one, so a durable read cannot gate the Winter leg without turning
+      // the pass-through into a wrapper. The official leg checks the DURABLE row too, inside its own
+      // launch, before a credential is read or a child is spawned.
+      const sessionId = runtime?.official?.sessionId ?? runtime?.sessionId;
+      if (decided !== undefined && sessionId !== undefined) {
+        const known = persistedRuntime.get(sessionId);
+        if (known !== undefined && known !== decided.runtimeKind) throw new RuntimeHandoffRequiredError({ from: known, to: decided.runtimeKind, address: `session:${sessionId}` });
+        persistedRuntime.set(sessionId, decided.runtimeKind);
+      }
+      if (decided !== undefined && decided.runtimeKind === "claude-agent") {
+        const official = runtime?.official;
+        if (official === undefined) {
+          throw new RuntimeLaunchInputError({
+            field: "runtime.official",
+            reason:
+              "a claude-agent session is a supervised child process with a directory row of its own, so the door needs at least the session id that row is addressed by (WS-14 §6 rule 2, WS-15 §6.1) — the Winter leg needs none of this, which is why it is not on `Options`",
+          });
+        }
+        return openOfficialLeg(
+          {
+            brand,
+            official: internals.official as OfficialAdapterHandle,
+            directory,
+            messaging,
+            keychain: opts.keychain,
+            shared: () => barrier.shared,
+            ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
+            ...(opts.official === undefined ? {} : { policy: opts.official }),
+          },
+          { prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand), input: official, selection: decided },
+        );
+      }
+      return opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand) });
   };
 
   const sdk: RuntimeSdk & { [INTERNALS]: RuntimeSdkInternals } = {
@@ -283,39 +404,21 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     brand,
     directory,
     messaging,
-    query(args) {
-      assertLive("query");
-      // THE DOOR DECIDES, AND REFUSES WHAT IT CANNOT SERVE (whole-branch review, F-4).
-      //
-      // It forwards to the Winter peer — routing the official branch is its own task — but "forwards
-      // to Winter" and "ignores the selection" are not the same thing, and until this block existed
-      // they were. A host passing the persisted choice the entire selection lane exists to honour
-      // (`options.runtime.selection = { runtimeKind: "claude-agent", … }`) got a WINTER session, with
-      // no error, no diagnostic and no record of which runtime ran. That is D13's "the certified
-      // handoff or a visible fork, never a silent rewrite" broken at the one door.
-      //
-      // A REFUSAL IS THE HONEST ANSWER while the official leg is unrouted. It is typed, it names the
-      // runtime, and it points at the adapter that does serve that branch today.
-      const options = args.options ?? {};
-      const runtime = (options as RouterOptions).runtime;
-      if (runtime !== undefined) {
-        // The persisted selection WINS and is never re-decided (D13); `select` is decided here only
-        // when there is no persisted one — the same precedence `selectRuntime` itself implements.
-        const decided = runtime.selection ?? (runtime.select === undefined ? undefined : sdk.selectRuntime(runtime.select));
-        if (decided !== undefined && decided.runtimeKind !== "winter-agent") throw new RuntimeNotRoutedError(decided.runtimeKind);
-      }
-      return opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand) });
-    },
+    query: queryImpl as RuntimeSdk["query"],
     selectRuntime(input) {
       assertLive("selectRuntime");
-      const result = selectRuntimePure(input);
-      if (isSelectionRefusal(result)) throw new SelectionRefusedError(result);
-      return result;
+      return decide(input);
     },
     async handoff(session, to) {
       assertLive("handoff");
       const plan = await internals.barrier.plan(session, to);
-      return internals.barrier.execute(plan);
+      const outcome = await internals.barrier.execute(plan);
+      // THE LEDGER FOLLOWS THE CERTIFIED TRANSFER, and only it. A handoff that ended in a lossy fork
+      // offer or a refusal did NOT move the session, so the door must go on refusing the new runtime —
+      // updating the ledger on anything but `resumed` would turn a failed handoff into the silent
+      // switch the ledger exists to prevent.
+      if (outcome.kind === "resumed") persistedRuntime.set(session.sessionId, to);
+      return outcome;
     },
     async dispose() {
       // IDEMPOTENT. A host that disposes twice (a shutdown path plus a signal handler) must not get
