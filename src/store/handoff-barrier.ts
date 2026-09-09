@@ -195,7 +195,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   // EVERYTHING THE STORE TOUCHES IS RESOLVED ON FIRST USE. The spine's wiring line calls this factory
   // for every `createRuntimeSdk`, most of which never hand a session off and some of which (every
   // `test/spine/*` case) inject a peer with no store class at all. See `lazySharedSessionStore`.
-  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, ...(deps.winterHome === undefined ? {} : { winterHome: deps.winterHome }) }) : () => deps.shared!;
+  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(deps.winterHome === undefined ? {} : { winterHome: deps.winterHome }) }) : () => deps.shared!;
   const homeOf = (): string => deps.winterHome ?? sharedOf().identity.winterHome;
   let decorator: MaterializedResumeDecorator | undefined = deps.decorator;
   const decoratorOf = (): MaterializedResumeDecorator => (decorator ??= createMaterializedResumeDecorator(context, { shared: sharedOf, now }));

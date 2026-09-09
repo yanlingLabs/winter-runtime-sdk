@@ -121,7 +121,7 @@ export interface MaterializedResumeDecoratorHandle extends MaterializedResumeDec
 export function createMaterializedResumeDecorator(context: SeamContext, deps: MaterializedResumeDeps = {}): MaterializedResumeDecoratorHandle {
   const now = deps.now ?? (() => new Date());
   const sharedOf: () => SharedSessionStore =
-    typeof deps.shared === "function" ? deps.shared : deps.shared !== undefined ? () => deps.shared as SharedSessionStore : lazySharedSessionStore({ peers: context.peers });
+    typeof deps.shared === "function" ? deps.shared : deps.shared !== undefined ? () => deps.shared as SharedSessionStore : lazySharedSessionStore({ peers: context.peers, brand: context.brand });
   let report: MaterializedResumeProbeReport | undefined = deps.report;
 
   const doorOf = (): MaterializedResumeDoor => (report !== undefined && report.results.length > 0 && report.results.every((r) => r.passed) ? "preferred" : "fallback");

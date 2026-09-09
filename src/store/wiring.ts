@@ -31,7 +31,7 @@
 // has no logging of any kind (WS-05 §13, the global constraint).
 import { randomUUID } from "node:crypto";
 
-import type { SessionKey, SessionStore, SessionStoreEntry, SessionSummaryEntry } from "@yanlinglabs/winter-agent-sdk";
+import type { BrandProfile, SessionKey, SessionStore, SessionStoreEntry, SessionSummaryEntry } from "@yanlinglabs/winter-agent-sdk";
 
 import { RuntimeSdkError } from "../errors.ts";
 import type { RuntimeSdkPeers } from "../sdk.ts";
@@ -617,18 +617,32 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
  * it was wired in. Resolved on the first `plan()`/`execute()`, it costs nothing until a handoff exists,
  * and a host that already has a store passes it and never reaches this at all.
  */
-export function lazySharedSessionStore(input: { peers: RuntimeSdkPeers; winterHome?: string; policy?: Partial<MirrorPolicy> }): () => SharedSessionStore {
+export function lazySharedSessionStore(input: {
+  peers: RuntimeSdkPeers;
+  winterHome?: string;
+  /**
+   * The RESOLVED profile. NOT optional in practice: `resolveWinterHome()` defaults to `WINTER_BRAND`,
+   * so a call without it would send a rebranded host's sessions to Winter's own home directory — the
+   * exact failure the brand sweep gate exists to catch, and did catch, on this line.
+   */
+  brand: Pick<BrandProfile, "envPrefix" | "homeDirName">;
+  policy?: Partial<MirrorPolicy>;
+}): () => SharedSessionStore {
   let resolved: SharedSessionStore | undefined;
   return () => {
     if (resolved !== undefined) return resolved;
     const winterHome =
       input.winterHome ??
       (() => {
-        const resolveWinterHome = (input.peers.winter as unknown as { resolveWinterHome?: () => string }).resolveWinterHome;
+        const resolveWinterHome = (
+          input.peers.winter as unknown as {
+            resolveWinterHome?: (env?: Record<string, string | undefined>, brand?: Pick<BrandProfile, "envPrefix" | "homeDirName">) => string;
+          }
+        ).resolveWinterHome;
         if (typeof resolveWinterHome !== "function") {
           throw new SharedStoreUnavailableError();
         }
-        return resolveWinterHome();
+        return resolveWinterHome(undefined, input.brand);
       })();
     resolved = createSharedSessionStore({ peers: input.peers, winterHome, ...(input.policy === undefined ? {} : { policy: input.policy }) });
     return resolved;
