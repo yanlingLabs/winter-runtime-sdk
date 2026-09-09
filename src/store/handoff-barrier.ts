@@ -42,7 +42,7 @@ import type { MaterializedResumeDoor } from "../seams/materialized-resume.ts";
 import type { SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import type { RuntimeKind, RuntimeSelection } from "../selection/runtime-selection.ts";
 import { createMaterializedResumeDecorator, materializedTranscriptPath, resumeStagingRoot, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
-import { canonicalTranscriptPath, reconcileLocalWriteRoot, compareTranscriptTail } from "./reconcile.ts";
+import { canonicalTranscriptPath, compareTranscriptTail, localTranscriptPath, reconcileLocalWriteRoot, scanLocalWriteRoot } from "./reconcile.ts";
 import { materializeTempContinuity, resolveEngineTempLayout, tempContinuityModeFor, type EngineTempLayout } from "./temp-continuity.ts";
 import { lazySharedSessionStore, type SharedSessionStore } from "./wiring.ts";
 
@@ -396,43 +396,14 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     };
 
     const session = plan.session;
+    // EVERY AWAIT IS INSIDE THE TRY (review r3, N10). N3 wrapped the destination side and left the
+    // symmetric source-side calls — `loadEntry`, the source resolver, `owner.health()` — outside it, so
+    // `execute()` still had a fourth arm: an unknown session, an unreachable directory or a throwing
+    // `health()` escaped as a raw error. Nothing leaks on those paths (they precede the lease and the
+    // marker), but the seam's `Promise<HandoffOutcome>` is either total or it is not.
     const shared = sharedOf();
     const winterHome = homeOf();
-    const entry = await loadEntry(session);
-
-    // A STALE PLAN IS NOT EXECUTED (review r1, F9). Between `plan()` and `execute()` the session can
-    // change hands — a plan built when Winter owned it would otherwise run its whole eight steps
-    // against a record that has since moved, and report `resumed` for a transfer that never applied.
-    if (entry.runtimeKind !== plan.from) {
-      return lossy(1, `this plan was built when ${plan.from} owned the session and ${entry.runtimeKind} owns it now; re-plan against the current owner`);
-    }
-
-    const owner = (await deps.participants?.source?.(session, plan.from)) ?? undefined;
-    const healthNow = owner?.health === undefined ? undefined : await owner.health();
-
-    // PLAN AND EXECUTE AGREE BY CONSTRUCTION (review r1, F7). A step the plan already knows cannot be
-    // proven is refused here rather than run: `execute()` used to ignore the markers entirely and
-    // drive a same-runtime "handoff" to `resumed`, bumping the generation and rewriting the producer
-    // record for a transfer that moved nothing.
-    //
-    // STEP 4 IS THE ONE EXCEPTION, and it is not a loophole: its own logic below reaches the SAME
-    // refusal with the specific vocabulary WS-05 §12 gives it (`blocked: repair-required` /
-    // `mirror-error`), and collapsing that into a fork would lose the one distinction a host acts on.
-    const markers = new Map([...markersFor({ entry, to: plan.to, session, ...(healthNow === undefined ? {} : { health: healthNow }) })]);
-    for (const step of plan.steps) {
-      if (step.knownUnprovable !== undefined) markers.set(step.step, step.knownUnprovable);
-    }
-    for (const [step, reason] of [...markers.entries()].sort((a, b) => a[0] - b[0])) {
-      if (step === 4) continue;
-      return lossy(step, reason);
-    }
-
-    let lease: HandoffLease;
-    try {
-      lease = acquireHandoffLease(leaseRootOf(), session);
-    } catch (error) {
-      return blocked(1, "lease-held", error instanceof Error ? error.message : String(error));
-    }
+    let lease: HandoffLease | undefined;
     let stagedRoot: string | undefined;
     let pendingWritten = false;
     /** True once the producer record has landed: from that instant the handoff IS committed. */
@@ -467,7 +438,43 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       }
     };
 
+    let entry: RuntimeDirectoryEntry | undefined;
+    let target: HandoffResumeTarget | undefined;
     try {
+      entry = await loadEntry(session);
+      assertOneDecoratorStore(); // review r3, N8: the check the doc comment already promised runs here
+
+      // A STALE PLAN IS NOT EXECUTED (review r1, F9). Between `plan()` and `execute()` the session can
+      // change hands — a plan built when Winter owned it would otherwise run its whole eight steps
+      // against a record that has since moved, and report `resumed` for a transfer that never applied.
+      if (entry.runtimeKind !== plan.from) {
+        return lossy(1, `this plan was built when ${plan.from} owned the session and ${entry.runtimeKind} owns it now; re-plan against the current owner`);
+      }
+
+      const owner = (await deps.participants?.source?.(session, plan.from)) ?? undefined;
+      const healthNow = owner?.health === undefined ? undefined : await owner.health();
+
+      // PLAN AND EXECUTE AGREE BY CONSTRUCTION (review r1, F7). A step the plan already knows cannot be
+      // proven is refused here rather than run.
+      //
+      // STEP 4 IS THE ONE EXCEPTION, and it is not a loophole: its own logic below reaches the SAME
+      // refusal with the specific vocabulary WS-05 §12 gives it (`blocked: repair-required` /
+      // `mirror-error`), and collapsing that into a fork would lose the one distinction a host acts on.
+      const markers = new Map([...markersFor({ entry, to: plan.to, session, ...(healthNow === undefined ? {} : { health: healthNow }) })]);
+      for (const step of plan.steps) {
+        if (step.knownUnprovable !== undefined) markers.set(step.step, step.knownUnprovable);
+      }
+      for (const [step, reason] of [...markers.entries()].sort((a, b) => a[0] - b[0])) {
+        if (step === 4) continue;
+        return lossy(step, reason);
+      }
+
+      try {
+        lease = acquireHandoffLease(leaseRootOf(), session);
+      } catch (error) {
+        return blocked(1, "lease-held", error instanceof Error ? error.message : String(error));
+      }
+
       await owner?.stopNewTurns?.();
       record(1, true, "the handoff lease is held by this process and the source is not taking new turns");
 
@@ -507,14 +514,14 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // by path; the repair used to reach it through a SCAN, and a scan that found nothing reported
         // `nothing-to-do` — which is not `diverged`, so the barrier said "reconciled" and completed a
         // handoff that silently dropped the tail the source had written.
-        if (report.status === "diverged" || report.appended !== comparison.missing.length) {
+        if (report.status === "diverged" || report.appended !== comparison.missing) {
           return blocked(
             4,
             "repair-required",
-            `the canonical store could not be reconciled against ${localRoot}: ${comparison.missing.length} entr(y|ies) were missing and ${report.appended} landed (${report.status})`,
+            `the canonical store could not be reconciled against ${localRoot}: ${comparison.missing} entr(y|ies) were missing and ${report.appended} landed (${report.status})`,
           );
         }
-        record(4, true, `the canonical tail was ${comparison.missing.length} entr(y|ies) behind the recorded local-write root and has been reconciled`);
+        record(4, true, `the canonical tail was ${comparison.missing} entr(y|ies) behind the recorded local-write root and has been reconciled`);
       } else if (comparison.kind === "diverged" || comparison.kind === "canonical-ahead") {
         return blocked(4, "repair-required", comparison.reason);
       } else {
@@ -543,16 +550,25 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       const closed = (await owner?.close()) ?? undefined;
       if (closed !== undefined && closed.ok === false) return lossy(6, closed.reason);
       const level = raiseLevel(await currentLevel(shared, session), entry);
+      // THE WRITER LEASE FIRST, AND THE FLAG ONLY AFTER IT (review r3, N7). Arming `pendingWritten`
+      // before this call — r2's nit 1 — meant that a session whose lease another LIVE process holds
+      // took a correct, transient `blocked: lease-held` and then had `unwind()` write to it anyway:
+      // the write was refused the same way, the facade recorded `append-failed`, and the session was
+      // `repair-required` for the life of the store instance, with no local-write root to reconcile
+      // against and nothing that clears the flag. A refusal here must leave the session untouched.
+      try {
+        await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+      } catch (error) {
+        if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
+        return lossy(6, `the writer lease could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+      }
       let staged: PendingCommit;
-      // SET BEFORE THE CALL (review r2, nit 1): a throw from inside `markHandoffPending` — after its
-      // append, from its own `settle()` — would otherwise leave a marker `unwind()` does not know about.
-      // Clearing a marker that was never written is a no-op fold, which is the cheap side of the trade.
+      // Armed for exactly the window nit 1 was about: a throw from the marker's own append/settle.
       pendingWritten = true;
       try {
         staged = await markHandoffPending({ shared, session, entry, plan, level, now: now() });
       } catch (error) {
         await unwind();
-        if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
         return lossy(6, `the handoff could not be staged: ${error instanceof Error ? error.message : String(error)}`);
       }
       record(6, true, `the owner is closed, the writer lease is this process's, and a pending handoff to ${plan.to} at level ${level} is recorded — ownership has NOT moved`);
@@ -592,7 +608,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           text: (deps.noteText ?? defaultNoteText)({ from: plan.from, to: plan.to, session }),
         },
       });
-      const target: HandoffResumeTarget = {
+      target = {
         address: entry.address,
         runtimeKind: plan.to,
         backendSessionId: session.sessionId,
@@ -633,7 +649,20 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         pendingWritten = false;
       } catch (error) {
         await unwind();
-        return lossy(8, `the destination confirmed init but the producer record could not be written: ${error instanceof Error ? error.message : String(error)}`);
+        // THE TARGET TRAVELS WITH THE REFUSAL (review r3, N11). `stagedRoot` was released the moment the
+        // destination confirmed, so the copy at `target.stagingRoot` survives deliberately — and a host
+        // told only "the producer record could not be written" has no way to find the directory it now
+        // owns. Naming it is the difference between a documented leak and an orphan.
+        const reason = `the destination confirmed init but the producer record could not be written: ${error instanceof Error ? error.message : String(error)}`;
+        record(8, false, reason);
+        return {
+          kind: "lossy-fork-offered",
+          reason,
+          step: 8,
+          detail: target?.stagingRoot === undefined ? reason : `${reason}. The destination is reading ${target.stagingRoot}; that staging copy is retained deliberately and belongs to the host's retention pass.`,
+          ...(target === undefined ? {} : { target }),
+          steps: trail,
+        };
       }
 
       // FROM HERE THE OUTCOME IS `resumed` WHATEVER FAILS (review r2, N2.1). The transcript's own record
@@ -672,20 +701,23 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       // staging-root factory, `decorate()`, the destination RESOLVER and the note's own append — so a
       // throw escaped as a raw error, skipped `unwind()` and left a marker and a staged copy behind.
       const detail = error instanceof Error ? error.message : String(error);
-      if (committed) {
-        // Past the producer record there is no honest way to say the source kept the session.
+      if (committed && entry !== undefined) {
+        // Past the producer record there is no honest way to say the source kept the session. The
+        // TARGET travels with it (review r3, N11): a host told the handoff completed needs the staging
+        // root it now owns, and this arm is one of the two that can leak one deliberately.
         return {
           kind: "resumed",
           selection: { ...entry.selection, runtimeKind: plan.to },
           step: 8,
           detail: `the session resumed on ${plan.to}, but the barrier failed afterwards: ${detail}`,
+          ...(target === undefined ? {} : { target }),
           steps: trail,
         };
       }
       await unwind();
       return lossy(at, `the barrier failed at step ${at}: ${detail}`);
     } finally {
-      releaseHandoffLease(lease);
+      if (lease !== undefined) releaseHandoffLease(lease);
     }
   };
 
@@ -727,39 +759,66 @@ function defaultTempLayout(context: SeamContextWithDirectory): (entry: RuntimeDi
 
 type LocalRootComparison =
   | { kind: "match"; reason: string }
-  | { kind: "canonical-behind"; missing: unknown[]; reason: string }
+  | { kind: "canonical-behind"; missing: number; reason: string }
   | { kind: "diverged"; reason: string }
   | { kind: "canonical-ahead"; reason: string };
 
 /**
- * §12 step 4's comparison, including the case the spec's prose does not name: THERE IS NO LOCAL ROOT.
+ * §12 step 4's comparison, over the SESSION — its own transcript and every subagent transcript under
+ * it (review r3, N9 and its second nit).
  *
- * A Winter-owned session writes the canonical file itself — the local write and the canonical write are
- * the same write — so there is nothing to compare it against and the step is vacuously satisfied. Saying
- * so explicitly is the point: a barrier that silently skipped step 4 for half its sessions would look
- * identical to one that ran it.
+ * TWO THINGS THIS FIXES AT ONCE. The count it returns is now the same scope the repair reports back
+ * (`reconcileLocalWriteRoot` reconciles the named session AND its subkeys), so a session whose subagent
+ * is also behind is no longer refused with "1 missing and 2 landed (reconciled)" — a self-contradictory
+ * message inside a spurious refusal. And a subagent that is behind while the parent is level is no
+ * longer INVISIBLE: it used to read `match`, and the handoff completed with the child's tail left in the
+ * local root. WS-05 §12 step 4 is about the session, and a subkey is part of it.
+ *
+ * THE PATHS COME FROM ONE PLACE. The parent's is `localTranscriptPath` — the same builder the repair
+ * uses — and the children come from the same scan the repair walks, so "is this the transcript" has one
+ * answer on both halves of the step.
+ *
+ * THERE IS NO LOCAL ROOT AT ALL for a Winter-owned session: it writes the canonical file itself, so the
+ * local write and the canonical write are the same write. Saying so explicitly is the point — a barrier
+ * that silently skipped step 4 for half its sessions would look identical to one that ran it.
  */
 async function compareAgainstLocalRoot(args: { shared: SharedSessionStore; session: SessionKey; localRoot: string | undefined }): Promise<LocalRootComparison> {
   if (args.localRoot === undefined) {
     return { kind: "match", reason: "the source writes the canonical transcript directly, so there is no separate local-write root to compare against" };
   }
-  const localPath = join(args.localRoot, "projects", args.session.projectKey, `${args.session.sessionId}.jsonl`);
-  if (!existsSync(localPath)) {
-    return { kind: "match", reason: `the recorded local-write root holds no transcript for this session (${localPath}), so there is nothing it could disagree with` };
+  const keys: SessionKey[] = [
+    args.session,
+    ...scanLocalWriteRoot(args.localRoot)
+      .filter((found) => found.key.subpath !== undefined && found.key.projectKey === args.session.projectKey && found.key.sessionId === args.session.sessionId)
+      .map((found) => found.key),
+  ];
+  let missing = 0;
+  let compared = 0;
+  for (const key of keys) {
+    const localPath = localTranscriptPath(args.localRoot, key);
+    if (!existsSync(localPath)) continue;
+    compared += 1;
+    const entries = (await args.shared.store.load(key)) ?? [];
+    const canonicalLines = entries.filter((entry) => entry["type"] !== "agent_metadata").map((entry) => JSON.stringify(entry));
+    const comparison = compareTranscriptTail({ localPath, canonicalLines, isDecoration: (uuid) => args.shared.decorations.has(args.session, uuid) });
+    const what = key.subpath === undefined ? "the session's transcript" : `subkey ${key.subpath}`;
+    switch (comparison.kind) {
+      case "match":
+        break;
+      case "canonical-behind":
+        missing += comparison.missing.length;
+        break;
+      case "diverged":
+        return { kind: "diverged", reason: `${what}: ${comparison.reason}` };
+      case "canonical-ahead":
+        return { kind: "canonical-ahead", reason: `${what}: the canonical store holds ${comparison.extra} entr(y|ies) the recorded local-write root does not, so they are not the same history` };
+    }
   }
-  const entries = (await args.shared.store.load(args.session)) ?? [];
-  const canonicalLines = entries.filter((entry) => entry["type"] !== "agent_metadata").map((entry) => JSON.stringify(entry));
-  const comparison = compareTranscriptTail({ localPath, canonicalLines, isDecoration: (uuid) => args.shared.decorations.has(args.session, uuid) });
-  switch (comparison.kind) {
-    case "match":
-      return { kind: "match", reason: `the canonical tail matches the recorded local-write root over all ${comparison.lines} entries` };
-    case "canonical-behind":
-      return { kind: "canonical-behind", missing: comparison.missing, reason: `the canonical tail is ${comparison.missing.length} entr(y|ies) behind ${localPath}` };
-    case "diverged":
-      return { kind: "diverged", reason: comparison.reason };
-    case "canonical-ahead":
-      return { kind: "canonical-ahead", reason: `the canonical store holds ${comparison.extra} entr(y|ies) the recorded local-write root does not, so they are not the same history` };
+  if (compared === 0) {
+    return { kind: "match", reason: `the recorded local-write root holds no transcript for this session (${args.localRoot}), so there is nothing it could disagree with` };
   }
+  if (missing === 0) return { kind: "match", reason: `the canonical tail matches the recorded local-write root across ${compared} transcript(s)` };
+  return { kind: "canonical-behind", missing, reason: `the canonical tail is ${missing} entr(y|ies) behind ${args.localRoot} across ${compared} transcript(s)` };
 }
 
 // --- step 5 -------------------------------------------------------------------------------------------
@@ -992,11 +1051,9 @@ async function markHandoffPending(args: {
   level: CompatibilityLevel;
   now: Date;
 }): Promise<PendingCommit> {
-  // The writer lease, re-verified before anything is written: a DIFFERENT live process holding it is
-  // exactly the "exactly one runtime owns a compatibility session at a time" violation, and the store's
-  // own typed `WinterStoreLeaseError` is the honest way to learn it.
-  await args.shared.canonical.acquireSessionLease({ projectKey: args.session.projectKey, sessionId: args.session.sessionId });
-
+  // The writer lease is the CALLER's business now (review r3, N7): it has to be taken before the
+  // caller arms the marker flag, because a refusal must leave the session with nothing written to it —
+  // not even the fold that clears a marker that was never made.
   const entries = (await args.shared.store.load(args.session)) ?? [];
   const chainable = entries.filter((entry) => typeof entry["uuid"] === "string");
   const cursor = (chainable[chainable.length - 1]?.["uuid"] as string | undefined) ?? "";

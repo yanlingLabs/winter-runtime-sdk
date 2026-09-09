@@ -1080,10 +1080,22 @@ describe("N2 / N3 — after `confirmInit`, the barrier never lies and never thro
           throw new Error("the staging root is not writable");
         },
       };
-      const barrier = barrierFor(bed, { decorator: throwing as never, participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+      // The staging root EXISTS before `decorate()` throws, so "leaves no staged copy" is an assertion
+      // rather than a vacuous truth (review r3, nit 4).
+      let staged: string | undefined;
+      const barrier = barrierFor(bed, {
+        decorator: throwing as never,
+        stagingRootFor: (uuid) => {
+          staged = join(bed.home, "staging", `${RESUME_STAGING_PREFIX}${uuid}`);
+          mkdirSync(join(staged, "projects"), { recursive: true });
+          return staged;
+        },
+        participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) },
+      });
       const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
       expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
       expect(outcome.detail).toContain("not writable");
+      expect(existsSync(staged!)).toBe(false);
       expect((await bed.shared.canonical.readSessionSummary(bed.key))?.["pendingHandoff"]).toBeNull();
       expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
     });
@@ -1334,5 +1346,196 @@ describe("the source can still write after a handoff — a DOCUMENTED behaviour,
       expect((await barrier.plan(bed.key, "claude-agent")).from).toBe("winter-agent");
       expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
     });
+  });
+});
+
+describe("fix round 3 — the last four edges", () => {
+  test("N7: a writer lease held elsewhere at step 6 leaves the session's health untouched", async () => {
+    // A correct, TRANSIENT `blocked: lease-held` used to poison the session: `pendingWritten` was armed
+    // before the lease, so `unwind()` wrote to a session this process had just been refused, the facade
+    // recorded `append-failed`, and every later attempt was `blocked: mirror-error step 4` with nothing
+    // able to clear it (review r3, N7 / PLANT 37).
+    let contended = true;
+    class LeaseHeldElsewhere extends WinterCompatibilitySessionStore {
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        if (contended) throw Object.assign(new Error("session lease is held by another live process (pid 4242)"), { name: "WinterStoreLeaseError" });
+        return super.acquireSessionLease(key);
+      }
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        if (contended) throw Object.assign(new Error("session lease is held by another live process (pid 4242)"), { name: "WinterStoreLeaseError" });
+        return super.append(key, entries);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        contended = false;
+        await bed.record();
+        await bed.append(1);
+        const barrier = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+
+        contended = true;
+        const refused = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+        expect(refused).toMatchObject({ kind: "blocked", reason: "lease-held", step: 6 });
+
+        // NOTHING was written to the contended session: no mirror error, no `repair-required`.
+        contended = false;
+        expect(bed.shared.health(bed.key).transcriptHealth).toBe("ok");
+        expect(bed.shared.health(bed.key).errors).toHaveLength(0);
+
+        // ...so the handoff succeeds once the contention is over.
+        const second = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+        expect(second.kind, second.detail).toBe("resumed");
+      },
+      { store: LeaseHeldElsewhere, policy: { backoffMs: 1 } },
+    );
+  });
+
+  test("N8: a foreign decorator is refused through `execute()` too, before any mirrored turn", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      const second = createSharedSessionStore({ peers: bed.peers, winterHome: bed.home });
+      const foreign = createMaterializedResumeDecorator(bed.context, {
+        shared: second,
+        report: { door: "preferred", probedAt: new Date(0).toISOString(), results: (["neighbor-file-survival", "no-wash-back", "sidecar-round-trip", "crash-pairs"] as const).map((probe) => ({ probe, passed: true, evidence: "forced open" })) },
+      });
+      // A plan built elsewhere (a cached one, or a barrier whose plan() was never called) reaching
+      // `execute()` directly: the decoration would land in the foreign registry, the destination's first
+      // mirrored turn would keep a dangling parentUuid, and step 5 would fail forever.
+      const clean = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+      const plan = await clean.plan(bed.key, "claude-agent");
+      const wrong = barrierFor(bed, { decorator: foreign, participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+      // `execute()` returns outcomes rather than throwing (review r3, N10), so the wiring refusal
+      // arrives as a fork that NAMES it — the important half is that the handoff does not run.
+      const outcome = await wrong.execute(plan);
+      expect(outcome.kind).toBe("lossy-fork-offered");
+      expect(outcome.detail).toContain("DIFFERENT session store");
+      // Nothing moved, and nothing was decorated into either store.
+      expect((await bed.directoryStore.load())[0]!.runtimeKind).toBe("winter-agent");
+      expect(bed.shared.decorations.list(bed.key)).toHaveLength(0);
+      expect(second.decorations.list(bed.key)).toHaveLength(0);
+    });
+  });
+
+  test("N9: a lagging SUBAGENT is reconciled with its parent, and counted in the same scope", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      const [a] = await bed.append(1);
+      const subkey: SessionKey = { ...bed.key, subpath: "subagents/agent-a1" };
+      // Each transcript has its OWN chain (WS-05 §5.2) — the child's parent is within the child.
+      const child = bed.entry({ key: subkey, parentUuid: null });
+      const parentTail = bed.entry({ parentUuid: a!["uuid"] });
+      const spool = join(bed.home, "spool");
+      for (const [key, entries] of [
+        [bed.key, [a!, parentTail]],
+        [subkey, [child]],
+      ] as Array<[SessionKey, SessionStoreEntry[]]>) {
+        const path = localTranscriptPath(spool, key);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+      }
+
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ health: () => ({ launchedThroughProxy: true, recordedLocalWriteRoot: spool, transcriptHealth: "ok" }) }),
+          destination: () => confirmingDestination({}),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      // Not a spurious refusal: the counts are the same scope now, and BOTH transcripts landed.
+      expect(outcome.kind, outcome.detail).toBe("resumed");
+      expect(((await bed.shared.store.load(bed.key)) ?? []).map((e) => e["uuid"])).toContain(parentTail["uuid"]);
+      expect(((await bed.shared.store.load(subkey)) ?? []).map((e) => e["uuid"])).toContain(child["uuid"]);
+    });
+  });
+
+  test("N9 (the other half): a subagent behind while the PARENT is level is not invisible", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      const [a] = await bed.append(1);
+      const subkey: SessionKey = { ...bed.key, subpath: "subagents/agent-a1" };
+      const child = bed.entry({ key: subkey, parentUuid: null });
+      const spool = join(bed.home, "spool");
+      for (const [key, entries] of [
+        [bed.key, [a!]],
+        [subkey, [child]],
+      ] as Array<[SessionKey, SessionStoreEntry[]]>) {
+        const path = localTranscriptPath(spool, key);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+      }
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ health: () => ({ launchedThroughProxy: true, recordedLocalWriteRoot: spool, transcriptHealth: "ok" }) }),
+          destination: () => confirmingDestination({}),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome.kind, outcome.detail).toBe("resumed");
+      // The child's tail reached the canonical store — it used to be left in the local root.
+      expect(((await bed.shared.store.load(subkey)) ?? []).map((e) => e["uuid"])).toContain(child["uuid"]);
+    });
+  });
+
+  test("N10: `execute()` returns an outcome when the source resolver or `health()` throws", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record();
+      await bed.append(1);
+      const plan = await barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } }).plan(bed.key, "claude-agent");
+
+      const resolverThrows = barrierFor(bed, {
+        participants: {
+          source: () => {
+            throw new Error("the source resolver is unreachable");
+          },
+          destination: () => confirmingDestination({}),
+        },
+      });
+      expect(await resolverThrows.execute(plan)).toMatchObject({ kind: "lossy-fork-offered", step: 1 });
+
+      const healthThrows = barrierFor(bed, {
+        participants: {
+          source: () =>
+            idleOwner({
+              health: () => {
+                throw new Error("health() is unreachable");
+              },
+            }),
+          destination: () => confirmingDestination({}),
+        },
+      });
+      const outcome = await healthThrows.execute(plan);
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 1 });
+      if (outcome.kind !== "lossy-fork-offered") throw new Error("unreachable");
+      expect(outcome.reason).toContain("health() is unreachable");
+
+      // And a session the directory has never heard of is an OUTCOME here, not a throw.
+      const unknown = await resolverThrows.execute({ ...plan, session: { projectKey: "p", sessionId: "00000000-0000-4000-8000-00000000ffff" } });
+      expect(unknown.kind).toBe("lossy-fork-offered");
+    });
+  });
+
+  test("N11: a commit that fails after `confirmInit` names the staging root the destination now owns", async () => {
+    class RefusesTheProducerRecord extends WinterCompatibilitySessionStore {
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        if (entries.some((entry) => entry["producerRuntime"] !== undefined)) throw new Error("the summary sidecar is read-only");
+        return super.append(key, entries);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.record();
+        await bed.append(1);
+        const barrier = barrierFor(bed, { participants: { source: () => idleOwner(), destination: () => confirmingDestination({}) } });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+        expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+        // The host can FIND the directory it now owns — the leak is deliberate, so it has to be locatable.
+        expect(outcome.target).toBeDefined();
+        expect(existsSync(outcome.target!.stagingRoot!)).toBe(true);
+        expect(outcome.detail).toContain(outcome.target!.stagingRoot!);
+        expect(outcome.detail).toContain("retention pass");
+      },
+      { store: RefusesTheProducerRecord, policy: { backoffMs: 1 } },
+    );
   });
 });
