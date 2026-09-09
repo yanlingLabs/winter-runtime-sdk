@@ -28,7 +28,7 @@ import { mcpToolName, type BrandProfile, type SessionStore } from "@yanlinglabs/
 import type { OfficialOptions } from "../seams/official-sdk-shapes.ts";
 import type { OptionsTemplateInput } from "../seams/official-adapter.ts";
 import { officialToolAliases } from "./aliases.ts";
-import { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, type OfficialPermissionMode } from "./callbacks.ts";
+import { createApprovalBridge, createContainmentHooks, isOurApprovalBridge, isOurContainmentHook, type OfficialPermissionMode } from "./callbacks.ts";
 import type { OfficialApprovalBridge } from "./callbacks.ts";
 import { containmentPaths, officialDisallowedTools, type ContainmentPolicy } from "./containment.ts";
 import { officialBranchLabel } from "./branding.ts";
@@ -250,16 +250,20 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
   // adapter's own door. `canUseTool` is not consulted for that writer at all, so the hook is its ONLY
   // floor; an invariant that did not check for it was checking the wrong things.
   //
-  // The marks are what make this checkable for an object we did not build — see `callbacks.ts`.
+  // IDENTITY, NOT THE MARK (review r4, NEW-18). The marks make the floor and the bridge VISIBLE on an
+  // object we did not build; they are exported `Symbol.for` keys, so they are stampable, and a hook
+  // stamped with the floor's mark was measured standing in for the floor on the launch path. What is
+  // demanded here is a hook `createContainmentHooks` built and a bridge `createApprovalBridge` built —
+  // `WeakSet` membership, which nothing outside `callbacks.ts` can confer.
   const hooks = (options["hooks"] ?? {}) as Record<string, Array<{ hooks?: unknown[] }>>;
-  const hasFloor = (hooks["PreToolUse"] ?? []).some((matcher) => (matcher.hooks ?? []).some((hook) => carriesMark(hook, CONTAINMENT_FLOOR_MARK)));
+  const hasFloor = (hooks["PreToolUse"] ?? []).some((matcher) => (matcher.hooks ?? []).some((hook) => isOurContainmentHook(hook)));
   if (!hasFloor) {
     refuse(
       "hooks.PreToolUse",
-      "§8's containment floor is missing: the permission callback is not consulted for every tool on this runtime (the worktree writers never reach it), so the PreToolUse hook is the only point every call passes through — a session without it can create vendor-named paths (WS-14 §8/§10)",
+      "§8's containment floor is missing, or is not this branch's (a hook merely stamped with the exported mark is not the floor): the permission callback is not consulted for every tool on this runtime (the worktree writers never reach it), so the PreToolUse hook is the only point every call passes through — a session without it can create vendor-named paths (WS-14 §8/§10)",
     );
   }
-  if (!carriesMark(options["canUseTool"], APPROVAL_BRIDGE_MARK)) {
+  if (!isOurApprovalBridge(options["canUseTool"])) {
     refuse(
       "canUseTool",
       "the approval bridge is missing or is not this branch's: §10's decisions must go through the bridge that applies the containment floor first and returns a typed PermissionResult (never `null`)",

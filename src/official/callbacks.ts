@@ -153,37 +153,56 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
 // point every call passes through.
 
 /**
- * THE MARKS THAT MAKE THE FLOOR CHECKABLE (review r2, NEW-1).
+ * THE MARKS THAT MAKE THE FLOOR VISIBLE (review r2, NEW-1) — visible, and no longer PROOF.
  *
  * `assertOptionsInvariants` has to be able to answer "does this options object carry the floor?" for
  * an object it did not build — that is the whole point of a function whose doc says it validates what
  * `launch()` is HANDED. A structural guess ("some PreToolUse matcher exists") would pass for any hook
- * at all, so the floor's own callback and the approval bridge each carry a symbol the check looks for.
- * `Symbol.for` rather than a module-local symbol: two copies of this package in one process (a host
- * vendoring the router beside an app that also vendors it) must still recognise each other's floor.
+ * at all, so the floor's own callback and the approval bridge each carry a symbol — `Symbol.for`, so a
+ * host reading an options object can recognise the two by name whichever copy of this package stamped
+ * them.
+ *
+ * WHAT A MARK IS NOW (review r3 NEW-11, review r4 NEW-18): a LABEL. It is an exported `Symbol.for` key,
+ * so any caller can stamp it, and both marks have been measured being stamped to some effect. The
+ * answer to "is this the floor / the bridge" is the identity check further down, never the mark.
  */
 export const CONTAINMENT_FLOOR_MARK = Symbol.for("winter-runtime-sdk.official.containment-floor");
 export const APPROVAL_BRIDGE_MARK = Symbol.for("winter-runtime-sdk.official.approval-bridge");
 
-/** True when this function is one of ours — the floor's hook or the approval bridge. */
+/** True when this function carries the mark — a label a host can read, NOT proof that this package made it. */
 export function carriesMark(value: unknown, mark: symbol): boolean {
   return typeof value === "function" && (value as unknown as Record<symbol, unknown>)[mark] === true;
 }
 
 /**
- * THE IDENTITY CHECK (review r3, NEW-11) — for the one decision where a forgery has consequences.
+ * THE IDENTITY CHECKS (review r3 NEW-11, review r4 NEW-18) — the question a mark cannot answer.
  *
- * The marks make the floor CHECKABLE for an options object we did not build, which is what the
- * invariant needs; they are also `Symbol.for` keys on an exported symbol, so any caller can stamp
- * one. For the hook that costs nothing (the adapter merges the genuine floor anyway), but a stamped
- * `canUseTool` was measured being taken VERBATIM — skipping the saved-approval strip and letting the
- * vendor's settings file be written. So the adapter asks a different question of the bridge: not "is
- * it marked" but "did WE make it", which a `WeakSet` answers and nobody can counterfeit.
+ * Both marks are `Symbol.for` keys on exported symbols, so any caller can stamp one, and each has been
+ * measured being stamped to some effect. r3: a stamped `canUseTool` was taken VERBATIM, skipping the
+ * saved-approval strip and letting the vendor's settings file be written. r4: the fix for that
+ * recognised the bridge by identity but left the hook on the mark — and the r3 tidy-up that skipped the
+ * floor's merge "when the options already carry the mark" turned the token that PROVED the floor was
+ * installed into the token that REMOVED it. A no-op host hook stamped with it replaced §8's floor;
+ * `EnterWorktree` and `Task(isolation:"worktree")` created `<cwd>/.claude` (swept post-hoc) and left a
+ * dangling `.git/worktrees/…` entry the sweep cannot see. So both are recognised the same way now: not
+ * "is it marked" but "did WE make it", which a `WeakSet` answers and nobody can counterfeit.
+ *
+ * SCOPE OF THE IDENTITY, stated: it is per copy of this module. A second copy of the package in one
+ * process cannot vouch for the first's floor — and does not need to, because `launch()` merges its own
+ * copy's floor on every launch before the invariants run. The one route that notices is a host
+ * validating copy A's options with copy B's `assertOptionsInvariants` directly, and there the refusal
+ * is the safe direction.
  */
 const OUR_BRIDGES = new WeakSet<object>();
+const OUR_FLOORS = new WeakSet<object>();
 
 export function isOurApprovalBridge(value: unknown): value is OfficialApprovalBridge {
   return typeof value === "function" && OUR_BRIDGES.has(value as unknown as object);
+}
+
+/** True only for a hook `createContainmentHooks` built. A hook merely stamped with the mark is NOT the floor. */
+export function isOurContainmentHook(value: unknown): boolean {
+  return typeof value === "function" && OUR_FLOORS.has(value as unknown as object);
 }
 
 /** The subset of the hook contract this needs, declared structurally (the peer is never imported). */
@@ -225,6 +244,7 @@ export function createContainmentHooks(options: ContainmentHooksOptions): Record
     return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: decision.reason } };
   };
   (guard as unknown as Record<symbol, unknown>)[CONTAINMENT_FLOOR_MARK] = true;
+  OUR_FLOORS.add(guard as unknown as object);
   return { PreToolUse: [{ hooks: [guard] }] };
 }
 

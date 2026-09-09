@@ -23,8 +23,8 @@ import type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, Of
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
 
 import { officialBranchLabel } from "./branding.ts";
-import { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, isOurApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./callbacks.ts";
-import type { ContainmentPolicy } from "./containment.ts";
+import { createApprovalBridge, createContainmentHooks, isOurApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./callbacks.ts";
+import { resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
 import { createContainmentSweep, type ContainmentBreach, type ContainmentSweep } from "./sweep.ts";
 import { mergeHooks } from "./options-template.ts";
 import { buildOfficialChildEnv, type OfficialEnvInput, type OfficialEnvPolicy } from "./env-allowlist.ts";
@@ -224,6 +224,10 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
    */
   const installFloor = (plan: OfficialLaunchPlan): OfficialOptions => {
     const containment: ContainmentPolicy = { projectDirName: brand.projectDirName, ...(policy.containment ?? {}) };
+    // THE ADAPTER'S OWN POLICY IS VALIDATED ON EVERY LAUNCH, whichever bridge the caller brought (review
+    // r4, NEW-19). `redirect` was a typed refusal only on the route where this adapter happened to
+    // construct the bridge, and a silent `disable` when the caller's bridge was one this package made.
+    resolveSavedApprovalDisposition(containment, branchLabel);
     const home = (plan.options.env ?? {})["HOME"];
     const sweep = createContainmentSweep({
       cwd: plan.cwd,
@@ -231,12 +235,23 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
       branchLabel,
       onBreach: (breach, error) => policy.onContainmentBreach?.(breach, error),
     });
-    // A SECOND COPY OF THE FLOOR IS HARMLESS AND UNTIDY (review r3, NEW-15): options built by
-    // `buildOfficialOptions` already carry it, so merging unconditionally stacked two identical pure
-    // decisions. Merge ours only when the caller's do not already carry the mark.
-    const hostHooks = (plan.options.hooks ?? {}) as Record<string, Array<{ hooks?: unknown[] }>>;
-    const alreadyFloored = (hostHooks["PreToolUse"] ?? []).some((matcher) => (matcher.hooks ?? []).some((hook) => carriesMark(hook, CONTAINMENT_FLOOR_MARK)));
-    const floorHooks = alreadyFloored ? {} : (createContainmentHooks({ brand, containment }) as Record<string, unknown[]>);
+    // THE FLOOR IS MERGED ON EVERY LAUNCH, UNCONDITIONALLY (review r4, NEW-18). Fix r3 skipped it when
+    // the caller's PreToolUse hooks already carried `CONTAINMENT_FLOOR_MARK`, to spare a second copy —
+    // and the mark is a `Symbol.for` key on an exported symbol, so the token that PROVED the floor was
+    // installed became the token that REMOVED it. Measured on the real runtime: a no-op host hook
+    // stamped with it replaced §8's floor, `EnterWorktree` and `Task(isolation:"worktree")` created
+    // `<cwd>/.claude` (swept post-hoc, the turn ended) and left a dangling `.git/worktrees/…` entry the
+    // sweep cannot see. And no forgery was needed: a GENUINE floor built by `buildOfficialOptions` under
+    // a looser template policy carries the TEMPLATE's dispositions, so skipping the merge made this
+    // adapter's own `policy.containment` inert for every caller of the supported path.
+    //
+    // So provenance is the wrong test here — a floor built with a different policy is a different floor —
+    // and the only hook that applies THIS adapter's policy is the one it builds itself, on every launch.
+    // A second copy is a pure decision the runtime evaluates beside the first (measured: every matcher
+    // runs, and any deny wins), which is what "install-if-omitted, merge never replace" (review r2,
+    // NEW-1) always meant. Identity is asked where it is the right question: `assertOptionsInvariants`
+    // recognises a floor by `WeakSet` membership, never by the mark.
+    const floorHooks = createContainmentHooks({ brand, containment }) as Record<string, unknown[]>;
     const merged = mergeHooks(mergeHooks(floorHooks, sweep.hooks as unknown), plan.options.hooks);
     const existing = plan.options.canUseTool;
     // A CALLER'S OWN CALLBACK IS WRAPPED, NEVER DROPPED: it becomes the broker behind our bridge, so
@@ -282,8 +297,9 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     // REVIEW r2, NEW-1 — THE FLOOR IS INSTALLED HERE, on the caller's options, before anything is
     // asserted about them. "Merge, never replace": the host's own hooks and its own broker survive,
     // ours run first, and the sweep's snapshot pair rides along. Then the invariants check that the
-    // result really carries both marks — so an options object that arrived without them is fixed and
-    // an object that cannot be fixed is refused, rather than launching uncontained.
+    // result really carries both — by IDENTITY, not by a stampable mark (review r4, NEW-18) — so an
+    // options object that arrived without them is fixed and an object that cannot be fixed is refused,
+    // rather than launching uncontained.
     const withFloor = installFloor(plan);
     assertOptionsInvariants(withFloor, branchLabel);
     if (resume !== undefined && resume.resume.length === 0) {

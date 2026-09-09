@@ -30,7 +30,7 @@ export type { AuthCredentialPlan, AuthFamily, AuthVariableSetKey, ClaudeOauthGat
 export { OFFICIAL_DISCLOSURES, officialBranchLabel } from "./branding.ts";
 export type { OfficialDisclosure } from "./branding.ts";
 
-export { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision } from "./callbacks.ts";
+export { APPROVAL_BRIDGE_MARK, CONTAINMENT_FLOOR_MARK, carriesMark, createApprovalBridge, createContainmentHooks, createFirstResponseWins, isOurApprovalBridge, isOurContainmentHook, revalidateResumedDecision } from "./callbacks.ts";
 export type {
   ApprovalBroker,
   ApprovalRequest,

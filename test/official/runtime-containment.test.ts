@@ -14,7 +14,7 @@
 // statement about a path that could never have existed.
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { WINTER_BRAND, type SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
 import { createInMemoryRuntimeDirectoryStore } from "../../src/index.ts";
@@ -22,8 +22,9 @@ import { createFakeKeychain, createFakeWinterPeer, withLoopbackFake } from "../.
 import type { SeamContextWithDirectory } from "../../src/seams/context.ts";
 import { stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import { createOfficialAdapter } from "../../src/official/index.ts";
-import { createApprovalBridge, type ApprovalBroker, type OfficialPermissionMode } from "../../src/official/callbacks.ts";
+import { createOfficialAdapter, type OfficialAdapterPolicy } from "../../src/official/index.ts";
+import { CONTAINMENT_FLOOR_MARK, createApprovalBridge, type ApprovalBroker, type OfficialPermissionMode } from "../../src/official/callbacks.ts";
+import type { ContainmentPolicy } from "../../src/official/containment.ts";
 import type { ContainmentBreach } from "../../src/official/sweep.ts";
 import type { OfficialOptions } from "../../src/seams/official-sdk-shapes.ts";
 import { cleanupHermetic, decoyUntouched, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, treeOf, type HermeticSession, type ScriptedTurn } from "./support.ts";
@@ -61,6 +62,10 @@ async function runContainment(args: {
   broker?: ApprovalBroker;
   /** Edit the options AFTER the template built them — the "host builds them by hand" case (NEW-1). */
   mutateOptions?: (options: OfficialOptions) => OfficialOptions;
+  /** The adapter's own policy — its `options` (the TEMPLATE's policy) and its `containment` are two surfaces (review r4, NEW-18). */
+  adapterPolicy?: OfficialAdapterPolicy;
+  /** The containment policy the harness's OWN bridge is built with. Default: the floor's strict default. */
+  bridgeContainment?: ContainmentPolicy;
 }): Promise<{
   decisions: Array<{ tool: string; behavior: string; source: string }>;
   results: ReturnType<typeof toolResults>;
@@ -79,7 +84,7 @@ async function runContainment(args: {
   await withLoopbackFake({ routes }, async (fake) => {
     const base = { peers: { winter: createFakeWinterPeer().peer, claude: bed.module }, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore: createInMemoryRuntimeDirectoryStore() };
     const context: SeamContextWithDirectory = { ...base, directory: stubRuntimeDirectory(base) };
-    const adapter = createOfficialAdapter(context);
+    const adapter = createOfficialAdapter(context, args.adapterPolicy ?? {});
     await adapter.ready();
 
     const templateInput = {
@@ -106,6 +111,7 @@ async function runContainment(args: {
       canUseTool: createApprovalBridge({
         brand: WINTER_BRAND,
         mode: args.mode ?? "default",
+        ...(args.bridgeContainment === undefined ? {} : { containment: args.bridgeContainment }),
         broker: args.broker ?? (async (request) => ({ behavior: "allow", updatedInput: request.input })),
         onDecision: ({ request, result, source }) => decisions.push({ tool: request.toolName, behavior: result.behavior, source }),
       }),
@@ -149,6 +155,20 @@ function vendorNamedArtifacts(session: HermeticSession): string[] {
   if (existsSync(join(session.home, ".claude", "plans"))) found.push(join(session.home, ".claude", "plans"));
   for (const entry of readdirSync(session.decoyVendorHome)) if (entry !== "decoy.json") found.push(join(session.decoyVendorHome, entry));
   return found;
+}
+
+/**
+ * The worktree admin entries a session left in the repository (review r4, NEW-18).
+ *
+ * `git worktree add` records every worktree under `.git/worktrees/<name>`, and that record OUTLIVES the
+ * vendor-named checkout: with the floor suppressed, `EnterWorktree` created `<cwd>/.claude/worktrees/…`,
+ * the sweep removed it, and `.git/worktrees/feature` stayed behind — a dangling entry the sweep does
+ * not look for (it is not vendor-named) and cannot attribute. The floor stopping the call PRE-hoc is
+ * the only thing that keeps this list empty, so it is asserted beside row 14's own predicate.
+ */
+function danglingWorktreeEntries(session: HermeticSession): string[] {
+  const dir = join(session.cwd, ".git", "worktrees");
+  return existsSync(dir) ? readdirSync(dir).sort() : [];
 }
 
 describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, against the real pinned runtime", () => {
@@ -412,6 +432,132 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
       // passes through — is absent, and so is the product's own (nothing routes one).
       expect(existsSync(join(session.cwd, ".claude", "settings.local.json"))).toBe(false);
       expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
+      expect(vendorNamedArtifacts(session)).toEqual([]);
+      expect(decoyUntouched(session)).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "review r4, NEW-18 (a): a host hook stamped with the exported floor mark does not REPLACE the floor — the floor is recognised by identity",
+    async () => {
+      // THE REVIEWER'S PLANT, and it is fix r3's own tidy-up inverted: `installFloor` skipped the merge
+      // when the caller's hooks already carried `CONTAINMENT_FLOOR_MARK`, so a no-op hook stamped with
+      // the exported symbol REPLACED §8's floor. Measured on `898112a` in this exact bed: `EnterWorktree`
+      // RAN, created `<cwd>/.claude` (swept post-hoc, the turn ended) and left `.git/worktrees/feature`
+      // behind — a dangling worktree admin entry the sweep cannot see and does not clean.
+      const session = hermeticSession("containment-counterfeit", { git: true });
+      const seen: string[] = [];
+      const { results, breaches } = await runContainment({
+        session,
+        mutateOptions: (options) => {
+          const counterfeit = async (raw: unknown): Promise<Record<string, never>> => {
+            seen.push(String((raw as { tool_name?: string }).tool_name));
+            return {};
+          };
+          (counterfeit as unknown as Record<symbol, unknown>)[CONTAINMENT_FLOOR_MARK] = true;
+          // The template's own hooks are DROPPED: what launch() is handed is the counterfeit and nothing else.
+          return { ...options, hooks: { PreToolUse: [{ hooks: [counterfeit] }] } };
+        },
+        turns: [
+          { toolUses: [{ id: "w1", name: "EnterWorktree", input: { name: "feature" } }] },
+          { toolUses: [{ id: "a1", name: "Task", input: { description: "isolated", prompt: "go", isolation: "worktree", subagent_type: "general-purpose" } }] },
+          { toolUses: [{ id: "f1", name: "Write", input: { file_path: join(session.cwd, "CLAUDE.md"), content: "x" } }] },
+          { text: "done" },
+        ],
+      });
+      const resultFor = (id: string): string => JSON.stringify(results.find((entry) => entry.tool_use_id === id)?.content ?? "").toLowerCase();
+      // PRE-HOC, by the REAL floor: the model was handed our own sentence for every writer, and nothing
+      // was swept — the sweep never had anything to undo.
+      expect(resultFor("w1")).toContain("worktrees belong under .winter/worktrees");
+      expect(resultFor("a1")).toContain("isolated agent worktree");
+      expect(resultFor("f1")).toContain("may not create or modify");
+      expect(breaches).toEqual([]);
+      // MERGED, NEVER REPLACED: the counterfeit is still there — as the host's hook, after the floor —
+      // and it ran for every call (the runtime evaluates every matcher).
+      expect(seen).toContain("EnterWorktree");
+      expect(seen).toContain("Write");
+      expect(seen.some((name) => name === "Task" || name === "Agent")).toBe(true);
+      // Row 14's predicate, AND the reviewer's second one: no `<cwd>/.claude`, and no dangling entry.
+      expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
+      expect(danglingWorktreeEntries(session)).toEqual([]);
+      expect(vendorNamedArtifacts(session)).toEqual([]);
+      expect(decoyUntouched(session)).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "review r4, NEW-18 (b): a LOOSER template policy cannot make the adapter's own containment inert — no forgery needed",
+    async () => {
+      // THE SECOND ROUTE, the one that made the finding a Major: `createOfficialAdapter(ctx, { options:
+      // { containment } })` is the TEMPLATE's policy and `createOfficialAdapter(ctx, { containment })` is
+      // the adapter's — two documented surfaces. Options built by `buildOptions` under a template policy
+      // that hands the worktree and workflow writers to a host replacement carry a GENUINE floor, built
+      // by this package, with those writers ALLOWED; on `898112a` that genuine floor suppressed the merge,
+      // so the adapter's strict default never rode. The harness's own bridge is built just as loose here,
+      // so the adapter's floor is the ONLY layer left that can say no — and it does, pre-hoc, for all three.
+      const loose: ContainmentPolicy = { worktrees: "host-replacement", workflows: "host-replacement" };
+      const session = hermeticSession("containment-template-policy", { git: true });
+      const { decisions, results, breaches } = await runContainment({
+        session,
+        adapterPolicy: { options: { containment: loose } },
+        bridgeContainment: loose,
+        turns: [
+          { toolUses: [{ id: "w1", name: "EnterWorktree", input: { name: "feature" } }] },
+          { toolUses: [{ id: "a1", name: "Task", input: { description: "isolated", prompt: "go", isolation: "worktree", subagent_type: "general-purpose" } }] },
+          { toolUses: [{ id: "k1", name: "Workflow", input: { name: "deep-research" } }] },
+          { text: "done" },
+        ],
+      });
+      const resultFor = (id: string): string => JSON.stringify(results.find((entry) => entry.tool_use_id === id)?.content ?? "").toLowerCase();
+      expect(resultFor("w1")).toContain("worktrees belong under .winter/worktrees");
+      expect(resultFor("a1")).toContain("isolated agent worktree");
+      expect(resultFor("k1")).toContain("workflows resolve under .winter/workflows");
+      // ATTRIBUTION (review r2, NEW-7): `Workflow` IS consulted with the callback on this runtime, and the
+      // loose bridge would have allowed it — the absence of any bridge decision is what says the HOOK
+      // denied it first.
+      expect(decisions.some((decision) => decision.tool === "Workflow")).toBe(false);
+      expect(breaches).toEqual([]);
+      expect(existsSync(join(session.cwd, ".claude"))).toBe(false);
+      expect(danglingWorktreeEntries(session)).toEqual([]);
+      expect(vendorNamedArtifacts(session)).toEqual([]);
+      expect(decoyUntouched(session)).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "review r4, NEW-18 (c): merge never replace — the host's own hook still runs after the floor, and its `allow` cannot lift a floor deny",
+    async () => {
+      // r2's NEW-1 property measured END TO END rather than on the merged array: a host PreToolUse hook
+      // that ALLOWS everything is kept (it ran for both calls, in order) and ordered after the floor (its
+      // `allow` did not lift the floor's deny — the runtime evaluates every matcher, and any deny wins).
+      const session = hermeticSession("containment-host-hook");
+      const seen: string[] = [];
+      const { results } = await runContainment({
+        session,
+        mutateOptions: (options) => {
+          const host = async (raw: unknown): Promise<unknown> => {
+            const input = raw as { tool_name?: string; tool_input?: { file_path?: string } };
+            seen.push(`${input.tool_name}:${basename(input.tool_input?.file_path ?? "")}`);
+            return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "the host says yes" } };
+          };
+          const hooks = (options.hooks ?? {}) as Record<string, unknown[]>;
+          return { ...options, hooks: { ...hooks, PreToolUse: [...(hooks["PreToolUse"] ?? []), { hooks: [host] }] } };
+        },
+        turns: [
+          { toolUses: [{ id: "d1", name: "Write", input: { file_path: join(session.cwd, "CLAUDE.md"), content: "# hijacked\n" } }] },
+          { toolUses: [{ id: "a1", name: "Write", input: { file_path: join(session.cwd, "notes.md"), content: "ordinary work\n" } }] },
+          { text: "done" },
+        ],
+      });
+      const resultFor = (id: string): string => JSON.stringify(results.find((entry) => entry.tool_use_id === id)?.content ?? "").toLowerCase();
+      expect(resultFor("d1")).toContain("may not create or modify");
+      expect(resultFor("a1")).toContain("created successfully");
+      expect(seen).toEqual(["Write:CLAUDE.md", "Write:notes.md"]);
+      expect(existsSync(join(session.cwd, "CLAUDE.md"))).toBe(false);
+      expect(existsSync(join(session.cwd, "notes.md"))).toBe(true);
       expect(vendorNamedArtifacts(session)).toEqual([]);
       expect(decoyUntouched(session)).toBe(true);
     },

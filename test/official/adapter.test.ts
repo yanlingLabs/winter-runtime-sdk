@@ -18,7 +18,8 @@ import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts"
 import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { createOfficialAdapter, officialHandoffEligibility, type OfficialSessionHandle } from "../../src/official/index.ts";
 import { OfficialConfigurationError, OfficialInvalidResumeError, OfficialMcpError } from "../../src/official/errors.ts";
-import { buildOfficialOptions } from "../../src/official/options-template.ts";
+import { assertOptionsInvariants, buildOfficialOptions } from "../../src/official/options-template.ts";
+import { CONTAINMENT_FLOOR_MARK, carriesMark, isOurContainmentHook } from "../../src/official/callbacks.ts";
 import { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
 import type { SpawnedChildProcess } from "../../src/official/spawn-proxy.ts";
 
@@ -227,6 +228,74 @@ describe("review r1, M3 — the wiring through the router's own door", () => {
     // The seeded entry is a MINIMAL one — the real directory entry, when the host records it, owns
     // every other field.
     expect([recorded?.runtimeKind, recorded?.objectKind, recorded?.mode]).toEqual(["claude-agent", "session", "code"]);
+  });
+});
+
+describe("review r4, NEW-18 / NEW-19 — the floor is merged on every launch and recognised by IDENTITY", () => {
+  type Hook = (input: unknown) => Promise<unknown>;
+  /** Every PreToolUse hook in the options, flattened, in the order the runtime is given them. */
+  const preToolUseHooks = (options: OfficialOptions | undefined): Hook[] =>
+    ((options?.hooks as { PreToolUse?: Array<{ hooks: Hook[] }> } | undefined)?.PreToolUse ?? []).flatMap((matcher) => matcher.hooks);
+  /** Drives every hook with one call — the reviewer's own probe shape — and reports which of them denied. */
+  const deniedBy = async (hooks: Hook[], toolName: string, toolInput: Record<string, unknown>): Promise<boolean[]> =>
+    (await Promise.all(hooks.map((hook) => hook({ hook_event_name: "PreToolUse", tool_name: toolName, tool_use_id: "probe", tool_input: toolInput })))).map(
+      (output) => (output as { hookSpecificOutput?: { permissionDecision?: string } } | undefined)?.hookSpecificOutput?.permissionDecision === "deny",
+    );
+
+  test("a host hook stamped with the exported mark is NOT the floor: launch() merges the real one ahead of it, and the invariants refuse the counterfeit alone", async () => {
+    const { module, calls } = fakeClaudeModule();
+    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() });
+    const good = adapter.buildOptions(templateInput(adapter.spawnProxy));
+    const counterfeit: Hook = async () => ({});
+    (counterfeit as unknown as Record<symbol, unknown>)[CONTAINMENT_FLOOR_MARK] = true;
+    expect(carriesMark(counterfeit, CONTAINMENT_FLOOR_MARK)).toBe(true);
+    expect(isOurContainmentHook(counterfeit)).toBe(false);
+    // The invariants demand the IDENTITY: an options object whose only marked hook is the counterfeit has no floor.
+    expect(() => assertOptionsInvariants({ ...good, hooks: { PreToolUse: [{ hooks: [counterfeit] }] } }, "winter-claude-agent")).toThrow(/containment floor is missing/);
+    // …and launch() does not trust the mark either: the real floor is merged AHEAD of the counterfeit, which survives as a host hook.
+    adapter.launch(plan({ ...good, hooks: { PreToolUse: [{ hooks: [counterfeit] }] } }));
+    const handed = preToolUseHooks(calls[0]?.options);
+    expect(handed.map(isOurContainmentHook)).toEqual([true, false, false]); // ours, the sweep's pre, the counterfeit
+    expect(handed[2]).toBe(counterfeit);
+    expect(await deniedBy(handed, "EnterWorktree", { name: "feature" })).toEqual([true, false, false]);
+  });
+
+  test("a LOOSER template policy cannot make the adapter's own containment inert: both floors ride, and the adapter's denies", async () => {
+    const { module, calls } = fakeClaudeModule();
+    // The TEMPLATE's policy hands the worktree writers to a host replacement; the ADAPTER's containment is the strict default.
+    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild(), options: { containment: { worktrees: "host-replacement" } } });
+    const built = adapter.buildOptions(templateInput(adapter.spawnProxy));
+    // The template's floor is GENUINE — identity, not a forgery — and lets the writer through, as configured.
+    expect(preToolUseHooks(built).map(isOurContainmentHook)).toEqual([true]);
+    expect(await deniedBy(preToolUseHooks(built), "EnterWorktree", { name: "feature" })).toEqual([false]);
+    // launch() merges the adapter's own floor anyway: ours first, then the sweep's, then the template's — and ours denies.
+    adapter.launch(plan(built));
+    const handed = preToolUseHooks(calls[0]?.options);
+    expect(handed.map(isOurContainmentHook)).toEqual([true, false, true]);
+    expect(await deniedBy(handed, "EnterWorktree", { name: "feature" })).toEqual([true, false, false]);
+  });
+
+  test("merge never replace: the host's own matchers survive after ours, on every event they registered", () => {
+    const { module, calls } = fakeClaudeModule();
+    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() });
+    const good = adapter.buildOptions(templateInput(adapter.spawnProxy));
+    const hostMatcher = { matcher: "Write", hooks: [async () => ({})] };
+    adapter.launch(plan({ ...good, hooks: { PreToolUse: [hostMatcher], PostToolUse: [hostMatcher], Stop: [hostMatcher] } }));
+    const hooks = calls[0]?.options?.hooks as Record<string, Array<{ hooks: unknown[] }>>;
+    expect(isOurContainmentHook(hooks["PreToolUse"]?.[0]?.hooks[0])).toBe(true);
+    expect(hooks["PreToolUse"]?.at(-1)).toBe(hostMatcher);
+    expect(hooks["PostToolUse"]?.at(-1)).toBe(hostMatcher);
+    expect(hooks["Stop"]).toEqual([hostMatcher]);
+  });
+
+  test("review r4, NEW-19: `redirect` is refused on EVERY route — a bridge this package made does not skip the adapter's own policy", () => {
+    const { module, calls } = fakeClaudeModule();
+    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild(), containment: { savedWebFetchApprovals: "redirect" } });
+    // Options whose bridge THIS PACKAGE made, under the default disposition — the route that used to
+    // downgrade to `disable` in silence, because the adapter validated its policy only where it built the bridge.
+    const options = buildOfficialOptions(templateInput(adapter.spawnProxy));
+    expect(() => adapter.launch(plan(options))).toThrow(/cannot be honoured on this branch/);
+    expect(calls).toHaveLength(0);
   });
 });
 
