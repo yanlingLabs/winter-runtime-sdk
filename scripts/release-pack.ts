@@ -38,6 +38,12 @@
 //      from the peer inside `src/official/**` — those declarations are emitted but UNREACHABLE, so no
 //      consumer ever loads them — and this rule is what keeps that distinction real rather than
 //      remembered.
+//
+// THE `sha256` THIS SCRIPT PRINTS IS PROVENANCE FOR THE RELEASE NOTE, NEVER A GATE: it is the packed
+// tarball's own hash, computed once per pack and reported so a consumer can verify what they
+// installed — it asserts nothing about whether the build that produced `dist/` was reproducible.
+// That question is `test/gates/dist-determinism.test.ts`'s, over `build()` directly, before a tarball
+// exists at all.
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
