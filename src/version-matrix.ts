@@ -225,18 +225,31 @@ export function readResolvedManifestVersion(packageName: string, resolveEntry: (
 }
 
 /**
+ * The seams `resolveVersionMatrix` accepts. `resolveEntry`, when given, REPLACES probe 2's resolver
+ * end to end (through `identityFor` into `readResolvedManifestVersion`) — the only way a test can make
+ * that probe genuinely fail rather than merely be irrelevant because `declared` or peer-export already
+ * answered. Production code (`assertVersionMatrix`) never supplies one.
+ */
+export interface VersionMatrixSeams {
+  resolveEntry?: (name: string) => string;
+}
+
+/**
  * `declared` (probe 0, R2) is checked FIRST and wins over both other probes when it parses — even
  * over a peer that also exports its own identity. A `declared` that fails to `parseVersion` is not an
  * assertion the host actually made about a real version, so it falls through to probe 1 rather than
  * refusing on unparseable input.
  */
-function identityFor(packageName: string, namespace: unknown, supported: string, declared?: string): PeerVersionIdentity | undefined {
+function identityFor(packageName: string, namespace: unknown, supported: string, declared: string | undefined, seams: VersionMatrixSeams): PeerVersionIdentity | undefined {
   if (declared !== undefined && parseVersion(declared) !== undefined) {
     return { packageName, packageVersion: declared, source: "host-declared", supported };
   }
   const exported = readExportedVersion(namespace);
   if (exported !== undefined) return { packageName, packageVersion: exported, source: "peer-export", supported };
-  const resolved = readResolvedManifestVersion(packageName);
+  // `seams.resolveEntry` undefined -> `readResolvedManifestVersion`'s own default parameter applies
+  // (passing `undefined` explicitly is the same as omitting the argument), so the real, unmodified
+  // resolver is what every production call and every OTHER test still goes through.
+  const resolved = readResolvedManifestVersion(packageName, seams.resolveEntry);
   if (resolved !== undefined) return { packageName, packageVersion: resolved, source: "resolved-manifest", supported };
   return undefined;
 }
@@ -254,10 +267,28 @@ const UNKNOWN_ACTUAL = "unknown (the injected module exports no version identity
  * `declared` is `RuntimeSdkOptions.peerVersions` (R2), optional — the one-arg call
  * (`assertVersionMatrix(peers)`) stays legal and behaves exactly as before: with nothing declared,
  * every peer's identity comes from probe 1 or probe 2, unchanged.
+ *
+ * `seams` is test-only (R2 review r1): NOT exposed here — `resolveVersionMatrix` below is where a test
+ * reaches it. A public seam parameter on this function is a production call site that could pass a
+ * broken resolver by accident, for a capability real hosts never need.
  */
 export function assertVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterAgentSdk?: string; claudeAgentSdk?: string }): VersionMatrixReport {
+  return resolveVersionMatrix(peers, declared);
+}
+
+/**
+ * `assertVersionMatrix`'s full implementation, with an injectable `seams` (R2 review r1, `test/spine/
+ * version-matrix.test.ts`'s test (d)). NOT on the package barrel (`src/index.ts`) — deliberately: a
+ * real host has no reason to override how this package resolves ITS OWN peers' manifests, so this
+ * function exists only so a test can force probe 2 (`resolved-manifest`) to GENUINELY fail — the one
+ * condition a test cannot otherwise reproduce on demand (in an ordinary dev checkout the real peers
+ * really are resolvable, so a test that never overrides the resolver cannot tell "declared won" from
+ * "resolved-manifest would have answered the same value anyway"). `assertVersionMatrix` is the public,
+ * one-line delegation with the real (default) seams.
+ */
+export function resolveVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterAgentSdk?: string; claudeAgentSdk?: string }, seams: VersionMatrixSeams = {}): VersionMatrixReport {
   const winterName = "@yanlinglabs/winter-agent-sdk";
-  const winterIdentity = identityFor(winterName, peers.winter, SUPPORTED.winterAgentSdk, declared?.winterAgentSdk);
+  const winterIdentity = identityFor(winterName, peers.winter, SUPPORTED.winterAgentSdk, declared?.winterAgentSdk, seams);
   if (winterIdentity === undefined) {
     throw new RuntimeSdkVersionError({ expected: `${winterName} ${SUPPORTED.winterAgentSdk}`, actual: UNKNOWN_ACTUAL });
   }
@@ -289,7 +320,7 @@ export function assertVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterA
   if (peers.claude === undefined) return report;
 
   const claudeName = "@anthropic-ai/claude-agent-sdk";
-  const claudeIdentity = identityFor(claudeName, peers.claude, SUPPORTED.claudeAgentSdk, declared?.claudeAgentSdk);
+  const claudeIdentity = identityFor(claudeName, peers.claude, SUPPORTED.claudeAgentSdk, declared?.claudeAgentSdk, seams);
   if (claudeIdentity === undefined) {
     throw new RuntimeSdkVersionError({ expected: `${claudeName} ${SUPPORTED.claudeAgentSdk}`, actual: UNKNOWN_ACTUAL });
   }

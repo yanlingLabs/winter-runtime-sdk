@@ -10,6 +10,10 @@ import { createFakeClaudePeer, createFakeKeychain, createFakeWinterPeer } from "
 import { assertVersionMatrix, createRuntimeSdk, parseVersion, readExportedVersion, readResolvedManifestVersion, runtimeSdkInternals, satisfiesRange, SUPPORTED, SUPPORTED_PROTOCOL_VERSIONS } from "../../src/index.ts";
 import { RuntimeSdkVersionError } from "../../src/errors.ts";
 import type { RuntimeSdkPeers } from "../../src/sdk.ts";
+// NOT on the package barrel (`src/index.ts`), deliberately (R2 review r1) — a real host never needs
+// to override how this package resolves its own peers' manifests. Reached by relative path here, the
+// one test that needs the seam.
+import { resolveVersionMatrix } from "../../src/version-matrix.ts";
 
 const keychain = createFakeKeychain();
 
@@ -96,25 +100,29 @@ describe("assertVersionMatrix — peerVersions (R2)", () => {
     expect(report.winterAgentSdk.source).toBe("peer-export");
   });
 
-  test("(d) the compiled-binary door: a declared claude version wins even when resolved-manifest is unavailable", () => {
-    // `readResolvedManifestVersion`'s default resolver is `createRequire(import.meta.url).resolve`,
-    // which cannot see outside a compiled binary's bundle (`file:///$bunfs/...`). The injected
-    // resolver below fails exactly the way that one would there -- proving the seam, not just
-    // asserting a return value.
+  test("(d) the compiled-binary door: a declared claude version wins when resolved-manifest is GENUINELY unavailable", () => {
+    // ONE integrated scenario, through `resolveVersionMatrix` (the seam-carrying internal, not the
+    // public `assertVersionMatrix`): a resolver that fails for EVERY name, threaded end to end into
+    // probe 2 -- what `readResolvedManifestVersion`'s default resolver
+    // (`createRequire(import.meta.url).resolve`) would do inside a compiled binary
+    // (`file:///$bunfs/...`). Without this seam, probe 2 would resolve the REAL, installed
+    // `@anthropic-ai/claude-agent-sdk` devDependency in this checkout and silently mask the very
+    // condition this test exists to demonstrate.
     const unresolvable = (): string => {
       throw new Error("Cannot find module (simulated compiled-binary resolution failure)");
     };
-    expect(readResolvedManifestVersion("@anthropic-ai/claude-agent-sdk", unresolvable)).toBeUndefined();
-
-    // The construction itself: a claude peer exporting NO version identity of its own, and no
-    // `peerVersions`, would refuse here in a real compiled binary (probe 1 fails, probe 2 cannot run).
-    // `peerVersions.claudeAgentSdk` is the only door -- and it wins over probe 2 even though, in THIS
-    // dev checkout, probe 2 would actually succeed (the peer is a real installed devDependency): the
-    // `source` assertion is what proves declared was used, not just a value that could have come from
-    // either probe.
     const { peer } = createFakeWinterPeer();
+    // A claude peer exporting NO version identity of its own (probe 1 fails too).
     const noVersionClaude = {} as unknown as NonNullable<RuntimeSdkPeers["claude"]>;
-    const report = assertVersionMatrix({ winter: peer, claude: noVersionClaude }, { claudeAgentSdk: "0.3.250" });
+
+    // (i) No `declared`, peer-export absent, and probe 2 genuinely broken: construction REFUSES.
+    // This is the proof that the manifest path was actually unavailable in this scenario, not merely
+    // unused.
+    expect(() => resolveVersionMatrix({ winter: peer, claude: noVersionClaude }, undefined, { resolveEntry: unresolvable })).toThrow(RuntimeSdkVersionError);
+
+    // (ii) The SAME peers and the SAME failing resolver, plus `peerVersions.claudeAgentSdk` --
+    // construction now succeeds, and the source is `host-declared`: the only door that was open.
+    const report = resolveVersionMatrix({ winter: peer, claude: noVersionClaude }, { claudeAgentSdk: "0.3.250" }, { resolveEntry: unresolvable });
     expect(report.claudeAgentSdk?.packageVersion).toBe("0.3.250");
     expect(report.claudeAgentSdk?.source).toBe("host-declared");
   });
