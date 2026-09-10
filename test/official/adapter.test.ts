@@ -17,10 +17,10 @@ import type { OfficialOptions, OfficialQuery, OfficialSdkModule, OfficialSpawnOp
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { createOfficialAdapter, officialHandoffEligibility, TRAFFIC_OPT_OUT_VARIABLES, type OfficialSessionHandle } from "../../src/official/index.ts";
-import { OfficialConfigurationError, OfficialInvalidResumeError, OfficialMcpError } from "../../src/official/errors.ts";
+import { OfficialConfigurationError, OfficialInvalidResumeError } from "../../src/official/errors.ts";
 import { assertOptionsInvariants, buildOfficialOptions } from "../../src/official/options-template.ts";
 import { CONTAINMENT_FLOOR_MARK, carriesMark, isOurContainmentHook } from "../../src/official/callbacks.ts";
-import { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
+import { OFFICIAL_MATERIALIZATION_DROPS, canonicalToolNames, officialMcpServers, winterMcpServerDescriptor, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
 import type { SpawnedChildProcess } from "../../src/official/spawn-proxy.ts";
 import { UnaddressableEntryError } from "../../src/errors.ts";
 import type { RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
@@ -480,7 +480,7 @@ describe("WS-14 §11 — the standing MCP server on the official branch", () => 
     expect(canonicalToolNames(descriptor, { mcpServerName: "acme" })).toEqual(["mcp__acme__send_message", "mcp__acme__list_agents"]);
   });
 
-  test("NO ADVISOR on this server (D29): registering one is a refusal, not a silent filter", () => {
+  test("Winter's advisor BACKS Claude's on the official branch (R-8-1): registering one SURVIVES, not a refusal", () => {
     const advisor: WinterMcpToolDescriptor = {
       tool: "advisor",
       description: "x",
@@ -489,11 +489,12 @@ describe("WS-14 §11 — the standing MCP server on the official branch", () => 
       permissionClass: "advisor",
       handler: async () => ({ content: [] }),
     };
-    expect(() => assertNoAdvisor([advisor], branchLabel)).toThrow(OfficialMcpError);
-    expect(() => winterMcpServerDescriptor({ brand: WINTER_BRAND, messaging: handlers, capabilities: [advisor], branchLabel })).toThrow(/API-side server tool/);
-    // the capability plugins themselves are registered unchanged
+    const descriptor = winterMcpServerDescriptor({ brand: WINTER_BRAND, messaging: handlers, capabilities: [advisor], branchLabel });
+    expect(descriptor.tools.map((tool) => tool.tool)).toEqual(["send_message", "list_agents", "advisor"]);
+    expect(canonicalToolNames(descriptor, WINTER_BRAND)).toContain(`mcp__${WINTER_BRAND.mcpServerName}__advisor`);
+    // the capability plugins themselves are registered unchanged, alongside it
     const capability: WinterMcpToolDescriptor = { ...advisor, tool: "browser_navigate" };
-    expect(winterMcpServerDescriptor({ brand: WINTER_BRAND, messaging: handlers, capabilities: [capability], branchLabel }).tools).toHaveLength(3);
+    expect(winterMcpServerDescriptor({ brand: WINTER_BRAND, messaging: handlers, capabilities: [advisor, capability], branchLabel }).tools).toHaveLength(4);
   });
 
   test("materialization goes through the INJECTED module, and its absence is a typed MCP failure", () => {

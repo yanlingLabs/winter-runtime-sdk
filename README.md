@@ -134,12 +134,19 @@ at all.
 **The official branch disables the runtime's remote feature configuration by default** (R-7b-11).
 Every official child gets `TRAFFIC_OPT_OUT_VARIABLES` — the four names are exported, so read them
 rather than trusting this sentence. Measured on the pin, same binary and same options: 25 advertised
-tools with the fetch, 21 without; `DesignSync`, `Monitor`, `PushNotification` and
-`advisor_20260301:advisor` appear only when a CDN answers. A tool surface that moves with no version
-moving is not a pinned artifact, so this is on unless you say otherwise: `remoteConfig: "allow"` (per
-query on `runtime.official`, or deployment-wide on `createRuntimeSdk({ official: { env: { … } } })`)
-opts back in, and the choice is recorded on the session's directory row as
-`RuntimeDirectoryEntry.remoteConfig`.
+tools with the fetch, 21 without; `DesignSync`, `Monitor`, `PushNotification` and Anthropic's own
+API-side `advisor_20260301:advisor` appear only when a CDN answers — that one is the vendor's server
+tool, orthogonal to what follows. A tool surface that moves with no version moving is not a pinned
+artifact, so this is on unless you say otherwise: `remoteConfig: "allow"` (per query on
+`runtime.official`, or deployment-wide on `createRuntimeSdk({ official: { env: { … } } })`) opts back
+in, and the choice is recorded on the session's directory row as `RuntimeDirectoryEntry.remoteConfig`.
+
+**Winter's own `advisor` is registered on the official branch too (R-8-1), backing Anthropic's rather
+than being refused.** WS-14 §11's standing MCP server used to throw if a capability list named
+`advisor` — each branch was meant to have its own, unrelated advisor. The user's tool-ownership ruling
+reverses that: `mcp__<brand>__advisor` is reachable on the official branch exactly like
+`send_message`/`list_agents`, independent of whether the CDN-gated API-side one above is present that
+session. `docs/probes/d29-advisor.md` §6 has the full reversal and what it does and does not change.
 
 **The materialized-resume PREFERRED door is open for the pinned runtime, by measurement** (R-7b-12).
 WS-17 §8's four probes pass against 0.3.250 on darwin-arm64 and linux-x64, so a handle over that peer

@@ -5,13 +5,17 @@
 // canonical names with identical description, schema, annotations, permission identity and result
 // shape on both branches."
 //
-// AND IT DOES NOT CARRY AN ADVISOR. WS-14's advisor amendment (authority WS-06 D29): "the server
-// registered into the official branch carries the messaging handlers and the capability plugins; it
-// does NOT carry an advisor. On the official branch the model's `advisor` is Anthropic's API-side
-// server tool (parameterless), Claude-family and Anthropic-chosen; Winter neither proxies nor
-// replaces it (a host cannot bare-name a tool there and `toolAliases` cannot intercept a server
-// tool)." `assertNoAdvisor` below is that rule as a refusal, and a test plants an advisor descriptor
-// to prove the refusal fires.
+// R-8-1(3) REVERSES THE OLD REFUSAL: Winter's advisor now BACKS Claude's on the official branch.
+// WS-14's advisor amendment (authority WS-06 D29) used to read "the server registered into the
+// official branch … does NOT carry an advisor" — on the theory that Anthropic's own API-side server
+// tool (parameterless, Claude-family and Anthropic-chosen) was the only advisor that branch could
+// ever have, so a Winter-native one would only advertise a second, unreachable advisor. The user's
+// tool-ownership ruling (R-8-1) supersedes that: Winter's default tools, `advisor` among them, are
+// PULLED BY THE ROUTER and bound under Claude's built-in names on the official branch too, so a
+// `WinterMcpToolDescriptor` named `advisor` is registered like any other capability — no refusal, no
+// filter. `docs/probes/d29-advisor.md` carries the measurement this reverses and records why the
+// measurement itself still stands (the API-side tool's own behaviour is unchanged; only the policy
+// choice of whether Winter ALSO offers one is reversed).
 //
 // TWO LAYERS, AND THE SPLIT IS DELIBERATE:
 //
@@ -120,26 +124,6 @@ export function messagingToolDescriptors(handlers: MessagingHandlers): readonly 
 }
 
 /**
- * §11's refusal: no advisor on this server, on this branch.
- *
- * Thrown rather than filtered. A silent filter would leave a host believing its advisor was
- * registered and wondering why the model never calls it; the whole point of D29's split is that each
- * branch's advisor has a DIFFERENT backing, and a host that tried to register one here has a
- * misunderstanding worth surfacing.
- */
-export function assertNoAdvisor(tools: readonly WinterMcpToolDescriptor[], branchLabel: string): void {
-  const advisor = tools.find((tool) => tool.tool === "advisor" || tool.tool.endsWith("_advisor"));
-  if (advisor !== undefined) {
-    throw new OfficialMcpError({
-      server: "the standing server",
-      reason:
-        "this branch's `advisor` is the provider's own API-side server tool: a host cannot bare-name a tool there and `toolAliases` cannot intercept a server tool, so registering one here would advertise a second, unreachable advisor (WS-14 §11 / WS-06 D29)",
-      branchLabel,
-    });
-  }
-}
-
-/**
  * Builds the standing server descriptor for a session.
  *
  * The capability plugins (browser, computer, office) are passed IN rather than declared here: WS-06
@@ -155,7 +139,6 @@ export function winterMcpServerDescriptor(args: {
   branchLabel: string;
 }): WinterMcpServerDescriptor {
   const tools = [...messagingToolDescriptors(args.messaging), ...(args.capabilities ?? [])];
-  assertNoAdvisor(tools, args.branchLabel);
   return { name: args.brand.mcpServerName, version: args.version ?? "1.0.0", tools };
 }
 
