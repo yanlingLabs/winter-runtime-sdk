@@ -27,7 +27,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/conformance-rows.md"
   ],
   "scripts": {
     "build:packages": "bun run scripts/build-packages.ts",
