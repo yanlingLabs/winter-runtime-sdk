@@ -75,6 +75,18 @@ export interface RuntimeSdkPeers {
 
 export interface RuntimeSdkOptions {
   peers: RuntimeSdkPeers;
+  /**
+   * Host-declared peer package versions (D19a/R2, WS-02 §7.1) — THE ONLY DOOR inside a compiled
+   * binary. The version matrix's probe 2 (`resolved-manifest`) resolves a peer's `package.json` via
+   * `createRequire(...).resolve()`, which cannot see outside a compiled binary's own bundle
+   * (`file:///$bunfs/...`); a host that self-spawns its own compiled artifact and whose injected peer
+   * exports no version identity of its own (probe 1) has NOTHING for the matrix to read unless it
+   * declares one here, from its own vendored `VERSIONS.json`. Declaring a version wins over both
+   * probes when it parses — it does not bypass the matrix's range/exact-pin checks, only replaces how
+   * the identity was DISCOVERED; an unparseable declared value falls through to probe 1 rather than
+   * refusing on its own. Absent, behaviour is unchanged: probes 1 and 2, in that order.
+   */
+  peerVersions?: { winterAgentSdk?: string; claudeAgentSdk?: string };
   /** R-7b-2's seam; default = in-memory (which is also what every hermetic test uses). */
   directoryStore?: RuntimeDirectoryStore;
   /** Host-provided credential reads (WS-14 §12) — never disk, never this package's own keychain. */
@@ -268,7 +280,7 @@ export function forwardableOptions(options: RouterOptions, brand?: Partial<Brand
  * only what it is about.
  */
 export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
-  const versions = assertVersionMatrix(opts.peers);
+  const versions = assertVersionMatrix(opts.peers, opts.peerVersions);
   // THE BRAND, RESOLVED ONCE, THROUGH THE INJECTED PEER (I2). The injected instance is authoritative
   // everywhere else in this file, and it must be here too: a host that vendored its own copy of the
   // Winter SDK gets ITS validation and ITS `InvalidBrandError`, so a caught error is the class the

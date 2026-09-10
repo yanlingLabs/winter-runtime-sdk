@@ -57,6 +57,79 @@ describe("readExportedVersion", () => {
   });
 });
 
+// ====================================================================================================
+// R2 — `RuntimeSdkOptions.peerVersions`: the host-declared door, WS-02 §7.1. The only way a compiled
+// binary (the daemon self-spawning `dist/norma-core`, `file:///$bunfs/...`) can identify its peers:
+// `createRequire(...).resolve()` cannot see outside the bundle there, so `resolved-manifest` (probe 2)
+// can never answer. Declared wins over BOTH other probes -- it is the host asserting what it actually
+// vendored, not a fallback guess.
+// ====================================================================================================
+describe("assertVersionMatrix — peerVersions (R2)", () => {
+  test("(a) a declared version wins over a peer that ALSO exports SDK_VERSION", () => {
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.2" }); // exports SDK_VERSION itself
+    const report = assertVersionMatrix({ winter: peer }, { winterAgentSdk: "0.0.5" });
+    expect(report.winterAgentSdk.packageVersion).toBe("0.0.5");
+    expect(report.winterAgentSdk.source).toBe("host-declared");
+  });
+
+  test("(b) a declared OUT-OF-RANGE version refuses with the same message shape as an out-of-range peer-export", () => {
+    const { peer } = createFakeWinterPeer(); // in-range peer-export -- irrelevant, declared wins first
+    let thrown: unknown;
+    try {
+      assertVersionMatrix({ winter: peer }, { winterAgentSdk: "0.9.9" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(RuntimeSdkVersionError);
+    const error = thrown as RuntimeSdkVersionError;
+    // SAME SHAPE as the existing peer-export refusal test above: `expected` names the matrix entry,
+    // `actual` names the package and the identity that missed it.
+    expect(error.expected).toBe("@yanlinglabs/winter-agent-sdk >=0.0.2 <0.1.0");
+    expect(error.actual).toBe("@yanlinglabs/winter-agent-sdk 0.9.9");
+    expect(error.message).toContain("version matrix refuses this peer set");
+  });
+
+  test("(c) a malformed declared version (\"abc\") falls through to peer-export", () => {
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.6" });
+    const report = assertVersionMatrix({ winter: peer }, { winterAgentSdk: "abc" });
+    expect(report.winterAgentSdk.packageVersion).toBe("0.0.6");
+    expect(report.winterAgentSdk.source).toBe("peer-export");
+  });
+
+  test("(d) the compiled-binary door: a declared claude version wins even when resolved-manifest is unavailable", () => {
+    // `readResolvedManifestVersion`'s default resolver is `createRequire(import.meta.url).resolve`,
+    // which cannot see outside a compiled binary's bundle (`file:///$bunfs/...`). The injected
+    // resolver below fails exactly the way that one would there -- proving the seam, not just
+    // asserting a return value.
+    const unresolvable = (): string => {
+      throw new Error("Cannot find module (simulated compiled-binary resolution failure)");
+    };
+    expect(readResolvedManifestVersion("@anthropic-ai/claude-agent-sdk", unresolvable)).toBeUndefined();
+
+    // The construction itself: a claude peer exporting NO version identity of its own, and no
+    // `peerVersions`, would refuse here in a real compiled binary (probe 1 fails, probe 2 cannot run).
+    // `peerVersions.claudeAgentSdk` is the only door -- and it wins over probe 2 even though, in THIS
+    // dev checkout, probe 2 would actually succeed (the peer is a real installed devDependency): the
+    // `source` assertion is what proves declared was used, not just a value that could have come from
+    // either probe.
+    const { peer } = createFakeWinterPeer();
+    const noVersionClaude = {} as unknown as NonNullable<RuntimeSdkPeers["claude"]>;
+    const report = assertVersionMatrix({ winter: peer, claude: noVersionClaude }, { claudeAgentSdk: "0.3.250" });
+    expect(report.claudeAgentSdk?.packageVersion).toBe("0.3.250");
+    expect(report.claudeAgentSdk?.source).toBe("host-declared");
+  });
+
+  test("(e) an ABSENT `peerVersions` leaves the existing peer-export/resolved-manifest behaviour untouched", () => {
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.2" });
+    const report = assertVersionMatrix({ winter: peer });
+    expect(report.winterAgentSdk.source).toBe("peer-export");
+    expect(report.winterAgentSdk.packageVersion).toBe("0.0.2");
+    // The one-arg call shape (no second parameter at all) stays legal too.
+    const claudeReport = assertVersionMatrix({ winter: peer, claude: createFakeClaudePeer() });
+    expect(claudeReport.claudeAgentSdk?.source).toBe("peer-export");
+  });
+});
+
 describe("assertVersionMatrix", () => {
   test("an in-range Winter peer reports its identity and its protocol version", () => {
     const { peer } = createFakeWinterPeer({ packageVersion: "0.0.2" });

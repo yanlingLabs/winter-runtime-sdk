@@ -242,6 +242,18 @@ was handed, the `claude-resume-<uuid>` staging root SURVIVES — the destination
 deleting a live child's `CLAUDE_CONFIG_DIR` is worse than leaving a directory behind. It is locatable
 at `outcome.target.stagingRoot` and belongs to your retention pass.
 
+**Compiled hosts must declare their peers' versions.** The version matrix's second probe
+(`resolved-manifest`) resolves a peer's `package.json` by walking up from `createRequire(...).resolve()`
+— which cannot see outside a compiled binary's own bundle (`file:///$bunfs/...`). A host that
+self-spawns its own compiled artifact and whose injected peer exports no version identity of its own
+has nothing left for the matrix to read, and construction refuses. `createRuntimeSdk({ peerVersions:
+{ winterAgentSdk, claudeAgentSdk } })` is the door: supply both from your own vendored
+`VERSIONS.json`, stamped at your own build time (WS-02 §7.1). A declared version is checked FIRST —
+it wins even over a peer that exports its own identity — and still has to satisfy the same
+range/exact-pin checks as either probe; it changes how the identity was discovered, not what counts
+as supported. A host that runs uncompiled (plain `bun`/`node`, source or an ordinary install) never
+needs this field.
+
 **"Exactly one runtime owns a session" is a convention here, not a mechanism.** The barrier moves
 ownership only after the destination confirms, and the transcript's producer record is authoritative —
 but the store's writer lease is re-entrant per pid and this router hosts both branches in one process,
