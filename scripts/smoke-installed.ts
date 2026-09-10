@@ -5,14 +5,14 @@
 // installed), installs into a throwaway directory OUTSIDE the repo, and imports every declared
 // `exports` entry under each requested runtime, failing loudly on the first import error.
 //
-// THE PEER IS PROVIDED, NOT PUBLISHED — and this is the one place this script differs from the SDK
-// repository's own smoke, deliberately. `@yanlinglabs/winter-agent-sdk` is a REQUIRED PEER: the
-// router's `dist/index.js` opens with `export * from "@yanlinglabs/winter-agent-sdk"`, so importing
-// the package without a resolvable peer is not a failure of the tarball, it is the documented
-// consequence of not installing a peer. Until that peer is published (R-7b-5), the smoke satisfies it
-// by SYMLINKING the same checkout `pnpm` linked into this repo — which is exactly what a host with
-// both packages vendored will have — and asserts the ROUTER's tarball is the dist-only thing under
-// test. At the close-out the pin becomes `^0.0.2` and this step becomes an ordinary registry install.
+// THE REQUIRED PEER IS AN ORDINARY REGISTRY INSTALL (R6, the close-out collapse).
+// `@yanlinglabs/winter-agent-sdk` is a REQUIRED PEER: the router's `dist/index.js` opens with
+// `export * from "@yanlinglabs/winter-agent-sdk"`, so importing the package without a resolvable
+// peer is not a failure of the tarball, it is the documented consequence of not installing a peer.
+// Now that the peer is published, the probe installs the EXACT version this checkout has resolved
+// (read off the installed copy's own manifest, not re-spelled as a range) alongside the tarball —
+// which is exactly what a host with both packages vendored will have — and asserts the ROUTER's
+// tarball is the dist-only thing under test.
 //
 // WHAT THIS PROVES, precisely: the packed manifest resolves, the compiled `default` entry runs under
 // Node (which cannot execute TypeScript), the `bun` condition is gone from the published manifest,
@@ -20,9 +20,9 @@
 // still TYPE-CHECK against the published declarations. That last one is a `tsc` run, not an import:
 // the failure it guards against (`Cannot find module '@anthropic-ai/claude-agent-sdk'` coming out of
 // our own `.d.ts`) is invisible to a runtime import, because types are erased before anything runs.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { peerPackageDir } from "./build-packages.ts";
@@ -199,25 +199,26 @@ export async function runSmoke(opts: { runtimes?: readonly SmokeRuntime[]; root?
     if (packed.violations.length > 0) throw new Error(`release-pack found violations, refusing to smoke-test:\n${packed.violations.join("\n")}`);
     const targets = deriveImportTargets(root);
 
-    // Outside the repository on purpose: a fresh mkdtemp, no workspace file, no lockfile, no
-    // committed .npmrc in scope. The only thing that can make this succeed is the tarball itself.
-    writeFileSync(join(probeDir, "package.json"), `${JSON.stringify({ name: "winter-runtime-sdk-smoke-probe", private: true, version: "0.0.0" }, null, 2)}\n`);
-    // `--legacy-peer-deps`: npm 7+ tries to INSTALL peer dependencies, and both of this package's
-    // peers are unpublished or deliberately absent here (see the header). The peer is provided below.
-    const install = Bun.spawnSync(["npm", "install", "--offline", "--legacy-peer-deps", packed.packed.tarballPath], { cwd: probeDir, stdout: "pipe", stderr: "pipe" });
-    if (install.exitCode !== 0) {
-      throw new Error(`npm install --offline failed (exit ${install.exitCode}):\n${new TextDecoder().decode(install.stdout)}${new TextDecoder().decode(install.stderr)}`);
-    }
-
+    // The EXACT version this checkout has resolved (never re-spelled as a range): the smoke tests
+    // the same peer version the tarball was built and tested against, not "whatever satisfies the
+    // range that day."
     const peerDir = peerPackageDir(REQUIRED_PEER, root);
     if (peerDir === undefined) throw new Error(`smoke-installed: the required peer ${REQUIRED_PEER} is not resolvable from this repository — run \`pnpm install\``);
-    // Every path segment is DERIVED from the package name, never re-spelled: the product token is
-    // exactly what the brand gate keeps out of source, and a second spelling here is a second thing
-    // to update.
-    const peerSegments = REQUIRED_PEER.split("/");
-    const peerLink = join(probeDir, "node_modules", ...peerSegments);
-    mkdirSync(dirname(peerLink), { recursive: true });
-    symlinkSync(peerDir, peerLink, "dir");
+    const peerManifest = JSON.parse(readFileSync(join(peerDir, "package.json"), "utf8")) as { version?: unknown };
+    if (typeof peerManifest.version !== "string") throw new Error(`smoke-installed: ${REQUIRED_PEER}'s installed package.json carries no \`version\``);
+
+    // Outside the repository on purpose: a fresh mkdtemp, no workspace file, no lockfile, no
+    // committed .npmrc in scope. What makes this succeed is the tarball itself plus an ORDINARY
+    // registry install of the required peer (R6) — no symlink, no sibling checkout.
+    writeFileSync(join(probeDir, "package.json"), `${JSON.stringify({ name: "winter-runtime-sdk-smoke-probe", private: true, version: "0.0.0" }, null, 2)}\n`);
+    // `--legacy-peer-deps`: npm 7+ tries to INSTALL peer dependencies, and the OPTIONAL peer
+    // (`@anthropic-ai/claude-agent-sdk`) is deliberately absent here — `typecheckWithoutOptionalPeer`
+    // below is what that absence exists to prove. No `--offline`: the required peer's install below
+    // needs the registry now that it is a real dependency, not a symlink onto this checkout.
+    const install = Bun.spawnSync(["npm", "install", "--legacy-peer-deps", packed.packed.tarballPath, `${REQUIRED_PEER}@${peerManifest.version}`], { cwd: probeDir, stdout: "pipe", stderr: "pipe" });
+    if (install.exitCode !== 0) {
+      throw new Error(`npm install failed (exit ${install.exitCode}):\n${new TextDecoder().decode(install.stdout)}${new TextDecoder().decode(install.stderr)}`);
+    }
 
     const distOnly = assertInstalledTreeIsDistOnly(probeDir, packed.packed.name);
     if (distOnly.length > 0) throw new Error(`the installed tree is not dist-only:\n${distOnly.join("\n")}`);

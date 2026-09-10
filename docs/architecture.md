@@ -203,45 +203,30 @@ installs. Tests import it by relative path.
 
 ---
 
-## Consuming the Winter SDK (half of the close-out has landed)
+## Consuming the Winter SDK (the close-out is complete)
 
 The three `@yanlinglabs/*` devDependencies are **registry pins** as of Phase 8a Task 0:
 `@yanlinglabs/winter-agent-sdk`, `@yanlinglabs/winter-conformance` and
 `@yanlinglabs/winter-provider-conformance` at `^0.0.2`, resolved from npm by `pnpm install` (the
 lockfile's integrity hashes are npm's, and `node_modules/@yanlinglabs/*` are the published dist-only
-tarballs — no `src/`). Nothing in this package's tests, build or release needs a sibling checkout any
-more: `bun test` resolves the pins through node_modules; `scripts/build-packages.ts` finds the peer's
+tarballs — no `src/`). Nothing in this package's tests, build or release needs a sibling checkout:
+`bun test` resolves the pins through node_modules; `scripts/build-packages.ts` finds the peer's
 declarations in the installed package (`tsconfig.build.json` sets `paths: {}`, which it must — files
 outside `rootDir` break a declaration emit); `release.yml` is single-checkout for the same reason, and
 orders `pnpm install` BEFORE `actions/setup-node` writes its per-job scope pin so the install can never
 be redirected at GitHub Packages.
 
-**What remains of the temporary `link:` shape (R-7b-5), until the close-out collapse — a separate
-change, deliberately not folded into the pin:**
-
-- `tsconfig.base.json`'s `paths` still point the **typecheck** (`tsconfig.typecheck.json`, over `src/`,
-  `test/` and `scripts/`) at a sibling checkout's `src`:
-
-  ```
-  <parent>/winter-runtime-sdk     <- this repository
-  <parent>/winter-agent-sdk       <- the SDK repository, checked out beside it
-  ```
-
-  Locally that sibling must exist. In `ci.yml` it is the second `actions/checkout`, pinned to
-  `WINTER_AGENT_SDK_REF: v0.0.2` — the version the registry pin resolves, not a moving `main` — and
-  it is installed and built there because the sibling's `src` imports the SDK's own workspace
-  packages, which resolve through the sibling's node_modules to THEIR `dist` (measured with
-  `--traceResolution`: `@yanlinglabs/winter-provider-catalog` lands in the sibling's
-  `dist/index.d.ts`).
-- `test/gates/release-gates.test.ts` asserts that checkout (`repository: yanlingLabs/winter-agent-sdk`,
-  unauthenticated).
-- `scripts/smoke-installed.ts` still provides the required peer by symlink — now to the installed
-  registry package rather than to a sibling — instead of installing it from the registry.
-
-The collapse removes the checkout, the `paths` and that assertion together and turns the smoke's
-symlink into an ordinary install. It is a deletion, not a migration: while pinning, the whole
-repository was type-checked with `paths` disabled against the published declarations — zero
-diagnostics.
+**R6 collapsed the temporary `link:` shape's last remnant.** `tsconfig.base.json` carried no `paths`
+until then: it pointed the **typecheck** (`tsconfig.typecheck.json`, over `src/`, `test/` and
+`scripts/`) at a sibling checkout's `src`, `ci.yml`'s `build` and `pack-smoke` jobs each checked out
+`yanlingLabs/winter-agent-sdk` beside this repository (pinned to `WINTER_AGENT_SDK_REF: v0.0.2`) and
+built it there, `test/gates/release-gates.test.ts` asserted that checkout by name, and
+`scripts/smoke-installed.ts` provided the required peer by symlinking it rather than installing it.
+The collapse deleted all four together — the `paths`, both checkouts (and every `working-directory:`
+that existed only to address them), the assertion, and the symlink, which is now an ordinary
+registry install of the exact version this checkout has resolved. It was a deletion, not a migration:
+before the collapse, the whole repository was type-checked with `paths` already disabled against the
+published declarations — **zero diagnostics**, re-verified when `paths` was actually deleted.
 
 **History — `link:` and not `file:`, measured.** While the shape was `link:`, pnpm's `file:` on a
 workspace package was ruled out because it tries to install that package's own dependencies, and the

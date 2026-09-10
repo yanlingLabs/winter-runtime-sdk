@@ -8,6 +8,11 @@
     "outDir": "dist",
     "rootDir": "src",
     "rewriteRelativeImportExtensions": true,
+    // Vacuous now that `tsconfig.base.json` carries no `paths` at all (R6: the sibling-checkout
+    // shape is retired) — kept anyway as the load-bearing reason the declaration emit resolves
+    // `@yanlinglabs/winter-agent-sdk` through node_modules rather than through any inherited `paths`
+    // a future edit to the base config might reintroduce. A declaration emit outside `rootDir` breaks
+    // outright, which is the failure this line exists to keep impossible, not merely unlikely.
     "paths": {}
   },
   "include": [

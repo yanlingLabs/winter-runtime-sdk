@@ -158,8 +158,7 @@ describe("the ci workflow runs every gate", () => {
     }
   });
 
-  test("the peer checkout is public and unauthenticated -- no cross-repo secret in CI", () => {
-    expect(ci).toContain("repository: yanlingLabs/winter-agent-sdk");
+  test("no cross-repo secret token is used by any checkout step (R6: one checkout, no sibling)", () => {
     expect(ci).not.toMatch(/token:\s*\$\{\{\s*secrets\./);
   });
 });
