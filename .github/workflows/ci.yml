@@ -4,26 +4,30 @@ name: ci
 # `v*` tag or a `workflow_dispatch` (`scripts/release-gates.test.ts` pins that trigger set and
 # asserts no other workflow in this repository contains the word `publish`).
 #
-# TWO CHECKOUTS, and this is the temporary shape (R-7b-5). Until the Winter SDK's first publish, this
-# package consumes it by `link:` onto a SIBLING CHECKOUT — `link:../winter-agent-sdk/packages/sdk` and
-# the two conformance harnesses beside it. So CI reproduces that layout literally: this repository at
-# `winter-runtime-sdk/`, the SDK repository at `winter-agent-sdk/`, both under the workspace, and
-# every step runs with an explicit `working-directory`.
+# TWO CHECKOUTS, and this is still the temporary shape (R-7b-5). Until the Winter SDK's first publish
+# this package consumed it by `link:` onto a SIBLING CHECKOUT — `link:../winter-agent-sdk/packages/sdk`
+# and the two conformance harnesses beside it — and CI reproduces that layout literally: this
+# repository at `winter-runtime-sdk/`, the SDK repository at `winter-agent-sdk/`, both under the
+# workspace, and every step runs with an explicit `working-directory`.
 #
-#   AT THE CLOSE-OUT this all collapses: the three `link:` dependencies become `^0.0.2` from the
-#   registries, the second checkout and the two steps that build it disappear, and the only change to
-#   the jobs below is that `pnpm install --frozen-lockfile` resolves from npm instead of from `../`.
-#   `WINTER_AGENT_SDK_REF` is pinned to `main` in the meantime and becomes `v0.0.2` if a lane needs a
-#   fixed ref before then.
+#   HALF OF THE CLOSE-OUT HAS LANDED (Phase 8a Task 0 Step 1): the three `link:` dependencies are
+#   `^0.0.2` from npm, and `pnpm install --frozen-lockfile` below resolves them from the registry. The
+#   second checkout REMAINS for one reason: `tsconfig.base.json`'s `paths` still point the typecheck
+#   at the sibling's `src` (and `test/gates/release-gates.test.ts` asserts this checkout), so
+#   `WINTER_AGENT_SDK_REF` is pinned to `v0.0.2` — the version the registry pin resolves — rather than
+#   a moving `main`. Removing the checkout, the `paths`, and that assertion is the remaining half.
+#   `release.yml` is already single-checkout.
 #
-# WHY THE SDK CHECKOUT IS BUILT (`bun run build:packages` over there): this package's own declaration
-# emit sets `paths: {}` — it must, because the repo-wide `paths` point at the sibling's `src`, and
-# files outside `rootDir` break a declaration emit outright. So `tsc` resolves the peer the ordinary
-# way, through node_modules to its `types` condition, i.e. to ITS `dist`, which is gitignored there
-# and absent on a fresh checkout. `scripts/build-packages.ts` says exactly this if the step is missing.
+# WHY THE SDK CHECKOUT IS STILL INSTALLED AND BUILT (`pnpm install` + `bun run build:packages` over
+# there): the `paths` typecheck follows `@yanlinglabs/*` into the sibling's `src`, and THOSE files
+# import the SDK's own workspace packages, which resolve through the sibling's node_modules to their
+# `types` condition, i.e. to THEIR `dist` — gitignored there and absent on a fresh checkout (measured:
+# `--traceResolution` lands `@yanlinglabs/winter-provider-catalog` in the sibling's `dist/index.d.ts`).
+# This package's OWN declaration emit no longer needs the sibling: `tsconfig.build.json` sets
+# `paths: {}`, so it resolves the peer through node_modules to the installed registry package's `dist`.
 on: [push, pull_request]
 env:
-  WINTER_AGENT_SDK_REF: main
+  WINTER_AGENT_SDK_REF: v0.0.2
 jobs:
   build:
     runs-on: ubuntu-latest
