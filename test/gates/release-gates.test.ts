@@ -99,6 +99,33 @@ describe("the release workflow", () => {
       expect(job).toContain("build:packages");
     }
   });
+
+  test("in EACH publish job the install runs BEFORE setup-node writes the per-job scope pin (parsed)", () => {
+    // `actions/setup-node` with `scope` + `registry-url` writes `@yanlinglabs:registry=<url>` into a
+    // userconfig that every later pnpm/npm resolution honours. This package's own `@yanlinglabs/*`
+    // devDependencies are registry pins from npm, so an install placed AFTER the GitHub Packages pin
+    // would ask THAT registry for them -- unauthenticated, against npm's integrity hashes -- and fail
+    // (Phase 8a Task 0). The order is a fact about each job's step list, so it is asserted over the
+    // parsed steps, per job, and the map below names the job that got it wrong.
+    const jobs = parseWorkflow("release.yml").jobs as Record<string, { steps: Array<{ run?: string; uses?: string; with?: Record<string, unknown> }> }>;
+    const order: Record<string, string> = {};
+    const pins: Record<string, unknown> = {};
+    for (const [name, job] of Object.entries(jobs)) {
+      const installAt = job.steps.findIndex((step) => typeof step.run === "string" && /pnpm install/.test(step.run));
+      const setupNodeAt = job.steps.findIndex((step) => typeof step.uses === "string" && step.uses.startsWith("actions/setup-node"));
+      order[name] =
+        installAt === -1 ? "no install step" : setupNodeAt === -1 ? "no setup-node step" : installAt < setupNodeAt ? "install, then setup-node" : `setup-node (step ${setupNodeAt}) before install (step ${installAt})`;
+      const setupNode = setupNodeAt === -1 ? undefined : job.steps[setupNodeAt];
+      pins[name] = { scope: setupNode?.with?.["scope"], registry: setupNode?.with?.["registry-url"] };
+    }
+    expect(order).toEqual({ publish: "install, then setup-node", "publish-npm": "install, then setup-node" });
+    // And WHICH pin each job writes: GitHub Packages for job 1, npm for job 2. The npm leg must never
+    // route to GitHub Packages (the SDK repository's own history), and it is the scope that decides.
+    expect(pins).toEqual({
+      publish: { scope: "@yanlinglabs", registry: "https://npm.pkg.github.com" },
+      "publish-npm": { scope: "@yanlinglabs", registry: "https://registry.npmjs.org" },
+    });
+  });
 });
 
 describe("the ci workflow runs every gate", () => {
@@ -121,10 +148,14 @@ describe("the ci workflow runs every gate", () => {
     expect(ci).not.toContain("continue-on-error");
   });
 
-  test("`pnpm install --frozen-lockfile` everywhere -- never a bare install", () => {
-    const installs = ci.split("\n").filter((line) => /pnpm install/.test(line));
-    expect(installs.length).toBeGreaterThan(0);
-    for (const line of installs) expect(line).toContain("--frozen-lockfile");
+  test("`pnpm install --frozen-lockfile` everywhere, in BOTH workflows -- never a bare install", () => {
+    // Every line, comments included: a comment that spells a bare `pnpm install` is the next
+    // copy-paste, and release.yml is where a bare install would resolve against the wrong registry.
+    for (const name of ["ci.yml", "release.yml"] as const) {
+      const installs = readWorkflow(name).split("\n").filter((line) => /pnpm install/.test(line));
+      expect(installs.length, `${name}: no pnpm install line at all`).toBeGreaterThan(0);
+      for (const line of installs) expect(line, `${name}: ${line.trim()}`).toContain("--frozen-lockfile");
+    }
   });
 
   test("the peer checkout is public and unauthenticated -- no cross-repo secret in CI", () => {

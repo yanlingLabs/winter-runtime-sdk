@@ -1,17 +1,20 @@
 name: release
-# Cloned from the SDK repository's own `release.yml` and reduced to one package.
+# Cloned from the SDK repository's own `release.yml` and reduced to one package, at the repo root.
 #
-# NOTHING HAS EVER RUN THIS WORKFLOW, AND NOTHING IN PHASE 7b DOES. The first publish is the user's
-# decision (R-7b-5), and it happens at the close-out, after the `link:` dependencies become registry
-# pins. `scripts/release-gates.test.ts` parses this file and asserts the trigger set below is EXACTLY
+# NOTHING HAS EVER RUN THIS WORKFLOW TO COMPLETION. The first publish is the user's decision (R-7b-5,
+# Phase 8a Task 0 Step 4): it happens when a `v0.0.1` tag is pushed, and not before.
+# `test/gates/release-gates.test.ts` parses this file and asserts the trigger set below is EXACTLY
 # `v*` + `workflow_dispatch` — no `phase-*` tag, no `push: branches` — and that no other workflow in
 # this repository contains the word `publish`.
+#
+# ONE CHECKOUT. The three `@yanlinglabs/*` devDependencies are registry pins (`^0.0.2`, on npm) as of
+# Phase 8a Task 0 Step 1, so the sibling-checkout shape `ci.yml` still carries is not needed here:
+# `pnpm install --frozen-lockfile` resolves them from npm, and `scripts/build-packages.ts` finds the
+# peer's declarations in the installed dist-only package rather than in a sibling's `dist`.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch: {}
-env:
-  WINTER_AGENT_SDK_REF: main
 jobs:
   # --- TWO REGISTRIES, TWO JOBS ---------------------------------------------------------------------
   #
@@ -28,70 +31,64 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: winter-runtime-sdk
-      - uses: actions/checkout@v4
-        with:
-          repository: yanlingLabs/winter-agent-sdk
-          ref: ${{ env.WINTER_AGENT_SDK_REF }}
-          path: winter-agent-sdk
       - uses: oven-sh/setup-bun@v2
       - uses: pnpm/action-setup@v4
         with: { version: 10 }
+
+      # INSTALL BEFORE THE REGISTRY PIN — the one ordering this repository must get right and the SDK
+      # repository never had to. `actions/setup-node` below writes `@yanlinglabs:registry=<url>` into
+      # a throwaway userconfig, and from that step on EVERY pnpm/npm resolution of the scope goes to
+      # that registry. This package's own `@yanlinglabs/*` devDependencies are registry pins resolved
+      # from npm (the lockfile's integrity hashes are npm's), and this step carries no credential —
+      # so an install placed after the pin would ask GitHub Packages for them, unauthenticated, and
+      # fail. Installed here, before the pin exists, it resolves from npm exactly as `ci.yml` does.
+      # The runner's preinstalled Node is enough for pnpm; the Node 18 the smokes need comes next.
+      - run: pnpm install --frozen-lockfile
+
       # `registry-url` + `scope` make setup-node write a throwaway userconfig (`$RUNNER_TEMP/.npmrc`,
       # pointed at by `NPM_CONFIG_USERCONFIG`) carrying BOTH `@yanlinglabs:registry=<url>` and
       # `//<url>/:_authToken=${NODE_AUTH_TOKEN}` — one mechanism choosing the registry and the
       # credential together, per job. That is why the committed `.npmrc` pins neither: a committed pin
-      # is global, and there are two registries.
+      # is global, and there are two registries. Nothing after this step installs anything: the pin
+      # governs `check-already-published.ts` and `pnpm publish`, which is all it is for.
       - uses: actions/setup-node@v4
         with:
           node-version: 18
           registry-url: "https://npm.pkg.github.com"
           scope: "@yanlinglabs"
-      - run: pnpm install --frozen-lockfile
-        working-directory: winter-agent-sdk
-      - run: bun run build:packages
-        working-directory: winter-agent-sdk
-      - run: pnpm install --frozen-lockfile
-        working-directory: winter-runtime-sdk
 
       # --- the gates: the same sequence ci.yml runs on every push, repeated here so a tag pushed out
       # of step with CI history (or a `workflow_dispatch` on an arbitrary ref) is never published
       # unverified. Kept in sync by hand, matching the SDK repository's own convention. ---
       - run: bun run build:packages
-        working-directory: winter-runtime-sdk
       - run: bun test
-        working-directory: winter-runtime-sdk
       - run: bun run typecheck
-        working-directory: winter-runtime-sdk
       - run: bun run scripts/smoke-installed.ts --runtime=node   # BLOCKING
-        working-directory: winter-runtime-sdk
       - run: bun run scripts/smoke-installed.ts --runtime=bun    # BLOCKING
-        working-directory: winter-runtime-sdk
 
       # THE VERSION/TAG CONSISTENCY GATE. A publish is triggered by pushing `v<version>` and what
       # ships is whatever the manifest says at that commit — equal only because a human ran the bump
       # before tagging. Diverging does not fail the publish, it SUCCEEDS at publishing the wrong
       # number, to registries where a version can never be re-published.
       - run: bun run scripts/check-release-version.ts
-        working-directory: winter-runtime-sdk
 
       # Built AGAIN immediately before the publish: several steps run in between, and the bytes that
       # SHIP must be built by a step adjacent to the one that publishes them. Relying on an earlier
       # step's leftovers is a dependency nothing states and nothing checks, and the failure mode is
       # silent — a `default` condition naming a file that is simply absent from the tarball.
       - run: bun run build:packages
-        working-directory: winter-runtime-sdk
+      # IDEMPOTENT RE-DRIVE, stated out loud: a half-done release is finished by a `workflow_dispatch`
+      # at the SAME tag, never by a version bump, and the log says whether this registry already had
+      # the version. `pnpm publish` itself refuses a duplicate; this step is the explanation.
       - name: "report whether this registry already has this version"
         run: bun run scripts/check-already-published.ts --registry https://npm.pkg.github.com
-        working-directory: winter-runtime-sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # `--no-git-checks` because the tag ref is a detached HEAD. pnpm (not npm) is what applies the
       # dist-only `publishConfig.exports` override at pack time — the `prepack` guard in package.json
-      # refuses a non-pnpm pack for exactly that reason.
+      # refuses a non-pnpm pack for exactly that reason. `publishConfig.access` is `restricted`, which
+      # is GitHub Packages' setting; the npm leg passes `--access public` explicitly.
       - run: pnpm publish --no-git-checks
-        working-directory: winter-runtime-sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -102,10 +99,16 @@ jobs:
   # from). A missing `NPM_TOKEN` SKIPS this job's publish step and leaves the GitHub Packages publish
   # untouched, which is why this is a separate job rather than two steps in one.
   #
+  # NOTHING IN THIS JOB POINTS AT GITHUB PACKAGES. The SDK repository's history is the warning: a
+  # committed scope pin (or a `publishConfig.registry`) beats `--registry` at both the pnpm and the
+  # npm layer, and nothing reached npm. This job's only registry pin is the `setup-node` one below,
+  # bound to npmjs for this job alone; `package.json` carries no `publishConfig.registry`.
+  #
   # `--provenance` attaches a signed npm provenance statement, which is why this job — and only this
   # job — carries `id-token: write`. `scripts/publish-npm.ts` packs through `releasePack()` (pnpm, so
-  # the dist-only overrides apply) and publishes the resulting TARBALL with `npm publish`, which is
-  # the only combination that gets both the overrides and `--provenance`.
+  # the dist-only overrides apply) and publishes the resulting TARBALL with `npm publish --provenance
+  # --access public`, which is the only combination that gets both the overrides and provenance
+  # (pnpm's own publish rebuilds npm's argv and silently drops `--provenance`).
   #
   # RUNBOOK when this job fails after job 1 succeeded:
   #   1. DO NOT bump the version. Both registries refuse a version they already hold, so a bump would
@@ -122,38 +125,30 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: winter-runtime-sdk
-      - uses: actions/checkout@v4
-        with:
-          repository: yanlingLabs/winter-agent-sdk
-          ref: ${{ env.WINTER_AGENT_SDK_REF }}
-          path: winter-agent-sdk
       - uses: oven-sh/setup-bun@v2
       - uses: pnpm/action-setup@v4
         with: { version: 10 }
+      # Same ordering as job 1, for the same reason: the install resolves from npm before any scope
+      # pin exists. Here the pin happens to name npm too, so the order is a convention kept rather
+      # than a failure avoided — the two jobs stay the same shape.
+      - run: pnpm install --frozen-lockfile
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
           scope: "@yanlinglabs"
-      - run: pnpm install --frozen-lockfile
-        working-directory: winter-agent-sdk
-      - run: bun run build:packages
-        working-directory: winter-agent-sdk
-      - run: pnpm install --frozen-lockfile
-        working-directory: winter-runtime-sdk
+      # The same two gates the GitHub Packages job ran, repeated here because this job checks out
+      # afresh: the version/tag agreement, and the compiled emit the tarball must contain.
       - run: bun run scripts/check-release-version.ts
-        working-directory: winter-runtime-sdk
       - run: bun run build:packages
-        working-directory: winter-runtime-sdk
       # TOKEN-GATED. `if:` cannot read `secrets` in a job-level condition, so the secret is lifted into
       # `env` on the step and the condition tests THAT. With no token the step is SKIPPED (green), the
-      # workflow succeeds, and GitHub Packages has already published.
+      # workflow succeeds, and GitHub Packages has already published. The skip-if-already-published
+      # probe runs inside the script, against npm, so a re-drive at the same tag finishes a half-done
+      # release instead of colliding on a version that is already there.
       - name: "publish to npm (skipped when NPM_TOKEN is absent)"
         if: ${{ env.NPM_TOKEN != '' }}
         run: bun run scripts/publish-npm.ts
-        working-directory: winter-runtime-sdk
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

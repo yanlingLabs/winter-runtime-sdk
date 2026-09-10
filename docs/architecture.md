@@ -203,34 +203,52 @@ installs. Tests import it by relative path.
 
 ---
 
-## Consuming the Winter SDK (the temporary shape)
+## Consuming the Winter SDK (half of the close-out has landed)
 
-Until the SDK repository's first publish (R-7b-5, a user gate), the three `@yanlinglabs/*`
-dependencies are `link:` onto a **sibling checkout**:
+The three `@yanlinglabs/*` devDependencies are **registry pins** as of Phase 8a Task 0:
+`@yanlinglabs/winter-agent-sdk`, `@yanlinglabs/winter-conformance` and
+`@yanlinglabs/winter-provider-conformance` at `^0.0.2`, resolved from npm by `pnpm install` (the
+lockfile's integrity hashes are npm's, and `node_modules/@yanlinglabs/*` are the published dist-only
+tarballs — no `src/`). Nothing in this package's tests, build or release needs a sibling checkout any
+more: `bun test` resolves the pins through node_modules; `scripts/build-packages.ts` finds the peer's
+declarations in the installed package (`tsconfig.build.json` sets `paths: {}`, which it must — files
+outside `rootDir` break a declaration emit); `release.yml` is single-checkout for the same reason, and
+orders `pnpm install` BEFORE `actions/setup-node` writes its per-job scope pin so the install can never
+be redirected at GitHub Packages.
 
-```
-<parent>/winter-runtime-sdk     <- this repository
-<parent>/winter-agent-sdk       <- the SDK repository, checked out beside it
-```
+**What remains of the temporary `link:` shape (R-7b-5), until the close-out collapse — a separate
+change, deliberately not folded into the pin:**
 
-`pnpm install` then symlinks `packages/sdk`, `packages/conformance` and `packages/provider-conformance`
-into `node_modules/@yanlinglabs/`, and `tsconfig.base.json`'s `paths` point the type-checker at their
-`src`.
+- `tsconfig.base.json`'s `paths` still point the **typecheck** (`tsconfig.typecheck.json`, over `src/`,
+  `test/` and `scripts/`) at a sibling checkout's `src`:
 
-**`link:` and not `file:`, measured.** pnpm's `file:` on a workspace package tries to install that
-package's own dependencies, and the SDK's are `workspace:*`, which cannot resolve outside its
-workspace: `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND … "@yanlinglabs/winter-provider-catalog@workspace:*" is
-in the dependencies but no package named … is present in the workspace`. `link:` is the pure symlink
-the design intends.
+  ```
+  <parent>/winter-runtime-sdk     <- this repository
+  <parent>/winter-agent-sdk       <- the SDK repository, checked out beside it
+  ```
 
-**One build in the sibling checkout is required before `bun run build:packages` here.**
-`tsconfig.build.json` sets `paths: {}` (it must — files outside `rootDir` break a declaration emit),
-so `tsc` resolves the peer through node_modules to its `types` condition, i.e. to its `dist`, which is
-gitignored there. `scripts/build-packages.ts` refuses with that instruction rather than failing inside
-tsc. CI does it explicitly.
+  Locally that sibling must exist. In `ci.yml` it is the second `actions/checkout`, pinned to
+  `WINTER_AGENT_SDK_REF: v0.0.2` — the version the registry pin resolves, not a moving `main` — and
+  it is installed and built there because the sibling's `src` imports the SDK's own workspace
+  packages, which resolve through the sibling's node_modules to THEIR `dist` (measured with
+  `--traceResolution`: `@yanlinglabs/winter-provider-catalog` lands in the sibling's
+  `dist/index.d.ts`).
+- `test/gates/release-gates.test.ts` asserts that checkout (`repository: yanlingLabs/winter-agent-sdk`,
+  unauthenticated).
+- `scripts/smoke-installed.ts` still provides the required peer by symlink — now to the installed
+  registry package rather than to a sibling — instead of installing it from the registry.
 
-**At the close-out** the three `link:` dependencies become `^0.0.2` from the registries, the second
-checkout disappears from both workflows, and the smoke installs the peer instead of symlinking it.
+The collapse removes the checkout, the `paths` and that assertion together and turns the smoke's
+symlink into an ordinary install. It is a deletion, not a migration: while pinning, the whole
+repository was type-checked with `paths` disabled against the published declarations — zero
+diagnostics.
+
+**History — `link:` and not `file:`, measured.** While the shape was `link:`, pnpm's `file:` on a
+workspace package was ruled out because it tries to install that package's own dependencies, and the
+SDK's are `workspace:*`, which cannot resolve outside its workspace
+(`ERR_PNPM_WORKSPACE_PKG_NOT_FOUND … "@yanlinglabs/winter-provider-catalog@workspace:*" is in the
+dependencies but no package named … is present in the workspace`). Kept for the next person tempted
+to point a local override at the sibling: `link:` is the pure symlink; `file:` is not.
 
 ---
 
