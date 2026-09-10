@@ -18,11 +18,12 @@ name: ci
 #   a moving `main`. Removing the checkout, the `paths`, and that assertion is the remaining half.
 #   `release.yml` is already single-checkout.
 #
-# WHY THE SDK CHECKOUT IS STILL INSTALLED AND BUILT (`pnpm install` + `bun run build:packages` over
-# there): the `paths` typecheck follows `@yanlinglabs/*` into the sibling's `src`, and THOSE files
-# import the SDK's own workspace packages, which resolve through the sibling's node_modules to their
-# `types` condition, i.e. to THEIR `dist` — gitignored there and absent on a fresh checkout (measured:
-# `--traceResolution` lands `@yanlinglabs/winter-provider-catalog` in the sibling's `dist/index.d.ts`).
+# WHY THE SDK CHECKOUT IS STILL INSTALLED AND BUILT (its own `pnpm install --frozen-lockfile` and
+# `bun run build:packages`): the `paths` typecheck follows `@yanlinglabs/*` into the sibling's `src`,
+# and THOSE files import the SDK's own workspace packages, which resolve through the sibling's
+# node_modules to their `types` condition, i.e. to THEIR `dist` — gitignored there and absent on a
+# fresh checkout (measured: `--traceResolution` lands `@yanlinglabs/winter-provider-catalog` in the
+# sibling's `dist/index.d.ts`).
 # This package's OWN declaration emit no longer needs the sibling: `tsconfig.build.json` sets
 # `paths: {}`, so it resolves the peer through node_modules to the installed registry package's `dist`.
 on: [push, pull_request]
