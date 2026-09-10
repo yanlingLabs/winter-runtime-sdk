@@ -11,6 +11,8 @@
 // loopback fake on `127.0.0.1` scripted to emit exactly the blocks each row is about, and the handler
 // is a recording fake standing in for the messaging handlers (which are the router's other lane).
 import { afterAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { WINTER_BRAND, mcpToolName, type SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
 import { createInMemoryRuntimeDirectoryStore } from "../../src/index.ts";
@@ -22,8 +24,8 @@ import { createOfficialAdapter } from "../../src/official/index.ts";
 import { acceptNativeSendMessageArgs, aliasDenyNames, officialToolAliases } from "../../src/official/aliases.ts";
 import { officialDisallowedTools } from "../../src/official/containment.ts";
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
-import { officialMcpServers, winterMcpServerDescriptor, type WinterMcpHandler } from "../../src/official/mcp-descriptors.ts";
-import { advertisedToolNames, cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type ScriptedTurn } from "./support.ts";
+import { officialMcpServers, winterMcpServerDescriptor, type WinterMcpHandler, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
+import { HERMETIC_TRAFFIC_OPT_OUTS, advertisedToolNames, cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, toolResults, type ScriptedTurn } from "./support.ts";
 
 const bed = officialRuntimeBed();
 const describeRuntime = bed === undefined ? describe.skip : describe;
@@ -57,6 +59,8 @@ interface RunResult {
   calls: Array<{ tool: string; args: unknown }>;
   record: ReturnType<typeof scriptedLoopback>["record"];
   configDir: string;
+  /** The child environment the production builder produced — where the four opt-outs are observable. */
+  env: Record<string, string>;
 }
 
 /**
@@ -70,6 +74,10 @@ async function runSession(args: {
   turns: readonly ScriptedTurn[];
   disallowedTools?: readonly string[];
   handlers?: { sendMessage?: WinterMcpHandler; listAgents?: WinterMcpHandler };
+  /** Extra tools on the standing server — §11's capability slot, which is how the probe registers `advisor`. */
+  capabilities?: readonly WinterMcpToolDescriptor[];
+  /** Merged OVER the brand's own alias map, so a probe can add a key the router does not ship. */
+  toolAliases?: Readonly<Record<string, string>>;
 }): Promise<RunResult> {
   /* c8 ignore next */
   if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
@@ -88,6 +96,7 @@ async function runSession(args: {
     const descriptor = winterMcpServerDescriptor({
       brand: WINTER_BRAND,
       branchLabel: "winter-claude-agent",
+      ...(args.capabilities === undefined ? {} : { capabilities: args.capabilities }),
       messaging: {
         sendMessage:
           args.handlers?.sendMessage ??
@@ -139,12 +148,13 @@ async function runSession(args: {
         env,
         mcpServers: officialMcpServers({ descriptor, module: bed.mcpModule, toInputShape: bed.toInputShape, branchLabel: "winter-claude-agent" }),
         canUseTool: createApprovalBridge({ brand: WINTER_BRAND, mode: "default", broker: async (request) => ({ behavior: "allow", updatedInput: request.input }) }),
+        ...(args.toolAliases === undefined ? {} : { toolAliases: { ...(options.toolAliases as Record<string, string>), ...args.toolAliases } }),
         ...(args.disallowedTools === undefined ? {} : { disallowedTools: [...options.disallowedTools as string[], ...args.disallowedTools] }),
       },
     });
 
     for await (const message of live.query) messages.push(message as { type: string; subtype?: string });
-    return { messages, calls, record, configDir: live.configDir };
+    return { messages, calls, record, configDir: live.configDir, env };
   });
 }
 
@@ -299,5 +309,140 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
       expect(typeof carriesToolUseId).toBe("boolean");
     },
     TIMEOUT,
+  );
+
+  // ==================================================================================================
+  // R4 — WHAT 0.3.250 DOES WITH AN ALIAS KEY THAT IS NOT ONE OF ITS OWN BUILT-INS (`advisor`).
+  //
+  // THE QUESTION, AND WHY IT IS A MEASUREMENT. R-8-1(3) makes Winter's own advisor BACK Claude's on
+  // the official branch, so the standing server now carries an `advisor` tool (`assertNoAdvisor` is
+  // retired) and the obvious next step is to widen `ALIASED_BUILTINS` with
+  // `{ builtin: "advisor", tool: "advisor" }`. But `SendMessage` and `ListAgents` are names the pinned
+  // runtime already knows: aliasing them redirects a lookup that would otherwise have hit a LOCAL
+  // built-in. `advisor` is not one of those — `docs/probes/d29-advisor.md` measured it as an
+  // API-SIDE server tool (`advisor_20260301`, no input schema, returned as a `server_tool_use` block)
+  // that the four traffic opt-outs remove from the session entirely. Whether the runtime's single-hop
+  // alias table accepts, ignores or refuses a key it has no built-in for is therefore unknown, and a
+  // widening that the pin quietly ignores would be a door the model can never walk through.
+  //
+  // SO THIS RECORDS, IT DOES NOT ASSERT. The only outcome asserted is that the turn COMPLETED under
+  // the four traffic opt-outs and that `docs/probes/advisor-alias.md` states what was observed — the
+  // same convention as row 2 and item 15 above, and the same convention `aliases.ts:85-91` names. The
+  // doc is read back rather than merely written beside the test, so a change in the runtime's
+  // behaviour fails HERE instead of leaving a confident file that is quietly no longer true.
+  // ==================================================================================================
+  const ADVISOR_PROBE_DOC = resolve(import.meta.dir, "..", "..", "docs", "probes", "advisor-alias.md");
+  const CANONICAL_ADVISOR = mcpToolName(WINTER_BRAND, "advisor");
+  /**
+   * Both names a deny rule must carry for `advisor`, spelled by hand ON PURPOSE.
+   *
+   * `aliasDenyNames("advisor", brand)` does not type-check today: its parameter is `AliasedBuiltin`,
+   * which is derived from `ALIASED_BUILTINS`, which is what this measurement GATES. These are exactly
+   * the two names the helper would return after the widening — `[builtin, aliasTargetFor(builtin, …)]`.
+   */
+  const ADVISOR_DENY_NAMES = ["advisor", CANONICAL_ADVISOR] as const;
+
+  /** The recorded answers, parsed out of the probe document's `measured` block. */
+  function recordedFacts(): Record<string, string> {
+    const fence = /```measured\n([\s\S]*?)```/.exec(readFileSync(ADVISOR_PROBE_DOC, "utf8"));
+    if (fence?.[1] === undefined) throw new Error(`${ADVISOR_PROBE_DOC} carries no \`\`\`measured block: the probe's answers must be recorded there`);
+    const facts: Record<string, string> = {};
+    for (const line of fence[1].split("\n")) {
+      const match = /^([a-z][a-z0-9-]*): (.+)$/.exec(line.trim());
+      if (match?.[1] !== undefined && match[2] !== undefined) facts[match[1]] = match[2];
+    }
+    return facts;
+  }
+
+  test(
+    "R4: an `advisor` alias against the pin — what is advertised, what a bare `advisor` block resolves to, and what a deny removes",
+    async () => {
+      const advisorCalls: unknown[] = [];
+      const advisor: WinterMcpToolDescriptor = {
+        tool: "advisor",
+        description: "Winter's own advisor, registered on the standing server (R-8-1(3)).",
+        inputSchema: { type: "object", properties: { question: { type: "string", maxLength: 300 } }, required: ["question"] },
+        exposure: "eager",
+        permissionClass: "advisor",
+        handler: async (raw) => {
+          advisorCalls.push(raw);
+          return { content: [{ type: "text" as const, text: "advice: ship it" }] };
+        },
+      };
+      const aliased = { toolAliases: { advisor: CANONICAL_ADVISOR }, capabilities: [advisor] } as const;
+
+      // (a) + (b): one session, the model emitting the BARE name the alias is keyed by.
+      const bare = await runSession({
+        ...aliased,
+        turns: [{ toolUses: [{ id: "toolu_advisor_bare", name: "advisor", input: { question: "is this ready?" } }] }, { text: "advised" }],
+      });
+      // FACT (a) IS READ FROM THE RUNTIME'S OWN `system/init.tools`, which is what the question names;
+      // the wire's advertised set is recorded beside it because the two need not agree.
+      const init = bare.messages.find((message) => message.type === "system" && message.subtype === "init") as { tools?: unknown[] } | undefined;
+      const initTools = (init?.tools ?? []).map(String);
+      const advertised = advertisedToolNames(bare.record, 0);
+      const bareResult = toolResults(bare.record).find((entry) => entry.tool_use_id === "toolu_advisor_bare");
+
+      // THE CONTROL, without which (b) means nothing: the SAME bare block, the SAME registered
+      // descriptor, and NO alias entry. If the handler is reached here too, the alias is not what
+      // resolved it and widening `ALIASED_BUILTINS` would be cargo cult.
+      const controlCalls: unknown[] = [];
+      const unaliased = await runSession({
+        capabilities: [{ ...advisor, handler: async (raw) => { controlCalls.push(raw); return { content: [{ type: "text" as const, text: "advice: ship it" }] }; } }],
+        turns: [{ toolUses: [{ id: "toolu_advisor_control", name: "advisor", input: { question: "no alias?" } }] }, { text: "advised" }],
+      });
+      const controlResult = toolResults(unaliased.record).find((entry) => entry.tool_use_id === "toolu_advisor_control");
+
+      // (c): the same call, and the canonical one, under the deny rule the helper would produce.
+      const deniedBare = await runSession({
+        ...aliased,
+        disallowedTools: ADVISOR_DENY_NAMES,
+        turns: [{ toolUses: [{ id: "toolu_advisor_denied_bare", name: "advisor", input: { question: "blocked?" } }] }, { text: "ok" }],
+      });
+      const deniedCanonical = await runSession({
+        ...aliased,
+        disallowedTools: ADVISOR_DENY_NAMES,
+        turns: [{ toolUses: [{ id: "toolu_advisor_denied_canonical", name: CANONICAL_ADVISOR, input: { question: "blocked?" } }] }, { text: "ok" }],
+      });
+      const blocked = (result: RunResult, id: string): boolean => {
+        const row = toolResults(result.record).find((entry) => entry.tool_use_id === id);
+        return row !== undefined && /denied|not allowed|permission|disabled|blocked/.test(JSON.stringify(row.content).toLowerCase());
+      };
+
+      const observed = {
+        "init-tools-advertise-canonical-advisor": initTools.includes(CANONICAL_ADVISOR) ? "yes" : "no",
+        "init-tools-advertise-bare-advisor": initTools.includes("advisor") ? "yes" : "no",
+        "wire-advertises-canonical-advisor": advertised.includes(CANONICAL_ADVISOR) ? "yes" : "no",
+        "wire-advertises-bare-advisor": advertised.includes("advisor") ? "yes" : "no",
+        "bare-advisor-reaches-the-mcp-handler": advisorCalls.length > 0 ? "yes" : "no",
+        "bare-advisor-reaches-the-mcp-handler-without-the-alias": controlCalls.length > 0 ? "yes" : "no",
+        "bare-advisor-tool-result-is-error": bareResult?.is_error === true ? "yes" : "no",
+        "deny-blocks-the-bare-call": blocked(deniedBare, "toolu_advisor_denied_bare") ? "yes" : "no",
+        "deny-blocks-the-canonical-call": blocked(deniedCanonical, "toolu_advisor_denied_canonical") ? "yes" : "no",
+      };
+      // eslint-disable-next-line no-console
+      console.log(`[R4 advisor alias] observed: ${JSON.stringify(observed, null, 2)}`);
+      // eslint-disable-next-line no-console
+      console.log(`[R4 advisor alias] system/init.tools: ${JSON.stringify(initTools)}`);
+      // eslint-disable-next-line no-console
+      console.log(`[R4 advisor alias] wire-advertised names: ${JSON.stringify(advertised)}`);
+      // eslint-disable-next-line no-console
+      console.log(`[R4 advisor alias] the bare call's tool_result: ${JSON.stringify(bareResult)}`);
+      // eslint-disable-next-line no-console
+      console.log(`[R4 advisor alias] the UNALIASED control's tool_result: ${JSON.stringify(controlResult)}`);
+
+      // WHAT IS ASSERTED, AND IT IS NOT THE ANSWER. The turn completed…
+      expect(bare.messages.at(-1)?.type).toBe("result");
+      // …the run was the hermetic one (the doc's claim about the pin is about a child that asked no CDN
+      // what tools it should have)…
+      for (const [name, value] of Object.entries(HERMETIC_TRAFFIC_OPT_OUTS)) expect({ name, value: bare.env[name] }).toEqual({ name, value });
+      expect(new Set(bare.record.paths)).toEqual(new Set(["/api/hello", "/v1/messages"]));
+      // …and the document records exactly what was just observed, key for key.
+      const recorded = recordedFacts();
+      expect(Object.fromEntries(Object.keys(observed).map((key) => [key, recorded[key]]))).toEqual(observed);
+      expect(recorded["pin"]).toBe("@anthropic-ai/claude-agent-sdk 0.3.250");
+      expect(recorded["measured-on"]).toBe("2026-09-11");
+    },
+    TIMEOUT * 3,
   );
 });
