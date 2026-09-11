@@ -257,8 +257,9 @@ async function runCondition(
     const home = mkdtempSync(join(root, "home-"));
     const claudeConfigDir = mkdtempSync(join(root, "config-"));
     const cwd = mkdtempSync(join(root, "cwd-"));
+    const anthropic = await anthropicFake();
     return await withLoopbackFake(
-      { routes: anthropicFake.anthropicFakeRoutes({ messages: scenarioForAnyModel(spec.content ?? [{ type: "text", text: "ok" }]) }) },
+      { routes: anthropic.anthropicFakeRoutes({ messages: scenarioForAnyModel(spec.content ?? [{ type: "text", text: "ok" }]) }) },
       async (fake) => {
         const entries: ConformanceTraceEntry[] = [];
         const abortController = new AbortController();
@@ -285,7 +286,7 @@ async function runCondition(
         } finally {
           clearTimeout(watchdog);
         }
-        const normalized = normalizeTrace(entries);
+        const normalized = await normalizeTrace(entries);
         const init = normalized.find((entry) => entry.kind === "system/init");
         const initTools = Array.isArray((init?.payload as { tools?: unknown } | undefined)?.tools) ? ((init?.payload as { tools: string[] }).tools) : [];
         const wireTools = new Set<string>();

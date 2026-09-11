@@ -10,13 +10,40 @@
 // so the env allowlist a test uses is one object rather than a habit.
 //
 // BUN ONLY, and openly: `@yanlinglabs/winter-provider-conformance` declares `engines.bun` alone
-// because its fakes use `Bun.serve`. This module is imported by tests, never by `src/index.ts`, and
-// `src/testing/**` is excluded from the published build for exactly that reason.
-import { anthropicFake, openaiResponsesFake, requestsTo, withFake } from "@yanlinglabs/winter-provider-conformance/fakes";
+// because its fakes use `Bun.serve`. Calling one of the four functions below under Node (or under Bun
+// without the package installed) fails at the CALL, with that package's own error — no different from
+// before.
+//
+// LAZY, since 0.0.3 (P8c-13), AT THE VALUE LEVEL: a top-level `import … from
+// "@yanlinglabs/winter-provider-conformance/fakes"` would make importing THIS FILE at runtime throw
+// `ERR_MODULE_NOT_FOUND` the moment anything evaluates it, whether or not the caller ever reaches for
+// one of the four functions below. `loadFakesModule` moves that resolution to the moment one of them
+// is CALLED (a dynamic `import()`, cached so every caller in one process shares the same module),
+// which is also why `anthropicFake`/`openaiResponsesFake` — the vendor's own NAMESPACE re-exports, not
+// functions — became async accessors here rather than staying live bindings: a live binding to an
+// unresolved module cannot exist, only a promise of one.
+//
+// STILL NOT SAFE AT THE TYPE LEVEL, and that is WHY THIS FILE IS NOT IN THE PUBLISHED `./testing`
+// SUBPATH'S GRAPH (`./host.ts` never imports it; `package.json`'s `./testing` entry points at
+// `./host.ts`, not `./index.ts`). Measured directly: a consumer with the OPTIONAL peer absent still
+// failed `tsc --noEmit` on THIS file's own `import type` line even when importing an unrelated name
+// from the barrel — a `.d.ts` binds its own top-level type-only imports as part of being loaded at
+// all, not lazily per export. `./capture-env.ts` carries the two exports below (`HERMETIC_TRAFFIC_OPT_OUTS`,
+// `officialCaptureEnv`) that name no peer, so `./host.ts` can import THAT file directly; this file
+// stays reachable only from `./index.ts`, the INTERNAL, unpublished barrel `bun test` uses by relative
+// path.
 import type { FakeRoute, FakeServer, RecordedRequest, StartFakeOptions } from "@yanlinglabs/winter-provider-conformance/fakes";
 
 export type { FakeRoute, FakeServer, RecordedRequest, StartFakeOptions };
-export { anthropicFake, openaiResponsesFake, requestsTo };
+
+type FakesEntry = typeof import("@yanlinglabs/winter-provider-conformance/fakes");
+
+let fakesModule: Promise<FakesEntry> | undefined;
+
+function loadFakesModule(): Promise<FakesEntry> {
+  fakesModule ??= import("@yanlinglabs/winter-provider-conformance/fakes");
+  return fakesModule;
+}
 
 /**
  * Runs `fn` against a loopback fake and ALWAYS closes it.
@@ -25,50 +52,28 @@ export { anthropicFake, openaiResponsesFake, requestsTo };
  * to hide. The name is the documentation — a lane reading `withLoopbackFake` at a call site knows
  * both that it binds loopback and that closing is not its problem.
  */
-export const withLoopbackFake: <T>(opts: StartFakeOptions, fn: (fake: FakeServer) => Promise<T>) => Promise<T> = withFake;
-
-/**
- * THE FOUR TRAFFIC OPT-OUTS THAT MAKE A CHILD RUNTIME ACTUALLY HERMETIC (whole-branch review, F-1).
- *
- * HERMETICITY IS A PROPERTY OF THE CHILD ENVIRONMENT, NOT OF THE FAKE. The loopback fake captures the
- * MODEL endpoint and nothing else; the pinned artifact also fetches REMOTE FEATURE CONFIGURATION
- * (`cdn.growthbook.io`), telemetry, error reports and update checks, none of which pass through
- * `ANTHROPIC_BASE_URL`. Measured on this pin, same binary, same options, same fake: with these four
- * unset the request carries 25 tools; with them set, 21 — `DesignSync`, `Monitor`,
- * `PushNotification` and `advisor_20260301:advisor` appear ONLY when the remote flag fetch succeeds.
- *
- * SO A TEST WITHOUT THESE IS NOT MEASURING THE PIN. It is measuring the pin plus whatever a CDN said
- * this minute, which is (a) a different answer on a different day, (b) a suite that goes red when the
- * fetch times out — the "flake seen twice in ~20 runs" — and (c) a `docs/probes/` record whose "no
- * network" line is false.
- *
- * THE SAME OBJECT THE PRODUCTION ENV BUILDER SETS (R-7b-11). It used to be a test-only copy handed to
- * `configuredExtras`, and a copy is exactly how a test bed and a shipped session end up measuring two
- * different artifacts: this re-export is what makes "the beds run what a host runs" checkable by
- * identity rather than by reading two lists.
- */
-export { TRAFFIC_OPT_OUT_VARIABLES as HERMETIC_TRAFFIC_OPT_OUTS } from "../official/env-allowlist.ts";
-import { TRAFFIC_OPT_OUT_VARIABLES } from "../official/env-allowlist.ts";
-
-/**
- * The minimal environment that points an official-SDK session at a loopback fake (R-7b-6).
- *
- * A REPLACEMENT, never a spread of `process.env` — WS-14 §3's own rule for the child environment, and
- * the same reason the SDK repository's capture harness sets `HOME`: a throwaway is required because
- * `os.homedir()` falls back to the OS user database and would otherwise reach the real `~/.claude`
- * regardless of `CLAUDE_CONFIG_DIR`.
- *
- * PLUS THE FOUR OPT-OUTS ABOVE, unconditionally, because "hermetic" has to mean the whole child and
- * not just its model endpoint (F-1). `allowRemoteConfig` is the ONE deliberate escape hatch: the D29
- * probe's non-hermetic leg uses it to observe what remote configuration adds, and it is spelled at
- * the call site so a reader can see which legs are which.
- */
-export function officialCaptureEnv(input: { baseUrl: string; apiKey?: string; claudeConfigDir: string; home: string; allowRemoteConfig?: boolean }): Record<string, string> {
-  return {
-    ANTHROPIC_BASE_URL: input.baseUrl,
-    ANTHROPIC_API_KEY: input.apiKey ?? "sk-ant-fake-hermetic-key",
-    CLAUDE_CONFIG_DIR: input.claudeConfigDir,
-    HOME: input.home,
-    ...(input.allowRemoteConfig === true ? {} : TRAFFIC_OPT_OUT_VARIABLES),
-  };
+export async function withLoopbackFake<T>(opts: StartFakeOptions, fn: (fake: FakeServer) => Promise<T>): Promise<T> {
+  const { withFake } = await loadFakesModule();
+  return withFake(opts, fn);
 }
+
+/** The Anthropic Messages family's fake builders (`anthropicFakeRoutes`, `anthropicTurnResponse`, …). */
+export async function anthropicFake(): Promise<FakesEntry["anthropicFake"]> {
+  return (await loadFakesModule()).anthropicFake;
+}
+
+/** The OpenAI Responses family's fake builders (`responsesStream`, `responsesFrames`, …). */
+export async function openaiResponsesFake(): Promise<FakesEntry["openaiResponsesFake"]> {
+  return (await loadFakesModule()).openaiResponsesFake;
+}
+
+/** The requests whose path matches, for an assertion that does not want to count a health probe. */
+export async function requestsTo(fake: FakeServer, path: string): Promise<RecordedRequest[]> {
+  return (await loadFakesModule()).requestsTo(fake, path);
+}
+
+// `HERMETIC_TRAFFIC_OPT_OUTS`/`officialCaptureEnv` MOVED to `./capture-env.ts` (0.0.3, P8c-13): they
+// name no optional peer, so they belong in the file `./host.ts` (the published `./testing` subpath)
+// can import directly. Re-exported here, unchanged, for the tests that still reach them off this
+// file or off the full internal barrel (`./index.ts`).
+export { HERMETIC_TRAFFIC_OPT_OUTS, officialCaptureEnv } from "./capture-env.ts";

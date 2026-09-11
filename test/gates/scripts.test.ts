@@ -190,9 +190,18 @@ describe("smoke-installed", () => {
   });
 
   test("`deriveImportTargets` reads this package's own manifest -- never a hand-kept list", () => {
+    // 0.0.3 (P8c-13) added the `./testing` subpath, so this repository's OWN manifest now derives
+    // two targets -- the assertion grew with it rather than pinning a stale count.
     const targets = deriveImportTargets();
-    expect(targets.map((t) => t.specifier)).toEqual(["@yanlinglabs/winter-runtime-sdk"]);
-    expect(targets[0]?.runtimes).toEqual(["node", "bun"]);
+    expect(targets.map((t) => t.specifier)).toEqual(["@yanlinglabs/winter-runtime-sdk", "@yanlinglabs/winter-runtime-sdk/testing"]);
+    expect(targets.map((t) => t.runtimes)).toEqual([
+      ["node", "bun"],
+      ["node", "bun"],
+    ]);
+    // The root barrel is expected to carry the whole SDK's surface; `./testing` is deliberately
+    // narrow (see `src/testing/host.ts`'s header) -- the floor each target is checked against differs
+    // for exactly that reason, never a hand-kept exception list.
+    expect(targets.map((t) => t.minExports)).toEqual([10, 1]);
   });
 
   test("the installed-tree check finds a shipped `src/` and a surviving `bun` condition (plants)", async () => {

@@ -152,7 +152,7 @@ describeRuntime("WS-04 §12's corpus on the official branch", () => {
     "plain query: the stream is the runtime's own, and the normalized trace has the corpus shape",
     async () => {
       const result = await runScenario({ turns: [{ text: "hello from the loopback" }] });
-      const kinds = normalizeTrace(result.entries).map((entry) => entry.kind);
+      const kinds = (await normalizeTrace(result.entries)).map((entry) => entry.kind);
       expect(kinds[0]).toBe("system/init");
       expect(kinds.at(-1)).toBe("result");
       expect(kinds).toContain("assistant");

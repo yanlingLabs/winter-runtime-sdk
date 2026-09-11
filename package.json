@@ -1,6 +1,6 @@
 {
   "name": "@yanlinglabs/winter-runtime-sdk",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "license": "MIT",
   "type": "module",
   "description": "One door over the Winter Agent SDK and the official Claude Agent SDK: runtime selection, the official-SDK adapter, the shared session store, the handoff barrier and the cross-runtime messaging router.",
@@ -22,6 +22,11 @@
       "types": "./dist/index.d.ts",
       "bun": "./src/index.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/host.d.ts",
+      "bun": "./src/testing/host.ts",
+      "default": "./dist/testing/host.js"
     }
   },
   "files": [
@@ -44,6 +49,10 @@
       ".": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
+      },
+      "./testing": {
+        "types": "./dist/testing/host.d.ts",
+        "default": "./dist/testing/host.js"
       }
     }
   },
@@ -54,10 +63,18 @@
   },
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.250",
-    "@yanlinglabs/winter-agent-sdk": ">=0.0.3 <0.1.0"
+    "@yanlinglabs/winter-agent-sdk": ">=0.0.3 <0.1.0",
+    "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0",
+    "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@yanlinglabs/winter-conformance": {
+      "optional": true
+    },
+    "@yanlinglabs/winter-provider-conformance": {
       "optional": true
     }
   },

@@ -11,24 +11,37 @@
 // checksum-verified. Lanes A and D drive it deliberately (the D29 advisor probe, R-7b-8; the
 // official-branch captures, R-7b-6) behind their own opt-in gate. Nothing in `bun test` may call it,
 // and `test/spine/testing-conformance.test.ts` asserts only that it is a function.
-import { compareTraces, goldenPath, listGoldens, loadGolden, normalizeTrace, runCapture } from "@yanlinglabs/winter-conformance";
+//
+// LAZY, since 0.0.3 (P8c-13), for the same reason as `./fakes.ts`: `@yanlinglabs/winter-conformance`
+// is an OPTIONAL peer of the published `./testing` subpath, so this module's OWN evaluation must not
+// require it to be installed — a consumer who only reaches for `./fakes.ts` or `./hermetic.ts`'s
+// exports still imports THIS file, transitively, through `src/testing/index.ts`'s barrel re-export.
 import type { ConformanceTraceEntry } from "@yanlinglabs/winter-conformance";
 
 export type { ConformanceTraceEntry };
 
+type ConformanceEntry = typeof import("@yanlinglabs/winter-conformance");
+
+let conformanceModule: Promise<ConformanceEntry> | undefined;
+
+function loadConformanceModule(): Promise<ConformanceEntry> {
+  conformanceModule ??= import("@yanlinglabs/winter-conformance");
+  return conformanceModule;
+}
+
 /** The committed golden traces this package can compare against, by name. */
-export function listGoldenTraces(): string[] {
-  return listGoldens();
+export async function listGoldenTraces(): Promise<string[]> {
+  return (await loadConformanceModule()).listGoldens();
 }
 
 /** One committed golden, parsed. */
-export function loadGoldenTrace(name: string): ConformanceTraceEntry[] {
-  return loadGolden(name);
+export async function loadGoldenTrace(name: string): Promise<ConformanceTraceEntry[]> {
+  return (await loadConformanceModule()).loadGolden(name);
 }
 
 /** Where a golden lives on disk — for a diff a human reads, never for writing. */
-export function goldenTracePath(name: string): string {
-  return goldenPath(name);
+export async function goldenTracePath(name: string): Promise<string> {
+  return (await loadConformanceModule()).goldenPath(name);
 }
 
 /**
@@ -38,7 +51,15 @@ export function goldenTracePath(name: string): string {
  * normalizes traces the same way the SDK repository does" is one import site, and a future
  * divergence is a diff here rather than in six test files.
  */
-export { normalizeTrace, compareTraces };
+export async function normalizeTrace(entries: ConformanceTraceEntry[]): Promise<ConformanceTraceEntry[]> {
+  return (await loadConformanceModule()).normalizeTrace(entries);
+}
+
+export async function compareTraces(a: ConformanceTraceEntry[], b: ConformanceTraceEntry[]): Promise<string[]> {
+  return (await loadConformanceModule()).compareTraces(a, b);
+}
 
 /** GATED, NEVER CALLED FROM `bun test` — see this module's header. */
-export const runOfficialCapture: () => Promise<void> = runCapture;
+export async function runOfficialCapture(): Promise<void> {
+  return (await loadConformanceModule()).runCapture();
+}
