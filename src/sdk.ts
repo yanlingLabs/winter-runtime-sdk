@@ -25,7 +25,7 @@
 //      already carries the official shape).
 //
 // Both are in the Task 1 report under "what the pinned interfaces forced me to change".
-import type { BrandProfile, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import type { BrandProfile, McpSdkServerConfigWithInstance, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError } from "./errors.ts";
 import { officialLegAddress, openOfficialLeg, sessionLedgerKey, type RouterOfficialInput, type RouterOfficialPolicy, type RouterQuery } from "./door.ts";
@@ -45,6 +45,7 @@ import { createHandoffBarrier } from "./store/index.ts";
 import { materializedResumeReportForPin } from "./store/pinned-probes.ts";
 import type { HandoffBarrierDeps } from "./store/index.ts";
 import { createOfficialAdapter } from "./official/adapter.ts";
+import { capabilityServerDescriptors, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
@@ -106,6 +107,38 @@ export interface RuntimeSdkOptions {
    * fill in when neither does.
    */
   brand?: Partial<BrandProfile>;
+  /**
+   * WS-09 §1.3's capability servers, as the Winter SDK's own in-process shape — FORWARDED ON BOTH
+   * LEGS, never rewritten into anything else (R-8, and the user's tool-ownership ruling R-8-1).
+   *
+   * THE ROUTER OWNS NO TOOL. The daemon owns the capability tools — computer, browser, office — and
+   * hands them over as MCP SERVERS; this is the door they come through, and the router's whole job is
+   * to put the same servers in front of both runtimes. The Winter leg receives each entry BY
+   * REFERENCE under its own `name`, merged into `Options.mcpServers`. The official leg cannot take the
+   * object itself (its runtime registers in-process servers through its own constructor, over its own
+   * validator's schema shape), so the same tools are REGISTERED there from the server's own
+   * declaration — see `capabilityServerDescriptor`. Identical names, identical schemas, identical
+   * handlers, two registrations.
+   *
+   * THE BRAND'S OWN SERVER NAME IS RESERVED. `brand.mcpServerName` is the standing server's key on the
+   * official branch (§7's aliases resolve to `mcp__<mcpServerName>__<tool>`), so a capability server
+   * that claimed it would shadow the messaging tools on one branch and not the other. That is a typed
+   * refusal at construction, not a silent overwrite.
+   *
+   * WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR: the official leg refuses rather than open a
+   * session whose capability tools exist on one branch only.
+   */
+  capabilities?: readonly McpSdkServerConfigWithInstance[];
+  /**
+   * The host's JSON-Schema → validator-shape bridge, for the official branch's in-process servers.
+   *
+   * INJECTED BECAUSE THE ROUTER DEPENDS ON NO VALIDATOR (see `official/mcp-descriptors.ts`'s header):
+   * the official runtime's own server constructor takes schemas in its peer validator's shape, and a
+   * package whose entire design is "two injected peers and nothing else" will not grow a third
+   * dependency to produce them. A host that has the official SDK already has that validator, and
+   * writes this in one line.
+   */
+  toInputShape?: InputShapeFactory;
   /**
    * The handoff barrier's collaborators (whole-branch review, F-3).
    *
@@ -246,14 +279,27 @@ const INTERNALS = Symbol.for("winter-runtime-sdk.internals");
 /**
  * Builds the object forwarded to a peer's `query()`.
  *
+ * THE INVARIANT, IN ONE SENTENCE: **the forwarded options are the caller's options minus
+ * `ROUTER_ONLY_OPTION_KEYS`, plus the brand's capability-server entries under `mcpServers`, and
+ * nothing else is rewritten.**
+ *
  * THE COMMON CASE FORWARDS THE CALLER'S OWN OBJECT, by reference. "Passes through verbatim" is a
  * property a test can only really check by identity, and a router that copied unconditionally would
  * be quietly deciding which of `Options`' members it knows about — the exact drift D19b's "never a
- * translation layer" rules out. A copy is made ONLY when a router-owned key is present, because that
- * key must not reach an SDK that would not recognise it; every other member keeps its own value
- * identity through the copy.
+ * translation layer" rules out. A copy is made ONLY when there is something to remove or something to
+ * add, because that is the only time the caller's own object would be the wrong thing to hand over;
+ * every other member keeps its own value identity through the copy.
+ *
+ * SO R-8 DID NOT WEAKEN THE PROPERTY, IT RESTATED IT. A host that configures no capabilities is
+ * unaffected — the identity return below still fires, and the test that pins it is unchanged. A host
+ * that configures them gets a copy whose every member except `mcpServers` is `Object.is`-identical to
+ * its own, and whose `mcpServers` is its own entries plus the capability entries, by reference.
+ *
+ * A CAPABILITY KEY THE CALLER ALSO USES IS A TYPED REFUSAL, never a silent overwrite in either
+ * direction: one of the two servers would simply not be there, and the party who would find out is
+ * the model, at the one moment the tool matters.
  */
-export function forwardableOptions(options: RouterOptions, brand?: Partial<BrandProfile>): Options {
+export function forwardableOptions(options: RouterOptions, brand?: Partial<BrandProfile>, capabilityServers?: Readonly<Record<string, unknown>>): Options {
   const stripKeys = ROUTER_ONLY_OPTION_KEYS.filter((key) => key in options);
   // THE BRAND IS FILLED IN, NEVER OVERWRITTEN (I2). A per-query `Options.brand` is the host saying
   // something about THIS query and wins outright; the constructor profile is a default for the
@@ -263,14 +309,62 @@ export function forwardableOptions(options: RouterOptions, brand?: Partial<Brand
   // Winter's default, which is what the SDK would apply anyway — so injecting it would change nothing
   // except this object's identity, and the pass-through property is worth more than the symmetry.
   const injectBrand = brand !== undefined && options.brand === undefined;
-  if (stripKeys.length === 0 && !injectBrand) return options;
+  if (stripKeys.length === 0 && !injectBrand && capabilityServers === undefined) return options;
   const forwarded: Record<string, unknown> = {};
   for (const key of Object.keys(options)) {
     if ((ROUTER_ONLY_OPTION_KEYS as readonly string[]).includes(key)) continue;
     forwarded[key] = (options as Record<string, unknown>)[key];
   }
   if (injectBrand) forwarded["brand"] = brand;
+  if (capabilityServers !== undefined) forwarded["mcpServers"] = mergedMcpServers(options.mcpServers, capabilityServers);
   return forwarded as Options;
+}
+
+/**
+ * The caller's own `mcpServers` entries, plus the capability entries, or a refusal.
+ *
+ * BY REFERENCE ON BOTH SIDES: each value is the object its owner built. The caller's own record is
+ * never mutated — a host that reuses one `Options` object across queries would otherwise find the
+ * router's entries in it.
+ */
+function mergedMcpServers(callerOwned: Options["mcpServers"], capabilityServers: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  if (callerOwned === undefined) return capabilityServers as Record<string, unknown>;
+  for (const name of Object.keys(capabilityServers)) {
+    if (name in callerOwned) {
+      throw new RuntimeLaunchInputError({
+        field: "mcpServers",
+        reason: `the caller's own \`mcpServers\` already carries \`${name}\`, which is the name of a capability server this handle forwards — one of the two would silently not be registered, so the door refuses rather than choose for you`,
+      });
+    }
+  }
+  return { ...callerOwned, ...capabilityServers };
+}
+
+/**
+ * The Winter leg's `mcpServers` record, keyed by each capability server's own name.
+ *
+ * TWO REFUSALS, BOTH AT CONSTRUCTION. Two servers under one name is a host that has lost track of
+ * which one is registered; a server under `brand.mcpServerName` is a host claiming the STANDING
+ * server's key — the one `mcp__<mcpServerName>__<tool>` resolves through and the official leg
+ * registers the messaging tools under — which would leave the two branches advertising different
+ * tools under one name.
+ */
+function capabilityServerRecord(capabilities: readonly McpSdkServerConfigWithInstance[] | undefined, brand: BrandProfile): Record<string, McpSdkServerConfigWithInstance> | undefined {
+  if (capabilities === undefined || capabilities.length === 0) return undefined;
+  const record: Record<string, McpSdkServerConfigWithInstance> = {};
+  for (const server of capabilities) {
+    if (server.name === brand.mcpServerName) {
+      throw new RuntimeLaunchInputError({
+        field: "capabilities",
+        reason: `\`${server.name}\` is the brand's own standing-server name, which the router registers the messaging tools under on the official branch — a capability server may not claim it (WS-09 §1.3)`,
+      });
+    }
+    if (server.name in record) {
+      throw new RuntimeLaunchInputError({ field: "capabilities", reason: `two capability servers are named \`${server.name}\`, so one of them would never be registered` });
+    }
+    record[server.name] = server;
+  }
+  return record;
 }
 
 /**
@@ -291,6 +385,14 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
   if (!resolved.ok) throw new opts.peers.winter.InvalidBrandError(resolved.reason);
   const brand = resolved.brand;
   const directoryStore = opts.directoryStore ?? createInMemoryRuntimeDirectoryStore();
+  // THE CAPABILITY SERVERS, BUILT ONCE (R-8). Both shapes are derived here, beside the store, rather
+  // than per query: the Winter leg's record is the object every query forwards — value identity across
+  // queries is part of what "the same servers" means, and a record rebuilt per call would hand the
+  // peer a new object for an unchanged configuration — and the official leg's descriptors are a READ
+  // of the host's declaration, so doing it once also means a malformed one is a construction refusal
+  // rather than a first-query surprise.
+  const capabilityServers = capabilityServerRecord(opts.capabilities, brand);
+  const capabilityDescriptors: readonly WinterMcpServerDescriptor[] | undefined = opts.capabilities === undefined || opts.capabilities.length === 0 ? undefined : capabilityServerDescriptors(opts.capabilities);
 
   // ONE CONTEXT, BUILT ONCE, HANDED TO EVERY SEAM FACTORY. The directory is built FIRST and hoisted
   // out of the handle's object literal, because every other seam takes it (a lane's messaging router
@@ -442,12 +544,21 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
             transcriptProjectKey,
             ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
             ...(opts.official === undefined ? {} : { policy: opts.official }),
+            // THE DESCRIPTORS, NOT THE WINTER INSTANCES (R-8). The official runtime registers its own
+            // in-process servers; handing it the Winter instance object would register nothing. The
+            // bridge and the module travel with them because materialization needs both.
+            ...(capabilityDescriptors === undefined ? {} : { capabilities: capabilityDescriptors }),
+            ...(opts.toInputShape === undefined ? {} : { toInputShape: opts.toInputShape }),
+            ...(opts.peers.claude === undefined ? {} : { mcpModule: opts.peers.claude as OfficialMcpModule }),
             onOpened: noteOpened,
           },
+          // THE OFFICIAL LEG TAKES NO CAPABILITY RECORD HERE: its `mcpServers` are materialized by the
+          // leg itself (`officialCapabilityServers`) and merged into the options TEMPLATE, because the
+          // vendor's `Options.mcpServers` is not the Winter shape this record holds.
           { prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand), input: official, selection: decided },
         );
       }
-      const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand) });
+      const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand, capabilityServers) });
       // AFTER the peer returned, because that is when the Winter leg actually opened (I-1).
       noteOpened("winter-agent");
       return winterQuery;

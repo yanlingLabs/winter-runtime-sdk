@@ -30,10 +30,11 @@
 //   So the conversion is INJECTED (`toInputShape`) alongside the module, and the host — which already
 //   has the official SDK and therefore its peer validator — supplies it in one line. The Lane A
 //   report carries the worked example.
-import { mcpToolName, type BrandProfile } from "@yanlinglabs/winter-agent-sdk";
+import { isWinterMcpServerInstance, mcpToolName, type BrandProfile, type McpSdkServerConfigWithInstance, type WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 
 import { NATIVE_LIST_AGENTS_OUTPUT_SCHEMA, NATIVE_LIST_AGENTS_SCHEMA, NATIVE_SEND_MESSAGE_SCHEMA } from "./aliases.ts";
 import { OfficialMcpError } from "./errors.ts";
+import { RuntimeLaunchInputError } from "../errors.ts";
 
 /** A JSON-Schema object, in the subset the descriptors use. */
 export interface JsonSchemaObject {
@@ -140,6 +141,92 @@ export function winterMcpServerDescriptor(args: {
 }): WinterMcpServerDescriptor {
   const tools = [...messagingToolDescriptors(args.messaging), ...(args.capabilities ?? [])];
   return { name: args.brand.mcpServerName, version: args.version ?? "1.0.0", tools };
+}
+
+// --------------------------------------------------------------------------------------------------
+// THE DAEMON'S OWN CAPABILITY SERVERS, READ ONCE INTO DESCRIPTORS (R-8 / R-8-1).
+// --------------------------------------------------------------------------------------------------
+//
+// THE ROUTER OWNS NO TOOL. The user's tool-ownership ruling puts the capability tools (computer,
+// browser, office) in the DAEMON, which hands them to the router as MCP servers in the Winter SDK's
+// own in-process shape — `{ type: "sdk", name, tools?, instance }`. The Winter leg takes that object
+// verbatim, by reference. The OFFICIAL leg cannot: its runtime registers in-process servers through
+// its own constructor, over its own validator's schema shape, so the same tools have to be REGISTERED
+// there rather than handed over. That is what this reads the server for — one declaration, two
+// registrations, which is WS-14 §11's whole requirement.
+//
+// IT IS A READ, NOT A REWRITE. Every field comes from the host's own declaration: the tool's name,
+// description, input schema and annotations, and a handler that calls straight back into the host's
+// instance. Nothing is renamed and nothing is invented; the two fields a descriptor needs and MCP does
+// not carry (`exposure`, `permissionClass`) are the two the official materialization drops or never
+// reads (`OFFICIAL_MATERIALIZATION_DROPS`), so defaulting them decides nothing.
+//
+// WHERE THE DECLARATION COMES FROM. `McpSdkServerConfig.tools` is the declarative list, and it is
+// preferred because it is synchronous and is what the host meant to publish; a server that declares
+// none is asked for `listTools()` instead. The instance must satisfy the Winter SDK's OWN predicate
+// either way, because `callTool` is what every derived handler ends up calling.
+
+/** One capability server, as a descriptor the official branch can register. */
+export function capabilityServerDescriptor(server: McpSdkServerConfigWithInstance, version = "1.0.0"): WinterMcpServerDescriptor {
+  if (!isWinterMcpServerInstance(server.instance)) {
+    throw new RuntimeLaunchInputError({
+      field: "capabilities",
+      reason: `the capability server \`${server.name}\` carries no in-process instance the router can call (\`listTools\`/\`callTool\`), so its tools could be forwarded to the Winter leg and never registered on the official one`,
+    });
+  }
+  const instance: WinterMcpServerInstance = server.instance;
+  const declared = server.tools ?? instance.listTools();
+  const tools = declared.map((tool) => {
+    const meta = (tool as { _meta?: Record<string, unknown> })._meta;
+    const permissionClass = typeof meta?.["permissionClass"] === "string" ? (meta["permissionClass"] as string) : server.name;
+    return {
+      tool: tool.name,
+      description: tool.description ?? "",
+      inputSchema: capabilityInputSchema(tool.inputSchema, server.name, tool.name),
+      ...(tool.annotations === undefined ? {} : { annotations: tool.annotations }),
+      // EAGER, and the choice costs nothing: the official registration has no parameter for exposure
+      // at all (see `OFFICIAL_MATERIALIZATION_DROPS`), and the Winter leg never sees this descriptor —
+      // it gets the host's own server object, with the host's own exposure.
+      exposure: "eager" as const,
+      permissionClass,
+      handler: async (rawArgs: unknown): Promise<WinterMcpToolResult> => {
+        const result = await instance.callTool(tool.name, (rawArgs ?? {}) as Record<string, unknown>);
+        // THE CONTENT PASSES THROUGH. MCP content blocks are the shape both branches speak; the
+        // vendor's `tool()` hands whatever the handler returns back to the model unchanged, so
+        // re-shaping here would be the router deciding what a host's tool may answer.
+        return { content: result.content as WinterMcpToolResult["content"], ...(result.isError === undefined ? {} : { isError: result.isError }) };
+      },
+    };
+  });
+  return { name: server.name, version, tools };
+}
+
+/** Every capability server, in the order the host declared them. */
+export function capabilityServerDescriptors(servers: readonly McpSdkServerConfigWithInstance[]): readonly WinterMcpServerDescriptor[] {
+  return servers.map((server) => capabilityServerDescriptor(server));
+}
+
+/**
+ * The one narrowing this read performs, and it is a refusal rather than a coercion.
+ *
+ * `toInputShape` converts a JSON-Schema OBJECT into the official validator's raw shape; a schema that
+ * is not one has no conversion, and a host that learns so at construction can fix it, while a host
+ * that learns so at the first model call has a session whose tool is already advertised.
+ */
+function capabilityInputSchema(raw: Record<string, unknown>, server: string, tool: string): JsonSchemaObject {
+  const properties = raw["properties"];
+  if (raw["type"] !== "object" || typeof properties !== "object" || properties === null) {
+    throw new RuntimeLaunchInputError({
+      field: "capabilities",
+      reason: `the capability tool \`${tool}\` on \`${server}\` declares an input schema that is not a JSON-Schema object, and the official branch's in-process registration has no conversion for anything else`,
+    });
+  }
+  const required = raw["required"];
+  return {
+    type: "object",
+    properties: properties as JsonSchemaObject["properties"],
+    ...(Array.isArray(required) ? { required: required.map(String) } : {}),
+  };
 }
 
 /** The canonical names a descriptor registers — the identity both branches must agree on. */

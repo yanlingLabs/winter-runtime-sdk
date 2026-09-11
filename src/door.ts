@@ -41,12 +41,14 @@ import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from 
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "./errors.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
+import { createMessagingToolHandlers } from "./messaging/handlers.ts";
 import type { ContainmentPolicy } from "./official/containment.ts";
 import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
 import { buildOfficialChildEnv, type OfficialEnvPolicy } from "./official/env-allowlist.ts";
 import { fetchAuthCredentials, authVariableSetKey, type AuthCredentialPlan } from "./official/auth.ts";
 import { buildOfficialOptions, type OptionsTemplatePolicy } from "./official/options-template.ts";
+import { officialMcpServers, winterMcpServerDescriptor, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import { officialSpoolRoot } from "./official/spool.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryEntry } from "./seams/directory-store.ts";
@@ -134,7 +136,17 @@ export interface RouterOfficialInput {
   projectKey?: string;
   /** §3's `CLAUDE_CODE_TMPDIR` — the shared per-user temp root the host derives from the brand. */
   sharedTempRoot?: string;
-  /** §11's servers, already materialized by the host (`officialMcpServers`). */
+  /**
+   * §11's servers, already materialized by the host (`officialMcpServers`) — THE ESCAPE HATCH, AND IT
+   * WINS.
+   *
+   * Since R-8 the router materializes the standing server and the constructor's capability servers
+   * itself (`RuntimeSdkOptions.capabilities` + `toInputShape`), so most hosts never fill this in. A
+   * host that DID materialize its own keeps it: this record is merged OVER the router's, key by key,
+   * the same precedence `remoteConfig` (`:148-149`) and `options` (`:153`) have. A host that has gone
+   * to the trouble of building a server under some name means that server, and the router silently
+   * replacing it with one of its own would be the translation layer this package is not.
+   */
   mcpServers?: Readonly<Record<string, unknown>>;
   /** §1 profile 2's staging root. Defaults to the vendor's own `<tmpdir>/claude-resume-<resume id>`. */
   stagingRoot?: string;
@@ -219,6 +231,35 @@ export interface OfficialLegDeps {
   transcriptProjectKey: (cwd: string) => string;
   /** WS-14 §5.1's vendored runtime, from the constructor. A per-query `Options` value wins over it. */
   vendoredOfficialRuntime?: string;
+  /**
+   * The daemon's capability servers, as DESCRIPTORS (R-8 / R-8-1).
+   *
+   * DESCRIPTORS RATHER THAN THE WINTER INSTANCES, because this branch does not consume a server — it
+   * REGISTERS one, through its own runtime's in-process constructor. `createRuntimeSdk` reads the
+   * host's declaration once (`capabilityServerDescriptors`) and the leg materializes it per session,
+   * beside the standing server it builds from `messaging`.
+   *
+   * PER SERVER, UNDER ITS OWN NAME, so `mcp__<server>__<tool>` is the same canonical name on both legs
+   * — which is the whole of WS-14 §11's "registered identically into BOTH branches".
+   */
+  capabilities?: readonly WinterMcpServerDescriptor[];
+  /**
+   * The host's JSON-Schema → validator-shape bridge (`RuntimeSdkOptions.toInputShape`).
+   *
+   * IT IS WHAT SWITCHES THE ROUTER-BUILT SERVERS ON. With it, this leg registers the standing server
+   * (the messaging tools) and every capability server itself, and a host stops hand-materializing.
+   * Without it and WITH capabilities configured, the leg REFUSES: a session whose capability tools
+   * exist on the Winter branch and silently not on this one is the divergence §11 exists to prevent.
+   */
+  toInputShape?: InputShapeFactory;
+  /**
+   * The injected official peer, duck-typed to §11's surface (`createSdkMcpServer`/`tool`).
+   *
+   * THE SAME OBJECT `peers.claude` ALREADY IS — the seam declares only `query`, because that is all
+   * the launch path needs, and this is the one other member of it this package uses. A module without
+   * the constructor is `OfficialMcpError`, thrown where the server would have been built.
+   */
+  mcpModule?: OfficialMcpModule;
   /** The adapter's own policy, so a host's `env`/`containment` choices reach the door's own builders. */
   policy?: RouterOfficialPolicy;
   /**
@@ -371,11 +412,53 @@ export interface OfficialLegRequest {
 }
 
 /**
+ * §11's `mcpServers` for this session, built by the ROUTER rather than by the host (R-8 / R-8-1).
+ *
+ * ONE STANDING SERVER PLUS ONE PER CAPABILITY SERVER. The standing server carries the messaging tools
+ * §7's aliases resolve to, bound to THIS session's caller identity — which is why it is built per leg
+ * rather than once at construction. Each capability server is registered under its own name, so the
+ * canonical name a model sees is the same on both legs.
+ *
+ * THE BRIDGE IS THE SWITCH, and its absence with capabilities configured is a typed refusal (see
+ * `OfficialLegDeps.toInputShape`). With neither, this returns `undefined` and the leg behaves exactly
+ * as it did before R-8: `RouterOfficialInput.mcpServers` is the only route, and a host that was
+ * hand-materializing keeps working unchanged.
+ */
+function officialCapabilityServers(deps: OfficialLegDeps, sessionId: string, branchLabel: string): Record<string, unknown> | undefined {
+  if (deps.toInputShape === undefined) {
+    if (deps.capabilities === undefined) return undefined;
+    throw new RuntimeLaunchInputError({
+      field: "toInputShape",
+      reason:
+        "this handle was constructed with `capabilities` but no JSON-Schema → validator-shape bridge, and the official runtime registers in-process servers only through its own validator's shape — so those tools would exist on the Winter leg and silently not on this one (WS-14 §11)",
+    });
+  }
+  const toInputShape = deps.toInputShape;
+  const module = deps.mcpModule;
+  if (module === undefined) {
+    throw new RuntimeLaunchInputError({
+      field: "peers.claude",
+      reason: "the official leg cannot register the standing server without the official SDK module the servers are registered into",
+    });
+  }
+  const handlers = createMessagingToolHandlers(deps.messaging, { sessionId });
+  const standing = winterMcpServerDescriptor({ brand: deps.brand, branchLabel, messaging: { sendMessage: handlers.sendMessage, listAgents: handlers.listAgents } });
+  const servers: Record<string, unknown> = {};
+  for (const descriptor of [standing, ...(deps.capabilities ?? [])]) {
+    Object.assign(servers, officialMcpServers({ descriptor, module, toInputShape, branchLabel }));
+  }
+  return servers;
+}
+
+/**
  * Opens the official leg, synchronously, returning the vendor's `Query` through a handle that defers
  * the launch to the first pull (see this module's header, note 1).
  */
 export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegRequest): OfficialQuery {
   const branchLabel = officialBranchLabel(deps.brand);
+  // BEFORE ANYTHING ELSE HAPPENS. This is an input refusal, and an input refusal that arrived after a
+  // directory row, a credential read or a child process would be a refusal the host pays for.
+  const routerBuiltMcpServers = officialCapabilityServers(deps, request.input.sessionId, branchLabel);
   const parsed = request.input.parentSessionId === undefined ? buildSessionAddress(request.input.sessionId) : buildChildAddress(request.input.parentSessionId, request.input.sessionId);
   const address = officialLegAddress(request.input);
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
@@ -533,7 +616,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       ...(request.input.options ?? {}),
       advertisesHandoff: request.input.advertisesHandoff ?? true,
       env,
-      ...(request.input.mcpServers === undefined ? {} : { mcpServers: request.input.mcpServers }),
+      // THE ROUTER'S SERVERS FIRST, THE HOST'S OVER THEM (R-8). `input.mcpServers` is documented at its
+      // declaration as the escape hatch that wins: a host that materialized a server under some name
+      // means that server. Merged rather than replaced, so a host that hand-built ONE entry does not
+      // silently lose the capability servers it also configured.
+      ...(routerBuiltMcpServers === undefined && request.input.mcpServers === undefined ? {} : { mcpServers: { ...routerBuiltMcpServers, ...request.input.mcpServers } }),
       ...(bridge === undefined ? {} : { canUseTool: bridge }),
       ...(request.options.permissionMode === undefined ? {} : { permissionMode: request.options.permissionMode as OfficialPermissionMode }),
       ...(request.options.sessionId === undefined ? {} : { sessionId: request.options.sessionId }),

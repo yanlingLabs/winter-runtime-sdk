@@ -31,7 +31,7 @@ describeRuntime("WS-17 rows 1-2, through the door", () => {
         const writer = winterWriterHandle(() => "idle");
         bed.sdk.messaging.attachWinterSession("session:peer", writer.handle);
 
-        const messages = await drain(bed.sdk.query({ prompt: "do the thing", options: bed.officialOptions({ withMessagingTools: true }) }));
+        const messages = await drain(bed.sdk.query({ prompt: "do the thing", options: bed.officialOptions() }));
 
         // THE WHOLE PATH RAN: the model emitted the NATIVE name, the pinned runtime's own `toolAliases`
         // resolved it to the canonical MCP tool, Lane B's handler answered, and the router delivered —
@@ -57,7 +57,7 @@ describeRuntime("WS-17 rows 1-2, through the door", () => {
         await bed.sdk.directory.record(sessionEntry("peer-2", { displayName: "reviewer" }));
         bed.sdk.messaging.attachWinterSession("session:peer-2", winterWriterHandle(() => "idle").handle);
 
-        await drain(bed.sdk.query({ prompt: "who is out there", options: bed.officialOptions({ withMessagingTools: true }) }));
+        await drain(bed.sdk.query({ prompt: "who is out there", options: bed.officialOptions() }));
 
         const row = toolResults(bed.record).find((entry) => entry.tool_use_id === "toolu_door2");
         expect(row?.is_error).toBeUndefined();

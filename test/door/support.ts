@@ -15,15 +15,13 @@
 // HERMETIC IN THE FULL SENSE: `HOME` and `CLAUDE_CONFIG_DIR` are `mkdtemp` roots, a decoy vendor home
 // is planted under `HOME`, and R-7b-11's four traffic opt-outs are set by the PRODUCTION env builder —
 // this bed passes no policy at all, which is the point.
-import { WinterCompatibilitySessionStore, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { WinterCompatibilitySessionStore, transcriptProjectKey, type McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 
 import { createRuntimeSdk, type RouterOfficialPolicy, type RuntimeSdk, type RuntimeSdkOptions, type RuntimeSdkPeers } from "../../src/index.ts";
 import type { RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createInMemoryRuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import { createFakeKeychain, createFakeWinterPeer, withLoopbackFake } from "../../src/testing/index.ts";
-import { officialMcpServers, winterMcpServerDescriptor } from "../../src/official/mcp-descriptors.ts";
-import { createMessagingToolHandlers } from "../../src/messaging/index.ts";
 import { hermeticSession, officialRuntimeBed, scriptedLoopback, type HermeticSession, type LoopbackRecord, type ScriptedTurn } from "../official/support.ts";
 import { declaredClasses } from "../messaging/support.ts";
 
@@ -31,6 +29,23 @@ export const DOOR_TIMEOUT = 180_000;
 
 /** The credential ref the bed's keychain answers for. Its material never leaves the child env. */
 export const DOOR_CREDENTIAL = { kind: "keychain", account: "loopback:door", service: "com.example.door" } as const;
+
+/**
+ * A daemon-shaped capability server, in the Winter SDK's own in-process shape (R-8-1).
+ *
+ * THE DOOR'S BED IS A HOST, and this is what a host now hands over: the router forwards this object
+ * itself to the Winter leg and REGISTERS the same tool into the official runtime from its declaration.
+ * Its schema stays inside the string/boolean subset the bed's own `toInputShape` converts.
+ */
+export const DOOR_CAPABILITY = {
+  type: "sdk",
+  name: "door-capability",
+  tools: [{ name: "door_probe", description: "a capability tool the daemon owns", inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] } }],
+  instance: {
+    listTools: () => [{ name: "door_probe", description: "a capability tool the daemon owns", inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] } }],
+    callTool: async (_name: string, args: Record<string, unknown>) => ({ content: [{ type: "text", text: `did ${String(args["action"])}` }] }),
+  },
+} as const satisfies McpSdkServerConfigWithInstance;
 
 /**
  * A `custom` auth family, deliberately.
@@ -64,7 +79,7 @@ export interface DoorBed {
   /** The transcript project key the door sets — half of the `SessionKey` a handoff takes (I-2/M-2). */
   projectKey: string;
   /** The options a `sdk.query()` needs for the official leg, ready to spread. */
-  officialOptions(over?: { sessionId?: string; withMessagingTools?: boolean }): Record<string, unknown>;
+  officialOptions(over?: { sessionId?: string }): Record<string, unknown>;
   /**
    * A SECOND handle over the same peers/home/store, with extra constructor options.
    *
@@ -126,6 +141,12 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
         keychain: createFakeKeychain([{ ref: DOOR_CREDENTIAL, material: "sk-ant-loopback" }]),
         directoryStore,
         vendoredOfficialRuntime: runtime.executable,
+        // THE CAPABILITIES DOOR, THROUGH THE CONSTRUCTOR (R-8). This bed used to hand-materialize the
+        // standing server and pass it in as `runtime.official.mcpServers` — which meant the door's own
+        // bed was doing by hand the one thing the door now does, so no door test touched the real path.
+        // One daemon-shaped capability server and the host's own schema bridge are all a host supplies.
+        capabilities: [DOOR_CAPABILITY],
+        toInputShape: runtime.toInputShape,
         // ONE HOME for the shared store, the spool and every seam that resolves through the context.
         handoff: { winterHome: session.brandHome, ...(extra.handoff ?? {}) },
         messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
@@ -144,11 +165,6 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
       address: `session:${sessionId}`,
       officialOptions(over = {}) {
         const id = over.sessionId ?? sessionId;
-        const messagingTools = over.withMessagingTools !== true ? undefined : createMessagingToolHandlers(sdk.messaging, { sessionId: id });
-        const descriptor =
-          messagingTools === undefined
-            ? undefined
-            : winterMcpServerDescriptor({ brand: sdk.brand, branchLabel: "winter-claude-agent", messaging: { sendMessage: messagingTools.sendMessage, listAgents: messagingTools.listAgents } });
         return {
           cwd: session.cwd,
           canUseTool: async (_name: string, input: Record<string, unknown>) => ({ behavior: "allow", updatedInput: input }),
@@ -161,9 +177,6 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
               credentials: [{ variable: "ANTHROPIC_API_KEY", ref: DOOR_CREDENTIAL }],
               connectionEnv: { ANTHROPIC_BASE_URL: fake.url.replace(/\/$/, "") },
               base: { HOME: session.home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
-              ...(descriptor === undefined
-                ? {}
-                : { mcpServers: officialMcpServers({ descriptor, module: runtime.mcpModule, toInputShape: runtime.toInputShape, branchLabel: "winter-claude-agent" }) }),
             },
           },
         };

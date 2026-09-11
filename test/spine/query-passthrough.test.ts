@@ -12,12 +12,32 @@ import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/inde
 import { createRuntimeSdk, forwardableOptions, ROUTER_ONLY_OPTION_KEYS } from "../../src/index.ts";
 import { RuntimeSdkDisposedError } from "../../src/errors.ts";
 import type { RouterOptions } from "../../src/sdk.ts";
-import type { SdkMessage } from "@yanlinglabs/winter-agent-sdk";
+import type { McpSdkServerConfigWithInstance, SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "../../src/errors.ts";
 import type { RuntimeSelection, SelectionInput } from "../../src/selection/runtime-selection.ts";
 import { NOW, VERSIONS, credentials, listing } from "../selection/fixtures.ts";
 
 const keychain = createFakeKeychain();
+
+/**
+ * A daemon-owned capability server, in the Winter SDK's own in-process shape (R-8-1).
+ *
+ * The router never builds one of these: the DAEMON owns the capability tools and hands them over as
+ * MCP servers. `tools` is the declarative half the official leg reads to register the same tools into
+ * the other branch; `instance` is what the Winter leg runs them through.
+ */
+function capabilityServer(name: string, tool = "computer"): McpSdkServerConfigWithInstance {
+  const definition = { name: tool, description: "the daemon's own capability", inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] } };
+  return {
+    type: "sdk",
+    name,
+    tools: [definition],
+    instance: {
+      listTools: () => [definition],
+      callTool: async () => ({ content: [{ type: "text", text: "did the thing" }] }),
+    },
+  };
+}
 
 describe("query(): options", () => {
   test("with no router-owned key, the caller's OWN object is forwarded, by reference", () => {
@@ -48,11 +68,43 @@ describe("query(): options", () => {
     expect(Object.keys(forwarded).sort()).toEqual(["env", "model"]);
   });
 
+  test("with capabilities configured the object is a COPY, and every other member keeps its own value identity", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const server = capabilityServer("norma-computer");
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [server] });
+    const env = { PATH: "/usr/bin" };
+    const allowedTools = ["Read"];
+    const options: RouterOptions = { model: "some-model", env, allowedTools, runtime: {} };
+    sdk.query({ prompt: "hello", options });
+    const forwarded = calls[0]?.options as Record<string, unknown>;
+    // THE ONE ASSERTION R-8 BREAKS, and its replacement: not the same object, but the same MEMBERS.
+    expect(forwarded).not.toBe(options);
+    expect("runtime" in forwarded).toBe(false);
+    expect(forwarded["model"]).toBe("some-model");
+    expect(forwarded["env"]).toBe(env);
+    expect(forwarded["allowedTools"]).toBe(allowedTools);
+    expect(Object.keys(forwarded).sort()).toEqual(["allowedTools", "env", "mcpServers", "model"]);
+  });
+
   test("no options at all forwards an empty object -- the Winter door requires one", () => {
     const { peer, calls } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     sdk.query({ prompt: "hello" });
     expect(calls[0]?.options).toEqual({});
+  });
+
+  test("no options at all, WITH capabilities, forwards exactly the capability record and nothing else", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const server = capabilityServer("norma-computer");
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [server] });
+    sdk.query({ prompt: "hello" });
+    sdk.query({ prompt: "again" });
+    const first = calls[0]?.options as Record<string, unknown>;
+    expect(Object.keys(first)).toEqual(["mcpServers"]);
+    expect(Object.keys(first["mcpServers"] as object)).toEqual(["norma-computer"]);
+    expect((first["mcpServers"] as Record<string, unknown>)["norma-computer"]).toBe(server);
+    // ONE RECORD, BUILT ONCE: stable identity across queries on one handle.
+    expect((calls[1]?.options as Record<string, unknown>)["mcpServers"]).toBe(first["mcpServers"]);
   });
 
   test("`forwardableOptions` is the one place the rule lives, and it is exported", () => {
@@ -61,6 +113,147 @@ describe("query(): options", () => {
     expect(forwardableOptions(plain)).toBe(plain);
     const withRouterKey = { model: "m", runtime: {} };
     expect(forwardableOptions(withRouterKey)).toEqual({ model: "m" });
+    // THE THIRD PARAMETER IS OPTIONAL, so both calls above stay legal; with it, the merge.
+    const servers = { "norma-computer": capabilityServer("norma-computer") };
+    expect(forwardableOptions(plain, undefined, servers)).toEqual({ model: "m", mcpServers: servers });
+    const own = { other: { type: "sdk", name: "other", instance: {} } };
+    const merged = forwardableOptions({ model: "m", mcpServers: own } as RouterOptions, undefined, servers) as Record<string, unknown>;
+    expect(merged["mcpServers"]).toEqual({ ...own, ...servers });
+  });
+});
+
+// ====================================================================================================
+// R-8 / R-8-1 — THE CAPABILITY SERVERS, AND THE PASS-THROUGH INVARIANT THEY HAD TO BE FITTED INTO.
+//
+// The daemon owns the capability tools (computer, browser, office) and hands them to the router as MCP
+// SERVERS; the router forwards them to both legs and rewrites nothing else. That is a real change to
+// the object the Winter peer receives, so the identity claim above had to be restated rather than
+// dropped: with no capabilities configured the caller's OWN object is still forwarded, and with them
+// the forwarded object is a copy in which every member except `mcpServers` is the caller's own value.
+// ====================================================================================================
+describe("query(): the capability servers", () => {
+  test("(1) with no capabilities configured, the identity return still fires", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
+    const options: RouterOptions = { model: "m", mcpServers: { own: { type: "sdk", name: "own", instance: {} } } };
+    sdk.query({ prompt: "hello", options });
+    expect(calls[0]?.options).toBe(options);
+    expect(forwardableOptions(options)).toBe(options);
+  });
+
+  test("(2) capabilities and no caller `mcpServers`: exactly one added key, identical across queries", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const server = capabilityServer("norma-computer");
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [server] });
+    const options: RouterOptions = { model: "m" };
+    sdk.query({ prompt: "a", options });
+    sdk.query({ prompt: "b", options });
+    const first = calls[0]?.options as Record<string, unknown>;
+    const second = calls[1]?.options as Record<string, unknown>;
+    expect(Object.keys(first).sort()).toEqual(["mcpServers", "model"]);
+    expect(first["model"]).toBe("m");
+    const record = first["mcpServers"] as Record<string, unknown>;
+    expect(Object.keys(record)).toEqual(["norma-computer"]);
+    expect(record["norma-computer"]).toBe(server);
+    expect(second["mcpServers"]).toBe(record);
+  });
+
+  test("(3) capabilities beside the caller's OWN `mcpServers`: every caller entry keeps its identity", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const server = capabilityServer("norma-computer");
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [server] });
+    const hostOwned = { type: "sdk" as const, name: "host-owned", instance: {} };
+    const mcpServers = { "host-owned": hostOwned };
+    const env = { PATH: "/usr/bin" };
+    const options: RouterOptions = { model: "m", env, mcpServers };
+    sdk.query({ prompt: "hello", options });
+    const forwarded = calls[0]?.options as Record<string, unknown>;
+    const record = forwarded["mcpServers"] as Record<string, unknown>;
+    expect(Object.keys(record).sort()).toEqual(["host-owned", "norma-computer"]);
+    // THE CALLER'S ENTRY, BY REFERENCE — merged beside, never rebuilt.
+    expect(record["host-owned"]).toBe(hostOwned);
+    expect(record["norma-computer"]).toBe(server);
+    // …and the caller's own record object is NOT mutated.
+    expect(Object.keys(mcpServers)).toEqual(["host-owned"]);
+    expect(forwarded["env"]).toBe(env);
+  });
+
+  test("(4) a caller entry under a name the router also writes is a typed refusal, never an overwrite", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [capabilityServer("norma-computer")] });
+    // THE NAME THE ROUTER WRITES ON THIS LEG is the capability server's own — the brand's standing
+    // server name is reserved a step earlier, at construction (the test below), because the router
+    // registers the messaging tools under it on the OFFICIAL leg. Either way nobody's server is
+    // silently replaced by anybody else's.
+    const options: RouterOptions = { model: "m", mcpServers: { "norma-computer": { type: "sdk", name: "norma-computer", instance: {} } } };
+    try {
+      sdk.query({ prompt: "hello", options });
+      throw new Error("unreachable: the query should have refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((error as RuntimeLaunchInputError).field).toBe("mcpServers");
+      expect((error as Error).message).toContain("norma-computer");
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test("(5) the invariant, as one assertion: the caller's options minus `runtime`, plus `mcpServers`", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const server = capabilityServer("norma-computer");
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [server], brand: { mcpServerName: "acme" } });
+    const options: RouterOptions = { model: "m", env: { PATH: "/usr/bin" }, cwd: "/tmp/nowhere", allowedTools: ["Read"], runtime: {} };
+    sdk.query({ prompt: "hello", options });
+    const forwarded = calls[0]?.options as Record<string, unknown>;
+    const expected = new Set([...Object.keys(options).filter((key) => key !== "runtime"), "mcpServers", "brand"]);
+    expect(new Set(Object.keys(forwarded))).toEqual(expected);
+    for (const key of Object.keys(forwarded)) {
+      if (key === "mcpServers" || key === "brand") continue;
+      expect({ key, same: Object.is(forwarded[key], (options as Record<string, unknown>)[key]) }).toEqual({ key, same: true });
+    }
+  });
+
+  test("a capability server named after the brand's own standing server is refused at construction", () => {
+    const { peer } = createFakeWinterPeer();
+    try {
+      createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [capabilityServer("winter")], brand: { mcpServerName: "winter" } });
+      throw new Error("unreachable: the constructor should have refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((error as RuntimeLaunchInputError).field).toBe("capabilities");
+    }
+  });
+
+  test("two capability servers under one name are refused at construction", () => {
+    const { peer } = createFakeWinterPeer();
+    try {
+      createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [capabilityServer("norma-computer"), capabilityServer("norma-computer", "browser")] });
+      throw new Error("unreachable: the constructor should have refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((error as RuntimeLaunchInputError).field).toBe("capabilities");
+    }
+  });
+
+  test("the official leg refuses capabilities it cannot materialize, and names the field", () => {
+    const { peer } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [capabilityServer("norma-computer")] });
+    const selection: RuntimeSelection = {
+      runtimeKind: "claude-agent",
+      providerId: "anthropic",
+      modelRef: "anthropic/claude-opus-5",
+      family: "claude",
+      authFamily: "api-key",
+      sdkVersion: "0.0.2",
+      reason: "door fixture",
+      decidedAt: new Date(0).toISOString(),
+    };
+    try {
+      sdk.query({ prompt: "hello", options: { runtime: { selection, official: { sessionId: "s-1" } } } });
+      throw new Error("unreachable: the official leg should have refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((error as RuntimeLaunchInputError).field).toBe("toInputShape");
+    }
   });
 });
 

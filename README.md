@@ -36,8 +36,22 @@ Winter SDK before its first publish.
 runtime's handle untouched.
 
 ```ts
+// The host owns the capability tools and hands them over as MCP SERVERS; the router forwards the same
+// servers to BOTH legs and rewrites nothing else (R-8-1). `toInputShape` is the one line of glue the
+// official branch needs — its in-process server constructor takes schemas in its own validator's shape,
+// and this package deliberately depends on no validator.
+const sdk = createRuntimeSdk({
+  peers,
+  keychain,
+  vendoredOfficialRuntime,
+  capabilities: [computerServer, browserServer, officeServer],   // your own `{ type: "sdk", name, tools, instance }`
+  toInputShape: (schema) => jsonSchemaToZodRawShape(schema),     // one line, over the validator you already have
+});
+
 // The Winter leg: exactly what it always was. No runtime input, so nothing is decided and nothing
-// is stripped — the caller's own `options` object is forwarded by reference.
+// is stripped — the caller's own `options` object is forwarded by reference (with no `capabilities`
+// configured, by IDENTITY; with them, a copy whose every other member is still your own object, plus
+// your servers under `mcpServers`).
 for await (const message of sdk.query({ prompt: "hello" })) { /* SdkMessage */ }
 
 // The official leg: a `claude-agent` selection, plus what only a host can answer.
@@ -51,7 +65,9 @@ const query = sdk.query({
       official: {
         sessionId: "s-42",                        // its directory row is `session:s-42`
         base: minimalOsEnvironmentFrom(process.env),
-        mcpServers: officialMcpServers({ /* … */ }),
+        // OPTIONAL SINCE 0.0.2: the router materializes the standing server and your capability
+        // servers itself. This stays as the escape hatch, and it WINS, key by key, over the router's.
+        // mcpServers: officialMcpServers({ /* … */ }),
       },
     },
   },
