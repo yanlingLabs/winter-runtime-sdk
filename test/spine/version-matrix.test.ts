@@ -30,9 +30,9 @@ describe("satisfiesRange (plants)", () => {
     expect(satisfiesRange("0.3.249", SUPPORTED.claudeAgentSdk)).toBe(false);
   });
 
-  test("the caret form the close-out pins (`^0.0.2`) behaves like the range it replaces", () => {
-    expect(satisfiesRange("0.0.2", "^0.0.2")).toBe(true);
-    expect(satisfiesRange("0.0.3", "^0.0.2")).toBe(false); // a 0.0.x caret pins the patch
+  test("the caret form the close-out pins (`^0.0.3`) behaves like the range it replaces", () => {
+    expect(satisfiesRange("0.0.3", "^0.0.3")).toBe(true);
+    expect(satisfiesRange("0.0.4", "^0.0.3")).toBe(false); // a 0.0.x caret pins the patch
     expect(satisfiesRange("0.2.1", "^0.2.0")).toBe(true);
     expect(satisfiesRange("0.3.0", "^0.2.0")).toBe(false);
     expect(satisfiesRange("1.9.9", "^1.2.3")).toBe(true);

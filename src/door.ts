@@ -498,6 +498,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   // `"unknown"` so WS-10 §13's class floor judged a phantom sender, and the delivered
   // `<agent-message from="session:<child>">` named an address every reply answers `not_found` for.
   // `callerAddress` over this pair yields exactly `officialLegAddress`'s address.
+  // THE SESSION'S ADDRESS, HOISTED ABOVE THE CLOSURES THAT READ IT (RD review r1). The lazy transcript
+  // source below reads the directory row by this address; declaring it after that closure was correct
+  // at run time (the read happens per call) and misleading to read.
+  const address = officialLegAddress(request.input);
+
   /**
    * THE ADVISOR'S TRANSCRIPT, READ LAZILY — because its key is not knowable yet (interim review I-1).
    *
@@ -530,7 +535,6 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   const messagingCaller: WinterToolCaller = request.input.parentSessionId === undefined ? { sessionId: request.input.sessionId } : { sessionId: request.input.parentSessionId, agentId: request.input.sessionId };
   const routerBuiltMcpServers = officialCapabilityServers(deps, { caller: messagingCaller, transcriptSource: advisorTranscriptSource(), branchLabel, hostOwned: request.input.mcpServers });
   const parsed = request.input.parentSessionId === undefined ? buildSessionAddress(request.input.sessionId) : buildChildAddress(request.input.parentSessionId, request.input.sessionId);
-  const address = officialLegAddress(request.input);
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
   const stream = typeof request.prompt === "string" ? undefined : createOfficialInputStream();
   let detach: (() => void) | undefined;

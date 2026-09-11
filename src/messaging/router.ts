@@ -27,7 +27,6 @@
 //      applies inbound policy to the RETURNING NOTICE (a held subscriber gets a reduced-status
 //      notice), fires each subscription at most once, and drops the durable record when it does.
 import {
-  callerAddress,
   createLoopGuard,
   createMessagingRouter,
   createNotificationQueue,

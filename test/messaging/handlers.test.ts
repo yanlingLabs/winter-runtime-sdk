@@ -222,16 +222,12 @@ describe("item 15 — the per-call tool-use id from the vendor's `extra`", () =>
     return { ...bed, directory, messaging };
   };
 
-  test("the id is read from the vendor's own namespaced `_meta` key", () => {
-    expect(toolUseIdFromExtra({ _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: "toolu_abc" } })).toBe("toolu_abc");
-    // Defensive on every shape a future pin could hand us: losing the key degrades to the bound id.
-    expect(toolUseIdFromExtra(undefined)).toBeUndefined();
-    expect(toolUseIdFromExtra(null)).toBeUndefined();
-    expect(toolUseIdFromExtra({})).toBeUndefined();
-    expect(toolUseIdFromExtra({ _meta: null })).toBeUndefined();
-    expect(toolUseIdFromExtra({ _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: 42 } })).toBeUndefined();
-    expect(toolUseIdFromExtra({ _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: "" } })).toBeUndefined();
-  });
+  // THE READER'S OWN PLANT WENT WITH THE READER (R-8-1, carry 3). Six defensive cases over
+  // `toolUseIdFromExtra` — undefined, null, `{}`, a null `_meta`, a non-string value, an empty string —
+  // asserted the SDK's function from the consumer side, which is the same duplication the acceptor
+  // plants were deleted for. `@yanlinglabs/winter-agent-sdk/tools` tests it at the source. What stays
+  // here is the only half that is the router's: that the id it reads becomes THIS session's retry key
+  // against Lane B's real router, which the two plants below drive end to end.
 
   test("a retry with the SAME vendor tool-use id returns the stored outcome, not a second delivery", async () => {
     // The receiver's class is DECLARED here: since D2 an unknown class holds, and this test's subject

@@ -113,7 +113,7 @@ describe("the lane barrels", () => {
   });
 });
 
-describe("the two shared modules neither lane owns", () => {
+describe("the shared module neither lane owns", () => {
   // The names N13 unified. They are on the PACKAGE barrel and on no lane barrel — which is the state
   // the collision gate above keeps, but stated positively so a future edit that moved one back into a
   // lane (and out of the public surface) fails here rather than silently shrinking the package.
