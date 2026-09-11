@@ -33,15 +33,26 @@ behaviour therefore fails the test rather than leaving this document quietly unt
 | standing server | `winterMcpServerDescriptor` with the two messaging tools PLUS an `advisor` capability descriptor (`{ question: string }`), materialized into the official branch by `officialMcpServers` |
 | alias map | the brand's own (`SendMessage`, `ListAgents`) plus `advisor → mcp__winter__advisor` |
 | the model | the loopback fake, scripted to emit exactly one `tool_use` block per condition — so a BARE `advisor` block is emitted regardless of what the session advertises |
+| the advisor's handler | when measured (2026-09-11): a recording fake registered through `capabilities`. After R9: the standing server's own advisor over a scripted fake reviewer — same question, one fewer double |
 | condition 1 | bare `advisor` block, alias present |
 | condition 2 (the control) | bare `advisor` block, **no** alias entry, same descriptor registered |
 | condition 3 | bare `advisor` block, `disallowedTools: ["advisor", "mcp__winter__advisor"]` |
 | condition 4 | canonical `mcp__winter__advisor` block, same deny rule |
 
-Condition 3/4's deny list is spelled by hand because `aliasDenyNames("advisor", brand)` does not
-type-check today — its parameter is `AliasedBuiltin`, derived from `ALIASED_BUILTINS`, which is what
-this measurement gates. The two names are exactly what the helper returns after the widening
+Condition 3/4's deny list was spelled by hand when this was measured, because
+`aliasDenyNames("advisor", brand)` did not type-check: its parameter is `AliasedBuiltin`, derived from
+`ALIASED_BUILTINS`, which is what the measurement gated. **R9 landed the widening, so the helper now
+answers for `advisor` and the test calls it** — the two names are the same pair either way
 (`[builtin, aliasTargetFor(builtin, brand)]`).
+
+**What the test became (interim review I-2).** The gate passed, so the same four sessions now ASSERT
+this contract instead of recording it, with two changes the widening forced: the control session
+REPLACES the alias map with the brand's own minus the `advisor` key (a merged map cannot express "without
+this key", so a merging control would have silently carried the alias it exists to be without), and the
+standing server's own advisor is the one under test — the probe no longer injects a second `advisor`
+descriptor through `capabilities`, which after R9 would have registered two tools of one name. The
+`measured` block below is still read back and compared key for key, so this document and the artifact
+cannot drift apart.
 
 ## 2. What was observed
 
@@ -93,6 +104,13 @@ REMOVED, does not reach the handler at all —
 — so it is the alias, and nothing else, that resolved the name. **0.3.250's `toolAliases` does not
 require its key to be one of the runtime's own built-ins.** Single-hop name-based resolution of a
 model-emitted `tool_use` block is applied to the key as given.
+
+**Re-measured after R9 (2026-09-11, same pin).** Every key above holds unchanged when the advisor under
+test is the STANDING server's own — the SDK's `createAdvisorToolHandler` over a scripted fake reviewer —
+rather than the recording fake this probe first registered: the bare call still reaches it,
+`bare-advisor-tool-result-is-error` is still `no` (the reviewer answers, so there is no error to
+report), and the control still comes back `No such tool available`. The one thing that changed is who
+answered, which is the whole point of the widening.
 
 **(c) The deny rule removes both names.** With `disallowedTools: ["advisor", "mcp__winter__advisor"]`
 the bare call is blocked and the canonical call is blocked. Consistent with row 3's measurement (the

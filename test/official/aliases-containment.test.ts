@@ -9,81 +9,43 @@
 import { describe, expect, test } from "bun:test";
 import { WINTER_BRAND, mcpToolName } from "@yanlinglabs/winter-agent-sdk";
 
-import {
-  ALIASED_BUILTINS,
-  CANONICAL_DUPLICATE_EXPOSURE,
-  NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
-  NATIVE_SEND_MESSAGE_SCHEMA,
-  acceptNativeListAgentsArgs,
-  acceptNativeSendMessageArgs,
-  aliasTargetFor,
-  officialToolAliases,
-} from "../../src/official/aliases.ts";
+import { ALIASED_BUILTINS, CANONICAL_DUPLICATE_EXPOSURE, aliasTargetFor, officialToolAliases } from "../../src/official/aliases.ts";
 import { containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, resolveSavedApprovalDisposition, targetsForbiddenPath } from "../../src/official/containment.ts";
 import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
 
 const brand = WINTER_BRAND;
 
 describe("WS-14 §7 — the alias map", () => {
-  test("both built-ins point at the BRAND's own canonical tools", () => {
+  test("all FOUR built-in names point at the BRAND's own canonical tools", () => {
     expect(officialToolAliases(brand)).toEqual({
       SendMessage: mcpToolName(brand, "send_message"),
       ListAgents: mcpToolName(brand, "list_agents"),
+      ReadNotifications: mcpToolName(brand, "read_notifications"),
+      advisor: mcpToolName(brand, "advisor"),
     });
     expect(officialToolAliases({ mcpServerName: "acme" })).toEqual({
       SendMessage: "mcp__acme__send_message",
       ListAgents: "mcp__acme__list_agents",
+      ReadNotifications: "mcp__acme__read_notifications",
+      advisor: "mcp__acme__advisor",
     });
     expect(aliasTargetFor("SendMessage", { mcpServerName: "acme" })).toBe("mcp__acme__send_message");
-    expect(ALIASED_BUILTINS.map((entry) => entry.builtin)).toEqual(["SendMessage", "ListAgents"]);
+    // WIDENED ON A MEASUREMENT (R4): `ReadNotifications` and `advisor` are not local built-ins of the
+    // pin, and the probe is what established that `toolAliases` honours a key anyway.
+    expect(ALIASED_BUILTINS.map((entry) => entry.builtin)).toEqual(["SendMessage", "ListAgents", "ReadNotifications", "advisor"]);
   });
 
   test("the canonical duplicates are DEFERRED rather than hidden — they stay addressable by name", () => {
     expect(CANONICAL_DUPLICATE_EXPOSURE).toBe("deferred");
   });
 
-  describe("the native argument schemas are accepted EXACTLY", () => {
-    test("SendMessage: every WS-10 §10.1 constraint, and no extra field", () => {
-      expect(acceptNativeSendMessageArgs({ to: "reviewer", message: "ping" })).toEqual({ ok: true, args: { to: "reviewer", message: "ping" } });
-      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", summary: "s", notify_when_idle: true })).toEqual({
-        ok: true,
-        args: { to: "r", message: "m", summary: "s", notify_when_idle: true },
-      });
-      // "no more" is as load-bearing as "no less": an extra field would be a second schema.
-      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", priority: "high" })).toEqual({ ok: false, reason: "unknown argument(s): priority" });
-      expect(acceptNativeSendMessageArgs({ message: "m" }).ok).toBe(false);
-      expect(acceptNativeSendMessageArgs({ to: "r" }).ok).toBe(false);
-      // `to` is validated by the SDK subpath's own `validateToField` since review r4's N13 unified
-      // the two acceptors, so the REASON is the subpath's prose — and its rule is the stricter one:
-      // `"*"` is refused ANYWHERE in `to`, not only as the whole field.
-      const broadcast = acceptNativeSendMessageArgs({ to: "*", message: "m" });
-      expect(broadcast.ok).toBe(false);
-      if (!broadcast.ok) expect(broadcast.reason).toContain("broadcast");
-      expect(acceptNativeSendMessageArgs({ to: "a*b", message: "m" }).ok).toBe(false);
-      expect(acceptNativeSendMessageArgs({ to: "a\nb", message: "m" }).ok).toBe(false);
-      expect(acceptNativeSendMessageArgs({ to: "x".repeat(301), message: "m" }).ok).toBe(false);
-      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", summary: "s".repeat(201) }).ok).toBe(false);
-      expect(acceptNativeSendMessageArgs({ to: "r", message: "m", notify_when_idle: "yes" }).ok).toBe(false);
-      expect(acceptNativeSendMessageArgs("nope").ok).toBe(false);
-      // An empty message is legal — WS-10 §10.1: `""` is the pure idle subscription.
-      expect(acceptNativeSendMessageArgs({ to: "r", message: "", notify_when_idle: true }).ok).toBe(true);
-    });
-
-    test("ListAgents: two reserved optional fields, nothing else, and its output shape is pinned", () => {
-      expect(acceptNativeListAgentsArgs({})).toEqual({ ok: true, args: {} });
-      expect(acceptNativeListAgentsArgs(undefined)).toEqual({ ok: true, args: {} });
-      expect(acceptNativeListAgentsArgs({ channel: "c", q: "q" })).toEqual({ ok: true, args: { channel: "c", q: "q" } });
-      expect(acceptNativeListAgentsArgs({ limit: 5 }).ok).toBe(false);
-      expect(acceptNativeListAgentsArgs({ q: "x".repeat(257) }).ok).toBe(false);
-      expect(NATIVE_LIST_AGENTS_OUTPUT_SCHEMA.required).toEqual(["listing"]);
-    });
-
-    test("the mirrored schema keeps WS-10 §10.1's own constraints where a reader will look for them", () => {
-      expect(NATIVE_SEND_MESSAGE_SCHEMA.required).toEqual(["to", "message"]);
-      expect(NATIVE_SEND_MESSAGE_SCHEMA.properties.to.maxLength).toBe(300);
-      expect(NATIVE_SEND_MESSAGE_SCHEMA.properties.summary.maxLength).toBe(200);
-    });
-  });
+  // THE ACCEPTOR AND SCHEMA PLANTS MOVED WITH THE CONTRACT (R-8-1, carry 3). They pinned
+  // `src/native-args.ts`'s copy of WS-10 §10.1/§10.2 — the four fields, `to`'s rules, the two bounds,
+  // the output shape — and that copy no longer exists: `@yanlinglabs/winter-agent-sdk/tools` declares
+  // it once for both hosts and tests it there. Deleted rather than re-pointed, because a second suite
+  // asserting the same contract from the consumer side is exactly the duplication the move undid (and
+  // the SDK's answers differ deliberately on two of them — ruling P-4 truncates an over-long `summary`
+  // where this suite pinned a refusal).
 });
 
 describe("WS-14 §8 — builtin-path containment", () => {

@@ -41,7 +41,7 @@ import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from 
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "./errors.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
-import { createMessagingToolHandlers, type MessagingToolCaller } from "./messaging/handlers.ts";
+import { transcriptSourceForSessionKey, type ReviewerResolver, type TranscriptEntry, type TranscriptSource, type WinterToolCaller } from "@yanlinglabs/winter-agent-sdk/tools";
 import type { ContainmentPolicy } from "./official/containment.ts";
 import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
@@ -267,6 +267,16 @@ export interface OfficialLegDeps {
    * the constructor is `OfficialMcpError`, thrown where the server would have been built.
    */
   mcpModule?: OfficialMcpModule;
+  /**
+   * What the host supplies for the STANDING ADVISOR — the reviewer, never the tool (interim review I-5).
+   *
+   * The advisor is registered on this branch whether or not a host fills this in, because the Winter
+   * runtime always advertises `advisor` and two legs whose advertised sets differ by a host option is
+   * exactly the divergence WS-14 §11 forbids. What this supplies is the REVIEWER: absent, the default
+   * resolver answers `undefined`, which is WS-06 §4's ordinary tool error ("no reviewer configured"),
+   * not a throw and not a missing tool.
+   */
+  advisor?: { resolveReviewer?: ReviewerResolver; maxChars?: number };
   /** The adapter's own policy, so a host's `env`/`containment` choices reach the door's own builders. */
   policy?: RouterOfficialPolicy;
   /**
@@ -431,7 +441,10 @@ export interface OfficialLegRequest {
  * as it did before R-8: `RouterOfficialInput.mcpServers` is the only route, and a host that was
  * hand-materializing keeps working unchanged.
  */
-function officialCapabilityServers(deps: OfficialLegDeps, caller: MessagingToolCaller, branchLabel: string, hostOwned: Readonly<Record<string, unknown>> | undefined): Record<string, unknown> | undefined {
+function officialCapabilityServers(
+  deps: OfficialLegDeps,
+  args: { caller: WinterToolCaller; transcriptSource: TranscriptSource; branchLabel: string; hostOwned: Readonly<Record<string, unknown>> | undefined },
+): Record<string, unknown> | undefined {
   if (deps.toInputShape === undefined) {
     if (deps.capabilities === undefined) return undefined;
     throw new RuntimeLaunchInputError({
@@ -442,7 +455,7 @@ function officialCapabilityServers(deps: OfficialLegDeps, caller: MessagingToolC
   }
   // THE ESCAPE HATCH REACHES THE STANDING SERVER AND STOPS THERE (review r1). Checked before the
   // module, the handlers and the registration, because it is a statement about the host's own input.
-  for (const name of Object.keys(hostOwned ?? {})) {
+  for (const name of Object.keys(args.hostOwned ?? {})) {
     if ((deps.capabilities ?? []).some((descriptor) => descriptor.name === name)) throw capabilityNameCollisionError({ field: "runtime.official.mcpServers", name });
   }
   const toInputShape = deps.toInputShape;
@@ -453,11 +466,17 @@ function officialCapabilityServers(deps: OfficialLegDeps, caller: MessagingToolC
       reason: "the official leg cannot register the standing server without the official SDK module the servers are registered into",
     });
   }
-  const handlers = createMessagingToolHandlers(deps.messaging, caller);
-  const standing = winterMcpServerDescriptor({ brand: deps.brand, branchLabel, messaging: { sendMessage: handlers.sendMessage, listAgents: handlers.listAgents } });
+  // THE PORT IS THE ROUTER'S OWN HANDLE, PASSED STRAIGHT IN (ruling P-3). `GlobalMessagingHandle`
+  // satisfies the SDK's `MessagingToolPort` structurally, so there is no adapter here to drift.
+  const standing = winterMcpServerDescriptor({
+    brand: deps.brand,
+    port: deps.messaging,
+    caller: args.caller,
+    advisor: { transcriptSource: args.transcriptSource, ...(deps.advisor?.resolveReviewer === undefined ? {} : { resolveReviewer: deps.advisor.resolveReviewer }), ...(deps.advisor?.maxChars === undefined ? {} : { maxChars: deps.advisor.maxChars }) },
+  });
   const servers: Record<string, unknown> = {};
   for (const descriptor of [standing, ...(deps.capabilities ?? [])]) {
-    Object.assign(servers, officialMcpServers({ descriptor, module, toInputShape, branchLabel }));
+    Object.assign(servers, officialMcpServers({ descriptor, module, toInputShape, branchLabel: args.branchLabel }));
   }
   return servers;
 }
@@ -477,8 +496,37 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   // `"unknown"` so WS-10 §13's class floor judged a phantom sender, and the delivered
   // `<agent-message from="session:<child>">` named an address every reply answers `not_found` for.
   // `callerAddress` over this pair yields exactly `officialLegAddress`'s address.
-  const messagingCaller: MessagingToolCaller = request.input.parentSessionId === undefined ? { sessionId: request.input.sessionId } : { sessionId: request.input.parentSessionId, agentId: request.input.sessionId };
-  const routerBuiltMcpServers = officialCapabilityServers(deps, messagingCaller, branchLabel, request.input.mcpServers);
+  /**
+   * THE ADVISOR'S TRANSCRIPT, READ LAZILY — because its key is not knowable yet (interim review I-1).
+   *
+   * `transcriptSourceForSessionKey` takes a `SessionKey` up front, and this session's key is
+   * `{ projectKey, sessionId: backendSessionId }` where the BACKEND id is allocated by the vendor and
+   * arrives with the first `system/init` frame — after this function runs, and after the standing
+   * server carrying the advisor has already been registered. A source built here with whatever id
+   * existed at open time would read the wrong transcript, or none, for the whole session.
+   *
+   * So the source is the interface's one method and nothing else: every call re-reads the session's
+   * own directory row for the id the runtime reported, then delegates to the SDK's reader over the ONE
+   * shared store. Before the first init frame it answers `[]` — an advisor called in the first
+   * milliseconds of a session has nothing to review, which is the honest answer rather than a throw.
+   *
+   * MIRROR LAG IS REAL AND ACCEPTED: the official branch's entries land in the shared store in ~100 ms
+   * batches, so the advisor sees the transcript up to the last landed batch.
+   */
+  const advisorTranscriptSource = (): TranscriptSource => ({
+    async getEntries(): Promise<TranscriptEntry[]> {
+      const cwd = request.options.cwd;
+      const projectKey = request.input.projectKey ?? (cwd === undefined || cwd.length === 0 ? undefined : deps.transcriptProjectKey(cwd));
+      if (projectKey === undefined) return [];
+      const row = await deps.directory.get(address);
+      const sessionId = row?.backendSessionId ?? request.options.sessionId;
+      if (sessionId === undefined || sessionId.length === 0) return [];
+      return transcriptSourceForSessionKey({ projectKey, sessionId }, { store: deps.shared().store }).getEntries();
+    },
+  });
+
+  const messagingCaller: WinterToolCaller = request.input.parentSessionId === undefined ? { sessionId: request.input.sessionId } : { sessionId: request.input.parentSessionId, agentId: request.input.sessionId };
+  const routerBuiltMcpServers = officialCapabilityServers(deps, { caller: messagingCaller, transcriptSource: advisorTranscriptSource(), branchLabel, hostOwned: request.input.mcpServers });
   const parsed = request.input.parentSessionId === undefined ? buildSessionAddress(request.input.sessionId) : buildChildAddress(request.input.parentSessionId, request.input.sessionId);
   const address = officialLegAddress(request.input);
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).

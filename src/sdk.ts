@@ -45,6 +45,7 @@ import { createHandoffBarrier } from "./store/index.ts";
 import { materializedResumeReportForPin } from "./store/pinned-probes.ts";
 import type { HandoffBarrierDeps } from "./store/index.ts";
 import { createOfficialAdapter } from "./official/adapter.ts";
+import type { ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { capabilityNameCollisionError, capabilityServerDescriptors, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
@@ -127,6 +128,12 @@ export interface RuntimeSdkOptions {
    *
    * WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR: the official leg refuses rather than open a
    * session whose capability tools exist on one branch only.
+   *
+   * A CALLER'S OWN `Options.mcpServers` REACHES THE WINTER LEG ONLY, and always has: the official leg
+   * builds its servers from this constructor and `runtime.official.mcpServers`, and never reads the
+   * pinned `Options` field at all. A caller key that collides with a capability name is therefore
+   * refused for BOTH legs at the door (interim review I-6) rather than refused on one and silently
+   * dropped on the other.
    */
   capabilities?: readonly McpSdkServerConfigWithInstance[];
   /**
@@ -139,6 +146,20 @@ export interface RuntimeSdkOptions {
    * writes this in one line.
    */
   toInputShape?: InputShapeFactory;
+  /**
+   * The REVIEWER behind the standing advisor (R-8-1(3), ruling P-6; interim review I-5).
+   *
+   * The advisor tool itself is not optional and is not configured here: the official leg registers it
+   * on the standing server unconditionally, because the Winter runtime always advertises `advisor` and
+   * two legs whose advertised sets differ by a host option is the divergence WS-14 §11 exists to
+   * prevent. This supplies WHO REVIEWS — a resolver the host owns, because reviewer RESOLUTION is the
+   * runtime's provider-layer concern (D30) and the router has no provider layer. With no resolver the
+   * tool answers WS-06 §4's ordinary error.
+   *
+   * The transcript is NOT a field here: the source is this session's own, built by the leg over the one
+   * shared store, keyed by the backend session id the runtime reports at `system/init`.
+   */
+  advisor?: { resolveReviewer: ReviewerResolver; maxChars?: number };
   /**
    * The handoff barrier's collaborators (whole-branch review, F-3).
    *
@@ -329,10 +350,25 @@ export function forwardableOptions(options: RouterOptions, brand?: Partial<Brand
  */
 function mergedMcpServers(callerOwned: Options["mcpServers"], capabilityServers: Readonly<Record<string, unknown>>): Record<string, unknown> {
   if (callerOwned === undefined) return capabilityServers as Record<string, unknown>;
+  assertNoCapabilityCollision(callerOwned, capabilityServers);
+  return { ...callerOwned, ...capabilityServers };
+}
+
+/**
+ * The collision rule, as ONE function the door runs before it picks a leg (interim review I-6).
+ *
+ * It used to live only inside the Winter leg's merge, which made the same caller mistake a typed
+ * refusal on one leg and SILENCE on the other: the official leg never reads `Options.mcpServers` at
+ * all, so a caller whose own entry shadowed a capability name simply lost it there, with no error and
+ * no tool. One options object cannot mean two different things depending on which runtime the session
+ * was decided onto — that is the class the R5 re-review closed for `runtime.official.mcpServers`, and
+ * this is the same class one field over.
+ */
+function assertNoCapabilityCollision(callerOwned: Options["mcpServers"], capabilityServers: Readonly<Record<string, unknown>>): void {
+  if (callerOwned === undefined) return;
   for (const name of Object.keys(capabilityServers)) {
     if (name in callerOwned) throw capabilityNameCollisionError({ field: "mcpServers", name });
   }
-  return { ...callerOwned, ...capabilityServers };
 }
 
 /**
@@ -496,6 +532,10 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       // visible fork, never a silent rewrite", broken at the one door. F-4 made that a typed refusal;
       // this routes it.
       const options = args.options ?? {};
+      // BEFORE THE LEG IS PICKED (I-6): the caller's own `mcpServers` is only ever forwarded to the
+      // WINTER leg, so a collision with a forwarded capability had to be judged here rather than
+      // inside the leg that happens to read the field.
+      if (capabilityServers !== undefined) assertNoCapabilityCollision(options.mcpServers, capabilityServers);
       const runtime = (options as RouterOptions).runtime;
       // The persisted selection WINS and is never re-decided (D13); `select` is decided here only when
       // there is no persisted one — the same precedence `selectRuntime` itself implements.
@@ -545,6 +585,7 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
             ...(capabilityDescriptors === undefined ? {} : { capabilities: capabilityDescriptors }),
             ...(opts.toInputShape === undefined ? {} : { toInputShape: opts.toInputShape }),
             ...(opts.peers.claude === undefined ? {} : { mcpModule: opts.peers.claude as OfficialMcpModule }),
+            ...(opts.advisor === undefined ? {} : { advisor: opts.advisor }),
             onOpened: noteOpened,
           },
           // THE OFFICIAL LEG TAKES NO CAPABILITY RECORD HERE: its `mcpServers` are materialized by the

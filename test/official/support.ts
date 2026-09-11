@@ -138,7 +138,11 @@ interface ZodLike {
 function jsonSchemaToShape(schema: JsonSchemaObject, zod: { string(): ZodLike; boolean(): ZodLike }): Record<string, unknown> {
   const required = new Set(schema.required ?? []);
   const shape: Record<string, unknown> = {};
-  for (const [name, property] of Object.entries(schema.properties)) {
+  // `properties` IS OPTIONAL ON THE SDK'S SHAPE (interim review I-3), and `advisor`/`read_notifications`
+  // are the schemas that exercise it: WS-06 §4's advisor takes `{}`. A host's bridge has to tolerate
+  // that rather than iterate `undefined`.
+  for (const [name, raw] of Object.entries(schema.properties ?? {})) {
+    const property = raw as Record<string, unknown>;
     const type = property["type"];
     let field: ZodLike = type === "boolean" ? zod.boolean() : zod.string();
     const maxLength = property["maxLength"];

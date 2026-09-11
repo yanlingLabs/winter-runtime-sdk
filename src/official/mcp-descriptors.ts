@@ -31,17 +31,30 @@
 //   has the official SDK and therefore its peer validator — supplies it in one line. The Lane A
 //   report carries the worked example.
 import { isWinterMcpServerInstance, mcpToolName, type BrandProfile, type McpSdkServerConfigWithInstance, type WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
+import {
+  WINTER_DEFAULT_TOOL_DEFINITIONS,
+  createAdvisorToolHandler,
+  createMessagingToolHandlers,
+  type AdvisorToolDeps,
+  type JsonSchemaObject,
+  type MessagingToolPort,
+  type WinterToolCaller,
+  type WinterToolDefinition,
+  type WinterToolHandler,
+} from "@yanlinglabs/winter-agent-sdk/tools";
 
-import { NATIVE_LIST_AGENTS_OUTPUT_SCHEMA, NATIVE_LIST_AGENTS_SCHEMA, NATIVE_SEND_MESSAGE_SCHEMA } from "./aliases.ts";
 import { OfficialMcpError } from "./errors.ts";
 import { RuntimeLaunchInputError } from "../errors.ts";
 
-/** A JSON-Schema object, in the subset the descriptors use. */
-export interface JsonSchemaObject {
-  type: "object";
-  properties: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  required?: readonly string[];
-}
+/**
+ * ONE `JsonSchemaObject`, AND IT IS THE SDK'S (interim review I-3).
+ *
+ * The router used to declare its own — `properties` required, no `additionalProperties` — and every
+ * composition of an SDK schema into a descriptor went through `as unknown as JsonSchemaObject`. Two
+ * types for one contract is how the two copies of the native schemas drifted in the first place
+ * (barrel-exports.test.ts's own header), so the type travels with the definitions it describes.
+ */
+export type { JsonSchemaObject };
 
 /** What a handler answers with — the MCP content shape, identical on both branches. */
 export interface WinterMcpToolResult {
@@ -52,21 +65,21 @@ export interface WinterMcpToolResult {
 /**
  * A tool handler, and the vendor's own second argument (item 15).
  *
- * `extra` IS FORWARDED, NOT DROPPED — but what it CARRIES is a measurement, not an assumption. The
- * carry that produced this change asked for it so the official branch could derive WS-10 §12's retry
- * key (the (session, tool-call id) pair a retry must allocate the SAME message id from), and the
- * whole-branch review was right to say that must be checked first: the in-process server's `extra` is
- * the MCP REQUEST CONTEXT — the JSON-RPC request id and `_meta` — which is not the model's
- * `tool_use_id`. `test/official/runtime-aliases.test.ts` records what the pinned runtime actually
- * puts there; see that test and this module's own note below for the answer.
- *
- * Forwarding it is worth doing either way: it is the only channel the vendor gives a tool for request
- * context, dropping it is unrecoverable at the handler, and a handler that does not want it simply
- * declares one parameter.
+ * `extra` IS FORWARDED, NOT DROPPED, and what it carries is measured rather than assumed: on 0.3.250
+ * `extra._meta["claudecode/toolUseId"]` is the id the model emitted, which is the half of WS-10 §12's
+ * retry key the official branch could not otherwise have. The SDK's `toolUseIdFromExtra` reads it (and
+ * falls back to the bound caller's id), so the router forwards the argument and decides nothing.
  */
 export type WinterMcpHandler = (args: unknown, extra?: unknown) => Promise<WinterMcpToolResult>;
 
-/** One tool on the standing server. Everything a branch needs to register it, and nothing branch-specific. */
+/**
+ * One tool on the standing server — the ROUTER'S OWN COMPOSITION TYPE, and nothing more (R-8-1).
+ *
+ * It is a `WinterToolDefinition` (the SDK's: bare name, description, schemas, annotations, permission
+ * class) plus the two things only a HOST can supply: the handler that runs it and how this branch
+ * exposes it. The router declares no tool of its own — every field but those two is read off the
+ * definition the SDK owns.
+ */
 export interface WinterMcpToolDescriptor {
   /** The bare tool name (`send_message`); the canonical name is derived from it and the brand. */
   tool: string;
@@ -88,59 +101,85 @@ export interface WinterMcpServerDescriptor {
   tools: readonly WinterMcpToolDescriptor[];
 }
 
-/** The two messaging handlers §7's aliases resolve to. Their implementations are the router's. */
-export interface MessagingHandlers {
-  sendMessage: WinterMcpHandler;
-  listAgents: WinterMcpHandler;
-}
-
 /**
- * The messaging tools, with the NATIVE schemas mirrored (§7: "handlers MUST accept the native
- * argument schemas exactly").
+ * The SDK's host-neutral `{ text, isError? }` as the MCP content shape this branch registers.
  *
- * `deferred` on both: they are the canonical twins of aliased built-ins, and §7 wants the model to
- * see one `SendMessage`, not two.
+ * THE WHOLE ADAPTATION IS THESE FOUR LINES (ruling P-4). The SDK handler answers in the shape both
+ * hosts share; each host wraps it in its own runtime's result type, and a host that re-shaped the
+ * TEXT would be the second implementation the relocation exists to delete.
  */
-export function messagingToolDescriptors(handlers: MessagingHandlers): readonly WinterMcpToolDescriptor[] {
-  return [
-    {
-      tool: "send_message",
-      description:
-        "Resolves `to` against the child registry, teammates and the live peer registry; steers a running child, resumes an addressable completed/stopped child, wakes an idle live peer, queues for a running peer; never cold-resumes an arbitrary exited transcript.",
-      inputSchema: NATIVE_SEND_MESSAGE_SCHEMA as unknown as JsonSchemaObject,
-      exposure: "deferred",
-      permissionClass: "messaging",
-      handler: handlers.sendMessage,
-    },
-    {
-      tool: "list_agents",
-      description: "Names/refs, activity/status and addressing identity for children, teammates and eligible live peers; never an enumeration of exited transcripts.",
-      inputSchema: NATIVE_LIST_AGENTS_SCHEMA as unknown as JsonSchemaObject,
-      outputSchema: NATIVE_LIST_AGENTS_OUTPUT_SCHEMA as unknown as JsonSchemaObject,
-      exposure: "deferred",
-      permissionClass: "messaging",
-      handler: handlers.listAgents,
-    },
-  ];
+function mcpResult(handler: WinterToolHandler): WinterMcpHandler {
+  return async (args, extra) => {
+    const result = await handler(args, extra);
+    return { content: [{ type: "text" as const, text: result.text }], ...(result.isError === undefined ? {} : { isError: result.isError }) };
+  };
+}
+
+/** The SDK's definition, plus the handler and the exposure this branch supplies. */
+function descriptorFor(definition: WinterToolDefinition, handler: WinterToolHandler): WinterMcpToolDescriptor {
+  return {
+    tool: definition.toolName,
+    description: definition.description,
+    inputSchema: definition.inputSchema,
+    ...(definition.outputSchema === undefined ? {} : { outputSchema: definition.outputSchema }),
+    ...(definition.annotations === undefined ? {} : { annotations: definition.annotations }),
+    // DEFERRED, for the same reason the two messaging twins always were (§7): each of the four is the
+    // canonical twin of a name the model already sees as a built-in through `toolAliases`, and §7
+    // wants one `SendMessage`, not two. (The pin does not implement deferral for MCP tools — measured,
+    // `aliases.ts` — so this is an intent the branch records, not an enforcement it gets.)
+    exposure: "deferred",
+    permissionClass: definition.permissionClass,
+    handler: mcpResult(handler),
+  };
 }
 
 /**
- * Builds the standing server descriptor for a session.
+ * THE STANDING SERVER, COMPOSED FROM THE SDK'S DEFINITIONS AND THE SDK'S HANDLER FACTORIES (R-8-1).
  *
- * The capability plugins (browser, computer, office) are passed IN rather than declared here: WS-06
- * owns their exact names and schemas, and a copy of them in the router would be a second declaration
- * to drift. What the router owns is that they are registered under the same canonical names, with the
- * same identity, on both branches — which is what `canonicalToolNames` below makes checkable.
+ * THE ROUTER OWNS NO TOOL. It used to declare `send_message` and `list_agents` here — their
+ * descriptions, their native schemas, their acceptors — beside a second copy of the same declarations
+ * inside the Winter runtime, and the two had already drifted on what `to` may contain and on what an
+ * over-long `summary` does. `@yanlinglabs/winter-agent-sdk/tools` is now the single declaration, and
+ * this function is what BINDS it: `WINTER_DEFAULT_TOOL_DEFINITIONS` × the SDK's handler factories,
+ * under the brand's server name.
+ *
+ * THE PORT IS PASSED STRAIGHT THROUGH (ruling P-3). `GlobalMessagingHandle` satisfies
+ * `MessagingToolPort` structurally — `sendDetailed`, `listReachable({from})`, `readNotifications(id)`
+ * — so the router needs no adapter of its own and `messagingToolPortFromRuntimeDeps` (which adapts the
+ * RUNTIME's deps) is never used here.
+ *
+ * THE ADVISOR IS ALWAYS REGISTERED (interim review I-5). The Winter runtime always advertises
+ * `advisor`; gating the official branch's copy on a host option would make the two legs' advertised
+ * sets differ by a setting that changes nothing on the other leg. `advisor.resolveReviewer` supplies
+ * the reviewer — its default answers `undefined`, which is WS-06 §4's ordinary tool error, not a throw.
  */
 export function winterMcpServerDescriptor(args: {
   brand: Pick<BrandProfile, "mcpServerName">;
-  messaging: MessagingHandlers;
+  port: MessagingToolPort;
+  caller: WinterToolCaller | (() => WinterToolCaller);
+  advisor: Omit<AdvisorToolDeps, "resolveReviewer"> & Partial<Pick<AdvisorToolDeps, "resolveReviewer">>;
   capabilities?: readonly WinterMcpToolDescriptor[];
   version?: string;
-  branchLabel: string;
 }): WinterMcpServerDescriptor {
-  const tools = [...messagingToolDescriptors(args.messaging), ...(args.capabilities ?? [])];
-  return { name: args.brand.mcpServerName, version: args.version ?? "1.0.0", tools };
+  const messaging = createMessagingToolHandlers(args.port, args.caller);
+  const advisor = createAdvisorToolHandler({
+    transcriptSource: args.advisor.transcriptSource,
+    resolveReviewer: args.advisor.resolveReviewer ?? (() => undefined),
+    ...(args.advisor.maxChars === undefined ? {} : { maxChars: args.advisor.maxChars }),
+  });
+  const handlers: Record<string, WinterToolHandler> = {
+    send_message: messaging.sendMessage,
+    list_agents: messaging.listAgents,
+    read_notifications: messaging.readNotifications,
+    advisor,
+  };
+  const tools = WINTER_DEFAULT_TOOL_DEFINITIONS.map((definition) => {
+    const handler = handlers[definition.toolName];
+    /* c8 ignore next */
+    if (handler === undefined) throw new OfficialMcpError({ server: args.brand.mcpServerName, reason: `the SDK declares a default tool this branch has no handler for: \`${definition.toolName}\``, branchLabel: "winter-claude-agent" });
+    return descriptorFor(definition, handler);
+  });
+  return { name: args.brand.mcpServerName, version: args.version ?? "1.0.0", tools: [...tools, ...(args.capabilities ?? [])] };
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -189,6 +228,10 @@ export function capabilityServerDescriptor(server: McpSdkServerConfigWithInstanc
       // it gets the host's own server object, with the host's own exposure.
       exposure: "eager" as const,
       permissionClass,
+      // NO `extra` SLOT (M-12). `WinterMcpServerInstance.callTool(name, args)` takes arguments only, so
+      // the vendor's second handler argument — where 0.3.250 puts the model's `tool_use_id` — has
+      // nowhere to go on a capability tool. The daemon's own tools therefore get no §12 retry key on
+      // this branch; the standing server's do, because the SDK's handlers take `extra`.
       handler: async (rawArgs: unknown): Promise<WinterMcpToolResult> => {
         const result = await instance.callTool(tool.name, (rawArgs ?? {}) as Record<string, unknown>);
         // THE CONTENT PASSES THROUGH. MCP content blocks are the shape both branches speak; the
@@ -228,20 +271,29 @@ export function capabilityServerDescriptors(servers: readonly McpSdkServerConfig
  * `toInputShape` converts a JSON-Schema OBJECT into the official validator's raw shape; a schema that
  * is not one has no conversion, and a host that learns so at construction can fix it, while a host
  * that learns so at the first model call has a session whose tool is already advertised.
+ *
+ * WHAT IT KEEPS AND WHAT IT DROPS (M-3), disclosed rather than left to be discovered: `type`,
+ * `properties`, `required` and `additionalProperties` travel; every OTHER JSON-Schema keyword a
+ * daemon's tool may carry (`$defs`, `oneOf`, `format`, per-property `pattern` beyond what the host's
+ * own `toInputShape` reads…) reaches the official branch only insofar as the host's bridge reads it
+ * off the property objects, which pass through untouched. `OFFICIAL_MATERIALIZATION_DROPS` names the
+ * descriptor-level fields; this is the schema-level statement of the same limitation.
  */
 function capabilityInputSchema(raw: Record<string, unknown>, server: string, tool: string): JsonSchemaObject {
   const properties = raw["properties"];
-  if (raw["type"] !== "object" || typeof properties !== "object" || properties === null) {
+  if (raw["type"] !== "object" || (properties !== undefined && (typeof properties !== "object" || properties === null))) {
     throw new RuntimeLaunchInputError({
       field: "capabilities",
       reason: `the capability tool \`${tool}\` on \`${server}\` declares an input schema that is not a JSON-Schema object, and the official branch's in-process registration has no conversion for anything else`,
     });
   }
   const required = raw["required"];
+  const additionalProperties = raw["additionalProperties"];
   return {
     type: "object",
-    properties: properties as JsonSchemaObject["properties"],
+    ...(properties === undefined ? {} : { properties: properties as Record<string, unknown> }),
     ...(Array.isArray(required) ? { required: required.map(String) } : {}),
+    ...(typeof additionalProperties === "boolean" ? { additionalProperties } : {}),
   };
 }
 
@@ -311,7 +363,6 @@ export function materializeOfficialMcpServer(args: {
   return createSdkMcpServer({ name: args.descriptor.name, version: args.descriptor.version, tools });
 }
 
-/** `Options.mcpServers` for this branch: one entry, keyed by the brand's own server name. */
 /** The descriptor fields the official branch's registration cannot carry (review r1, n3). */
 export const OFFICIAL_MATERIALIZATION_DROPS: readonly string[] = ["outputSchema", "exposure"];
 

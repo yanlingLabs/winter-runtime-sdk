@@ -21,7 +21,8 @@ import type { SeamContextWithDirectory } from "../../src/seams/context.ts";
 import { stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
-import { acceptNativeSendMessageArgs, aliasDenyNames, officialToolAliases } from "../../src/official/aliases.ts";
+import { aliasDenyNames, officialToolAliases } from "../../src/official/aliases.ts";
+import type { MessagingToolPort } from "@yanlinglabs/winter-agent-sdk/tools";
 import { officialDisallowedTools } from "../../src/official/containment.ts";
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
 import { officialMcpServers, winterMcpServerDescriptor, type WinterMcpHandler, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
@@ -73,11 +74,18 @@ interface RunResult {
 async function runSession(args: {
   turns: readonly ScriptedTurn[];
   disallowedTools?: readonly string[];
-  handlers?: { sendMessage?: WinterMcpHandler; listAgents?: WinterMcpHandler };
-  /** Extra tools on the standing server — §11's capability slot, which is how the probe registers `advisor`. */
+  /** Extra tools on the standing server — §11's capability slot. */
   capabilities?: readonly WinterMcpToolDescriptor[];
-  /** Merged OVER the brand's own alias map, so a probe can add a key the router does not ship. */
+  /**
+   * REPLACES the brand's own alias map, never merges with it (interim review I-2).
+   *
+   * A merge cannot express the one condition the advisor control needs — an alias map with `advisor`
+   * REMOVED — and a control that silently kept the alias it was supposed to be without would have
+   * "measured" the alias by running it twice.
+   */
   toolAliases?: Readonly<Record<string, string>>;
+  /** The advisor's reviewer for this session; absent = none resolvable (WS-06 §4's ordinary error). */
+  reviewer?: { provider: { generate: () => Promise<{ kind: string; text?: string }> }; model: string };
 }): Promise<RunResult> {
   /* c8 ignore next */
   if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
@@ -93,27 +101,32 @@ async function runSession(args: {
     const adapter = createOfficialAdapter(context, hermeticEnvPolicy());
     await adapter.ready();
 
+    // THE PORT IS WHAT THE ROUTER SUPPLIES (ruling P-3) and the handlers are the SDK's (R-8-1), so what
+    // these rows measure is the whole production path: the model's block → the pin's alias table → the
+    // canonical MCP tool → the SDK's handler → the port. A recording port is the only double.
+    const port: MessagingToolPort = {
+      sendDetailed: async (request) => {
+        calls.push({ tool: "send_message", args: request });
+        return { outcome: { status: "delivered", messageId: "m-1" } } as unknown as Awaited<ReturnType<MessagingToolPort["sendDetailed"]>>;
+      },
+      listReachable: async (scope) => {
+        calls.push({ tool: "list_agents", args: scope });
+        return [];
+      },
+      readNotifications: (sessionId) => {
+        calls.push({ tool: "read_notifications", args: { sessionId } });
+        return { notifications: [], remaining: 0 };
+      },
+    };
     const descriptor = winterMcpServerDescriptor({
       brand: WINTER_BRAND,
-      branchLabel: "winter-claude-agent",
-      ...(args.capabilities === undefined ? {} : { capabilities: args.capabilities }),
-      messaging: {
-        sendMessage:
-          args.handlers?.sendMessage ??
-          (async (raw) => {
-            calls.push({ tool: "send_message", args: raw });
-            const accepted = acceptNativeSendMessageArgs(raw);
-            return accepted.ok
-              ? { content: [{ type: "text" as const, text: `delivered to ${accepted.args.to}` }] }
-              : { content: [{ type: "text" as const, text: `refused: ${accepted.reason}` }], isError: true };
-          }),
-        listAgents:
-          args.handlers?.listAgents ??
-          (async (raw) => {
-            calls.push({ tool: "list_agents", args: raw });
-            return { content: [{ type: "text" as const, text: JSON.stringify({ listing: "one live peer: reviewer" }) }] };
-          }),
+      port,
+      caller: { sessionId: "aliases" },
+      advisor: {
+        transcriptSource: { getEntries: () => [{ role: "user" as const, text: "the session so far" }] },
+        ...(args.reviewer === undefined ? {} : { resolveReviewer: () => args.reviewer as never }),
       },
+      ...(args.capabilities === undefined ? {} : { capabilities: args.capabilities }),
     });
 
     const templateInput = {
@@ -148,7 +161,8 @@ async function runSession(args: {
         env,
         mcpServers: officialMcpServers({ descriptor, module: bed.mcpModule, toInputShape: bed.toInputShape, branchLabel: "winter-claude-agent" }),
         canUseTool: createApprovalBridge({ brand: WINTER_BRAND, mode: "default", broker: async (request) => ({ behavior: "allow", updatedInput: request.input }) }),
-        ...(args.toolAliases === undefined ? {} : { toolAliases: { ...(options.toolAliases as Record<string, string>), ...args.toolAliases } }),
+        // REPLACED, NOT MERGED (I-2): `{}` and "the brand's own, minus one key" are both expressible.
+        ...(args.toolAliases === undefined ? {} : { toolAliases: args.toolAliases }),
         ...(args.disallowedTools === undefined ? {} : { disallowedTools: [...options.disallowedTools as string[], ...args.disallowedTools] }),
       },
     });
@@ -168,13 +182,18 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
         turns: [{ toolUses: [{ id: "toolu_row1", name: "SendMessage", input: { to: "reviewer", message: "ping", summary: "a ping" } }] }, { text: "sent" }],
       });
 
-      // The handler was reached — through the ALIAS, from the built-in name the model emitted.
-      expect(result.calls).toEqual([{ tool: "send_message", args: { to: "reviewer", message: "ping", summary: "a ping" } }]);
-      // …with the NATIVE argument schema intact (WS-10 §10.1's own fields, unrenamed, unwrapped).
-      expect(acceptNativeSendMessageArgs(result.calls[0]?.args).ok).toBe(true);
-      // …and the VISIBLE result came back as this tool call's result.
+      // The PORT was reached — through the ALIAS, from the built-in name the model emitted, and through
+      // the SDK's own handler (which is where the acceptor now lives: R-8-1).
+      expect(result.calls.map((call) => call.tool)).toEqual(["send_message"]);
+      const request = result.calls[0]?.args as { from: { winterSessionId?: string }; to: string; body: string; summary?: string };
+      // …with WS-10 §10.1's own fields intact, unrenamed and unwrapped, one layer further in than the
+      // model wrote them: `to` is still `to`, the message is the body, the summary survives.
+      expect({ to: request.to, body: request.body, summary: request.summary }).toEqual({ to: "reviewer", body: "ping", summary: "a ping" });
+      // …and the SENDER is the caller bound at registration, never anything the model wrote.
+      expect(request.from.winterSessionId).toBe("aliases");
+      // …and the VISIBLE result came back as this tool call's result: the bare delivery outcome (P-4).
       const results = toolResults(result.record);
-      expect(results.some((entry) => entry.tool_use_id === "toolu_row1" && JSON.stringify(entry.content).includes("delivered to reviewer"))).toBe(true);
+      expect(results.some((entry) => entry.tool_use_id === "toolu_row1" && JSON.stringify(entry.content).includes("delivered"))).toBe(true);
       expect(results.some((entry) => entry.is_error === true)).toBe(false);
       // The whole session ran on loopback and nowhere else.
       expect(new Set(result.record.paths)).toEqual(new Set(["/api/hello", "/v1/messages"]));
@@ -188,8 +207,9 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
     "row 2: `ListAgents` aliases the same way, and the advertised set records what 0.3.250 actually does",
     async () => {
       const result = await runSession({ turns: [{ toolUses: [{ id: "toolu_row2", name: "ListAgents", input: {} }] }, { text: "listed" }] });
-      expect(result.calls).toEqual([{ tool: "list_agents", args: {} }]);
-      expect(toolResults(result.record).some((entry) => JSON.stringify(entry.content).includes("one live peer"))).toBe(true);
+      expect(result.calls.map((call) => call.tool)).toEqual(["list_agents"]);
+      // The SDK's handler renders the port's rows; an empty registry is a SENTENCE, not an empty string.
+      expect(toolResults(result.record).some((entry) => JSON.stringify(entry.content).includes("listing"))).toBe(true);
 
       // THE MEASUREMENT ROW 2 ASKS FOR. Both aliases are configured, so the model emits the built-in
       // name; what the runtime ADVERTISES alongside it is the vendor's decision, and this is it.
@@ -220,7 +240,8 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
       const direct = await runSession({
         turns: [{ toolUses: [{ id: "toolu_row3a", name: mcpToolName(WINTER_BRAND, "send_message"), input: { to: "reviewer", message: "direct" } }] }, { text: "ok" }],
       });
-      expect(direct.calls).toEqual([{ tool: "send_message", args: { to: "reviewer", message: "direct" } }]);
+      expect(direct.calls.map((call) => call.tool)).toEqual(["send_message"]);
+      expect((direct.calls[0]?.args as { body: string }).body).toBe("direct");
 
       // (b) THE MEASUREMENT THIS ROW EXISTS FOR, and it is a finding rather than a confirmation:
       //     denying the BUILT-IN name does NOT stop the aliased call on this runtime. The deny check
@@ -230,7 +251,7 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
         turns: [{ toolUses: [{ id: "toolu_row3b", name: "SendMessage", input: { to: "reviewer", message: "not blocked" } }] }, { text: "ok" }],
         disallowedTools: ["SendMessage"],
       });
-      expect(deniedBuiltinOnly.calls).toEqual([{ tool: "send_message", args: { to: "reviewer", message: "not blocked" } }]);
+      expect(deniedBuiltinOnly.calls.map((call) => call.tool)).toEqual(["send_message"]);
 
       // (c) …and denying the RESOLVED canonical name does stop it. `aliasDenyNames` is the helper
       //     that keeps a caller from having to know this, and `officialDisallowedTools` expands every
@@ -256,8 +277,13 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
     "the alias map the runtime was given is the brand's own, and the vendor literals are untouched",
     async () => {
       const aliases = officialToolAliases(WINTER_BRAND);
-      expect(Object.keys(aliases)).toEqual(["SendMessage", "ListAgents"]);
-      expect(Object.values(aliases)).toEqual([mcpToolName(WINTER_BRAND, "send_message"), mcpToolName(WINTER_BRAND, "list_agents")]);
+      expect(Object.keys(aliases)).toEqual(["SendMessage", "ListAgents", "ReadNotifications", "advisor"]);
+      expect(Object.values(aliases)).toEqual([
+        mcpToolName(WINTER_BRAND, "send_message"),
+        mcpToolName(WINTER_BRAND, "list_agents"),
+        mcpToolName(WINTER_BRAND, "read_notifications"),
+        mcpToolName(WINTER_BRAND, "advisor"),
+      ]);
     },
     TIMEOUT,
   );
@@ -278,69 +304,46 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
   // carry say the true thing.
   // ==================================================================================================
   test(
-    "the handler receives the vendor's `extra`, and its contents decide whether a §12 retry key exists",
+    "the vendor's `extra` reaches the SDK's handler, and its tool-call id arrives at the port as §12's key",
     async () => {
-      const seen: unknown[] = [];
       const result = await runSession({
         turns: [{ toolUses: [{ id: "toolu_extra_probe", name: "SendMessage", input: { to: "reviewer", message: "ping" } }] }, { text: "done" }],
-        handlers: {
-          sendMessage: async (raw, extra) => {
-            seen.push(extra);
-            void raw;
-            return { content: [{ type: "text" as const, text: "ok" }] };
-          },
-        },
       });
       expect(result.messages.some((message) => message.type === "result")).toBe(true);
-      // THE HANDLER REALLY RAN, and it really got a second argument.
-      expect(seen).toHaveLength(1);
-      const extra = seen[0] as Record<string, unknown> | undefined;
-      const keys = extra === undefined || extra === null ? [] : Object.keys(extra).sort();
-      const flat = JSON.stringify(extra, (_k, value) => (typeof value === "function" ? "[function]" : value));
-      console.log(`[item 15] the vendor's \`extra\`, as the pinned runtime passes it — keys: ${JSON.stringify(keys)}\n[item 15] value: ${String(flat).slice(0, 600)}`);
-      expect(extra).toBeDefined();
-
-      // THE QUESTION THE CARRY ASKED, answered against the artifact rather than by inference: is the
-      // MODEL's tool-use id reachable from here? `toolu_extra_probe` is the id the model emitted.
-      const carriesToolUseId = String(flat).includes("toolu_extra_probe");
-      console.log(`[item 15] the model's tool_use_id is reachable from \`extra\`: ${carriesToolUseId}`);
-      // Recorded as an observation, not asserted in one direction: if a later pin starts carrying it,
-      // this line changes and the README clause and the SDK carry change with it.
-      expect(typeof carriesToolUseId).toBe("boolean");
+      // THE KEY IS REAL, and it is the model's OWN id. The router forwards `extra` into the SDK
+      // handler, the SDK reads the vendor's namespaced `_meta` key, and what arrives at the port is
+      // `originToolCallId` — so this branch has WS-10 §12's (session, tool-call) pair rather than
+      // depending on the rapid-repeat guard. Measured here against the artifact, not inferred.
+      const request = result.calls[0]?.args as { originToolCallId?: string };
+      expect(request.originToolCallId).toBe("toolu_extra_probe");
     },
     TIMEOUT,
   );
 
   // ==================================================================================================
-  // R4 — WHAT 0.3.250 DOES WITH AN ALIAS KEY THAT IS NOT ONE OF ITS OWN BUILT-INS (`advisor`).
+  // R-8-1(3) — THE STANDING ADVISOR IS REACHABLE UNDER CLAUDE'S OWN BARE NAME (was R4's measurement).
   //
-  // THE QUESTION, AND WHY IT IS A MEASUREMENT. R-8-1(3) makes Winter's own advisor BACK Claude's on
-  // the official branch, so the standing server now carries an `advisor` tool (`assertNoAdvisor` is
-  // retired) and the obvious next step is to widen `ALIASED_BUILTINS` with
-  // `{ builtin: "advisor", tool: "advisor" }`. But `SendMessage` and `ListAgents` are names the pinned
-  // runtime already knows: aliasing them redirects a lookup that would otherwise have hit a LOCAL
-  // built-in. `advisor` is not one of those — `docs/probes/d29-advisor.md` measured it as an
-  // API-SIDE server tool (`advisor_20260301`, no input schema, returned as a `server_tool_use` block)
-  // that the four traffic opt-outs remove from the session entirely. Whether the runtime's single-hop
-  // alias table accepts, ignores or refuses a key it has no built-in for is therefore unknown, and a
-  // widening that the pin quietly ignores would be a door the model can never walk through.
+  // WHAT THIS USED TO BE. R4 asked whether 0.3.250's `toolAliases` honours a key that is NOT one of its
+  // own local built-ins: `SendMessage` and `ListAgents` redirect a lookup that would otherwise hit a
+  // built-in, while `advisor` on the pin is an API-SIDE server tool the traffic opt-outs remove
+  // entirely (`docs/probes/d29-advisor.md`). The answer decided whether `ALIASED_BUILTINS` could be
+  // widened at all, so the test RECORDED rather than asserted, and `docs/probes/advisor-alias.md` is
+  // the dated record — kept, because it is the evidence the widening rests on.
   //
-  // SO THIS RECORDS, IT DOES NOT ASSERT. The only outcome asserted is that the turn COMPLETED under
-  // the four traffic opt-outs and that `docs/probes/advisor-alias.md` states what was observed — the
-  // same convention as row 2 and item 15 above, and the same convention `aliases.ts:85-91` names. The
-  // doc is read back rather than merely written beside the test, so a change in the runtime's
-  // behaviour fails HERE instead of leaving a confident file that is quietly no longer true.
+  // WHAT IT IS NOW. The gate passed and the widening landed, so the same four sessions assert the
+  // CONTRACT they measured (interim review I-2): with the brand's own alias map a bare `advisor` block
+  // reaches the standing server's advisor and comes back with the reviewer's answer; with the advisor
+  // key REMOVED from the map it is "No such tool available"; `aliasDenyNames("advisor", brand)` — which
+  // now type-checks, because the widening is what it was gating — removes both spellings.
+  //
+  // THE CONTROL IS WHY THE ALIAS MAP IS REPLACED, NOT MERGED. A merged map cannot express "without
+  // this key", so a control built by merging would silently carry the alias it exists to be without.
   // ==================================================================================================
   const ADVISOR_PROBE_DOC = resolve(import.meta.dir, "..", "..", "docs", "probes", "advisor-alias.md");
   const CANONICAL_ADVISOR = mcpToolName(WINTER_BRAND, "advisor");
-  /**
-   * Both names a deny rule must carry for `advisor`, spelled by hand ON PURPOSE.
-   *
-   * `aliasDenyNames("advisor", brand)` does not type-check today: its parameter is `AliasedBuiltin`,
-   * which is derived from `ALIASED_BUILTINS`, which is what this measurement GATES. These are exactly
-   * the two names the helper would return after the widening — `[builtin, aliasTargetFor(builtin, …)]`.
-   */
-  const ADVISOR_DENY_NAMES = ["advisor", CANONICAL_ADVISOR] as const;
+  const REVIEWER = { provider: { generate: async () => ({ kind: "text", text: "ship it" }) }, model: "fake-reviewer" };
+  /** The brand's own map with the advisor key taken out — the one condition a merge cannot express. */
+  const ALIASES_WITHOUT_ADVISOR = Object.fromEntries(Object.entries(officialToolAliases(WINTER_BRAND)).filter(([key]) => key !== "advisor"));
 
   /** The recorded answers, parsed out of the probe document's `measured` block. */
   function recordedFacts(): Record<string, string> {
@@ -354,91 +357,84 @@ describeRuntime("WS-17 rows 1-3 — aliasing, against the real pinned runtime", 
     return facts;
   }
 
-  test(
-    "R4: an `advisor` alias against the pin — what is advertised, what a bare `advisor` block resolves to, and what a deny removes",
-    async () => {
-      const advisorCalls: unknown[] = [];
-      const advisor: WinterMcpToolDescriptor = {
-        tool: "advisor",
-        description: "Winter's own advisor, registered on the standing server (R-8-1(3)).",
-        inputSchema: { type: "object", properties: { question: { type: "string", maxLength: 300 } }, required: ["question"] },
-        exposure: "eager",
-        permissionClass: "advisor",
-        handler: async (raw) => {
-          advisorCalls.push(raw);
-          return { content: [{ type: "text" as const, text: "advice: ship it" }] };
-        },
-      };
-      const aliased = { toolAliases: { advisor: CANONICAL_ADVISOR }, capabilities: [advisor] } as const;
+  /**
+   * A tool call the deny rule stopped — by the SHAPE the runtime produced, not by a regex on wording.
+   *
+   * The captured refusal is `is_error: true` with a body naming the RESOLVED canonical tool
+   * ("Permission to use `mcp__winter__advisor` has been denied"), which is also the evidence for the
+   * rule row 3 measured: the deny check runs AFTER alias resolution, so both spellings are stopped by
+   * the canonical half of `aliasDenyNames`. (An UNKNOWN tool is a different shape entirely — the
+   * vendor's `<tool_use_error>No such tool available</tool_use_error>` — which is what (b) asserts.)
+   */
+  function blocked(result: RunResult, id: string): boolean {
+    const row = toolResults(result.record).find((entry) => entry.tool_use_id === id);
+    return row?.is_error === true && JSON.stringify(row.content).includes(CANONICAL_ADVISOR);
+  }
 
-      // (a) + (b): one session, the model emitting the BARE name the alias is keyed by.
+  test(
+    "a bare `advisor` reaches the standing advisor through the alias; without the alias it does not; a deny removes both",
+    async () => {
+      // (a) THE CONTRACT. The brand's own alias map, the standing server's own advisor, a reviewer.
       const bare = await runSession({
-        ...aliased,
-        turns: [{ toolUses: [{ id: "toolu_advisor_bare", name: "advisor", input: { question: "is this ready?" } }] }, { text: "advised" }],
+        reviewer: REVIEWER,
+        turns: [{ toolUses: [{ id: "toolu_advisor_bare", name: "advisor", input: {} }] }, { text: "advised" }],
       });
-      // FACT (a) IS READ FROM THE RUNTIME'S OWN `system/init.tools`, which is what the question names;
-      // the wire's advertised set is recorded beside it because the two need not agree.
       const init = bare.messages.find((message) => message.type === "system" && message.subtype === "init") as { tools?: unknown[] } | undefined;
       const initTools = (init?.tools ?? []).map(String);
-      const advertised = advertisedToolNames(bare.record, 0);
       const bareResult = toolResults(bare.record).find((entry) => entry.tool_use_id === "toolu_advisor_bare");
 
-      // THE CONTROL, without which (b) means nothing: the SAME bare block, the SAME registered
-      // descriptor, and NO alias entry. If the handler is reached here too, the alias is not what
-      // resolved it and widening `ALIASED_BUILTINS` would be cargo cult.
-      const controlCalls: unknown[] = [];
-      const unaliased = await runSession({
-        capabilities: [{ ...advisor, handler: async (raw) => { controlCalls.push(raw); return { content: [{ type: "text" as const, text: "advice: ship it" }] }; } }],
-        turns: [{ toolUses: [{ id: "toolu_advisor_control", name: "advisor", input: { question: "no alias?" } }] }, { text: "advised" }],
-      });
-      const controlResult = toolResults(unaliased.record).find((entry) => entry.tool_use_id === "toolu_advisor_control");
+      // The canonical name is advertised; the bare one is not (it is an ALIAS, not a tool).
+      expect(initTools).toContain(CANONICAL_ADVISOR);
+      expect(initTools).not.toContain("advisor");
+      // …and the bare block reached the standing advisor, which answered with the reviewer's words.
+      expect(bareResult?.is_error).toBeUndefined();
+      const payload = JSON.parse(String((bareResult?.content as Array<{ text?: string }> | undefined)?.[0]?.text ?? "{}")) as { advice?: string; model?: string };
+      expect(payload).toEqual({ advice: "ship it", model: "fake-reviewer" });
+      expect(bare.messages.at(-1)?.type).toBe("result");
 
-      // (c): the same call, and the canonical one, under the deny rule the helper would produce.
+      // (b) THE CONTROL: the same block, the same standing advisor, the alias key REMOVED.
+      const unaliased = await runSession({
+        reviewer: REVIEWER,
+        toolAliases: ALIASES_WITHOUT_ADVISOR,
+        turns: [{ toolUses: [{ id: "toolu_advisor_control", name: "advisor", input: {} }] }, { text: "advised" }],
+      });
+      const control = toolResults(unaliased.record).find((entry) => entry.tool_use_id === "toolu_advisor_control");
+      expect(control?.is_error).toBe(true);
+      expect(JSON.stringify(control?.content)).toContain("No such tool available");
+
+      // (c) THE DENY, through the helper the widening made type-check.
+      const denyNames = aliasDenyNames("advisor", WINTER_BRAND);
+      expect(denyNames).toEqual(["advisor", CANONICAL_ADVISOR]);
       const deniedBare = await runSession({
-        ...aliased,
-        disallowedTools: ADVISOR_DENY_NAMES,
-        turns: [{ toolUses: [{ id: "toolu_advisor_denied_bare", name: "advisor", input: { question: "blocked?" } }] }, { text: "ok" }],
+        reviewer: REVIEWER,
+        disallowedTools: denyNames,
+        turns: [{ toolUses: [{ id: "toolu_advisor_denied_bare", name: "advisor", input: {} }] }, { text: "ok" }],
       });
       const deniedCanonical = await runSession({
-        ...aliased,
-        disallowedTools: ADVISOR_DENY_NAMES,
-        turns: [{ toolUses: [{ id: "toolu_advisor_denied_canonical", name: CANONICAL_ADVISOR, input: { question: "blocked?" } }] }, { text: "ok" }],
+        reviewer: REVIEWER,
+        disallowedTools: denyNames,
+        turns: [{ toolUses: [{ id: "toolu_advisor_denied_canonical", name: CANONICAL_ADVISOR, input: {} }] }, { text: "ok" }],
       });
-      const blocked = (result: RunResult, id: string): boolean => {
-        const row = toolResults(result.record).find((entry) => entry.tool_use_id === id);
-        return row !== undefined && /denied|not allowed|permission|disabled|blocked/.test(JSON.stringify(row.content).toLowerCase());
-      };
+      expect(blocked(deniedBare, "toolu_advisor_denied_bare")).toBe(true);
+      expect(blocked(deniedCanonical, "toolu_advisor_denied_canonical")).toBe(true);
 
+      // THE RUN WAS THE HERMETIC ONE — the document's claims are about a child that asked no CDN what
+      // tools it should have.
+      for (const [name, value] of Object.entries(HERMETIC_TRAFFIC_OPT_OUTS)) expect({ name, value: bare.env[name] }).toEqual({ name, value });
+      expect(new Set(bare.record.paths)).toEqual(new Set(["/api/hello", "/v1/messages"]));
+
+      // …AND THE RECORD STILL AGREES WITH THE ARTIFACT. `docs/probes/advisor-alias.md` is the dated
+      // measurement the widening rests on; if the pin's behaviour ever moves, this fails here rather
+      // than leaving a confident file that is no longer true.
+      const recorded = recordedFacts();
       const observed = {
         "init-tools-advertise-canonical-advisor": initTools.includes(CANONICAL_ADVISOR) ? "yes" : "no",
         "init-tools-advertise-bare-advisor": initTools.includes("advisor") ? "yes" : "no",
-        "wire-advertises-canonical-advisor": advertised.includes(CANONICAL_ADVISOR) ? "yes" : "no",
-        "wire-advertises-bare-advisor": advertised.includes("advisor") ? "yes" : "no",
-        "bare-advisor-reaches-the-mcp-handler": advisorCalls.length > 0 ? "yes" : "no",
-        "bare-advisor-reaches-the-mcp-handler-without-the-alias": controlCalls.length > 0 ? "yes" : "no",
-        "bare-advisor-tool-result-is-error": bareResult?.is_error === true ? "yes" : "no",
+        "bare-advisor-reaches-the-mcp-handler": bareResult !== undefined && bareResult.is_error !== true ? "yes" : "no",
+        "bare-advisor-reaches-the-mcp-handler-without-the-alias": control?.is_error === true ? "no" : "yes",
         "deny-blocks-the-bare-call": blocked(deniedBare, "toolu_advisor_denied_bare") ? "yes" : "no",
         "deny-blocks-the-canonical-call": blocked(deniedCanonical, "toolu_advisor_denied_canonical") ? "yes" : "no",
       };
-      // eslint-disable-next-line no-console
-      console.log(`[R4 advisor alias] observed: ${JSON.stringify(observed, null, 2)}`);
-      // eslint-disable-next-line no-console
-      console.log(`[R4 advisor alias] system/init.tools: ${JSON.stringify(initTools)}`);
-      // eslint-disable-next-line no-console
-      console.log(`[R4 advisor alias] wire-advertised names: ${JSON.stringify(advertised)}`);
-      // eslint-disable-next-line no-console
-      console.log(`[R4 advisor alias] the bare call's tool_result: ${JSON.stringify(bareResult)}`);
-      // eslint-disable-next-line no-console
-      console.log(`[R4 advisor alias] the UNALIASED control's tool_result: ${JSON.stringify(controlResult)}`);
-
-      // WHAT IS ASSERTED, AND IT IS NOT THE ANSWER. The turn completed…
-      expect(bare.messages.at(-1)?.type).toBe("result");
-      // …the run was the hermetic one (the doc's claim about the pin is about a child that asked no CDN
-      // what tools it should have)…
-      for (const [name, value] of Object.entries(HERMETIC_TRAFFIC_OPT_OUTS)) expect({ name, value: bare.env[name] }).toEqual({ name, value });
-      expect(new Set(bare.record.paths)).toEqual(new Set(["/api/hello", "/v1/messages"]));
-      // …and the document records exactly what was just observed, key for key.
-      const recorded = recordedFacts();
       expect(Object.fromEntries(Object.keys(observed).map((key) => [key, recorded[key]]))).toEqual(observed);
       expect(recorded["pin"]).toBe("@anthropic-ai/claude-agent-sdk 0.3.250");
       expect(recorded["measured-on"]).toBe("2026-09-11");

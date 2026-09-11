@@ -11,9 +11,11 @@
 // NOT enumerate exited transcripts on disk".
 import { describe, expect, test } from "bun:test";
 
-import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
-import { acceptNativeListAgentsArgs, acceptNativeSendMessageArgs } from "../../src/native-args.ts";
-import { toolUseIdFromExtra, VENDOR_TOOL_USE_ID_META_KEY } from "../../src/messaging/index.ts";
+import { createRuntimeMessaging } from "../../src/messaging/index.ts";
+// THE HANDLERS ARE THE SDK'S (R-8-1): one declaration for both hosts. The router supplies the PORT —
+// its own `GlobalMessagingHandle`, which satisfies `MessagingToolPort` structurally (ruling P-3).
+import { createMessagingToolHandlers } from "@yanlinglabs/winter-agent-sdk/tools";
+import { toolUseIdFromExtra, VENDOR_TOOL_USE_ID_META_KEY } from "@yanlinglabs/winter-agent-sdk/tools";
 import { childEntry, createBed, createFakeFacet, declaredClasses, sessionEntry, winterHandle, winterWriterHandle } from "./support.ts";
 
 function bedWith() {
@@ -22,52 +24,20 @@ function bedWith() {
   return { ...bed, directory, messaging };
 }
 
-const parse = (result: { content: Array<{ text: string }> }): Record<string, unknown> => JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+// THE SDK HANDLER ANSWERS `{ text, isError? }` (ruling P-4); each host wraps it in its own runtime's
+// result type, and the router's wrap is `mcp-descriptors.ts`'s four-line `mcpResult`.
+const parse = (result: { text: string }): Record<string, unknown> => JSON.parse(result.text === "" ? "{}" : result.text) as Record<string, unknown>;
 
-describe("the native argument schemas, accepted EXACTLY", () => {
-  test("`SendMessage` takes the four native fields and refuses a fifth", () => {
-    expect(acceptNativeSendMessageArgs({ to: "session:x", message: "hi", summary: "s", notify_when_idle: true })).toEqual({
-      ok: true,
-      args: { to: "session:x", message: "hi", summary: "s", notify_when_idle: true },
-    });
-    // "No more" matters as much as "no less": an alias target that accepted an extra field would be a
-    // second, undocumented schema reachable only through the alias (WS-14 §7).
-    const extra = acceptNativeSendMessageArgs({ to: "session:x", message: "hi", priority: "high" });
-    expect(extra.ok).toBe(false);
-    if (!extra.ok) expect(extra.reason).toContain("priority");
-  });
-
-  test("`to` is validated by WS-10 §10.1's own rules, through the shared validator", () => {
-    for (const [to, fragment] of [
-      ["", "non-empty"],
-      ["x".repeat(301), "300"],
-      ["a\nb", "newline"],
-      ["*", "broadcast"],
-    ] as const) {
-      const result = acceptNativeSendMessageArgs({ to, message: "hi" });
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toContain(fragment);
-    }
-  });
-
-  test("`message` is required — and an EMPTY one is legal, because that is the pure idle subscription", () => {
-    expect(acceptNativeSendMessageArgs({ to: "session:x" }).ok).toBe(false);
-    expect(acceptNativeSendMessageArgs({ to: "session:x", message: "" }).ok).toBe(true);
-  });
-
-  test("`summary` is capped at 200 and `notify_when_idle` must be a boolean", () => {
-    expect(acceptNativeSendMessageArgs({ to: "session:x", message: "hi", summary: "s".repeat(201) }).ok).toBe(false);
-    expect(acceptNativeSendMessageArgs({ to: "session:x", message: "hi", notify_when_idle: "yes" }).ok).toBe(false);
-  });
-
-  test("`ListAgents` accepts `{}`, both reserved fields, and nothing else", () => {
-    expect(acceptNativeListAgentsArgs({})).toEqual({ ok: true, args: {} });
-    expect(acceptNativeListAgentsArgs(undefined)).toEqual({ ok: true, args: {} });
-    expect(acceptNativeListAgentsArgs({ channel: "c", q: "x" })).toEqual({ ok: true, args: { channel: "c", q: "x" } });
-    expect(acceptNativeListAgentsArgs({ limit: 5 }).ok).toBe(false);
-    expect(acceptNativeListAgentsArgs({ q: "x".repeat(257) }).ok).toBe(false);
-  });
-});
+// THE ACCEPTOR PLANTS ARE GONE, AND THAT IS THE POINT (R-8-1, carry 3). They asserted the router's own
+// copy of WS-10 §10.1/§10.2's model-facing contract — the four native fields, `to`'s rules, the
+// `summary` cap, `ListAgents`' two reserved fields — against `src/native-args.ts`, which no longer
+// exists. The contract is declared once in `@yanlinglabs/winter-agent-sdk/tools` and tested there, at
+// the source, for both hosts. What remains HERE is the only half that is the router's: what happens
+// when those accepted arguments meet Lane B's real router over Lane B's real directory.
+//
+// The acceptors' BEHAVIOUR also moved with them (ruling P-4): the SDK truncates an over-long `summary`
+// where the router used to refuse it, refuses an empty message without `notify_when_idle`, and rejects
+// arrays. Tests that pinned the old answers are deleted rather than re-pinned here.
 
 describe("row 1's handler half — a native SendMessage block, routed", () => {
   test("the handler delivers and returns the typed outcome as the model's visible result", async () => {
@@ -225,7 +195,7 @@ describe("row 2's handler half — ListAgents' output contract", () => {
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "caller" });
     const result = await handlers.listAgents({ limit: 10 });
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("limit");
+    expect(result.text).toContain("limit");
   });
 });
 
@@ -275,8 +245,8 @@ describe("item 15 — the per-call tool-use id from the vendor's `extra`", () =>
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "sender" });
     const extra = { _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: "toolu_retry" } };
 
-    const first = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "hi" }, extra)).content[0]!.text) as { messageId: string; status: string };
-    const retry = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "hi" }, extra)).content[0]!.text) as { messageId: string; status: string };
+    const first = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "hi" }, extra)).text) as { messageId: string; status: string };
+    const retry = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "hi" }, extra)).text) as { messageId: string; status: string };
 
     // THE SAME ID, derived from the vendor's own per-call value — §12's whole requirement.
     expect(first.messageId).toBe("msg:sender:toolu_retry");
@@ -294,8 +264,8 @@ describe("item 15 — the per-call tool-use id from the vendor's `extra`", () =>
     world.messaging.attachWinterSession("session:receiver", writer.handle);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "sender" });
 
-    const a = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "one" }, { _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: "toolu_a" } })).content[0]!.text) as { messageId: string };
-    const b = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "two" }, { _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: "toolu_b" } })).content[0]!.text) as { messageId: string };
+    const a = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "one" }, { _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: "toolu_a" } })).text) as { messageId: string };
+    const b = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "two" }, { _meta: { [VENDOR_TOOL_USE_ID_META_KEY]: "toolu_b" } })).text) as { messageId: string };
     expect(a.messageId).not.toBe(b.messageId);
     expect(writer.pushed).toHaveLength(2);
   });
@@ -306,7 +276,7 @@ describe("item 15 — the per-call tool-use id from the vendor's `extra`", () =>
     await world.directory.record(sessionEntry("receiver"));
     world.messaging.attachWinterSession("session:receiver", winterWriterHandle(() => "idle").handle);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "sender", toolUseId: "toolu_bound" });
-    const result = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "hi" })).content[0]!.text) as { messageId: string };
+    const result = JSON.parse((await handlers.sendMessage({ to: "session:receiver", message: "hi" })).text) as { messageId: string };
     expect(result.messageId).toBe("msg:sender:toolu_bound");
   });
 });

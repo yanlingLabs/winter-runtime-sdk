@@ -64,17 +64,10 @@ export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, is
 // R-7b-11's four, for the same reason: the README says the router disables the runtime's remote
 // feature configuration by default, and a host should be able to READ the set rather than trust prose.
 export { TRAFFIC_OPT_OUT_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./official/env-allowlist.ts";
-export {
-  LIST_AGENTS_FIELD_MAX,
-  NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
-  NATIVE_LIST_AGENTS_SCHEMA,
-  NATIVE_SEND_MESSAGE_SCHEMA,
-  SEND_MESSAGE_SUMMARY_MAX,
-  SEND_MESSAGE_TO_MAX,
-  acceptNativeListAgentsArgs,
-  acceptNativeSendMessageArgs,
-} from "./native-args.ts";
-export type { NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } from "./native-args.ts";
+// THE TOOL SURFACE IS NOT HERE (ruling P-7, R-8-1). The native schemas, their bounds, their
+// acceptors, the handler factories and the advisor all live in `@yanlinglabs/winter-agent-sdk/tools`
+// — one declaration for both hosts — and this package re-exports none of them: the router owns no
+// tool, so it publishes no tool surface. A host that needs them imports the SDK it already depends on.
 
 // --- the seams (interfaces the four lanes implement behind) ----------------------------------------
 export * from "./seams/index.ts";
@@ -87,10 +80,9 @@ export type { OfficialInputStream, RouterOfficialInput, RouterOfficialPolicy, Ro
 export type { LaneId } from "./errors.ts";
 
 // --- WS-15 §6.1–6.4: the directory and the cross-runtime messaging router (Lane B; the three doors a host needs + their vocabulary) ---
-export { createRuntimeMessaging, createMessagingToolHandlers, createAttachedSessionRegistry } from "./messaging/index.ts";
+export { createRuntimeMessaging, createAttachedSessionRegistry } from "./messaging/index.ts";
 export type {
   AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession,
-  DirectorySnapshot, GlobalMessagingHandle, GlobalMessagingOptions, MessagingToolCaller,
-  MessagingToolHandlers, MessagingToolResult, ReplyRequest, RouterMessagingAdapter,
+  DirectorySnapshot, GlobalMessagingHandle, GlobalMessagingOptions, ReplyRequest, RouterMessagingAdapter,
   RuntimeDirectoryHandle, RuntimeDirectoryOptions, RuntimeDirectoryRecoveryHooks,
 } from "./messaging/index.ts";

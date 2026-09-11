@@ -16,7 +16,10 @@
 // the CHILD's own record rather than by its parent's runtime.
 import { describe, expect, test } from "bun:test";
 
-import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { createRuntimeMessaging } from "../../src/messaging/index.ts";
+// THE HANDLERS ARE THE SDK'S (R-8-1): one declaration for both hosts. The router supplies the PORT —
+// its own `GlobalMessagingHandle`, which satisfies `MessagingToolPort` structurally (ruling P-3).
+import { createMessagingToolHandlers } from "@yanlinglabs/winter-agent-sdk/tools";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
 import { childAddress, childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
 import { credentials, listing, NOW, VERSIONS } from "../selection/fixtures.ts";
@@ -476,9 +479,9 @@ describe("NEW-12 — a host permission-class hook that raises", () => {
     world.messaging.attachWinterSession("session:receiver", winterWriterHandle(() => "idle").handle);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "sender", toolUseId: "toolu-new12" });
     const result = await handlers.sendMessage({ to: "session:receiver", message: "a message only this test sends" });
-    expect(Array.isArray(result.content)).toBe(true);
-    expect(result.content[0]?.text).toContain("held");
-    expect(result.content[0]?.text).toContain("class unknown");
+    expect(typeof result.text).toBe("string");
+    expect(result.text).toContain("held");
+    expect(result.text).toContain("class unknown");
   });
 
   test("a hook that ANSWERS is unaffected — the catch is a fall-through, not a swallow", async () => {

@@ -5,6 +5,7 @@
 // The official module here is a FAKE (a `query` that records what it was handed). The real one is
 // driven in `runtime-*.test.ts`; what this file proves is the wiring around it.
 import { describe, expect, test } from "bun:test";
+import type { MessagingToolPort } from "@yanlinglabs/winter-agent-sdk/tools";
 import { PassThrough } from "node:stream";
 import { WINTER_BRAND, type SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
@@ -465,36 +466,61 @@ describe("WS-14 §5 / WS-17 row 15 — the handoff refusals", () => {
 });
 
 describe("WS-14 §11 — the standing MCP server on the official branch", () => {
-  const handlers = {
-    sendMessage: async () => ({ content: [{ type: "text" as const, text: "delivered" }] }),
-    listAgents: async () => ({ content: [{ type: "text" as const, text: JSON.stringify({ listing: "" }) }] }),
+  // THE PORT, NOT HANDLERS (ruling P-3). What the router supplies is the thing messages travel over;
+  // the handlers are the SDK's, built from it. A stub is enough here because these tests are about the
+  // DESCRIPTOR the composition produces, not about delivery (which `test/messaging/*` owns).
+  const port: MessagingToolPort = {
+    sendDetailed: async () => ({ status: "delivered", messageId: "m1" }) as unknown as Awaited<ReturnType<MessagingToolPort["sendDetailed"]>>,
+    listReachable: async () => [],
+    readNotifications: () => ({ notifications: [], remaining: 0 }),
   };
+  const advisor = { transcriptSource: { getEntries: () => [] } };
   const branchLabel = "winter-claude-agent";
+  const standing = (brand: { mcpServerName: string }, capabilities?: readonly WinterMcpToolDescriptor[]) =>
+    winterMcpServerDescriptor({ brand, port, caller: { sessionId: "s-1" }, advisor, ...(capabilities === undefined ? {} : { capabilities }) });
 
-  test("the messaging handlers are registered with the NATIVE schemas, deferred, under canonical names", () => {
-    const descriptor = winterMcpServerDescriptor({ brand: { mcpServerName: "acme" }, messaging: handlers, branchLabel });
+  test("the FOUR default tools come from the SDK's own definitions, deferred, under canonical names", () => {
+    const descriptor = standing({ mcpServerName: "acme" });
     expect(descriptor.name).toBe("acme");
-    expect(descriptor.tools.map((tool) => tool.tool)).toEqual(["send_message", "list_agents"]);
-    expect(descriptor.tools.map((tool) => tool.exposure)).toEqual(["deferred", "deferred"]);
+    // THE ROUTER DECLARES NONE OF THESE (R-8-1). The order is `WINTER_DEFAULT_TOOL_DEFINITIONS`' own.
+    expect(descriptor.tools.map((tool) => tool.tool)).toEqual(["send_message", "list_agents", "read_notifications", "advisor"]);
+    expect(descriptor.tools.map((tool) => tool.exposure)).toEqual(["deferred", "deferred", "deferred", "deferred"]);
     expect(descriptor.tools[0]?.inputSchema.required).toEqual(["to", "message"]);
-    expect(canonicalToolNames(descriptor, { mcpServerName: "acme" })).toEqual(["mcp__acme__send_message", "mcp__acme__list_agents"]);
+    expect(canonicalToolNames(descriptor, { mcpServerName: "acme" })).toEqual(["mcp__acme__send_message", "mcp__acme__list_agents", "mcp__acme__read_notifications", "mcp__acme__advisor"]);
+    // D1: the SDK's `ListAgents` output schema says "EXACTLY `{ listing: string }`" out loud, which
+    // the router's own copy never did.
+    expect(descriptor.tools[1]?.outputSchema?.additionalProperties).toBe(false);
+    expect(descriptor.tools[1]?.outputSchema?.properties).toEqual({ listing: { type: "string" } });
   });
 
-  test("Winter's advisor BACKS Claude's on the official branch (R-8-1): registering one SURVIVES, not a refusal", () => {
-    const advisor: WinterMcpToolDescriptor = {
-      tool: "advisor",
+  test("the advisor is registered ALWAYS — a host option supplies the reviewer, never the tool (I-5)", () => {
+    // No `advisor` deps of any kind: the tool is still there, because the Winter runtime always
+    // advertises it and two legs whose advertised sets differ by a host option is the divergence
+    // WS-14 §11 forbids.
+    const descriptor = winterMcpServerDescriptor({ brand: WINTER_BRAND, port, caller: { sessionId: "s-1" }, advisor: { transcriptSource: { getEntries: () => [] } } });
+    expect(descriptor.tools.map((tool) => tool.tool)).toContain("advisor");
+    expect(canonicalToolNames(descriptor, WINTER_BRAND)).toContain(`mcp__${WINTER_BRAND.mcpServerName}__advisor`);
+  });
+
+  test("with no reviewer resolvable the advisor answers WS-06 §4's ordinary tool error, not a throw", async () => {
+    const descriptor = standing(WINTER_BRAND);
+    const tool = descriptor.tools.find((candidate) => candidate.tool === "advisor");
+    const result = await tool!.handler({});
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text.length).toBeGreaterThan(0);
+  });
+
+  test("the capability plugins are registered alongside the four, unchanged", () => {
+    const capability: WinterMcpToolDescriptor = {
+      tool: "browser_navigate",
       description: "x",
       inputSchema: { type: "object", properties: {} },
       exposure: "eager",
-      permissionClass: "advisor",
+      permissionClass: "browser",
       handler: async () => ({ content: [] }),
     };
-    const descriptor = winterMcpServerDescriptor({ brand: WINTER_BRAND, messaging: handlers, capabilities: [advisor], branchLabel });
-    expect(descriptor.tools.map((tool) => tool.tool)).toEqual(["send_message", "list_agents", "advisor"]);
-    expect(canonicalToolNames(descriptor, WINTER_BRAND)).toContain(`mcp__${WINTER_BRAND.mcpServerName}__advisor`);
-    // the capability plugins themselves are registered unchanged, alongside it
-    const capability: WinterMcpToolDescriptor = { ...advisor, tool: "browser_navigate" };
-    expect(winterMcpServerDescriptor({ brand: WINTER_BRAND, messaging: handlers, capabilities: [advisor, capability], branchLabel }).tools).toHaveLength(4);
+    expect(standing(WINTER_BRAND, [capability]).tools).toHaveLength(5);
+    expect(standing(WINTER_BRAND, [capability]).tools.at(-1)?.tool).toBe("browser_navigate");
   });
 
   test("materialization goes through the INJECTED module, and its absence is a typed MCP failure", () => {
@@ -506,10 +532,10 @@ describe("WS-14 §11 — the standing MCP server on the official branch", () => 
       },
       createSdkMcpServer: (options: { name: string; tools?: unknown[] }) => ({ type: "sdk", name: options.name, tools: options.tools }),
     };
-    const descriptor = winterMcpServerDescriptor({ brand: WINTER_BRAND, messaging: handlers, branchLabel });
-    const servers = officialMcpServers({ descriptor, module, toInputShape: (schema) => ({ shapeOf: Object.keys(schema.properties) }), branchLabel });
+    const descriptor = standing(WINTER_BRAND);
+    const servers = officialMcpServers({ descriptor, module, toInputShape: (schema) => ({ shapeOf: Object.keys(schema.properties ?? {}) }), branchLabel });
     expect(Object.keys(servers)).toEqual(["winter"]);
-    expect(registered.map((entry) => entry.name)).toEqual(["send_message", "list_agents"]);
+    expect(registered.map((entry) => entry.name)).toEqual(["send_message", "list_agents", "read_notifications", "advisor"]);
     expect(registered[0]?.schema).toEqual({ shapeOf: ["to", "message", "summary", "notify_when_idle"] });
 
     expect(() => officialMcpServers({ descriptor, module: {}, toInputShape: () => ({}), branchLabel })).toThrow(/no in-process MCP server constructor/);

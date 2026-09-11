@@ -14,7 +14,10 @@
 // native `SendMessage` to a COMPLETED child of that parent routes through the resumed parent again.
 import { describe, expect, test } from "bun:test";
 
-import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { createRuntimeMessaging } from "../../src/messaging/index.ts";
+// THE HANDLERS ARE THE SDK'S (R-8-1): one declaration for both hosts. The router supplies the PORT —
+// its own `GlobalMessagingHandle`, which satisfies `MessagingToolPort` structurally (ruling P-3).
+import { createMessagingToolHandlers } from "@yanlinglabs/winter-agent-sdk/tools";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
 import { childEntry, createBed, createFakeOfficialSession, sessionEntry, declaredClasses } from "./support.ts";
 
@@ -33,7 +36,9 @@ function bedWith(options: GlobalMessagingOptions = {}) {
   return { ...bed, directory, messaging };
 }
 
-const parse = (result: { content: Array<{ text: string }> }): Record<string, unknown> => JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+// THE SDK HANDLER ANSWERS `{ text, isError? }` (ruling P-4); each host wraps it in its own runtime's
+// result type, and the router's wrap is `mcp-descriptors.ts`'s four-line `mcpResult`.
+const parse = (result: { text: string }): Record<string, unknown> => JSON.parse(result.text === "" ? "{}" : result.text) as Record<string, unknown>;
 
 /** Two official sessions, each with its own live handle and one child of its own. */
 async function twoOfficialSessions(world: ReturnType<typeof bedWith>) {
