@@ -63,14 +63,20 @@ spine scheduled them, and **both have landed**:
 2. The five wiring lines in `createRuntimeSdk` **are** the real factories; `src/seams/stubs.ts`
    survives for the seams tests, which is what it is now for.
 
-**Two modules belong to NO lane** (fix wave, review r4 N13): `src/vendor-paths.ts` — the vendor's
+**One module belongs to NO lane** (fix wave, review r4 N13): `src/vendor-paths.ts` — the vendor's
 `claude-resume-<uuid>` staging-root vocabulary, shared by the official adapter (which recognises one)
-and the store lane (which stages one) — and `src/native-args.ts` — WS-10 §10.1/§10.2's model-facing
-schemas and their acceptors, shared by the official branch's alias targets and the Winter branch's
-canonical handler. Both were written TWICE, in parallel trees, with mirrored argument orders and
-already-drifted validation. Each now has one definition, is exported once from the package barrel and
-by no lane barrel, and `test/spine/barrel-exports.test.ts` fails if a name is ever exported by two
-lane barrels again.
+and the store lane (which stages one). It was written TWICE, in parallel trees, with mirrored argument
+orders; it now has one definition, is exported once from the package barrel and by no lane barrel, and
+`test/spine/barrel-exports.test.ts` fails if a name is ever exported by two lane barrels again.
+
+**`src/native-args.ts` used to be the second, and R9 deleted it** (R-8-1). WS-10 §10.1/§10.2's
+model-facing schemas and their acceptors had the same disease one repository up: a copy here and a copy
+inside the Winter runtime, already drifted on what `to` may contain and on what an over-long `summary`
+does. They now live once in `@yanlinglabs/winter-agent-sdk/tools`, with the four default-tool
+DEFINITIONS and the handler factories, and both hosts import them. The router publishes none of it
+(ruling P-7): it owns no tool, so it re-exports no tool surface — `src/official/mcp-descriptors.ts`
+COMPOSES the standing server from the SDK's definitions and factories, and that composition is the
+router's whole contribution.
 
 **`test/joint/` belongs to no lane either.** It is the bed where one real pinned runtime drives Lane
 B's real router: every lane had proven its own half against a DOUBLE of its neighbour, which is
@@ -203,45 +209,30 @@ installs. Tests import it by relative path.
 
 ---
 
-## Consuming the Winter SDK (half of the close-out has landed)
+## Consuming the Winter SDK (the close-out is complete)
 
 The three `@yanlinglabs/*` devDependencies are **registry pins** as of Phase 8a Task 0:
 `@yanlinglabs/winter-agent-sdk`, `@yanlinglabs/winter-conformance` and
-`@yanlinglabs/winter-provider-conformance` at `^0.0.2`, resolved from npm by `pnpm install` (the
+`@yanlinglabs/winter-provider-conformance` at `^0.0.3`, resolved from npm by `pnpm install` (the
 lockfile's integrity hashes are npm's, and `node_modules/@yanlinglabs/*` are the published dist-only
-tarballs — no `src/`). Nothing in this package's tests, build or release needs a sibling checkout any
-more: `bun test` resolves the pins through node_modules; `scripts/build-packages.ts` finds the peer's
+tarballs — no `src/`). Nothing in this package's tests, build or release needs a sibling checkout:
+`bun test` resolves the pins through node_modules; `scripts/build-packages.ts` finds the peer's
 declarations in the installed package (`tsconfig.build.json` sets `paths: {}`, which it must — files
 outside `rootDir` break a declaration emit); `release.yml` is single-checkout for the same reason, and
 orders `pnpm install` BEFORE `actions/setup-node` writes its per-job scope pin so the install can never
 be redirected at GitHub Packages.
 
-**What remains of the temporary `link:` shape (R-7b-5), until the close-out collapse — a separate
-change, deliberately not folded into the pin:**
-
-- `tsconfig.base.json`'s `paths` still point the **typecheck** (`tsconfig.typecheck.json`, over `src/`,
-  `test/` and `scripts/`) at a sibling checkout's `src`:
-
-  ```
-  <parent>/winter-runtime-sdk     <- this repository
-  <parent>/winter-agent-sdk       <- the SDK repository, checked out beside it
-  ```
-
-  Locally that sibling must exist. In `ci.yml` it is the second `actions/checkout`, pinned to
-  `WINTER_AGENT_SDK_REF: v0.0.2` — the version the registry pin resolves, not a moving `main` — and
-  it is installed and built there because the sibling's `src` imports the SDK's own workspace
-  packages, which resolve through the sibling's node_modules to THEIR `dist` (measured with
-  `--traceResolution`: `@yanlinglabs/winter-provider-catalog` lands in the sibling's
-  `dist/index.d.ts`).
-- `test/gates/release-gates.test.ts` asserts that checkout (`repository: yanlingLabs/winter-agent-sdk`,
-  unauthenticated).
-- `scripts/smoke-installed.ts` still provides the required peer by symlink — now to the installed
-  registry package rather than to a sibling — instead of installing it from the registry.
-
-The collapse removes the checkout, the `paths` and that assertion together and turns the smoke's
-symlink into an ordinary install. It is a deletion, not a migration: while pinning, the whole
-repository was type-checked with `paths` disabled against the published declarations — zero
-diagnostics.
+**R6 collapsed the temporary `link:` shape's last remnant.** `tsconfig.base.json` carried `paths`
+until then: they pointed the **typecheck** (`tsconfig.typecheck.json`, over `src/`, `test/` and
+`scripts/`) at a sibling checkout's `src`, `ci.yml`'s `build` and `pack-smoke` jobs each checked out
+`yanlingLabs/winter-agent-sdk` beside this repository (pinned to `WINTER_AGENT_SDK_REF: v0.0.2`) and
+built it there, `test/gates/release-gates.test.ts` asserted that checkout by name, and
+`scripts/smoke-installed.ts` provided the required peer by symlinking it rather than installing it.
+The collapse deleted all four together — the `paths`, both checkouts (and every `working-directory:`
+that existed only to address them), the assertion, and the symlink, which is now an ordinary
+registry install of the exact version this checkout has resolved. It was a deletion, not a migration:
+before the collapse, the whole repository was type-checked with `paths` already disabled against the
+published declarations — **zero diagnostics**, re-verified when `paths` was actually deleted.
 
 **History — `link:` and not `file:`, measured.** While the shape was `link:`, pnpm's `file:` on a
 workspace package was ruled out because it tries to install that package's own dependencies, and the
@@ -293,8 +284,8 @@ resolve two different homes.
 `createRuntimeSdk` asserts the matrix before it builds anything and refuses loudly with
 `RuntimeSdkVersionError { expected, actual }`.
 
-- `SUPPORTED.winterAgentSdk` is a **range** (`>=0.0.2 <0.1.0`) — the Winter SDK is this repository's
-  sibling and moves with it.
+- `SUPPORTED.winterAgentSdk` is a **range** (`>=0.0.3 <0.1.0`, raised by R8 for the `/tools` subpath)
+  — the Winter SDK is this repository's sibling and moves with it.
 - `SUPPORTED.claudeAgentSdk` is an **exact pin** (`0.3.250`) — WS-02 §6.1: declaration identity alone
   must not approve an upgrade; a new official version is a reviewed compatibility event.
 - The Winter peer's `PROTOCOL_VERSION` is checked against `SUPPORTED_PROTOCOL_VERSIONS` — the second,
@@ -304,9 +295,11 @@ resolve two different homes.
 
 A peer's package version is read from an exported version identity first (`SDK_VERSION` / `VERSION` /
 `PACKAGE_VERSION` / `version`), then from the resolvable installed manifest, and otherwise refused —
-"I could not tell" and "it is fine" are different answers. **Carry:** neither peer exports a version
-identity today, so the second probe is the live path; the Winter SDK exporting one at `0.0.2` would
-make the assertion describe the *injected instance* rather than the resolvable copy.
+"I could not tell" and "it is fine" are different answers. **The carry is discharged:** the Winter SDK
+exports `SDK_VERSION` as of `0.0.3` (SDK ruling P-5), so probe 1 is the live path for that peer and the
+matrix now describes the *injected instance* rather than the resolvable copy. The official peer still
+exports no identity, so it reaches probe 2 — and a compiled host, where probe 2 cannot resolve
+anything, declares both through `RuntimeSdkOptions.peerVersions` (R2).
 
 ---
 

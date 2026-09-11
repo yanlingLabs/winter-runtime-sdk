@@ -186,3 +186,24 @@ about alias identity should compare against the list it actually means.
   which is the whole point of F-1's fix: `darwin-arm64` locally and `linux-x64` in CI now measure the
   same thing on any day. The test runs the same way anywhere the pinned platform binary installs, and
   skips with a printed reason where it does not.
+
+## 6. Consequence reversed by R-8-1 (2026-09-11)
+
+**Everything measured above still stands. Only §4's POLICY CONCLUSION — what the router does with
+that measurement — is reversed.** The user's tool-ownership ruling R-8-1 (Winter 8b prerequisites)
+supersedes the old refusal: Winter's default tools, `advisor` among them, are pulled by the router and
+bound under Claude's built-in names on the official branch too, so `winterMcpServerDescriptor` no
+longer throws when a capability list names one — `assertNoAdvisor` is retired, and an `advisor`
+descriptor now survives into `descriptor.tools` and `canonicalToolNames` under
+`mcp__<brand>__advisor`, exactly like any other capability plugin.
+
+This is NOT a finding that contradicts §§1–4 above. Nothing about the PINNED ARTIFACT changed or was
+re-measured: Anthropic's API-side `advisor` server tool is still never a client-side tool on the
+official branch (point 1), still gated by the runtime's own remote feature configuration rather than
+by anything the session or this router configures (point 2), still unreachable by any allow-list,
+deny-list or alias the host controls (point 3), and still surfaces as a `server_tool_use` block rather
+than a tool call the host executes (point 4). What changes is only whether WINTER ALSO offers its own,
+client-side `advisor` on this branch — it now does, backing rather than replacing Anthropic's, and a
+model on the official branch that calls Winter's `mcp__<brand>__advisor` gets Winter's own reviewer
+plumbing regardless of whether the CDN-gated API-side one is present that session. A host that wants
+BOTH consequences legible should read this section beside §4 rather than in place of it.

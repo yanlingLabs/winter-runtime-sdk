@@ -58,11 +58,18 @@ export class RuntimeHandoffRequiredError extends RuntimeSdkError {
  * cannot run. This one is about the DOOR's own inputs: the session id its directory row is addressed
  * by, the credential its auth family needs, the vendored runtime path §5.1 will not guess. A host
  * catching it knows to fix a call site, not a configuration.
+ *
+ * THE PREFIX IS LEG-NEUTRAL, AND IT HAD TO BECOME SO (interim review I-7). It read "the official leg
+ * needs `<field>`" for as long as the official leg was the only caller — and then R-8 gave the class
+ * three refusals that are not: `capabilities` at CONSTRUCTION (before any leg exists, and fatal to a
+ * Winter-only host), and `mcpServers` on the WINTER leg. A host with no official peer at all reading
+ * "the official leg needs `mcpServers`" is told to look at the one branch it does not use. `leg` names
+ * the branch when there IS one, so nothing is lost where the old sentence was right.
  */
 export class RuntimeLaunchInputError extends RuntimeSdkError {
   readonly field: string;
-  constructor(args: { field: string; reason: string }) {
-    super(`winter-runtime-sdk: the official leg needs \`${args.field}\` — ${args.reason}`);
+  constructor(args: { field: string; reason: string; leg?: "official" | "winter" }) {
+    super(`winter-runtime-sdk: ${args.leg === undefined ? "" : `the ${args.leg} leg: `}\`${args.field}\` — ${args.reason}`);
     this.field = args.field;
   }
 }

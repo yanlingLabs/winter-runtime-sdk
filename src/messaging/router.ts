@@ -27,7 +27,6 @@
 //      applies inbound policy to the RETURNING NOTICE (a held subscriber gets a reduced-status
 //      notice), fires each subscription at most once, and drops the durable record when it does.
 import {
-  callerAddress,
   createLoopGuard,
   createMessagingRouter,
   createNotificationQueue,
@@ -641,13 +640,3 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
   return handle;
 }
 
-/**
- * The canonical address a `SendMessage`/`ListAgents` handler runs AS (see `handlers.ts`).
- *
- * The subpath's own `callerAddress` builds `agent:<parent>:<child>` for a child caller and
- * `session:<id>` for a top-level one — the same rule the resolution fence reads, so the handler and
- * the router can never disagree about who is asking.
- */
-export function callerAddressOf(caller: { sessionId: string; agentId?: string }): RuntimeAddress {
-  return callerAddress(caller);
-}

@@ -113,13 +113,17 @@ describe("the lane barrels", () => {
   });
 });
 
-describe("the two shared modules neither lane owns", () => {
+describe("the shared module neither lane owns", () => {
   // The names N13 unified. They are on the PACKAGE barrel and on no lane barrel — which is the state
   // the collision gate above keeps, but stated positively so a future edit that moved one back into a
   // lane (and out of the public surface) fails here rather than silently shrinking the package.
+  // `native-args.ts` LEFT THIS LIST BY LEAVING THE REPOSITORY (R-8-1). The names it held are the
+  // model-facing tool contract, and they now live once in `@yanlinglabs/winter-agent-sdk/tools` for
+  // both hosts — which is the same cure N13 applied here, one repository up. The router re-exports
+  // none of them (ruling P-7), so there is nothing left to keep on the package barrel;
+  // `test/spine/contract-reexport.test.ts` is what asserts their ABSENCE.
   const SHARED = {
     "vendor-paths.ts": ["RESUME_STAGING_PREFIX", "isResumeStagingRoot", "resumeStagingRoot"],
-    "native-args.ts": ["acceptNativeListAgentsArgs", "acceptNativeSendMessageArgs", "NATIVE_SEND_MESSAGE_SCHEMA", "NATIVE_LIST_AGENTS_SCHEMA", "NATIVE_LIST_AGENTS_OUTPUT_SCHEMA", "SEND_MESSAGE_TO_MAX", "SEND_MESSAGE_SUMMARY_MAX", "LIST_AGENTS_FIELD_MAX"],
   } as const;
   const all = Object.values(SHARED).flat() as readonly string[];
 
@@ -146,11 +150,10 @@ describe("the two shared modules neither lane owns", () => {
     const store = await import("../../src/store/materialized-resume.ts");
     expect(Object.keys(spool)).not.toContain("resumeStagingRoot");
     expect(Object.keys(store)).not.toContain("resumeStagingRoot");
+    // The acceptor half of this check retired with `native-args.ts` itself: there is no router-side
+    // copy left to be identical to. `src/official/aliases.ts` no longer re-exports any of it.
     const aliases = (await import("../../src/official/aliases.ts")) as Record<string, unknown>;
-    const nativeArgs = (await import("../../src/native-args.ts")) as Record<string, unknown>;
-    expect(aliases["acceptNativeSendMessageArgs"]).toBe(nativeArgs["acceptNativeSendMessageArgs"]);
-    const messaging = (await import("../../src/messaging/handlers.ts")) as Record<string, unknown>;
-    expect(messaging["acceptNativeSendMessageArgs"]).toBeUndefined();
+    expect(aliases["acceptNativeSendMessageArgs"]).toBeUndefined();
     // …and the one surviving argument order is `(uuid, base)`, not the mirrored one.
     expect(shared.resumeStagingRoot("u", "/tmp")).toBe(`/tmp/${shared.RESUME_STAGING_PREFIX}u`);
   });

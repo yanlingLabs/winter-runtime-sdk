@@ -12,7 +12,7 @@ export type { DirectorySnapshot, RuntimeDirectoryHandle, RuntimeDirectoryOptions
 export type { RuntimeDirectoryRecoveryHooks, RuntimeDirectoryRetention } from "../directory/recovery.ts";
 export { entryToChildLike, entryToListedRuntimeObject, entryToListedRuntimeObjectList, isListableFrom, isLiveStatus, isResolvableFrom, mergeAdapterOwnedFields, owningSessionIdOf, parentAddressOf, sessionAddressOf } from "../directory/entries.ts";
 
-export { createGlobalMessaging, callerAddressOf, deriveMessageId } from "./router.ts";
+export { createGlobalMessaging, deriveMessageId } from "./router.ts";
 export type { GlobalMessagingContext, GlobalMessagingHandle, GlobalMessagingOptions, ReplyRequest } from "./router.ts";
 export { createWinterMessagingAdapter } from "./winter-adapter.ts";
 export type { WinterMessagingAdapter, WinterMessagingAdapterDeps } from "./winter-adapter.ts";
@@ -25,11 +25,11 @@ export type { InboundPolicy, InboundPolicyDeps, InboundPolicyHooks, InboundVerdi
 export { createAttachedSessionRegistry } from "./sessions.ts";
 export type { AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession, LiveSessionStatus } from "./sessions.ts";
 export { renderAttributedTurn, renderOwnerQualifiedTurn, UnattributableSenderError } from "./attribution.ts";
-export { createMessagingToolHandlers, toolUseIdFromExtra, VENDOR_TOOL_USE_ID_META_KEY } from "./handlers.ts";
-export type { MessagingToolCaller, MessagingToolHandler, MessagingToolHandlers, MessagingToolResult } from "./handlers.ts";
-// The native schemas, their acceptors and their bounds are NOT here: they are WS-10 §10.1/§10.2's
-// model-facing contract, shared with the official branch's alias targets, and they live in
-// `src/native-args.ts` with one definition (review r4, N13). The package barrel exports them once.
+// THE MESSAGING TOOL HANDLERS ARE NOT HERE ANY MORE (R-8-1): `createMessagingToolHandlers`, the
+// acceptors, the native schemas and `callerAddress` all live in `@yanlinglabs/winter-agent-sdk/tools`,
+// declared once for both hosts. This lane's contribution is the PORT they run over — the router's
+// `GlobalMessagingHandle` satisfies the SDK's `MessagingToolPort` structurally (ruling P-3), so it is
+// passed straight in with no adapter. The router re-exports none of it (ruling P-7).
 
 import { createRuntimeDirectory, type RuntimeDirectoryHandle, type RuntimeDirectoryOptions } from "../directory/directory.ts";
 import type { SeamContext } from "../seams/context.ts";

@@ -82,8 +82,8 @@ export {
 } from "./errors.ts";
 export type { OfficialCrashClass, OfficialErrorCode, WinterErrorClassName } from "./errors.ts";
 
-export { OFFICIAL_MATERIALIZATION_DROPS, assertNoAdvisor, canonicalToolNames, materializeOfficialMcpServer, messagingToolDescriptors, officialMcpServers, winterMcpServerDescriptor } from "./mcp-descriptors.ts";
-export type { InputShapeFactory, JsonSchemaObject, MessagingHandlers, OfficialMcpModule, WinterMcpHandler, WinterMcpServerDescriptor, WinterMcpToolDescriptor, WinterMcpToolResult } from "./mcp-descriptors.ts";
+export { OFFICIAL_MATERIALIZATION_DROPS, canonicalToolNames, materializeOfficialMcpServer, officialMcpServers, winterMcpServerDescriptor } from "./mcp-descriptors.ts";
+export type { InputShapeFactory, JsonSchemaObject, OfficialMcpModule, WinterMcpHandler, WinterMcpServerDescriptor, WinterMcpToolDescriptor, WinterMcpToolResult } from "./mcp-descriptors.ts";
 
 export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, brandedFlagSettings, buildOfficialOptions, captureOptions, mergeHooks } from "./options-template.ts";
 export type { OptionsTemplatePolicy } from "./options-template.ts";

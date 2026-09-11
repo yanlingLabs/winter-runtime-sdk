@@ -99,7 +99,12 @@ describe("WS-14 §2 — the Options template", () => {
 
   test("every Winter-owned name in the template is BRAND-derived", () => {
     const options = buildOfficialOptions(input("code"));
-    expect(options.toolAliases).toEqual({ SendMessage: "mcp__acme__send_message", ListAgents: "mcp__acme__list_agents" });
+    expect(options.toolAliases).toEqual({
+      SendMessage: "mcp__acme__send_message",
+      ListAgents: "mcp__acme__list_agents",
+      ReadNotifications: "mcp__acme__read_notifications",
+      advisor: "mcp__acme__advisor",
+    });
     expect(options.plugins).toEqual([{ type: "local", path: "/work/repo/.acme", skipMcpDiscovery: true }]);
     expect((options.settings as { plansDirectory: string }).plansDirectory).toBe(".acme/plans");
 

@@ -102,10 +102,13 @@ describeRuntime("WS-17 rows 1-2, WHOLE-ROW: the model's own SendMessage through 
       expect(advertised).toContain("ListAgents");
       expect(advertised).toContain(mcpToolName(WINTER_BRAND, "send_message"));
       expect(advertised).toContain(mcpToolName(WINTER_BRAND, "list_agents"));
-      // The alias map the runtime was handed is the BRAND's own, never a literal.
+      // The alias map the runtime was handed is the BRAND's own, never a literal — all FOUR of it
+      // since R9 (`ReadNotifications` and `advisor` joined on R4's measurement).
       expect(officialToolAliases(WINTER_BRAND)).toEqual({
         SendMessage: mcpToolName(WINTER_BRAND, "send_message"),
         ListAgents: mcpToolName(WINTER_BRAND, "list_agents"),
+        ReadNotifications: mcpToolName(WINTER_BRAND, "read_notifications"),
+        advisor: mcpToolName(WINTER_BRAND, "advisor"),
       });
     },
     JOINT_TIMEOUT,

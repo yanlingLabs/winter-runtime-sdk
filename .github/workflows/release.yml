@@ -7,10 +7,11 @@ name: release
 # `v*` + `workflow_dispatch` — no `phase-*` tag, no `push: branches` — and that no other workflow in
 # this repository contains the word `publish`.
 #
-# ONE CHECKOUT. The three `@yanlinglabs/*` devDependencies are registry pins (`^0.0.2`, on npm) as of
-# Phase 8a Task 0 Step 1, so the sibling-checkout shape `ci.yml` still carries is not needed here:
-# `pnpm install --frozen-lockfile` resolves them from npm, and `scripts/build-packages.ts` finds the
-# peer's declarations in the installed dist-only package rather than in a sibling's `dist`.
+# ONE CHECKOUT, EVERYWHERE. The three `@yanlinglabs/*` devDependencies are registry pins (`^0.0.3`, on
+# npm) as of Phase 8a Task 0 Step 1, and R6 collapsed the sibling-checkout shape `ci.yml` used to
+# carry, so neither workflow has one now: `pnpm install --frozen-lockfile` resolves them from npm, and
+# `scripts/build-packages.ts` finds the peer's declarations in the installed dist-only package rather
+# than in a sibling's `dist`.
 on:
   push:
     tags: ["v*"]
@@ -32,6 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "1.3.14" }
       - uses: pnpm/action-setup@v4
         with: { version: 10 }
 
@@ -126,6 +128,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "1.3.14" }
       - uses: pnpm/action-setup@v4
         with: { version: 10 }
       # Same ordering as job 1, for the same reason: the install resolves from npm before any scope

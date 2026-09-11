@@ -14,19 +14,33 @@ Decision record: WS-00 D19 (2026-09-05). Boundaries that do not move:
   builtin-path containment, Winter MCP plugin registration), shared session-store wiring, the
   cross-runtime handoff barrier with the materialized-resume decoration doors, and the runtime
   directory plus cross-runtime messaging router.
+- **It owns NO TOOL** (the user's tool-ownership ruling, R-8-1). The default tools — `SendMessage`,
+  `ListAgents`, `ReadNotifications`, `advisor` — are DECLARED once in
+  `@yanlinglabs/winter-agent-sdk/tools` and BOUND here, under the official runtime's own built-in
+  names; the capability tools (computer, browser, office) are the HOST's, handed over as MCP servers
+  and forwarded to both legs unchanged. This package re-exports no tool surface of its own.
 - The host vendors all three packages directly (`winter-runtime-sdk`, `winter-agent-sdk`,
   `claude-agent-sdk`); this package declares the two SDKs as peer dependencies and receives their
   module instances by injection, so a host that never creates a Claude session never loads the
   official runtime and no SDK is ever instantiated twice.
 - A `brand` profile flows through unchanged (Winter defaults); Claude Code's own literals stay fixed.
 
-Status: Phase 7b, all four lanes landed and the door routed. The spine (the package scaffold, the
-contract re-export, the `createRuntimeSdk` constructor with its version matrix, the seams, the test
-harness and CI) and the four lanes behind those seams — the official-SDK adapter, the runtime
-directory and messaging router, the store wiring and handoff barrier, and runtime selection — are on
-`main`, with WS-17's eighteen router-owned rows proven and cited in `docs/conformance-rows.md`. See
-`docs/architecture.md` for the ownership map, the pinned interfaces and how this package consumes the
-Winter SDK before its first publish.
+Status: Phase 7b landed all four lanes and routed the door; `0.0.2` is the Phase-8b prerequisite
+release. The spine (the package scaffold, the contract re-export, the `createRuntimeSdk` constructor
+with its version matrix, the seams, the test harness and CI) and the four lanes behind those seams —
+the official-SDK adapter, the runtime directory and messaging router, the store wiring and handoff
+barrier, and runtime selection — are on `main`, with WS-17's eighteen router-owned rows proven and
+cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
+interfaces and how this package consumes the Winter SDK.
+
+**What `0.0.2` changes** (peer floor: `@yanlinglabs/winter-agent-sdk >=0.0.3 <0.1.0`):
+
+| | |
+|---|---|
+| `peerVersions` | A host DECLARES its peers' versions — the only door inside a compiled binary, where `require.resolve` cannot see out of the bundle to read a manifest. |
+| `capabilities` + `toInputShape` | The host's own MCP servers, forwarded to BOTH legs: by reference into the Winter leg's `Options.mcpServers`, and registered into the official runtime from the same declaration. One declaration, two registrations, identical canonical names. |
+| `advisor` | The standing server carries Winter's four default tools, `advisor` among them, bound under the official runtime's built-in names (measured: the pin honours an alias key that is not one of its own built-ins — `docs/probes/advisor-alias.md`). `advisor` supplies the REVIEWER; the tool is always registered. |
+| no tool ownership | `src/native-args.ts` and the router's messaging handlers are gone: the definitions, schemas, acceptors, handler factories and the advisor all come from `@yanlinglabs/winter-agent-sdk/tools`, and this package re-exports none of them. |
 
 ---
 
@@ -36,8 +50,22 @@ Winter SDK before its first publish.
 runtime's handle untouched.
 
 ```ts
+// The host owns the capability tools and hands them over as MCP SERVERS; the router forwards the same
+// servers to BOTH legs and rewrites nothing else (R-8-1). `toInputShape` is the one line of glue the
+// official branch needs — its in-process server constructor takes schemas in its own validator's shape,
+// and this package deliberately depends on no validator.
+const sdk = createRuntimeSdk({
+  peers,
+  keychain,
+  vendoredOfficialRuntime,
+  capabilities: [computerServer, browserServer, officeServer],   // your own `{ type: "sdk", name, tools, instance }`
+  toInputShape: (schema) => jsonSchemaToZodRawShape(schema),     // one line, over the validator you already have
+});
+
 // The Winter leg: exactly what it always was. No runtime input, so nothing is decided and nothing
-// is stripped — the caller's own `options` object is forwarded by reference.
+// is stripped — the caller's own `options` object is forwarded by reference (with no `capabilities`
+// configured, by IDENTITY; with them, a copy whose every other member is still your own object, plus
+// your servers under `mcpServers`).
 for await (const message of sdk.query({ prompt: "hello" })) { /* SdkMessage */ }
 
 // The official leg: a `claude-agent` selection, plus what only a host can answer.
@@ -51,7 +79,13 @@ const query = sdk.query({
       official: {
         sessionId: "s-42",                        // its directory row is `session:s-42`
         base: minimalOsEnvironmentFrom(process.env),
-        mcpServers: officialMcpServers({ /* … */ }),
+        // OPTIONAL SINCE 0.0.2: the router materializes the standing server and your capability
+        // servers itself. This stays as the escape hatch, and its reach is exactly one key: an entry
+        // under the BRAND's own standing-server name replaces the router's (that key reaches no other
+        // leg, so overriding it diverges from nothing); an entry naming a forwarded CAPABILITY is a
+        // typed refusal on BOTH legs, because that name is on both and a silent override would leave
+        // the two branches running different tools under one canonical name.
+        // mcpServers: officialMcpServers({ /* … */ }),
       },
     },
   },
@@ -134,12 +168,19 @@ at all.
 **The official branch disables the runtime's remote feature configuration by default** (R-7b-11).
 Every official child gets `TRAFFIC_OPT_OUT_VARIABLES` — the four names are exported, so read them
 rather than trusting this sentence. Measured on the pin, same binary and same options: 25 advertised
-tools with the fetch, 21 without; `DesignSync`, `Monitor`, `PushNotification` and
-`advisor_20260301:advisor` appear only when a CDN answers. A tool surface that moves with no version
-moving is not a pinned artifact, so this is on unless you say otherwise: `remoteConfig: "allow"` (per
-query on `runtime.official`, or deployment-wide on `createRuntimeSdk({ official: { env: { … } } })`)
-opts back in, and the choice is recorded on the session's directory row as
-`RuntimeDirectoryEntry.remoteConfig`.
+tools with the fetch, 21 without; `DesignSync`, `Monitor`, `PushNotification` and Anthropic's own
+API-side `advisor_20260301:advisor` appear only when a CDN answers — that one is the vendor's server
+tool, orthogonal to what follows. A tool surface that moves with no version moving is not a pinned
+artifact, so this is on unless you say otherwise: `remoteConfig: "allow"` (per query on
+`runtime.official`, or deployment-wide on `createRuntimeSdk({ official: { env: { … } } })`) opts back
+in, and the choice is recorded on the session's directory row as `RuntimeDirectoryEntry.remoteConfig`.
+
+**Winter's own `advisor` is registered on the official branch too (R-8-1), backing Anthropic's rather
+than being refused.** WS-14 §11's standing MCP server used to throw if a capability list named
+`advisor` — each branch was meant to have its own, unrelated advisor. The user's tool-ownership ruling
+reverses that: `mcp__<brand>__advisor` is reachable on the official branch exactly like
+`send_message`/`list_agents`, independent of whether the CDN-gated API-side one above is present that
+session. `docs/probes/d29-advisor.md` §6 has the full reversal and what it does and does not change.
 
 **The materialized-resume PREFERRED door is open for the pinned runtime, by measurement** (R-7b-12).
 WS-17 §8's four probes pass against 0.3.250 on darwin-arm64 and linux-x64, so a handle over that peer
@@ -241,6 +282,18 @@ producer record then fails to write, or if the destination throws while starting
 was handed, the `claude-resume-<uuid>` staging root SURVIVES — the destination may be reading it, and
 deleting a live child's `CLAUDE_CONFIG_DIR` is worse than leaving a directory behind. It is locatable
 at `outcome.target.stagingRoot` and belongs to your retention pass.
+
+**Compiled hosts must declare their peers' versions.** The version matrix's second probe
+(`resolved-manifest`) resolves a peer's `package.json` by walking up from `createRequire(...).resolve()`
+— which cannot see outside a compiled binary's own bundle (`file:///$bunfs/...`). A host that
+self-spawns its own compiled artifact and whose injected peer exports no version identity of its own
+has nothing left for the matrix to read, and construction refuses. `createRuntimeSdk({ peerVersions:
+{ winterAgentSdk, claudeAgentSdk } })` is the door: supply both from your own vendored
+`VERSIONS.json`, stamped at your own build time (WS-02 §7.1). A declared version is checked FIRST —
+it wins even over a peer that exports its own identity — and still has to satisfy the same
+range/exact-pin checks as either probe; it changes how the identity was discovered, not what counts
+as supported. A host that runs uncompiled (plain `bun`/`node`, source or an ordinary install) never
+needs this field.
 
 **"Exactly one runtime owns a session" is a convention here, not a mechanism.** The barrier moves
 ownership only after the destination confirms, and the transcript's producer record is authoritative —

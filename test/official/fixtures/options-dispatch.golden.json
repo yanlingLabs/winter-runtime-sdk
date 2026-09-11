@@ -54,6 +54,8 @@
   },
   "toolAliases": {
     "ListAgents": "mcp__acme__list_agents",
-    "SendMessage": "mcp__acme__send_message"
+    "ReadNotifications": "mcp__acme__read_notifications",
+    "SendMessage": "mcp__acme__send_message",
+    "advisor": "mcp__acme__advisor"
   }
 }

@@ -7,7 +7,10 @@
 import { describe, expect, test } from "bun:test";
 
 import { MAX_GLOBAL_MESSAGE_SIZE, MAX_HOP_COUNT, RAPID_REPEAT_WINDOW_MS, NOTIFY_IDLE_EXPIRY_MS } from "@yanlinglabs/winter-agent-sdk/messaging";
-import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { createRuntimeMessaging } from "../../src/messaging/index.ts";
+// THE HANDLERS ARE THE SDK'S (R-8-1): one declaration for both hosts. The router supplies the PORT —
+// its own `GlobalMessagingHandle`, which satisfies `MessagingToolPort` structurally (ruling P-3).
+import { createMessagingToolHandlers } from "@yanlinglabs/winter-agent-sdk/tools";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
 import { childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
 
@@ -364,7 +367,7 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     const { targetFacet } = await watcherAndTarget(world);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_1" });
 
-    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "ping", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "ping", notify_when_idle: true })).text ?? "{}") as Record<string, unknown>;
     expect(payload["status"]).toBe("queued");
     expect(payload["notify"]).toEqual({ subscribed: true });
     // …and the claim is backed by a durable record with the target's identity AND generation.
@@ -386,7 +389,7 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     const { targetFacet } = await watcherAndTarget(world);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_2" });
 
-    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "", notify_when_idle: true })).text ?? "{}") as Record<string, unknown>;
     expect(payload["status"]).toBe("subscribed");
     expect(targetFacet.delivered.length).toBe(0); // WS-10 §10.1: an empty message is the subscription
     expect((await world.store.subscriptions.list()).length).toBe(1);
@@ -399,7 +402,7 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     const world = bedWith();
     await watcherAndTarget(world);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_3" });
-    expect(JSON.parse((await handlers.sendMessage({ to: "session:target", message: "", notify_when_idle: true })).content[0]?.text ?? "{}")["status"]).toBe("subscribed");
+    expect(JSON.parse((await handlers.sendMessage({ to: "session:target", message: "", notify_when_idle: true })).text ?? "{}")["status"]).toBe("subscribed");
 
     // WS-15 §6.3: "survives restart only when DURABLY STORED with valid target identity/generation."
     const restarted = createRuntimeMessaging(world.context, { directory: { now: world.clock.now }, messaging: { now: world.clock.now } });
@@ -424,7 +427,7 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     world.messaging.attachWinterSession("session:target", writer.handle);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_5" });
 
-    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "ping", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:target", message: "ping", notify_when_idle: true })).text ?? "{}") as Record<string, unknown>;
     expect(payload["status"]).toBe("refused");
     expect(payload["notify"]).toBeUndefined();
     expect(writer.pushed.length).toBe(0);
@@ -437,7 +440,7 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     // window is therefore suppressed as a duplicate. A sender retries with a different body, or after
     // the window; the clock moves here to prove the path itself is open.
     world.clock.advance(RAPID_REPEAT_WINDOW_MS + 1);
-    const retry = JSON.parse((await createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_6" }).sendMessage({ to: "session:target", message: "ping" })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    const retry = JSON.parse((await createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_6" }).sendMessage({ to: "session:target", message: "ping" })).text ?? "{}") as Record<string, unknown>;
     expect(retry["status"]).toBe("delivered");
     expect(writer.pushed.length).toBe(1);
   });
@@ -450,7 +453,7 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     world.messaging.attachOfficialSession("session:official", official.handle);
     const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_4" });
 
-    const payload = JSON.parse((await handlers.sendMessage({ to: "session:official", message: "hi", notify_when_idle: true })).content[0]?.text ?? "{}") as Record<string, unknown>;
+    const payload = JSON.parse((await handlers.sendMessage({ to: "session:official", message: "hi", notify_when_idle: true })).text ?? "{}") as Record<string, unknown>;
     expect(payload["status"]).toBe("refused");
     expect(official.pushed.length).toBe(0);
     expect((await world.store.subscriptions.list()).length).toBe(0);

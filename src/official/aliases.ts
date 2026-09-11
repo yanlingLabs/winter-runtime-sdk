@@ -32,6 +32,15 @@ import { mcpToolName, type BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 export const ALIASED_BUILTINS = [
   { builtin: "SendMessage", tool: "send_message" },
   { builtin: "ListAgents", tool: "list_agents" },
+  // WIDENED BY MEASUREMENT, NOT BY HOPE (R4's gate, `docs/probes/advisor-alias.md`). These two keys
+  // are NOT local built-ins of the pinned runtime — its 26-name inventory carries neither — so the
+  // question was whether `toolAliases` honours a key it has no built-in for. Measured on 0.3.250: a
+  // model-emitted bare `advisor` reaches the standing server's advisor THROUGH the alias, and the
+  // identical block without the alias comes back `No such tool available`. `ReadNotifications` is the
+  // same class of key and the same answer; WS-14's 8b amendment §7 names all four as this branch's
+  // aliases (interim review I-4).
+  { builtin: "ReadNotifications", tool: "read_notifications" },
+  { builtin: "advisor", tool: "advisor" },
 ] as const;
 
 export type AliasedBuiltin = (typeof ALIASED_BUILTINS)[number]["builtin"];
@@ -50,29 +59,20 @@ export function aliasTargetFor(builtin: AliasedBuiltin, brand: Pick<BrandProfile
 }
 
 // --------------------------------------------------------------------------------------------------
-// The NATIVE argument schemas (WS-10 §10.1/§10.2) live in `src/native-args.ts`, ONCE.
+// THE NATIVE ARGUMENT SCHEMAS AND THEIR ACCEPTORS ARE NOT HERE ANY MORE (R-8-1).
 // --------------------------------------------------------------------------------------------------
 //
-// This lane authored its own copy first, and the whole-branch gate is why it no longer has one
-// (review r4, N13): the Winter branch's canonical handler had a second acceptor for the same
-// model-facing contract, and the two had already drifted — one refused a bare `"*"`, the other
-// refused `"*"` anywhere, and they returned different prose for the same refusal. WS-10 §10.1 says
-// BOTH branches present "this exact model-facing schema", and the alias is what makes that a hard
-// requirement rather than a nicety: the model emits the NATIVE block and the canonical handler is
-// what receives it. Two copies is precisely how that stops being true, invisibly, in the one place
-// neither lane's tests look. Re-exported here so this module still reads as the alias contract's
-// home; `src/official/index.ts` does not re-export them (the package barrel does, once).
-export {
-  LIST_AGENTS_FIELD_MAX,
-  NATIVE_LIST_AGENTS_OUTPUT_SCHEMA,
-  NATIVE_LIST_AGENTS_SCHEMA,
-  NATIVE_SEND_MESSAGE_SCHEMA,
-  SEND_MESSAGE_SUMMARY_MAX,
-  SEND_MESSAGE_TO_MAX,
-  acceptNativeListAgentsArgs,
-  acceptNativeSendMessageArgs,
-} from "../native-args.ts";
-export type { NativeArgsResult, NativeListAgentsArgs, NativeSendMessageArgs } from "../native-args.ts";
+// They were the router's own for one phase, then `src/native-args.ts`'s for another, and both times
+// the same contract existed twice — once here and once inside the Winter runtime — and both times the
+// two copies drifted (one refused a bare `"*"`, the other refused `"*"` anywhere; one refused an
+// over-long `summary`, the other truncated it). WS-10 §10.1 says BOTH branches present "this exact
+// model-facing schema", and an alias is what makes that a hard requirement rather than a nicety: the
+// model emits the NATIVE block and the canonical handler is what receives it.
+//
+// `@yanlinglabs/winter-agent-sdk/tools` is now the single declaration, and the router imports from it
+// like any other consumer. It is deliberately NOT re-exported from this package (ruling P-7): the
+// router owns no tool, so it publishes no tool surface — a host that needs the schemas installs the
+// SDK, which it already has as a required peer.
 
 /**
  * How the canonical duplicates are exposed (§7's "SHOULD be deferred/hidden").

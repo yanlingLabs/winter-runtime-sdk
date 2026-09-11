@@ -158,8 +158,7 @@ describe("the ci workflow runs every gate", () => {
     }
   });
 
-  test("the peer checkout is public and unauthenticated -- no cross-repo secret in CI", () => {
-    expect(ci).toContain("repository: yanlingLabs/winter-agent-sdk");
+  test("no cross-repo secret token is used by any checkout step (R6: one checkout, no sibling)", () => {
     expect(ci).not.toMatch(/token:\s*\$\{\{\s*secrets\./);
   });
 });
@@ -208,5 +207,25 @@ describe("no Anthropic artifact is committed (WS-02 §2)", () => {
     const ignore = readFileSync(join(REPO_ROOT, ".gitignore"), "utf8");
     expect(ignore.split("\n").map((l) => l.trim())).toContain("node_modules");
     expect(ignore.split("\n").map((l) => l.trim())).toContain("dist");
+  });
+});
+
+describe("the bun toolchain is pinned everywhere (R1)", () => {
+  // Parsed structurally, like the setup-node assertions above: a `bun-version` typo or a step added
+  // without one is a CI run on whatever bun the runner image happens to carry that week, and this
+  // suite's own gates (including the determinism one below) are only proven against ONE bun.
+  test("every `setup-bun` step in both workflows carries `with.bun-version`, pinned to the same version", () => {
+    const pins: Record<string, unknown> = {};
+    for (const name of ["ci.yml", "release.yml"] as const) {
+      const workflow = parseWorkflow(name) as { jobs?: Record<string, { steps: Array<{ uses?: string; with?: Record<string, unknown> }> }> };
+      for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+        const bunSteps = job.steps.filter((step) => typeof step.uses === "string" && step.uses.startsWith("oven-sh/setup-bun"));
+        expect(bunSteps.length, `${name}/${jobName}: no setup-bun step`).toBeGreaterThan(0);
+        for (const [index, step] of bunSteps.entries()) pins[`${name}/${jobName}[${index}]`] = step.with?.["bun-version"];
+      }
+    }
+    // Every job's setup-bun step pins the exact same version -- the one `bun --version` reports in
+    // this checkout (recorded, not derived, so a bump here is a deliberate edit).
+    for (const [key, version] of Object.entries(pins)) expect(version, key).toBe("1.3.14");
   });
 });

@@ -27,7 +27,7 @@ import { createOfficialAdapter } from "../../src/official/index.ts";
 import { directoryRecordSink } from "../../src/official/spawn-proxy.ts";
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
 import { officialMcpServers, winterMcpServerDescriptor } from "../../src/official/mcp-descriptors.ts";
-import { createMessagingToolHandlers, createRuntimeMessaging } from "../../src/messaging/index.ts";
+import { createRuntimeMessaging } from "../../src/messaging/index.ts";
 import type { GlobalMessagingHandle, RuntimeDirectoryHandle } from "../../src/messaging/index.ts";
 import { hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, type LoopbackRecord, type ScriptedTurn } from "../official/support.ts";
 import { declaredClasses, sessionEntry, winterWriterHandle } from "../messaging/support.ts";
@@ -154,7 +154,6 @@ export async function runJointSession(options: JointSessionOptions): Promise<Joi
       targets.set(peerRow.id, writer);
       messaging.attachWinterSession(`session:${peerRow.id}`, writer.handle);
     }
-    const handlers = createMessagingToolHandlers(messaging, { sessionId: officialId });
     // -------------------------------------------------------------------------------------------------
 
     const context: SeamContextWithDirectory = { ...base, directory };
@@ -176,10 +175,13 @@ export async function runJointSession(options: JointSessionOptions): Promise<Joi
     });
     await adapter.ready();
 
+    // THE ROUTER'S OWN HANDLE IS THE PORT (ruling P-3) and the SDK's factories are the handlers
+    // (R-8-1): this bed composes exactly what the door composes, one layer down.
     const descriptor = winterMcpServerDescriptor({
       brand: WINTER_BRAND,
-      branchLabel: "winter-claude-agent",
-      messaging: { sendMessage: handlers.sendMessage, listAgents: handlers.listAgents },
+      port: messaging,
+      caller: { sessionId: officialId },
+      advisor: { transcriptSource: { getEntries: () => [] } },
     });
 
     const options_ = adapter.buildOptions({

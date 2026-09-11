@@ -443,12 +443,12 @@ describe("the structural rules", () => {
 
   test("selectionVersionsFrom carries both peer identities out of the constructor's matrix report", () => {
     const versions = selectionVersionsFrom({
-      winterAgentSdk: { packageName: "w", packageVersion: "0.0.2", source: "peer-export", supported: ">=0.0.2 <0.1.0", protocolVersion: "1.0" },
+      winterAgentSdk: { packageName: "w", packageVersion: "0.0.3", source: "peer-export", supported: ">=0.0.3 <0.1.0", protocolVersion: "1.0" },
       claudeAgentSdk: { packageName: "c", packageVersion: "0.3.250", source: "peer-export", supported: "0.3.250" },
-      supported: { winterAgentSdk: ">=0.0.2 <0.1.0", claudeAgentSdk: "0.3.250" },
+      supported: { winterAgentSdk: ">=0.0.3 <0.1.0", claudeAgentSdk: "0.3.250" },
       supportedProtocolVersions: ["1.0"],
       checkedAt: NOW,
     });
-    expect(versions).toEqual({ winterSdkVersion: "0.0.2", claudeSdkVersion: "0.3.250" });
+    expect(versions).toEqual({ winterSdkVersion: "0.0.3", claudeSdkVersion: "0.3.250" });
   });
 });
