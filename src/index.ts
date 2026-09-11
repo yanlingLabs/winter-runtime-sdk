@@ -79,6 +79,45 @@ export { createOfficialInputStream, isOfficialQuery, officialCredentialPlan, off
 export type { OfficialInputStream, RouterOfficialInput, RouterOfficialPolicy, RouterQuery } from "./door.ts";
 export type { LaneId } from "./errors.ts";
 
+// --- P8c-13: the official-leg HOST SURFACE ----------------------------------------------------------
+//
+// Norma (the host) bridges its own approval broker into `canUseTool` and materializes MCP servers
+// from the router's descriptors; before this cut, neither was reachable from the package root.
+// `buildOfficialOptions` uses `policy.canUseTool` verbatim and `assertOptionsInvariants` refuses
+// anything not built by `createApprovalBridge` — so a host needs THAT constructor, not a hand-rolled
+// substitute. These are re-exports of `./official/*` names that are already the seam's own contract
+// (`RouterOfficialPolicy` above already types with several of them); this block is what makes them
+// importable without reaching into `./official/index.ts`, which is a TEST import site, not a host one.
+//
+// DELIBERATELY NOT HERE: the spawn-proxy/adapter internals (`createSupervisedSpawnProxy`,
+// `createOfficialAdapter`, `ProcessIdentity`, `SpawnChild`, …). Their declaration graph pulls
+// `node:stream`/`node:module` types into a consumer that only wants the approval bridge and the MCP
+// materializer; the installed-tarball smoke's runtime import of "." would still pass either way (Node
+// erases types), but a host's own `tsc` run over the root barrel would carry Node-only types it never
+// asked for. The door (`createRuntimeSdk`) reaches the adapter through the seam, not through a name a
+// consumer imports — see `./official/index.ts`'s own header.
+export { createApprovalBridge, isOurApprovalBridge } from "./official/callbacks.ts";
+export type { ApprovalBroker, ApprovalRequest, ApprovalBridgeOptions, DecisionSource, OfficialPermissionMode, OfficialApprovalBridge } from "./official/callbacks.ts";
+
+export { materializeOfficialMcpServer, officialMcpServers, winterMcpServerDescriptor, canonicalToolNames, OFFICIAL_MATERIALIZATION_DROPS } from "./official/mcp-descriptors.ts";
+export type { OfficialMcpModule, InputShapeFactory, JsonSchemaObject, WinterMcpServerDescriptor, WinterMcpToolDescriptor, WinterMcpHandler, WinterMcpToolResult } from "./official/mcp-descriptors.ts";
+
+export { minimalOsEnvironmentFrom, buildOfficialChildEnv } from "./official/env-allowlist.ts";
+export type { OfficialEnvPolicy, OfficialEnvInput, EnvAllowlistSnapshot } from "./official/env-allowlist.ts";
+
+export type { OptionsTemplatePolicy } from "./official/options-template.ts";
+export type { ContainmentPolicy, ContainmentDisposition } from "./official/containment.ts";
+export type { AuthCredentialPlan, AuthFamily, ClaudeOauthGate } from "./official/auth.ts";
+
+export { containmentDispositions, officialDisallowedTools } from "./official/containment.ts";
+
+export { officialBranchLabel, OFFICIAL_DISCLOSURES } from "./official/branding.ts";
+
+// R-7b's attributed-turn renderer for inbound messages (WS-15 §6): already the messaging lane's own
+// export (`./messaging/index.ts`), re-exported here so a host reads it off the package root rather
+// than a lane barrel it should not otherwise need.
+export { renderAttributedTurn } from "./messaging/index.ts";
+
 // --- WS-15 §6.1–6.4: the directory and the cross-runtime messaging router (Lane B; the three doors a host needs + their vocabulary) ---
 export { createRuntimeMessaging, createAttachedSessionRegistry } from "./messaging/index.ts";
 export type {
