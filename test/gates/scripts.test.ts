@@ -6,14 +6,16 @@
 // mismatch — each of those passes forever and proves nothing. So each one is driven here against a
 // synthetic tree or a synthetic string, in both directions.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { entriesFor, missingPeerDeclarations, peerPackageDir, rewriteDeclarationSpecifiers } from "../../scripts/build-packages.ts";
 import { moduleSpecifiersIn, reachableDeclarations, scanExtracted } from "../../scripts/release-pack.ts";
-import { assertInstalledTreeIsDistOnly, deriveImportTargets, runtimesFor } from "../../scripts/smoke-installed.ts";
+import { assertInstalledTreeIsDistOnly, deriveImportTargets, PROBE_NPMRC, runtimesFor } from "../../scripts/smoke-installed.ts";
 import { checkReleaseVersion, versionFromRef } from "../../scripts/check-release-version.ts";
 import { withTempDir } from "../../src/testing/index.ts";
+
+const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 
 describe("build-packages", () => {
   test("the declaration rewrite touches relative `.ts` specifiers and nothing else", () => {
@@ -147,6 +149,38 @@ describe("smoke-installed", () => {
       writeFileSync(join(dir, "orphan.d.ts"), 'import type { X } from "@anthropic-ai/claude-agent-sdk";\nexport type Y = X;\n');
       expect(reachableDeclarations(dir, "./index.d.ts")).toEqual(["c.d.ts", "index.d.ts", "nested/a.d.ts"]);
     });
+  });
+
+  // ==================================================================================================
+  // THE PROBE INSTALLS FROM THE PUBLIC REGISTRY, WHATEVER THE JOB IS PINNED TO (release 0.0.2, run 1).
+  //
+  // The release's GitHub Packages job runs `setup-node` with `registry-url: npm.pkg.github.com` +
+  // `scope: "@yanlinglabs"`, which writes a userconfig routing the whole scope there — correct for
+  // `pnpm publish`, fatal for this script, whose probe install asks for the required PEER by name.
+  // The release failed `401 unauthenticated` at the smoke step with every other gate green, and
+  // nothing reached either registry. The fix is a project-level `.npmrc` in the probe directory (npm
+  // ranks it above any userconfig); these assertions are what keep it there, since the failure it
+  // prevents cannot happen in CI — `ci.yml` pins no scope, so the bug is invisible until a release.
+  // ==================================================================================================
+  test("the probe's `.npmrc` pins BOTH the default registry and the `@yanlinglabs` scope to npmjs", () => {
+    const lines = PROBE_NPMRC.split("\n").filter((line) => line.trim() !== "");
+    expect(lines).toEqual(["registry=https://registry.npmjs.org/", "@yanlinglabs:registry=https://registry.npmjs.org/"]);
+    // THE SCOPE LINE IS THE LOAD-BEARING ONE: a scoped pin beats an unscoped `registry=` for that
+    // scope, so pinning only the default would leave the job's `@yanlinglabs` route in force.
+    expect(PROBE_NPMRC).toContain("@yanlinglabs:registry=");
+    // NO CREDENTIAL, EVER: both packages are public, and a token here would make this gate pass for a
+    // reason a consumer does not have.
+    expect(PROBE_NPMRC).not.toContain("_authToken");
+    expect(PROBE_NPMRC).not.toContain("npm.pkg.github.com");
+  });
+
+  test("the smoke WRITES that `.npmrc` into the probe directory before it installs", () => {
+    const source = readFileSync(join(REPO_ROOT, "scripts", "smoke-installed.ts"), "utf8");
+    const wrote = source.indexOf('writeFileSync(join(probeDir, ".npmrc"), PROBE_NPMRC)');
+    const installed = source.indexOf('Bun.spawnSync(["npm", "install"');
+    expect(wrote).toBeGreaterThan(0);
+    // ORDER IS THE WHOLE POINT: configuration npm reads at install time, written before the install.
+    expect(installed).toBeGreaterThan(wrote);
   });
 
   test("`runtimesFor` reads the package's own engines, and fails CLOSED on a package with none", () => {
