@@ -121,3 +121,44 @@ void [
   _noRouterKeyCollision,
   _tripwireIsNotVacuous,
 ];
+
+// ====================================================================================================
+// RULING P-7 — THE ROUTER RE-EXPORTS NO TOOL SURFACE.
+//
+// The main barrel is re-exported wholesale (above) because the router IS the Winter SDK's door: a host
+// that installs the router must not lose a member of the contract it wraps. `/tools` is the opposite
+// case. The router owns no tool (R-8-1), so it publishes none: a host that wants the definitions, the
+// schemas, the acceptors, the handler factories or the advisor imports them from the SDK, which it
+// already has as a REQUIRED peer. Re-publishing them here would create the second import path that
+// makes "which copy am I using?" a question again — the exact question deleting `src/native-args.ts`
+// answered.
+//
+// A SUBPATH, NOT A SHADOW: `@yanlinglabs/winter-agent-sdk/tools` is a separate entry point, so these
+// names are not part of the `export *` above and their absence is a CHOICE this test pins.
+// ====================================================================================================
+describe("ruling P-7 — the `/tools` surface is the SDK's alone", () => {
+  test("no `/tools` name is exported from the router's own barrel", async () => {
+    const tools = (await import("@yanlinglabs/winter-agent-sdk/tools")) as Record<string, unknown>;
+    const leaked = Object.keys(tools).filter((name) => name in router);
+    expect(leaked).toEqual([]);
+  });
+
+  test("the names the router DELETED are gone from its barrel by name, not merely absent by accident", () => {
+    // The eight that lived in `src/native-args.ts` plus the three the messaging lane published.
+    const moved = [
+      "NATIVE_SEND_MESSAGE_SCHEMA",
+      "NATIVE_LIST_AGENTS_SCHEMA",
+      "NATIVE_LIST_AGENTS_OUTPUT_SCHEMA",
+      "SEND_MESSAGE_TO_MAX",
+      "SEND_MESSAGE_SUMMARY_MAX",
+      "LIST_AGENTS_FIELD_MAX",
+      "acceptNativeSendMessageArgs",
+      "acceptNativeListAgentsArgs",
+      "createMessagingToolHandlers",
+      "toolUseIdFromExtra",
+      "VENDOR_TOOL_USE_ID_META_KEY",
+      "callerAddressOf",
+    ] as const;
+    for (const name of moved) expect({ name, onRouterBarrel: name in router }).toEqual({ name, onRouterBarrel: false });
+  });
+});

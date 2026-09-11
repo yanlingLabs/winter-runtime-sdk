@@ -63,14 +63,20 @@ spine scheduled them, and **both have landed**:
 2. The five wiring lines in `createRuntimeSdk` **are** the real factories; `src/seams/stubs.ts`
    survives for the seams tests, which is what it is now for.
 
-**Two modules belong to NO lane** (fix wave, review r4 N13): `src/vendor-paths.ts` — the vendor's
+**One module belongs to NO lane** (fix wave, review r4 N13): `src/vendor-paths.ts` — the vendor's
 `claude-resume-<uuid>` staging-root vocabulary, shared by the official adapter (which recognises one)
-and the store lane (which stages one) — and `src/native-args.ts` — WS-10 §10.1/§10.2's model-facing
-schemas and their acceptors, shared by the official branch's alias targets and the Winter branch's
-canonical handler. Both were written TWICE, in parallel trees, with mirrored argument orders and
-already-drifted validation. Each now has one definition, is exported once from the package barrel and
-by no lane barrel, and `test/spine/barrel-exports.test.ts` fails if a name is ever exported by two
-lane barrels again.
+and the store lane (which stages one). It was written TWICE, in parallel trees, with mirrored argument
+orders; it now has one definition, is exported once from the package barrel and by no lane barrel, and
+`test/spine/barrel-exports.test.ts` fails if a name is ever exported by two lane barrels again.
+
+**`src/native-args.ts` used to be the second, and R9 deleted it** (R-8-1). WS-10 §10.1/§10.2's
+model-facing schemas and their acceptors had the same disease one repository up: a copy here and a copy
+inside the Winter runtime, already drifted on what `to` may contain and on what an over-long `summary`
+does. They now live once in `@yanlinglabs/winter-agent-sdk/tools`, with the four default-tool
+DEFINITIONS and the handler factories, and both hosts import them. The router publishes none of it
+(ruling P-7): it owns no tool, so it re-exports no tool surface — `src/official/mcp-descriptors.ts`
+COMPOSES the standing server from the SDK's definitions and factories, and that composition is the
+router's whole contribution.
 
 **`test/joint/` belongs to no lane either.** It is the bed where one real pinned runtime drives Lane
 B's real router: every lane had proven its own half against a DOUBLE of its neighbour, which is

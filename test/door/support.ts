@@ -109,7 +109,7 @@ export interface DoorBed {
    * handle that resolved a different home would be a different shared store, which is the one wiring
    * mistake the barrier refuses outright.
    */
-  sdkWith(extra: { official?: RouterOfficialPolicy; handoff?: Omit<RuntimeSdkOptions["handoff"] & object, "winterHome"> }): RuntimeSdk;
+  sdkWith(extra: { official?: RouterOfficialPolicy; handoff?: Omit<RuntimeSdkOptions["handoff"] & object, "winterHome">; advisor?: RuntimeSdkOptions["advisor"] }): RuntimeSdk;
 }
 
 export interface DoorBedOptions {
@@ -159,7 +159,7 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
     const declared = declaredClasses();
     const capabilityCalls: Array<{ tool: string; args: unknown }> = [];
     const capability = doorCapabilityServer(capabilityCalls);
-    const build = (extra: { official?: RouterOfficialPolicy; handoff?: Omit<RuntimeSdkOptions["handoff"] & object, "winterHome"> } = {}): RuntimeSdk =>
+    const build = (extra: { official?: RouterOfficialPolicy; handoff?: Omit<RuntimeSdkOptions["handoff"] & object, "winterHome">; advisor?: RuntimeSdkOptions["advisor"] } = {}): RuntimeSdk =>
       createRuntimeSdk({
         peers: doorPeers(runtime.module),
         keychain: createFakeKeychain([{ ref: DOOR_CREDENTIAL, material: "sk-ant-loopback" }]),
@@ -175,6 +175,7 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
         handoff: { winterHome: session.brandHome, ...(extra.handoff ?? {}) },
         messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
         ...(extra.official === undefined ? {} : { official: extra.official }),
+        ...(extra.advisor === undefined ? {} : { advisor: extra.advisor }),
       });
     const sdk = build();
 
