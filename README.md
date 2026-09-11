@@ -66,7 +66,11 @@ const query = sdk.query({
         sessionId: "s-42",                        // its directory row is `session:s-42`
         base: minimalOsEnvironmentFrom(process.env),
         // OPTIONAL SINCE 0.0.2: the router materializes the standing server and your capability
-        // servers itself. This stays as the escape hatch, and it WINS, key by key, over the router's.
+        // servers itself. This stays as the escape hatch, and its reach is exactly one key: an entry
+        // under the BRAND's own standing-server name replaces the router's (that key reaches no other
+        // leg, so overriding it diverges from nothing); an entry naming a forwarded CAPABILITY is a
+        // typed refusal on BOTH legs, because that name is on both and a silent override would leave
+        // the two branches running different tools under one canonical name.
         // mcpServers: officialMcpServers({ /* … */ }),
       },
     },

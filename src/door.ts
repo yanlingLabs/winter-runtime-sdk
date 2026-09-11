@@ -448,6 +448,7 @@ function officialCapabilityServers(
   if (deps.toInputShape === undefined) {
     if (deps.capabilities === undefined) return undefined;
     throw new RuntimeLaunchInputError({
+      leg: "official",
       field: "toInputShape",
       reason:
         "this handle was constructed with `capabilities` but no JSON-Schema → validator-shape bridge, and the official runtime registers in-process servers only through its own validator's shape — so those tools would exist on the Winter leg and silently not on this one (WS-14 §11)",
@@ -462,6 +463,7 @@ function officialCapabilityServers(
   const module = deps.mcpModule;
   if (module === undefined) {
     throw new RuntimeLaunchInputError({
+      leg: "official",
       field: "peers.claude",
       reason: "the official leg cannot register the standing server without the official SDK module the servers are registered into",
     });

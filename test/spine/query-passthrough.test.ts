@@ -234,6 +234,62 @@ describe("query(): the capability servers", () => {
     }
   });
 
+  test("`capabilities: []` is no capabilities at all — the identity return still fires, on BOTH legs", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    // An empty array is a host that configured the door and put nothing through it. It must not cost
+    // the pass-through (the Winter leg) and must not arm the official leg's `toInputShape` refusal —
+    // there is nothing to materialize, so there is nothing to refuse.
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [] });
+    const options: RouterOptions = { model: "m" };
+    sdk.query({ prompt: "hello", options });
+    expect(calls[0]?.options).toBe(options);
+    const selection: RuntimeSelection = {
+      runtimeKind: "claude-agent",
+      providerId: "anthropic",
+      modelRef: "anthropic/claude-opus-5",
+      family: "claude",
+      authFamily: "api-key",
+      sdkVersion: "0.0.2",
+      reason: "door fixture",
+      decidedAt: new Date(0).toISOString(),
+    };
+    // The official leg gets past the capabilities gate and refuses for its OWN missing input instead.
+    try {
+      sdk.query({ prompt: "hello", options: { runtime: { selection, official: { sessionId: "s-1" } } } });
+    } catch (error) {
+      expect((error as RuntimeLaunchInputError).field).not.toBe("toInputShape");
+    }
+  });
+
+  test("(I-6) a caller's own `Options.mcpServers` colliding with a capability is refused for BOTH legs, at the door", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [capabilityServer("norma-computer")], toInputShape: (schema) => schema });
+    const selection: RuntimeSelection = {
+      runtimeKind: "claude-agent",
+      providerId: "anthropic",
+      modelRef: "anthropic/claude-opus-5",
+      family: "claude",
+      authFamily: "api-key",
+      sdkVersion: "0.0.2",
+      reason: "door fixture",
+      decidedAt: new Date(0).toISOString(),
+    };
+    const mcpServers = { "norma-computer": { type: "sdk" as const, name: "norma-computer", instance: {} } };
+    // THE WINTER LEG, where the field is actually forwarded…
+    expect(() => sdk.query({ prompt: "hello", options: { mcpServers } })).toThrow(RuntimeLaunchInputError);
+    // …AND THE OFFICIAL LEG, where it is not read at all — which is precisely why the same mistake used
+    // to be a typed refusal on one leg and SILENCE on the other. One options object, one answer.
+    try {
+      sdk.query({ prompt: "hello", options: { mcpServers, runtime: { selection, official: { sessionId: "s-1" } } } });
+      throw new Error("unreachable: the door should have refused before picking a leg");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((error as RuntimeLaunchInputError).field).toBe("mcpServers");
+      expect((error as Error).message).toContain("norma-computer");
+    }
+    expect(calls).toHaveLength(0);
+  });
+
   test("the official leg refuses a host `mcpServers` key that names a forwarded capability, the same way the Winter leg does", () => {
     const { peer, calls } = createFakeWinterPeer();
     // The bridge is supplied, so the refusal below is the COLLISION and not the missing-bridge one.
