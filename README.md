@@ -14,19 +14,33 @@ Decision record: WS-00 D19 (2026-09-05). Boundaries that do not move:
   builtin-path containment, Winter MCP plugin registration), shared session-store wiring, the
   cross-runtime handoff barrier with the materialized-resume decoration doors, and the runtime
   directory plus cross-runtime messaging router.
+- **It owns NO TOOL** (the user's tool-ownership ruling, R-8-1). The default tools — `SendMessage`,
+  `ListAgents`, `ReadNotifications`, `advisor` — are DECLARED once in
+  `@yanlinglabs/winter-agent-sdk/tools` and BOUND here, under the official runtime's own built-in
+  names; the capability tools (computer, browser, office) are the HOST's, handed over as MCP servers
+  and forwarded to both legs unchanged. This package re-exports no tool surface of its own.
 - The host vendors all three packages directly (`winter-runtime-sdk`, `winter-agent-sdk`,
   `claude-agent-sdk`); this package declares the two SDKs as peer dependencies and receives their
   module instances by injection, so a host that never creates a Claude session never loads the
   official runtime and no SDK is ever instantiated twice.
 - A `brand` profile flows through unchanged (Winter defaults); Claude Code's own literals stay fixed.
 
-Status: Phase 7b, all four lanes landed and the door routed. The spine (the package scaffold, the
-contract re-export, the `createRuntimeSdk` constructor with its version matrix, the seams, the test
-harness and CI) and the four lanes behind those seams — the official-SDK adapter, the runtime
-directory and messaging router, the store wiring and handoff barrier, and runtime selection — are on
-`main`, with WS-17's eighteen router-owned rows proven and cited in `docs/conformance-rows.md`. See
-`docs/architecture.md` for the ownership map, the pinned interfaces and how this package consumes the
-Winter SDK before its first publish.
+Status: Phase 7b landed all four lanes and routed the door; `0.0.2` is the Phase-8b prerequisite
+release. The spine (the package scaffold, the contract re-export, the `createRuntimeSdk` constructor
+with its version matrix, the seams, the test harness and CI) and the four lanes behind those seams —
+the official-SDK adapter, the runtime directory and messaging router, the store wiring and handoff
+barrier, and runtime selection — are on `main`, with WS-17's eighteen router-owned rows proven and
+cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
+interfaces and how this package consumes the Winter SDK.
+
+**What `0.0.2` changes** (peer floor: `@yanlinglabs/winter-agent-sdk >=0.0.3 <0.1.0`):
+
+| | |
+|---|---|
+| `peerVersions` | A host DECLARES its peers' versions — the only door inside a compiled binary, where `require.resolve` cannot see out of the bundle to read a manifest. |
+| `capabilities` + `toInputShape` | The host's own MCP servers, forwarded to BOTH legs: by reference into the Winter leg's `Options.mcpServers`, and registered into the official runtime from the same declaration. One declaration, two registrations, identical canonical names. |
+| `advisor` | The standing server carries Winter's four default tools, `advisor` among them, bound under the official runtime's built-in names (measured: the pin honours an alias key that is not one of its own built-ins — `docs/probes/advisor-alias.md`). `advisor` supplies the REVIEWER; the tool is always registered. |
+| no tool ownership | `src/native-args.ts` and the router's messaging handlers are gone: the definitions, schemas, acceptors, handler factories and the advisor all come from `@yanlinglabs/winter-agent-sdk/tools`, and this package re-exports none of them. |
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@yanlinglabs/winter-runtime-sdk",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "license": "MIT",
   "type": "module",
   "description": "One door over the Winter Agent SDK and the official Claude Agent SDK: runtime selection, the official-SDK adapter, the shared session store, the handoff barrier and the cross-runtime messaging router.",
