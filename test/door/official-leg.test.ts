@@ -7,15 +7,16 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WINTER_BRAND, WinterCompatibilitySessionStore, envName, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { WINTER_BRAND, WinterCompatibilitySessionStore, envName, mcpToolName, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { resolveEngineTempLayout } from "../../src/store/index.ts";
 
 import { createRuntimeSdk, RuntimeHandoffRequiredError, RuntimeLaunchInputError, isOfficialQuery, runtimeSdkInternals, type RuntimeSdkPeers } from "../../src/index.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../../src/official/env-allowlist.ts";
+import { officialMcpServers, type WinterMcpToolDescriptor } from "../../src/official/mcp-descriptors.ts";
 import { cleanupHermetic, officialRuntimeBed } from "../official/support.ts";
 import { envelope, sessionEntry } from "../messaging/support.ts";
-import { DOOR_CREDENTIAL, DOOR_TIMEOUT, doorSelection, drain, withDoorBed } from "./support.ts";
+import { DOOR_CAPABILITY_CANONICAL, DOOR_CAPABILITY_SERVER, DOOR_CREDENTIAL, DOOR_TIMEOUT, doorSelection, drain, withDoorBed } from "./support.ts";
 
 const describeRuntime = officialRuntimeBed() === undefined ? describe.skip : describe;
 
@@ -398,6 +399,77 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
         console.log(`[door] interrupt() response: ${JSON.stringify(response)}`);
         expect(response === undefined || typeof response === "object").toBe(true);
         await iterator.return?.(undefined);
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+});
+
+// ====================================================================================================
+// REVIEW r1 — HOW FAR `runtime.official.mcpServers` REACHES, PROVED RATHER THAN DOCUMENTED.
+//
+// The escape hatch is a per-key override, and the ruling draws the line where the two legs stop
+// agreeing: the STANDING SERVER's key is this branch's alone (the router hands it to no other leg), so
+// a host that built its own wins outright; a forwarded CAPABILITY's name is on BOTH legs, so an
+// override here would leave one branch running the host's server and the other the daemon's, under one
+// canonical name, with nothing anywhere to read about it. That one is a refusal.
+// ====================================================================================================
+describeRuntime("the door's official leg — the escape hatch, and where it stops", () => {
+  afterAll(cleanupHermetic);
+
+  test(
+    "a host entry under the BRAND's standing-server name replaces the router's; the capability server is untouched",
+    async () => {
+      const runtime = officialRuntimeBed();
+      /* c8 ignore next */
+      if (runtime === undefined) throw new Error("unreachable: skipped without a bed");
+      await withDoorBed({ turns: [{ text: "hello" }], sessionId: "door-hatch-wins" }, async (bed) => {
+        const marker: WinterMcpToolDescriptor = {
+          tool: "host_marker",
+          description: "the host's own standing server",
+          inputSchema: { type: "object", properties: { note: { type: "string" } } },
+          exposure: "eager",
+          permissionClass: "messaging",
+          handler: async () => ({ content: [{ type: "text" as const, text: "the host's" }] }),
+        };
+        const options = bed.officialOptions() as Record<string, unknown>;
+        (options["runtime"] as { official: Record<string, unknown> }).official["mcpServers"] = officialMcpServers({
+          descriptor: { name: bed.sdk.brand.mcpServerName, version: "1.0.0", tools: [marker] },
+          module: runtime.mcpModule,
+          toInputShape: runtime.toInputShape,
+          branchLabel: "winter-claude-agent",
+        });
+
+        const messages = await drain(bed.sdk.query({ prompt: "hi", options }));
+        const init = messages.find((message) => message.type === "system" && message.subtype === "init") as { tools?: unknown[] } | undefined;
+        const advertised = (init?.tools ?? []).map(String);
+        // THE HOST'S SERVER IS THE ONE REGISTERED under the standing name…
+        expect(advertised).toContain(mcpToolName(bed.sdk.brand, "host_marker"));
+        expect(advertised).not.toContain(mcpToolName(bed.sdk.brand, "send_message"));
+        // …and the capability server, which is NOT what the host overrode, is still there.
+        expect(advertised).toContain(DOOR_CAPABILITY_CANONICAL);
+      });
+    },
+    DOOR_TIMEOUT,
+  );
+
+  test(
+    "a host entry under a FORWARDED CAPABILITY's name is refused, before anything is launched",
+    async () => {
+      await withDoorBed({ turns: [{ text: "never reached" }], sessionId: "door-hatch-refused" }, async (bed) => {
+        const options = bed.officialOptions() as Record<string, unknown>;
+        (options["runtime"] as { official: Record<string, unknown> }).official["mcpServers"] = { [DOOR_CAPABILITY_SERVER]: { type: "sdk", name: DOOR_CAPABILITY_SERVER, instance: {} } };
+        try {
+          bed.sdk.query({ prompt: "hi", options });
+          throw new Error("unreachable: the leg should have refused");
+        } catch (error) {
+          expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+          expect((error as RuntimeLaunchInputError).field).toBe("runtime.official.mcpServers");
+          expect((error as Error).message).toContain(DOOR_CAPABILITY_SERVER);
+        }
+        // NOTHING WAS LAUNCHED: no child, no request, and no directory row for a session that never was.
+        expect(bed.record.requests).toHaveLength(0);
+        expect(await bed.directoryStore.load()).toHaveLength(0);
       });
     },
     DOOR_TIMEOUT,

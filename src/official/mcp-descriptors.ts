@@ -201,6 +201,22 @@ export function capabilityServerDescriptor(server: McpSdkServerConfigWithInstanc
   return { name: server.name, version, tools };
 }
 
+/**
+ * The ONE refusal both legs raise when a caller's own `mcpServers` key names a forwarded capability.
+ *
+ * IT IS SHARED BECAUSE THE TWO LEGS MUST SAY THE SAME THING (review r1). The Winter leg refuses in
+ * `forwardableOptions`, the official leg before its launch; the same mistake producing a typed error
+ * on one leg and a silent per-key override on the other would leave the two branches advertising
+ * different tools under one name, with nothing to read about it. Two copies of this sentence is how
+ * that starts being true again, so there is one.
+ */
+export function capabilityNameCollisionError(args: { field: string; name: string }): RuntimeLaunchInputError {
+  return new RuntimeLaunchInputError({
+    field: args.field,
+    reason: `\`${args.name}\` is the name of a capability server this handle forwards, and the caller's own \`mcpServers\` already carries it — one of the two would silently not be registered, and the other leg would still have the capability, so the door refuses rather than choose for you`,
+  });
+}
+
 /** Every capability server, in the order the host declared them. */
 export function capabilityServerDescriptors(servers: readonly McpSdkServerConfigWithInstance[]): readonly WinterMcpServerDescriptor[] {
   return servers.map((server) => capabilityServerDescriptor(server));

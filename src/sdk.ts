@@ -45,7 +45,7 @@ import { createHandoffBarrier } from "./store/index.ts";
 import { materializedResumeReportForPin } from "./store/pinned-probes.ts";
 import type { HandoffBarrierDeps } from "./store/index.ts";
 import { createOfficialAdapter } from "./official/adapter.ts";
-import { capabilityServerDescriptors, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
+import { capabilityNameCollisionError, capabilityServerDescriptors, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
@@ -330,12 +330,7 @@ export function forwardableOptions(options: RouterOptions, brand?: Partial<Brand
 function mergedMcpServers(callerOwned: Options["mcpServers"], capabilityServers: Readonly<Record<string, unknown>>): Record<string, unknown> {
   if (callerOwned === undefined) return capabilityServers as Record<string, unknown>;
   for (const name of Object.keys(capabilityServers)) {
-    if (name in callerOwned) {
-      throw new RuntimeLaunchInputError({
-        field: "mcpServers",
-        reason: `the caller's own \`mcpServers\` already carries \`${name}\`, which is the name of a capability server this handle forwards — one of the two would silently not be registered, so the door refuses rather than choose for you`,
-      });
-    }
+    if (name in callerOwned) throw capabilityNameCollisionError({ field: "mcpServers", name });
   }
   return { ...callerOwned, ...capabilityServers };
 }

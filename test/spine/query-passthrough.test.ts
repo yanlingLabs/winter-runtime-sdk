@@ -234,6 +234,33 @@ describe("query(): the capability servers", () => {
     }
   });
 
+  test("the official leg refuses a host `mcpServers` key that names a forwarded capability, the same way the Winter leg does", () => {
+    const { peer, calls } = createFakeWinterPeer();
+    // The bridge is supplied, so the refusal below is the COLLISION and not the missing-bridge one.
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [capabilityServer("norma-computer")], toInputShape: (schema) => schema });
+    const selection: RuntimeSelection = {
+      runtimeKind: "claude-agent",
+      providerId: "anthropic",
+      modelRef: "anthropic/claude-opus-5",
+      family: "claude",
+      authFamily: "api-key",
+      sdkVersion: "0.0.2",
+      reason: "door fixture",
+      decidedAt: new Date(0).toISOString(),
+    };
+    const official = { sessionId: "s-1", mcpServers: { "norma-computer": { type: "sdk", name: "norma-computer", instance: {} } } };
+    try {
+      sdk.query({ prompt: "hello", options: { runtime: { selection, official } } });
+      throw new Error("unreachable: the official leg should have refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RuntimeLaunchInputError);
+      expect((error as RuntimeLaunchInputError).field).toBe("runtime.official.mcpServers");
+      expect((error as Error).message).toContain("norma-computer");
+    }
+    // NOTHING RAN ON EITHER LEG.
+    expect(calls).toHaveLength(0);
+  });
+
   test("the official leg refuses capabilities it cannot materialize, and names the field", () => {
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, capabilities: [capabilityServer("norma-computer")] });

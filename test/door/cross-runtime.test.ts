@@ -15,7 +15,7 @@ import { mcpToolName } from "@yanlinglabs/winter-agent-sdk";
 
 import { cleanupHermetic, officialRuntimeBed, toolResults } from "../official/support.ts";
 import { envelope, sessionEntry, winterWriterHandle } from "../messaging/support.ts";
-import { DOOR_TIMEOUT, drain, doorSelection, withDoorBed } from "./support.ts";
+import { DOOR_CAPABILITY_CANONICAL, DOOR_CAPABILITY_TOOL, DOOR_TIMEOUT, drain, doorSelection, withDoorBed } from "./support.ts";
 
 const describeRuntime = officialRuntimeBed() === undefined ? describe.skip : describe;
 
@@ -70,6 +70,49 @@ describeRuntime("WS-17 rows 1-2, through the door", () => {
         expect(advertised.has(mcpToolName(bed.sdk.brand, "send_message"))).toBe(true);
         expect(advertised.has(mcpToolName(bed.sdk.brand, "list_agents"))).toBe(true);
       });
+    },
+    DOOR_TIMEOUT,
+  );
+});
+
+// ====================================================================================================
+// R-8 / R-8-1, THROUGH THE DOOR — THE CAPABILITY SERVER THE CONSTRUCTOR WAS GIVEN IS REALLY REGISTERED.
+//
+// The Winter leg's half of R-8 is pinned by identity tests in `test/spine/query-passthrough.test.ts`:
+// the host's own server object is what the peer receives. The OFFICIAL leg's half cannot be pinned
+// that way — the router does not hand the object over there, it REGISTERS the same tools into the
+// vendor's own in-process server from the host's declaration — so the only honest proof is the round
+// trip: the canonical name is advertised to the model, a model-emitted call under that name reaches
+// the HOST'S OWN instance, and what the host answered is what the model is shown. Registration that
+// merely did not throw would satisfy neither half (review r1).
+// ====================================================================================================
+describeRuntime("the constructor's capability servers, registered on the official leg", () => {
+  afterAll(cleanupHermetic);
+
+  test(
+    "a capability server is advertised under its canonical name, and a model call reaches the host's own instance",
+    async () => {
+      await withDoorBed(
+        { turns: [{ toolUses: [{ id: "toolu_capability", name: DOOR_CAPABILITY_CANONICAL, input: { action: "click" } }] }, { text: "did it" }], sessionId: "door-capability" },
+        async (bed) => {
+          const messages = await drain(bed.sdk.query({ prompt: "use the capability", options: bed.officialOptions() }));
+
+          // (a) THE RUNTIME'S OWN INVENTORY carries the name the Winter leg would advertise for the
+          //     same server — `mcp__<server>__<tool>`, identical on both legs.
+          const init = messages.find((message) => message.type === "system" && message.subtype === "init") as { tools?: unknown[] } | undefined;
+          expect((init?.tools ?? []).map(String)).toContain(DOOR_CAPABILITY_CANONICAL);
+
+          // (b) THE HOST'S OWN INSTANCE WAS REACHED, with the model's arguments untouched — which is
+          //     what "the router forwards the daemon's servers" has to mean on this branch.
+          expect(bed.capabilityCalls).toEqual([{ tool: DOOR_CAPABILITY_TOOL, args: { action: "click" } }]);
+
+          // (c) …and the host's answer is what the model was shown.
+          const row = toolResults(bed.record).find((entry) => entry.tool_use_id === "toolu_capability");
+          expect(JSON.stringify(row?.content)).toContain("did click");
+          expect(row?.is_error).toBeUndefined();
+          expect(messages.at(-1)?.type).toBe("result");
+        },
+      );
     },
     DOOR_TIMEOUT,
   );

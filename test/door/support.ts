@@ -30,22 +30,42 @@ export const DOOR_TIMEOUT = 180_000;
 /** The credential ref the bed's keychain answers for. Its material never leaves the child env. */
 export const DOOR_CREDENTIAL = { kind: "keychain", account: "loopback:door", service: "com.example.door" } as const;
 
+/** The daemon-shaped capability server this bed hands the router, and the canonical name it produces. */
+export const DOOR_CAPABILITY_SERVER = "door-capability";
+export const DOOR_CAPABILITY_TOOL = "door_probe";
+export const DOOR_CAPABILITY_CANONICAL = `mcp__${DOOR_CAPABILITY_SERVER}__${DOOR_CAPABILITY_TOOL}`;
+
+const DOOR_CAPABILITY_DEFINITION = {
+  name: DOOR_CAPABILITY_TOOL,
+  description: "a capability tool the daemon owns",
+  inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] },
+};
+
 /**
  * A daemon-shaped capability server, in the Winter SDK's own in-process shape (R-8-1).
  *
  * THE DOOR'S BED IS A HOST, and this is what a host now hands over: the router forwards this object
  * itself to the Winter leg and REGISTERS the same tool into the official runtime from its declaration.
  * Its schema stays inside the string/boolean subset the bed's own `toInputShape` converts.
+ *
+ * ITS `callTool` RECORDS, because "registered" is not a claim a materialization that threw nothing can
+ * support: the proof that the official leg really registered THIS server is the host's own instance
+ * being reached by a model-emitted call under the canonical name (review r1).
  */
-export const DOOR_CAPABILITY = {
-  type: "sdk",
-  name: "door-capability",
-  tools: [{ name: "door_probe", description: "a capability tool the daemon owns", inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] } }],
-  instance: {
-    listTools: () => [{ name: "door_probe", description: "a capability tool the daemon owns", inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] } }],
-    callTool: async (_name: string, args: Record<string, unknown>) => ({ content: [{ type: "text", text: `did ${String(args["action"])}` }] }),
-  },
-} as const satisfies McpSdkServerConfigWithInstance;
+function doorCapabilityServer(calls: Array<{ tool: string; args: unknown }>): McpSdkServerConfigWithInstance {
+  return {
+    type: "sdk",
+    name: DOOR_CAPABILITY_SERVER,
+    tools: [DOOR_CAPABILITY_DEFINITION],
+    instance: {
+      listTools: () => [DOOR_CAPABILITY_DEFINITION],
+      callTool: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ tool: name, args });
+        return { content: [{ type: "text", text: `did ${String(args["action"])}` }] };
+      },
+    },
+  };
+}
 
 /**
  * A `custom` auth family, deliberately.
@@ -78,6 +98,8 @@ export interface DoorBed {
   sessionId: string;
   /** The transcript project key the door sets — half of the `SessionKey` a handoff takes (I-2/M-2). */
   projectKey: string;
+  /** Every call the HOST's own capability instance was reached with, in order. */
+  capabilityCalls: Array<{ tool: string; args: unknown }>;
   /** The options a `sdk.query()` needs for the official leg, ready to spread. */
   officialOptions(over?: { sessionId?: string }): Record<string, unknown>;
   /**
@@ -135,6 +157,8 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
   return withLoopbackFake({ routes }, async (fake) => {
     const directoryStore = options.directoryStore ?? createInMemoryRuntimeDirectoryStore();
     const declared = declaredClasses();
+    const capabilityCalls: Array<{ tool: string; args: unknown }> = [];
+    const capability = doorCapabilityServer(capabilityCalls);
     const build = (extra: { official?: RouterOfficialPolicy; handoff?: Omit<RuntimeSdkOptions["handoff"] & object, "winterHome"> } = {}): RuntimeSdk =>
       createRuntimeSdk({
         peers: doorPeers(runtime.module),
@@ -145,7 +169,7 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
         // standing server and pass it in as `runtime.official.mcpServers` — which meant the door's own
         // bed was doing by hand the one thing the door now does, so no door test touched the real path.
         // One daemon-shaped capability server and the host's own schema bridge are all a host supplies.
-        capabilities: [DOOR_CAPABILITY],
+        capabilities: [capability],
         toInputShape: runtime.toInputShape,
         // ONE HOME for the shared store, the spool and every seam that resolves through the context.
         handoff: { winterHome: session.brandHome, ...(extra.handoff ?? {}) },
@@ -162,6 +186,7 @@ export async function withDoorBed<T>(options: DoorBedOptions, fn: (bed: DoorBed)
       record,
       sessionId,
       projectKey: transcriptProjectKey(session.cwd),
+      capabilityCalls,
       address: `session:${sessionId}`,
       officialOptions(over = {}) {
         const id = over.sessionId ?? sessionId;

@@ -48,7 +48,7 @@ import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermiss
 import { buildOfficialChildEnv, type OfficialEnvPolicy } from "./official/env-allowlist.ts";
 import { fetchAuthCredentials, authVariableSetKey, type AuthCredentialPlan } from "./official/auth.ts";
 import { buildOfficialOptions, type OptionsTemplatePolicy } from "./official/options-template.ts";
-import { officialMcpServers, winterMcpServerDescriptor, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
+import { capabilityNameCollisionError, officialMcpServers, winterMcpServerDescriptor, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import { officialSpoolRoot } from "./official/spool.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryEntry } from "./seams/directory-store.ts";
@@ -137,15 +137,22 @@ export interface RouterOfficialInput {
   /** §3's `CLAUDE_CODE_TMPDIR` — the shared per-user temp root the host derives from the brand. */
   sharedTempRoot?: string;
   /**
-   * §11's servers, already materialized by the host (`officialMcpServers`) — THE ESCAPE HATCH, AND IT
-   * WINS.
+   * §11's servers, already materialized by the host (`officialMcpServers`) — THE ESCAPE HATCH, AND
+   * EXACTLY HOW FAR IT REACHES (review r1).
    *
    * Since R-8 the router materializes the standing server and the constructor's capability servers
-   * itself (`RuntimeSdkOptions.capabilities` + `toInputShape`), so most hosts never fill this in. A
-   * host that DID materialize its own keeps it: this record is merged OVER the router's, key by key,
-   * the same precedence `remoteConfig` (`:148-149`) and `options` (`:153`) have. A host that has gone
-   * to the trouble of building a server under some name means that server, and the router silently
-   * replacing it with one of its own would be the translation layer this package is not.
+   * itself (`RuntimeSdkOptions.capabilities` + `toInputShape`), so most hosts never fill this in.
+   *
+   *   * THE STANDING-SERVER KEY (`brand.mcpServerName`): THE HOST WINS. A host that built its own
+   *     standing server means that server, and the router replacing it would be the translation layer
+   *     this package is not — the same precedence `remoteConfig` (`:148-149`) and `options` (`:153`)
+   *     have. It is also a key the OTHER leg never receives from the router, so one branch overriding
+   *     it diverges from nothing.
+   *   * A FORWARDED CAPABILITY'S NAME: REFUSED, with the same `RuntimeLaunchInputError` the Winter leg
+   *     raises for the identical collision, before any runtime is launched. `capabilities` are
+   *     forwarded to BOTH legs, so a per-key override here would leave this branch running the host's
+   *     server and the Winter branch running the daemon's under one name — two different tools, one
+   *     canonical name, no error anywhere.
    */
   mcpServers?: Readonly<Record<string, unknown>>;
   /** §1 profile 2's staging root. Defaults to the vendor's own `<tmpdir>/claude-resume-<resume id>`. */
@@ -424,7 +431,7 @@ export interface OfficialLegRequest {
  * as it did before R-8: `RouterOfficialInput.mcpServers` is the only route, and a host that was
  * hand-materializing keeps working unchanged.
  */
-function officialCapabilityServers(deps: OfficialLegDeps, sessionId: string, branchLabel: string): Record<string, unknown> | undefined {
+function officialCapabilityServers(deps: OfficialLegDeps, sessionId: string, branchLabel: string, hostOwned: Readonly<Record<string, unknown>> | undefined): Record<string, unknown> | undefined {
   if (deps.toInputShape === undefined) {
     if (deps.capabilities === undefined) return undefined;
     throw new RuntimeLaunchInputError({
@@ -432,6 +439,11 @@ function officialCapabilityServers(deps: OfficialLegDeps, sessionId: string, bra
       reason:
         "this handle was constructed with `capabilities` but no JSON-Schema → validator-shape bridge, and the official runtime registers in-process servers only through its own validator's shape — so those tools would exist on the Winter leg and silently not on this one (WS-14 §11)",
     });
+  }
+  // THE ESCAPE HATCH REACHES THE STANDING SERVER AND STOPS THERE (review r1). Checked before the
+  // module, the handlers and the registration, because it is a statement about the host's own input.
+  for (const name of Object.keys(hostOwned ?? {})) {
+    if ((deps.capabilities ?? []).some((descriptor) => descriptor.name === name)) throw capabilityNameCollisionError({ field: "runtime.official.mcpServers", name });
   }
   const toInputShape = deps.toInputShape;
   const module = deps.mcpModule;
@@ -458,7 +470,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   const branchLabel = officialBranchLabel(deps.brand);
   // BEFORE ANYTHING ELSE HAPPENS. This is an input refusal, and an input refusal that arrived after a
   // directory row, a credential read or a child process would be a refusal the host pays for.
-  const routerBuiltMcpServers = officialCapabilityServers(deps, request.input.sessionId, branchLabel);
+  const routerBuiltMcpServers = officialCapabilityServers(deps, request.input.sessionId, branchLabel, request.input.mcpServers);
   const parsed = request.input.parentSessionId === undefined ? buildSessionAddress(request.input.sessionId) : buildChildAddress(request.input.parentSessionId, request.input.sessionId);
   const address = officialLegAddress(request.input);
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
@@ -616,10 +628,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       ...(request.input.options ?? {}),
       advertisesHandoff: request.input.advertisesHandoff ?? true,
       env,
-      // THE ROUTER'S SERVERS FIRST, THE HOST'S OVER THEM (R-8). `input.mcpServers` is documented at its
-      // declaration as the escape hatch that wins: a host that materialized a server under some name
-      // means that server. Merged rather than replaced, so a host that hand-built ONE entry does not
-      // silently lose the capability servers it also configured.
+      // THE ROUTER'S SERVERS FIRST, THE HOST'S OVER THEM (R-8). What is left to override by the time
+      // this runs is the STANDING SERVER's key alone — a host key naming a forwarded capability was
+      // refused above — so the merge is the escape hatch its declaration documents, not a silent
+      // divergence between the two legs. Merged rather than replaced, so a host that hand-built one
+      // entry does not lose the capability servers it also configured.
       ...(routerBuiltMcpServers === undefined && request.input.mcpServers === undefined ? {} : { mcpServers: { ...routerBuiltMcpServers, ...request.input.mcpServers } }),
       ...(bridge === undefined ? {} : { canUseTool: bridge }),
       ...(request.options.permissionMode === undefined ? {} : { permissionMode: request.options.permissionMode as OfficialPermissionMode }),
