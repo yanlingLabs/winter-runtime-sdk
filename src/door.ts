@@ -41,7 +41,7 @@ import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from 
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "./errors.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
-import { createMessagingToolHandlers } from "./messaging/handlers.ts";
+import { createMessagingToolHandlers, type MessagingToolCaller } from "./messaging/handlers.ts";
 import type { ContainmentPolicy } from "./official/containment.ts";
 import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
@@ -431,7 +431,7 @@ export interface OfficialLegRequest {
  * as it did before R-8: `RouterOfficialInput.mcpServers` is the only route, and a host that was
  * hand-materializing keeps working unchanged.
  */
-function officialCapabilityServers(deps: OfficialLegDeps, sessionId: string, branchLabel: string, hostOwned: Readonly<Record<string, unknown>> | undefined): Record<string, unknown> | undefined {
+function officialCapabilityServers(deps: OfficialLegDeps, caller: MessagingToolCaller, branchLabel: string, hostOwned: Readonly<Record<string, unknown>> | undefined): Record<string, unknown> | undefined {
   if (deps.toInputShape === undefined) {
     if (deps.capabilities === undefined) return undefined;
     throw new RuntimeLaunchInputError({
@@ -453,7 +453,7 @@ function officialCapabilityServers(deps: OfficialLegDeps, sessionId: string, bra
       reason: "the official leg cannot register the standing server without the official SDK module the servers are registered into",
     });
   }
-  const handlers = createMessagingToolHandlers(deps.messaging, { sessionId });
+  const handlers = createMessagingToolHandlers(deps.messaging, caller);
   const standing = winterMcpServerDescriptor({ brand: deps.brand, branchLabel, messaging: { sendMessage: handlers.sendMessage, listAgents: handlers.listAgents } });
   const servers: Record<string, unknown> = {};
   for (const descriptor of [standing, ...(deps.capabilities ?? [])]) {
@@ -470,7 +470,15 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   const branchLabel = officialBranchLabel(deps.brand);
   // BEFORE ANYTHING ELSE HAPPENS. This is an input refusal, and an input refusal that arrived after a
   // directory row, a credential read or a child process would be a refusal the host pays for.
-  const routerBuiltMcpServers = officialCapabilityServers(deps, request.input.sessionId, branchLabel, request.input.mcpServers);
+  // THE CALLER IS THE ADDRESS THE ROW WAS RECORDED UNDER (interim review C-1). A door-opened CHILD is
+  // `agent:<parent>:<child>`, and binding its messaging tools to the bare `session:<child>` made three
+  // things wrong at once: `sendDetailed` resolved in the WRONG conversation (the caller's owning
+  // session became the child rather than its parent), `senderPermissionClass` found no row and fell to
+  // `"unknown"` so WS-10 §13's class floor judged a phantom sender, and the delivered
+  // `<agent-message from="session:<child>">` named an address every reply answers `not_found` for.
+  // `callerAddress` over this pair yields exactly `officialLegAddress`'s address.
+  const messagingCaller: MessagingToolCaller = request.input.parentSessionId === undefined ? { sessionId: request.input.sessionId } : { sessionId: request.input.parentSessionId, agentId: request.input.sessionId };
+  const routerBuiltMcpServers = officialCapabilityServers(deps, messagingCaller, branchLabel, request.input.mcpServers);
   const parsed = request.input.parentSessionId === undefined ? buildSessionAddress(request.input.sessionId) : buildChildAddress(request.input.parentSessionId, request.input.sessionId);
   const address = officialLegAddress(request.input);
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).

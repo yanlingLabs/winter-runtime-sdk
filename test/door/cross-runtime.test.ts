@@ -118,6 +118,71 @@ describeRuntime("the constructor's capability servers, registered on the officia
   );
 });
 
+// ====================================================================================================
+// C-1 (interim review) — A DOOR-OPENED CHILD SENDS AS ITSELF.
+//
+// SM1's own pair, in the direction no test had: the child SENDING. The leg records a child's row under
+// `agent:<parent>:<child>` but used to bind its messaging tools to the bare `session:<child>`, and the
+// three consequences were all invisible from inside the sending session — the resolution scope was the
+// wrong conversation, `senderPermissionClass` found no row for the address and fell to `"unknown"` so
+// WS-10 §13's floor judged a phantom sender, and the `from` the receiver was handed was an address
+// every reply answers `not_found` for. All three are observable only at the FAR END, which is where
+// this test looks.
+// ====================================================================================================
+describeRuntime("C-1 — a door-opened child's own SendMessage", () => {
+  afterAll(cleanupHermetic);
+
+  test(
+    "the delivered frame names the CHILD's own address, carries its real sender class, and is answerable",
+    async () => {
+      await withDoorBed(
+        { turns: [{ toolUses: [{ id: "toolu_child_send", name: "SendMessage", input: { to: "parent", message: "from the child", summary: "child ping" } }] }, { text: "sent" }], sessionId: "child-sender" },
+        async (bed) => {
+          // THE RECEIVER IS THE CHILD'S OWN PARENT, and that is not a convenience: WS-10 §10.3 makes a
+          // claimed `agent:` sender attributable ONLY by the session that owns it, so the parent is the
+          // one receiver that can tell us what address the child really sent as. (A third party gets
+          // the owner-qualified relay instead, which is a different path and a different test.)
+          await bed.sdk.directory.record(sessionEntry("gpt-parent", { displayName: "parent" }));
+          const parent = winterWriterHandle(() => "idle");
+          bed.sdk.messaging.attachWinterSession("session:gpt-parent", parent.handle);
+
+          const options = bed.officialOptions() as Record<string, unknown>;
+          (options["runtime"] as { official: Record<string, unknown> }).official["parentSessionId"] = "gpt-parent";
+          await drain(bed.sdk.query({ prompt: "tell the parent", options }));
+
+          const childAddress = "agent:gpt-parent:child-sender";
+          expect(parent.pushed).toHaveLength(1);
+          // THE ADDRESS THE ROW WAS RECORDED UNDER, not the bare session. Before C-1 this frame said
+          // `from="session:child-sender"` — delivered, unrefused, and wrong in three ways at once.
+          expect(parent.pushed[0]).toContain(`<agent-message from="${childAddress}"`);
+          expect(parent.pushed[0]).not.toContain('from="session:child-sender"');
+          // …so WS-10 §13's floor judged THIS sender, whose row exists, rather than a phantom whose
+          // class can only ever be `unknown`.
+          expect(parent.pushed[0]).toContain('sender-permission-class="prompts"');
+          expect(parent.pushed[0]).not.toContain('sender-permission-class="unknown"');
+          expect(parent.pushed[0]).toContain("from the child");
+          // The send itself was not refused, and the model was told so.
+          const row = toolResults(bed.record).find((entry) => entry.tool_use_id === "toolu_child_send");
+          expect(row?.is_error).toBeUndefined();
+
+          // …and the address the receiver was handed is one a reply actually resolves to.
+          const reply = await bed.sdk.messaging.deliver(
+            envelope({
+              messageId: "c1-reply",
+              from: { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: "gpt-parent" },
+              to: { objectKind: "agent", runtimeKind: "claude-agent", winterSessionId: "gpt-parent", parentWinterSessionId: "gpt-parent", childId: "child-sender" },
+              body: "answering the child",
+              ...live(),
+            }),
+          );
+          expect(reply.status).not.toBe("not_found");
+        },
+      );
+    },
+    DOOR_TIMEOUT,
+  );
+});
+
 describeRuntime("WS13c-SM1/SM2, through the door", () => {
   afterAll(cleanupHermetic);
 
