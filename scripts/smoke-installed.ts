@@ -186,6 +186,30 @@ async function typecheckWithoutOptionalPeer(probeDir: string, packageName: strin
   };
 }
 
+/**
+ * THE PROBE'S OWN `.npmrc` — the smoke installs from the PUBLIC registry, whatever the job is pinned to.
+ *
+ * WHY IT EXISTS (release 0.0.2, run 1). The GitHub Packages release job runs `actions/setup-node` with
+ * `registry-url: https://npm.pkg.github.com` + `scope: "@yanlinglabs"`, which writes a throwaway
+ * USERCONFIG carrying `@yanlinglabs:registry=https://npm.pkg.github.com` — and from that step on every
+ * npm resolution of the scope goes there. That is exactly right for `pnpm publish`, and exactly wrong
+ * for this script: since R6 the probe installs the required PEER from a registry
+ * (`@yanlinglabs/winter-agent-sdk@<resolved>`), so it asked GitHub Packages, at a step that carries no
+ * token, and the release failed `401 unauthenticated` after every other gate had passed.
+ *
+ * WHAT THIS SMOKE IS ABOUT decides where the fix belongs: "what a CONSUMER actually gets" — a consumer
+ * who installs the published tarball and the published peer from the public registry. The registry the
+ * probe reads is therefore a property of the PROBE, not of the job, and pinning it in the workflow
+ * would leave the same landmine for the next job that pins a scope (and for a developer whose own user
+ * `.npmrc` points `@yanlinglabs` somewhere else). A project-level `.npmrc` in the probe directory beats
+ * the userconfig in npm's own precedence order, which is what makes this independent rather than
+ * merely usually-right.
+ *
+ * NO TOKEN, DELIBERATELY. Both packages are public on npmjs; a credential here would make the gate
+ * pass for a reason a consumer does not have.
+ */
+export const PROBE_NPMRC = ["registry=https://registry.npmjs.org/", "@yanlinglabs:registry=https://registry.npmjs.org/", ""].join("\n");
+
 export interface SmokeResult {
   ok: boolean;
   results: Array<{ specifier: string; runtime: SmokeRuntime; ok: boolean; output: string }>;
@@ -211,10 +235,14 @@ export async function runSmoke(opts: { runtimes?: readonly SmokeRuntime[]; root?
     const peerManifest = JSON.parse(readFileSync(join(peerDir, "package.json"), "utf8")) as { version?: unknown };
     if (typeof peerManifest.version !== "string") throw new Error(`smoke-installed: ${REQUIRED_PEER}'s installed package.json carries no \`version\``);
 
-    // Outside the repository on purpose: a fresh mkdtemp, no workspace file, no lockfile, no
-    // committed .npmrc in scope. What makes this succeed is the tarball itself plus an ORDINARY
-    // registry install of the required peer (R6) — no symlink, no sibling checkout.
+    // Outside the repository on purpose: a fresh mkdtemp, no workspace file, no lockfile, and no
+    // configuration but the registry pin below. What makes this succeed is the tarball itself plus an
+    // ORDINARY public-registry install of the required peer (R6) — no symlink, no sibling checkout.
     writeFileSync(join(probeDir, "package.json"), `${JSON.stringify({ name: "winter-runtime-sdk-smoke-probe", private: true, version: "0.0.0" }, null, 2)}\n`);
+    // …with ONE piece of configuration, and it is the registry (see `PROBE_NPMRC`): a project-level
+    // `.npmrc` here outranks whatever userconfig the surrounding job wrote, so the peer comes from the
+    // public registry in CI, in the release job, and on a developer's machine alike.
+    writeFileSync(join(probeDir, ".npmrc"), PROBE_NPMRC);
     // `--legacy-peer-deps`: npm 7+ tries to INSTALL peer dependencies, and the OPTIONAL peer
     // (`@anthropic-ai/claude-agent-sdk`) is deliberately absent here — `typecheckWithoutOptionalPeer`
     // below is what that absence exists to prove. No `--offline`: the required peer's install below
