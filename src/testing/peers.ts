@@ -109,7 +109,7 @@ export function createFakeWinterPeer(options: FakeWinterPeerOptions = {}): FakeW
   const calls: RecordedQueryCall[] = [];
   const scripted = options.messages ?? [defaultMessage()];
   const namespace = {
-    SDK_VERSION: options.packageVersion ?? "0.0.2",
+    SDK_VERSION: options.packageVersion ?? "0.0.3",
     PROTOCOL_VERSION: options.protocolVersion ?? "1.0",
     // THE REAL brand functions, not stand-ins. `createRuntimeSdk` calls `resolveBrand` and throws
     // `InvalidBrandError` THROUGH THE INJECTED PEER (so a host that vendored its own copy catches its

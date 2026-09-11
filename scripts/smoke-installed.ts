@@ -5,6 +5,10 @@
 // installed), installs into a throwaway directory OUTSIDE the repo, and imports every declared
 // `exports` entry under each requested runtime, failing loudly on the first import error.
 //
+// IT NEEDS THE NETWORK (M-5). `--offline` is gone with the symlink it existed for: both the tarball's
+// install and the peer's come from the registry, so a local run without network access fails at the
+// install step rather than in anything this script is about. CI always has it.
+//
 // THE REQUIRED PEER IS AN ORDINARY REGISTRY INSTALL (R6, the close-out collapse).
 // `@yanlinglabs/winter-agent-sdk` is a REQUIRED PEER: the router's `dist/index.js` opens with
 // `export * from "@yanlinglabs/winter-agent-sdk"`, so importing the package without a resolvable

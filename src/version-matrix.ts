@@ -65,7 +65,7 @@ import type { RuntimeSdkPeers } from "./sdk.ts";
  * approve an upgrade — a new official version is a reviewed compatibility event (WS-17's drift gate),
  * not a range that quietly widens.
  */
-export const SUPPORTED = { winterAgentSdk: ">=0.0.2 <0.1.0", claudeAgentSdk: "0.3.250" } as const;
+export const SUPPORTED = { winterAgentSdk: ">=0.0.3 <0.1.0", claudeAgentSdk: "0.3.250" } as const;
 
 /**
  * The Winter wire protocol versions this router is tested against (`PROTOCOL_VERSION` in the SDK's

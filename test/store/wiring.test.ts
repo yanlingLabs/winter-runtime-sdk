@@ -46,7 +46,7 @@ describe("the shared store (WS-05 §6)", () => {
   test("the identity records the version BOTH branches are therefore on", async () => {
     await withStoreBed(async (bed) => {
       expect(bed.shared.identity.packageName).toBe("@yanlinglabs/winter-agent-sdk");
-      expect(bed.shared.identity.packageVersion).toBe("0.0.2");
+      expect(bed.shared.identity.packageVersion).toBe("0.0.3");
       expect(bed.shared.identity.winterHome).toBe(bed.home);
       expect(bed.shared.canonical).toBeInstanceOf(WinterCompatibilitySessionStore);
     });
@@ -252,7 +252,7 @@ describe("the decoration registry (WS-13 §8.2's no-wash-back mechanism)", () =>
 describe("the peer is the injection point", () => {
   test("`storePeers` really is the spine's own peer, widened", () => {
     const peers = storePeers();
-    expect((peers.winter as unknown as { SDK_VERSION: string }).SDK_VERSION).toBe("0.0.2");
+    expect((peers.winter as unknown as { SDK_VERSION: string }).SDK_VERSION).toBe("0.0.3");
     expect((peers.winter as unknown as { WinterCompatibilitySessionStore: unknown }).WinterCompatibilitySessionStore).toBe(WinterCompatibilitySessionStore);
   });
 });

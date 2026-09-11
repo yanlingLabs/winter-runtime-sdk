@@ -207,7 +207,7 @@ installs. Tests import it by relative path.
 
 The three `@yanlinglabs/*` devDependencies are **registry pins** as of Phase 8a Task 0:
 `@yanlinglabs/winter-agent-sdk`, `@yanlinglabs/winter-conformance` and
-`@yanlinglabs/winter-provider-conformance` at `^0.0.2`, resolved from npm by `pnpm install` (the
+`@yanlinglabs/winter-provider-conformance` at `^0.0.3`, resolved from npm by `pnpm install` (the
 lockfile's integrity hashes are npm's, and `node_modules/@yanlinglabs/*` are the published dist-only
 tarballs — no `src/`). Nothing in this package's tests, build or release needs a sibling checkout:
 `bun test` resolves the pins through node_modules; `scripts/build-packages.ts` finds the peer's
@@ -216,8 +216,8 @@ outside `rootDir` break a declaration emit); `release.yml` is single-checkout fo
 orders `pnpm install` BEFORE `actions/setup-node` writes its per-job scope pin so the install can never
 be redirected at GitHub Packages.
 
-**R6 collapsed the temporary `link:` shape's last remnant.** `tsconfig.base.json` carried no `paths`
-until then: it pointed the **typecheck** (`tsconfig.typecheck.json`, over `src/`, `test/` and
+**R6 collapsed the temporary `link:` shape's last remnant.** `tsconfig.base.json` carried `paths`
+until then: they pointed the **typecheck** (`tsconfig.typecheck.json`, over `src/`, `test/` and
 `scripts/`) at a sibling checkout's `src`, `ci.yml`'s `build` and `pack-smoke` jobs each checked out
 `yanlingLabs/winter-agent-sdk` beside this repository (pinned to `WINTER_AGENT_SDK_REF: v0.0.2`) and
 built it there, `test/gates/release-gates.test.ts` asserted that checkout by name, and
@@ -278,8 +278,8 @@ resolve two different homes.
 `createRuntimeSdk` asserts the matrix before it builds anything and refuses loudly with
 `RuntimeSdkVersionError { expected, actual }`.
 
-- `SUPPORTED.winterAgentSdk` is a **range** (`>=0.0.2 <0.1.0`) — the Winter SDK is this repository's
-  sibling and moves with it.
+- `SUPPORTED.winterAgentSdk` is a **range** (`>=0.0.3 <0.1.0`, raised by R8 for the `/tools` subpath)
+  — the Winter SDK is this repository's sibling and moves with it.
 - `SUPPORTED.claudeAgentSdk` is an **exact pin** (`0.3.250`) — WS-02 §6.1: declaration identity alone
   must not approve an upgrade; a new official version is a reviewed compatibility event.
 - The Winter peer's `PROTOCOL_VERSION` is checked against `SUPPORTED_PROTOCOL_VERSIONS` — the second,
@@ -289,9 +289,11 @@ resolve two different homes.
 
 A peer's package version is read from an exported version identity first (`SDK_VERSION` / `VERSION` /
 `PACKAGE_VERSION` / `version`), then from the resolvable installed manifest, and otherwise refused —
-"I could not tell" and "it is fine" are different answers. **Carry:** neither peer exports a version
-identity today, so the second probe is the live path; the Winter SDK exporting one at `0.0.2` would
-make the assertion describe the *injected instance* rather than the resolvable copy.
+"I could not tell" and "it is fine" are different answers. **The carry is discharged:** the Winter SDK
+exports `SDK_VERSION` as of `0.0.3` (SDK ruling P-5), so probe 1 is the live path for that peer and the
+matrix now describes the *injected instance* rather than the resolvable copy. The official peer still
+exports no identity, so it reaches probe 2 — and a compiled host, where probe 2 cannot resolve
+anything, declares both through `RuntimeSdkOptions.peerVersions` (R2).
 
 ---
 
