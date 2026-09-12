@@ -125,3 +125,25 @@ export type {
   DirectorySnapshot, GlobalMessagingHandle, GlobalMessagingOptions, ReplyRequest, RouterMessagingAdapter,
   RuntimeDirectoryHandle, RuntimeDirectoryOptions, RuntimeDirectoryRecoveryHooks,
 } from "./messaging/index.ts";
+
+// --- P8c-13 fix round 2: the HANDOFF PARTICIPANT types (types only) --------------------------------
+//
+// `createHandoffBarrier`/`HandoffBarrierHandle` were already reachable from root via `./seams/index.ts`
+// (`HandoffBarrier`/`HandoffOutcome`/`HandoffPlan`/`HandoffStep`/`HandoffStepNumber`), but the DATA
+// shapes a host actually renders a plan/outcome FROM — who owns the session today, what the destination
+// would run, what step 8 hands the destination, per-step results, the eligibility check, the detailed
+// outcome, and the barrier's own construction deps — were not: `src/store/index.ts` exports all of
+// them, but nothing in `src/index.ts` ever imported that lane barrel. Named directly off the files that
+// DECLARE them (`./store/handoff-barrier.ts`, `./seams/handoff.ts`, `./store/materialized-resume.ts`)
+// rather than through `./store/index.ts`, matching how the rest of this barrel reaches into a lane —
+// confirmed pure data: none of the three files' EMITTED declarations names a `node:*` specifier (the
+// value-level `node:fs`/`node:crypto` imports their implementations use never appear in the .d.ts,
+// since nothing exported here has a node-typed member).
+export type {
+  DetailedHandoffOutcome, HandoffBarrierDeps, HandoffDestinationRuntime, HandoffEligibilityLike,
+  HandoffOwnerHealth, HandoffParticipants, HandoffResumeTarget, HandoffSourceOwner, HandoffStepReport,
+} from "./store/handoff-barrier.ts";
+export type { HandoffSelection } from "./seams/handoff.ts";
+// `HandoffBarrierDeps.decorator` is typed with this — a host building `HandoffBarrierDeps` needs the
+// name to type it, not only the barrier's own construction path.
+export type { MaterializedResumeDecoratorHandle } from "./store/materialized-resume.ts";
