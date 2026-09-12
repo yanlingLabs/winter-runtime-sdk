@@ -44,6 +44,19 @@ export type SmokeRuntime = "node" | "bun";
 export interface ImportTarget {
   specifier: string;
   runtimes: SmokeRuntime[];
+  /**
+   * The floor `importUnder` treats as "actually imported something," not an empty or wrong module.
+   *
+   * NOT ONE NUMBER FOR EVERY TARGET. The root `"."` re-exports the entire Winter SDK plus this
+   * package's own names (150+ as of 0.0.3) — a count near that is meaningful evidence the right file
+   * loaded. A subpath is deliberately narrower: `"./testing"` (0.0.3, P8c-13) exports seven runtime
+   * names on purpose, by the same design that keeps two optional peers out of its graph (see
+   * `src/testing/host.ts`'s header) — a 10-name floor tuned for the root would fail it for being
+   * exactly as small as it was built to be. So every subpath gets a floor of 1 (still catches the
+   * real defect this check is for: an import that silently resolved to an empty stub or the wrong
+   * file), and only `"."` keeps the larger number.
+   */
+  minExports: number;
 }
 
 interface ManifestShape {
@@ -72,9 +85,9 @@ export function deriveImportTargets(root: string = REPO_ROOT): ImportTarget[] {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as ManifestShape;
   const runtimes = runtimesFor(manifest);
   const field = manifest.exports;
-  if (field === undefined || typeof field === "string") return [{ specifier: manifest.name, runtimes }];
+  if (field === undefined || typeof field === "string") return [{ specifier: manifest.name, runtimes, minExports: 10 }];
   return Object.keys(field)
-    .map((key) => ({ specifier: key === "." ? manifest.name : `${manifest.name}/${key.replace(/^\.\//, "")}`, runtimes }))
+    .map((key) => ({ specifier: key === "." ? manifest.name : `${manifest.name}/${key.replace(/^\.\//, "")}`, runtimes, minExports: key === "." ? 10 : 1 }))
     .sort((a, b) => a.specifier.localeCompare(b.specifier));
 }
 
@@ -106,8 +119,8 @@ export function assertInstalledTreeIsDistOnly(probeDir: string, packageName: str
   return violations;
 }
 
-async function importUnder(runtime: SmokeRuntime, specifier: string, probeDir: string): Promise<{ ok: boolean; output: string }> {
-  const code = `import(${JSON.stringify(specifier)}).then((m) => { const n = Object.keys(m).length; if (n < 10) { console.error(${JSON.stringify(`${runtime}: ${specifier} imported but exported`)}, n, "names"); process.exit(1); } console.log(${JSON.stringify(`${runtime}: ${specifier} OK`)}, n, "exports"); }).catch((e) => { console.error(${JSON.stringify(`${runtime}: ${specifier} FAILED:`)}, e && e.message ? e.message : e); process.exit(1); });`;
+async function importUnder(runtime: SmokeRuntime, specifier: string, probeDir: string, minExports: number): Promise<{ ok: boolean; output: string }> {
+  const code = `import(${JSON.stringify(specifier)}).then((m) => { const n = Object.keys(m).length; if (n < ${minExports}) { console.error(${JSON.stringify(`${runtime}: ${specifier} imported but exported`)}, n, "names"); process.exit(1); } console.log(${JSON.stringify(`${runtime}: ${specifier} OK`)}, n, "exports"); }).catch((e) => { console.error(${JSON.stringify(`${runtime}: ${specifier} FAILED:`)}, e && e.message ? e.message : e); process.exit(1); });`;
   const proc = Bun.spawn([runtime, "-e", code], { cwd: probeDir, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   return { ok: exitCode === 0, output: (stdout + stderr).trim() };
@@ -265,7 +278,7 @@ export async function runSmoke(opts: { runtimes?: readonly SmokeRuntime[]; root?
           console.log(`smoke-installed SKIP: ${runtime} import of "${target.specifier}" — that package declares no \`engines.${runtime}\``);
           continue;
         }
-        const result = await importUnder(runtime, target.specifier, probeDir);
+        const result = await importUnder(runtime, target.specifier, probeDir, target.minExports);
         results.push({ specifier: target.specifier, runtime, ok: result.ok, output: result.output });
         if (!result.ok) {
           console.error(`smoke-installed FAILED: ${runtime} import of "${target.specifier}"\n${result.output}`);

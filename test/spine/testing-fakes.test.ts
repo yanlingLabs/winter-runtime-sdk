@@ -13,12 +13,13 @@ import { WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
 describe("the loopback fakes", () => {
   test("bind 127.0.0.1 on an ephemeral port, record what they receive, and close after the body", async () => {
     let url = "";
+    const anthropic = await anthropicFake();
     const recorded = await withLoopbackFake(
       {
-        routes: anthropicFake.anthropicFakeRoutes({
+        routes: anthropic.anthropicFakeRoutes({
           messages: {
             "claude-sonnet-4-5": (): Response =>
-              anthropicFake.anthropicTurnResponse({ model: "claude-sonnet-4-5", blocks: [{ type: "text", chunks: ["hello"] }] }),
+              anthropic.anthropicTurnResponse({ model: "claude-sonnet-4-5", blocks: [{ type: "text", chunks: ["hello"] }] }),
           },
         }),
       },
@@ -50,13 +51,15 @@ describe("the loopback fakes", () => {
     expect(stillUp).toBe(false);
   });
 
-  test("a second family's fake is reachable through the same door (the barrel is not one-family)", () => {
+  test("a second family's fake is reachable through the same door (the barrel is not one-family)", async () => {
     // Named for what a lane will actually reach for: the Responses-API stream builder. Its shape
     // differs from the Anthropic family's (frames + a stream, rather than a route table), which is
     // exactly why this smoke names a real export rather than asserting the namespace is non-empty.
-    expect(typeof openaiResponsesFake.responsesStream).toBe("function");
-    expect(typeof openaiResponsesFake.responsesFrames).toBe("function");
-    expect(typeof anthropicFake.anthropicFakeRoutes).toBe("function");
+    const openai = await openaiResponsesFake();
+    const anthropic = await anthropicFake();
+    expect(typeof openai.responsesStream).toBe("function");
+    expect(typeof openai.responsesFrames).toBe("function");
+    expect(typeof anthropic.anthropicFakeRoutes).toBe("function");
   });
 
   test("the official-capture env is a REPLACEMENT, never a spread of process.env", async () => {

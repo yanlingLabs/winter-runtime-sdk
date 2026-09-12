@@ -204,8 +204,24 @@ be one SDK release away from being silently wrong. `test/spine/contract-reexport
 two namespaces object by object — every SDK export is present here, under the same name, and is the
 same object — which is also what catches a local name shadowing an SDK export.
 
-`src/testing/**` is **not** a published subpath: it reaches dev dependencies a consumer never
+`src/testing/index.ts` (the FULL harness) is **not** a published subpath: it reaches dev dependencies
+(`@yanlinglabs/winter-conformance`, `@yanlinglabs/winter-provider-conformance`) a consumer never
 installs. Tests import it by relative path.
+
+**`./testing` IS published, as of 0.0.3 (P8c-13) — but as a different, narrower file.**
+`package.json` `exports["./testing"]` points at `src/testing/host.ts`, not `src/testing/index.ts`:
+`createFakeKeychain`, `withHermeticHomes`, `withTempDir`, `createFakeClaudePeer`,
+`createFakeWinterPeer`, `HERMETIC_TRAFFIC_OPT_OUTS` and `officialCaptureEnv` — everything a host needs
+to write its own approval-bridge/MCP fixtures, and nothing that names either optional conformance peer.
+The loopback fakes (`./fakes.ts`: `anthropicFake`, `openaiResponsesFake`, `requestsTo`,
+`withLoopbackFake`) and the golden-trace tooling (`./conformance.ts`) both import their peer lazily — a
+dynamic `import()` inside each function body rather than a static import at the top of the file — which
+fixes the RUNTIME failure for a consumer who never calls them, but NOT the TYPE failure: a packed-
+tarball probe with the optional peer absent still failed `tsc --noEmit` on those files' own top-level
+`import type` line, regardless of which export a consumer actually touched (a `.d.ts` binds its
+top-level imports as part of being loaded at all). So `./fakes.ts` and `./conformance.ts` stay
+reachable only from `./index.ts`, the internal barrel; `./host.ts` is a separate, smaller barrel built
+to never resolve either peer in the first place.
 
 ---
 

@@ -25,7 +25,7 @@ Decision record: WS-00 D19 (2026-09-05). Boundaries that do not move:
   official runtime and no SDK is ever instantiated twice.
 - A `brand` profile flows through unchanged (Winter defaults); Claude Code's own literals stay fixed.
 
-Status: Phase 7b landed all four lanes and routed the door; `0.0.2` is the Phase-8b prerequisite
+Status: Phase 7b landed all four lanes and routed the door; `0.0.2` was the Phase-8b prerequisite
 release. The spine (the package scaffold, the contract re-export, the `createRuntimeSdk` constructor
 with its version matrix, the seams, the test harness and CI) and the four lanes behind those seams —
 the official-SDK adapter, the runtime directory and messaging router, the store wiring and handoff
@@ -33,7 +33,16 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
-**What `0.0.2` changes** (peer floor: `@yanlinglabs/winter-agent-sdk >=0.0.3 <0.1.0`):
+**What `0.0.3` changes** (P8c-13 — the official-leg HOST SURFACE, so a host can bridge its own
+approval broker and materialize MCP servers; no peer floor change):
+
+| | |
+|---|---|
+| root exports | `createApprovalBridge`/`isOurApprovalBridge` (+ `ApprovalBroker`/`ApprovalRequest`/`ApprovalBridgeOptions`/`DecisionSource`/`OfficialPermissionMode`/`OfficialApprovalBridge`), `materializeOfficialMcpServer`/`officialMcpServers`/`winterMcpServerDescriptor`/`canonicalToolNames`/`OFFICIAL_MATERIALIZATION_DROPS` (+ their descriptor/schema types), `minimalOsEnvironmentFrom`/`buildOfficialChildEnv` (+ env-policy types), the containment/auth/options-template types, `containmentDispositions`/`officialDisallowedTools`, `officialBranchLabel`/`OFFICIAL_DISCLOSURES`, and `renderAttributedTurn` — all previously reachable only through `./official/index.ts`, a test-only import site. `buildOfficialOptions` uses `policy.canUseTool` verbatim and `assertOptionsInvariants` refuses anything not built by `createApprovalBridge`, so without this a host's every official-leg tool call was denied by the fail-closed default. The spawn-proxy/adapter internals (`createSupervisedSpawnProxy`, `createOfficialAdapter`, …) stay OUT — their declaration graph pulls Node-only types into a consumer that never asked for them; the door reaches the adapter through the seam, not through a root import. |
+| `./testing` subpath | `createFakeKeychain`, `withHermeticHomes`, `withTempDir`, `createFakeClaudePeer`, `createFakeWinterPeer`, `HERMETIC_TRAFFIC_OPT_OUTS`, `officialCaptureEnv` — a NARROW barrel (`src/testing/host.ts`) that resolves neither `@yanlinglabs/winter-conformance` nor `@yanlinglabs/winter-provider-conformance`, so a host writing its own approval-bridge/MCP fixtures does not have to install either. The loopback fakes (`anthropicFake`, `openaiResponsesFake`, `requestsTo`, `withLoopbackFake`) and the golden-trace tooling stay on the internal, unpublished `./index.ts` barrel this repository's own tests use by relative path — a dynamic `import()` fixes their RUNTIME load without the peer, but not their TYPES, which still name it. |
+| root exports (types only) | `HandoffParticipants`, `HandoffSourceOwner`, `HandoffDestinationRuntime`, `HandoffResumeTarget`, `HandoffStepReport`, `HandoffOwnerHealth`, `HandoffEligibilityLike`, `DetailedHandoffOutcome`, `HandoffBarrierDeps`, `HandoffSelection`, and `MaterializedResumeDecoratorHandle` (`HandoffBarrierDeps.decorator`'s type) — the data shapes a host actually renders a handoff plan/outcome from, not just `HandoffBarrier`/`HandoffOutcome`/`HandoffPlan` (already reachable via the seams). Pure interfaces: none pulls a `node:*` specifier into the declaration graph. |
+
+**What `0.0.2` changed** (peer floor: `@yanlinglabs/winter-agent-sdk >=0.0.3 <0.1.0`):
 
 | | |
 |---|---|

@@ -9,51 +9,55 @@
 // throwaway npm prefix and needs network egress; WS-02 §6 makes that fetch an ephemeral,
 // checksum-verified, deliberate act. Asserting it is a function is the whole of what a hermetic
 // suite may say about it.
+//
+// EVERY CALL BELOW IS AWAITED (0.0.3, P8c-13): `./conformance.ts`'s functions became lazy — a dynamic
+// `import()` of the optional `@yanlinglabs/winter-conformance` peer inside each function body, so this
+// package's published `./testing` subpath does not require it — which made every one of them async.
 import { describe, expect, test } from "bun:test";
 
 import { compareTraces, goldenTracePath, listGoldenTraces, loadGoldenTrace, normalizeTrace, runOfficialCapture } from "../../src/testing/index.ts";
 import type { ConformanceTraceEntry } from "../../src/testing/index.ts";
 
 describe("the conformance harness", () => {
-  test("the committed goldens are reachable from this repository", () => {
-    const goldens = listGoldenTraces();
+  test("the committed goldens are reachable from this repository", async () => {
+    const goldens = await listGoldenTraces();
     expect(goldens.length).toBeGreaterThan(0);
     expect(goldens.every((name) => name.endsWith(".json"))).toBe(true);
   });
 
   test("a golden loads as trace entries, and its path is a real file", async () => {
-    const [first] = listGoldenTraces();
+    const [first] = await listGoldenTraces();
     expect(first).toBeDefined();
-    const trace = loadGoldenTrace(first!);
+    const trace = await loadGoldenTrace(first!);
     expect(Array.isArray(trace)).toBe(true);
     expect(trace.length).toBeGreaterThan(0);
-    expect(await Bun.file(goldenTracePath(first!)).exists()).toBe(true);
+    expect(await Bun.file(await goldenTracePath(first!)).exists()).toBe(true);
   });
 
-  test("normalizeTrace is idempotent and compareTraces finds no difference with itself", () => {
-    const [first] = listGoldenTraces();
-    const trace = loadGoldenTrace(first!);
-    const once = normalizeTrace(trace);
-    const twice = normalizeTrace(once);
-    expect(compareTraces(once, twice)).toEqual([]);
-    expect(compareTraces(once, once)).toEqual([]);
+  test("normalizeTrace is idempotent and compareTraces finds no difference with itself", async () => {
+    const [first] = await listGoldenTraces();
+    const trace = await loadGoldenTrace(first!);
+    const once = await normalizeTrace(trace);
+    const twice = await normalizeTrace(once);
+    expect(await compareTraces(once, twice)).toEqual([]);
+    expect(await compareTraces(once, once)).toEqual([]);
   });
 
-  test("compareTraces actually reports a difference (the check is not vacuous)", () => {
+  test("compareTraces actually reports a difference (the check is not vacuous)", async () => {
     const a: ConformanceTraceEntry[] = [{ sequence: 0, direction: "runtime-to-host", kind: "system", payload: { subtype: "init" } }];
     const b: ConformanceTraceEntry[] = [{ sequence: 0, direction: "runtime-to-host", kind: "assistant", payload: { subtype: "text" } }];
-    const diffs = compareTraces(normalizeTrace(a), normalizeTrace(b));
+    const diffs = await compareTraces(await normalizeTrace(a), await normalizeTrace(b));
     expect(diffs).toEqual(["kind@0: system != assistant", "payload@0 (system) differs"]);
   });
 
-  test("the normalizer strips the volatile fields a differential must not compare", () => {
+  test("the normalizer strips the volatile fields a differential must not compare", async () => {
     const entry: ConformanceTraceEntry = {
       sequence: 7,
       direction: "runtime-to-host",
       kind: "result",
       payload: { session_id: "s_abc", duration_ms: 1234, kept: "yes", nested: { uuid: "u", kept: 1 } },
     };
-    const [normalized] = normalizeTrace([entry]);
+    const [normalized] = await normalizeTrace([entry]);
     expect(normalized?.sequence).toBe(0);
     expect(normalized?.payload).toEqual({ kept: "yes", nested: { kept: 1 } });
   });

@@ -30,14 +30,20 @@
 //      drops it.
 //   6. PACKAGE IDENTITY — the packed manifest is the package this script asked for, under the
 //      `@yanlinglabs/` scope.
-//   7. THE OPTIONAL PEER IS NOT NAMED IN THE REACHABLE DECLARATION GRAPH (review r1, M7). Walking the
-//      relative imports out of the package's `types` entry gives exactly the `.d.ts` files a
-//      consumer's type-checker loads when it imports this package. A specifier for
-//      `@anthropic-ai/claude-agent-sdk` in ANY of them makes a consumer who (correctly) did not
-//      install an OPTIONAL peer see `Cannot find module` coming out of us. Lane A may `import type`
-//      from the peer inside `src/official/**` — those declarations are emitted but UNREACHABLE, so no
-//      consumer ever loads them — and this rule is what keeps that distinction real rather than
-//      remembered.
+//   7. NO OPTIONAL PEER IS NAMED IN ANY REACHABLE DECLARATION GRAPH (review r1, M7; widened at the
+//      0.0.3 fix round for P8c-13's `./testing` subpath). Walking the relative imports out of an
+//      `exports` entry's `types` condition gives exactly the `.d.ts` files a consumer's type-checker
+//      loads when it imports THAT entry. A specifier for an OPTIONAL peer in any of them makes a
+//      consumer who (correctly) did not install it see `Cannot find module` coming out of us —
+//      and it is a rule about EVERY entry, not only `"."`: `./testing` has its own `types` condition,
+//      its own declaration graph, and its own two optional peers
+//      (`@yanlinglabs/winter-conformance`, `@yanlinglabs/winter-provider-conformance` — see
+//      `src/testing/host.ts`'s header for why its graph is built to exclude them in the first place).
+//      The optional-peer SET is derived from the packed manifest's own `peerDependenciesMeta`
+//      (`optionalPeersFrom` below) rather than hand-copied, so a peer added or dropped there needs no
+//      matching edit here. Lane A may `import type` from a peer inside `src/official/**` — those
+//      declarations are emitted but UNREACHABLE from any entry's `types`, so no consumer ever loads
+//      them — and this rule is what keeps that distinction real rather than remembered.
 //
 // THE `sha256` THIS SCRIPT PRINTS IS PROVENANCE FOR THE RELEASE NOTE, NEVER A GATE: it is the packed
 // tarball's own hash, computed once per pack and reported so a consumer can verify what they
@@ -78,8 +84,39 @@ const CREDENTIAL_FILENAME_RE = /^\.env(\..+)?$|\.(pem|key|p12|pfx)$|^id_(rsa|dsa
 const CREDENTIAL_SUBSTRING_RE = /credential/i;
 const NON_CREDENTIAL_SOURCE_EXTENSIONS_RE = /\.(ts|tsx|js|jsx|mjs|cjs|md)$/i;
 const TEST_FILE_RE = /\.test\.ts$|\.test-support\.ts$/;
-/** The peer whose specifier must not appear in the reachable declaration graph (scan rule 7). */
-const OPTIONAL_PEER = "@anthropic-ai/claude-agent-sdk";
+
+/**
+ * Every peer this package's OWN manifest marks optional, straight off `peerDependenciesMeta`
+ * (scan rule 7) — never a hand-copied list. A peer added or dropped there needs no matching edit
+ * here, and a manifest with none (or with the field entirely absent) yields an empty set rather than
+ * a crash: a package with no optional peers correctly has nothing for this rule to check.
+ */
+export function optionalPeersFrom(manifest: { peerDependenciesMeta?: Record<string, { optional?: boolean } | undefined> }): string[] {
+  return Object.entries(manifest.peerDependenciesMeta ?? {})
+    .filter(([, meta]) => meta?.optional === true)
+    .map(([name]) => name);
+}
+
+/**
+ * Every `exports` entry's `types` condition, as `{ subpath, types }` — what rule 7 must walk so
+ * `./testing` (or any future subpath) gets the same reachable-declaration check as `"."`, not just
+ * the one the top-level `types` field happens to mirror.
+ *
+ * Falls back to the top-level `types` field (or its `./dist/index.d.ts` default) for a manifest whose
+ * `exports` is absent or a bare string — the shape a package with no subpaths at all would have.
+ */
+export function typesEntriesFrom(manifest: { types?: string; exports?: Record<string, unknown> | string }): Array<{ subpath: string; types: string }> {
+  const field = manifest.exports;
+  const fallback = [{ subpath: ".", types: manifest.types ?? "./dist/index.d.ts" }];
+  if (field === undefined || typeof field === "string") return fallback;
+  const out: Array<{ subpath: string; types: string }> = [];
+  for (const [subpath, conditions] of Object.entries(field)) {
+    if (typeof conditions !== "object" || conditions === null) continue;
+    const types = (conditions as Record<string, unknown>)["types"];
+    if (typeof types === "string") out.push({ subpath, types });
+  }
+  return out.length > 0 ? out : fallback;
+}
 
 /**
  * Every MODULE SPECIFIER in a declaration file — `from "x"` and `import("x")`, nothing else.
@@ -273,7 +310,12 @@ export function scanExtracted(root: string, expectedName: string): { violations:
   }
 
   const manifestPath = join(packageRoot, "package.json");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: string; types?: string; exports?: Record<string, unknown> | string };
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    name?: string;
+    types?: string;
+    exports?: Record<string, unknown> | string;
+    peerDependenciesMeta?: Record<string, { optional?: boolean } | undefined>;
+  };
   if (manifest.name !== expectedName) violations.push(`  ${expectedName}: the packed manifest names "${manifest.name}"`);
   if (!(manifest.name ?? "").startsWith("@yanlinglabs/")) violations.push(`  ${expectedName}: the packed manifest is outside the @yanlinglabs scope`);
   const exportsField = manifest.exports;
@@ -286,15 +328,20 @@ export function scanExtracted(root: string, expectedName: string): { violations:
       }
     }
   }
-  // Rule 7: the optional peer must not be reachable from what a consumer's type-checker loads.
-  const typesEntry = manifest.types ?? "./dist/index.d.ts";
-  for (const declaration of reachableDeclarations(packageRoot, typesEntry)) {
-    const specifiers = moduleSpecifiersIn(readFileSync(join(packageRoot, declaration), "utf8"));
-    if (specifiers.some((specifier) => specifier === OPTIONAL_PEER || specifier.startsWith(`${OPTIONAL_PEER}/`))) {
-      violations.push(
-        `  ${expectedName}: ${declaration} is reachable from the package's \`types\` entry and names ${OPTIONAL_PEER}, ` +
-          `which forces every consumer to install an OPTIONAL peer to type-check (see src/seams/official-sdk-shapes.ts)`,
-      );
+  // Rule 7: no optional peer may be reachable from what a consumer's type-checker loads -- for
+  // EVERY `exports` entry, each with its own `types` condition and its own declaration graph.
+  const optionalPeers = optionalPeersFrom(manifest);
+  for (const { subpath, types } of typesEntriesFrom(manifest)) {
+    for (const declaration of reachableDeclarations(packageRoot, types)) {
+      const specifiers = moduleSpecifiersIn(readFileSync(join(packageRoot, declaration), "utf8"));
+      for (const peer of optionalPeers) {
+        if (specifiers.some((specifier) => specifier === peer || specifier.startsWith(`${peer}/`))) {
+          violations.push(
+            `  ${expectedName}: ${declaration} is reachable from exports["${subpath}"].types and names ${peer}, ` +
+              `which forces every consumer of that subpath to install an OPTIONAL peer to type-check`,
+          );
+        }
+      }
     }
   }
   return { violations, filesScanned: files.length };
