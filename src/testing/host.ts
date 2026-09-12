@@ -17,6 +17,12 @@
 // (`./hermetic.ts`, `./capture-env.ts`) plus the peer-free half of `./peers.ts` — a host that installs
 // neither `@yanlinglabs/winter-conformance` nor `@yanlinglabs/winter-provider-conformance` still gets
 // a clean `tsc` AND a clean runtime import of `@yanlinglabs/winter-runtime-sdk/testing`.
+//
+// "NARROW" MEANS PEER-FREE, NOT SMALL. `./peers.ts` type-imports `RuntimeSdkPeers` from `../sdk.ts`,
+// so this file's OWN declaration graph still pulls in `dist/sdk.d.ts` transitively — the same large,
+// Node-type-bearing graph the root `"."` entry already requires every consumer to resolve. That is
+// fine: it names neither optional conformance peer, which is the one thing this file exists to keep
+// clean.
 export { createFakeKeychain, withHermeticHomes, withTempDir } from "./hermetic.ts";
 export type { FakeKeychain } from "./hermetic.ts";
 export { createFakeClaudePeer, createFakeWinterPeer } from "./peers.ts";

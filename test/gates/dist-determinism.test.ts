@@ -67,6 +67,14 @@ describe("dist determinism (R1)", () => {
       // and the declaration tree), so an empty `dist/` in both roots could never pass this by accident.
       expect(Object.keys(hashesA).length).toBeGreaterThan(10);
       expect(hashesA).toEqual(hashesB);
+
+      // NO ORPHAN `.d.ts` IN `dist/testing` (0.0.3 fix round). `tsconfig.build.json`'s `include` is
+      // `src/**/*.ts`, which would otherwise match `./fakes.ts`/`./conformance.ts`/`./index.ts`
+      // directly and emit a declaration for each even though NEITHER published entry (`src/index.ts`,
+      // `src/testing/host.ts`) imports them -- a `.d.ts` with no matching `.js`, naming an optional
+      // conformance peer no consumer of `./testing` need ever install. Reusing `rootA`'s already-built
+      // tree rather than building a third root keeps this assertion free.
+      expect(readdirSync(join(rootA, "dist", "testing")).sort()).toEqual(["capture-env.d.ts", "hermetic.d.ts", "host.d.ts", "host.js", "peers.d.ts"]);
     } finally {
       rmSync(rootA, { recursive: true, force: true });
       rmSync(rootB, { recursive: true, force: true });

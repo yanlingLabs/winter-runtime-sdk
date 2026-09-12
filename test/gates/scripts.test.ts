@@ -10,7 +10,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { entriesFor, missingPeerDeclarations, peerPackageDir, rewriteDeclarationSpecifiers } from "../../scripts/build-packages.ts";
-import { moduleSpecifiersIn, reachableDeclarations, scanExtracted } from "../../scripts/release-pack.ts";
+import { moduleSpecifiersIn, optionalPeersFrom, reachableDeclarations, scanExtracted, typesEntriesFrom } from "../../scripts/release-pack.ts";
 import { assertInstalledTreeIsDistOnly, deriveImportTargets, PROBE_NPMRC, runtimesFor } from "../../scripts/smoke-installed.ts";
 import { checkReleaseVersion, versionFromRef } from "../../scripts/check-release-version.ts";
 import { withTempDir } from "../../src/testing/index.ts";
@@ -93,7 +93,12 @@ describe("release-pack's tarball scan", () => {
   });
 
   test("rule 7: the OPTIONAL peer named in a REACHABLE declaration is rejected -- and only there", async () => {
-    const manifest = { name: "@yanlinglabs/winter-runtime-sdk", types: "./dist/index.d.ts", exports: { ".": { types: "./dist/index.d.ts", default: "./dist/index.js" } } };
+    const manifest = {
+      name: "@yanlinglabs/winter-runtime-sdk",
+      types: "./dist/index.d.ts",
+      exports: { ".": { types: "./dist/index.d.ts", default: "./dist/index.js" } },
+      peerDependenciesMeta: { "@anthropic-ai/claude-agent-sdk": { optional: true } },
+    };
     const clean = {
       "dist/index.js": "export {};",
       "dist/index.d.ts": 'export * from "./seams/index.js";\n',
@@ -104,7 +109,7 @@ describe("release-pack's tarball scan", () => {
 
     // A specifier in a file the `types` entry reaches: REJECTED.
     const reachable = { ...clean, "dist/seams/official-adapter.d.ts": 'import type { Options } from "@anthropic-ai/claude-agent-sdk";\nexport type O = Options;\n' };
-    expect((await scanSynthetic(reachable, manifest)).join("\n")).toContain("forces every consumer to install an OPTIONAL peer");
+    expect((await scanSynthetic(reachable, manifest)).join("\n")).toContain("forces every consumer of that subpath to install an OPTIONAL peer");
 
     // The SAME specifier in a file nothing reaches (Lane A's own internals): allowed, by design.
     const unreachable = { ...clean, "dist/official/adapter.d.ts": 'import type { Options } from "@anthropic-ai/claude-agent-sdk";\nexport type O = Options;\n' };
@@ -114,6 +119,74 @@ describe("release-pack's tarball scan", () => {
     // teach everyone to delete the explanation.
     const commented = { ...clean, "dist/seams/official-adapter.d.ts": '/** not `typeof import("@anthropic-ai/claude-agent-sdk")` -- see the header */\nexport interface OfficialAdapter { launch(): void }\n' };
     expect(await scanSynthetic(commented, manifest)).toEqual([]);
+  });
+
+  test("optionalPeersFrom derives the set from `peerDependenciesMeta` -- never a hand-copied list", () => {
+    expect(optionalPeersFrom({ peerDependenciesMeta: { a: { optional: true }, b: { optional: false }, c: {} } })).toEqual(["a"]);
+    expect(optionalPeersFrom({})).toEqual([]);
+    // This repository's OWN manifest, read live: whichever peers are marked optional TODAY, not a
+    // count pinned here to go stale the next time one is added or dropped.
+    const manifest = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { peerDependenciesMeta?: Record<string, { optional?: boolean }> };
+    const expected = Object.entries(manifest.peerDependenciesMeta ?? {})
+      .filter(([, meta]) => meta?.optional === true)
+      .map(([name]) => name)
+      .sort();
+    expect(optionalPeersFrom(manifest).sort()).toEqual(expected);
+    expect(expected).toContain("@anthropic-ai/claude-agent-sdk");
+    expect(expected).toContain("@yanlinglabs/winter-conformance");
+    expect(expected).toContain("@yanlinglabs/winter-provider-conformance");
+  });
+
+  test("typesEntriesFrom walks EVERY exports entry's `types` condition, not only the root's", () => {
+    expect(
+      typesEntriesFrom({
+        exports: {
+          ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+          "./testing": { types: "./dist/testing/host.d.ts", default: "./dist/testing/host.js" },
+        },
+      }),
+    ).toEqual([
+      { subpath: ".", types: "./dist/index.d.ts" },
+      { subpath: "./testing", types: "./dist/testing/host.d.ts" },
+    ]);
+    // No `exports` at all (or a bare string) -- the shape a package with no subpaths has -- falls
+    // back to the top-level `types` field.
+    expect(typesEntriesFrom({ types: "./dist/index.d.ts" })).toEqual([{ subpath: ".", types: "./dist/index.d.ts" }]);
+    expect(typesEntriesFrom({ exports: "./dist/index.js" })).toEqual([{ subpath: ".", types: "./dist/index.d.ts" }]);
+  });
+
+  test("rule 7 walks EVERY exports entry, and knows the OTHER two optional peers (0.0.3 fix round)", async () => {
+    const manifest = {
+      name: "@yanlinglabs/winter-runtime-sdk",
+      exports: {
+        ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+        "./testing": { types: "./dist/testing/host.d.ts", default: "./dist/testing/host.js" },
+      },
+      peerDependenciesMeta: {
+        "@anthropic-ai/claude-agent-sdk": { optional: true },
+        "@yanlinglabs/winter-conformance": { optional: true },
+        "@yanlinglabs/winter-provider-conformance": { optional: true },
+      },
+    };
+    const clean = {
+      "dist/index.js": "export {};",
+      "dist/index.d.ts": 'export * from "./seams/index.js";\n',
+      "dist/seams/index.d.ts": "export interface OfficialAdapter { launch(): void }\n",
+      "dist/testing/host.js": "export {};",
+      "dist/testing/host.d.ts": 'export { createFakeKeychain } from "./hermetic.js";\n',
+      "dist/testing/hermetic.d.ts": "export declare function createFakeKeychain(): unknown;\n",
+    };
+    expect(await scanSynthetic(clean, manifest)).toEqual([]);
+
+    // A subpath OTHER than "." -- rule 7 must reach it. Before this fix round, only the top-level
+    // `types` field (which mirrors `"."`) was walked, so this was invisible.
+    const testingSubpathReachable = { ...clean, "dist/testing/hermetic.d.ts": 'import type { X } from "@yanlinglabs/winter-provider-conformance/fakes";\nexport declare function createFakeKeychain(): X;\n' };
+    expect((await scanSynthetic(testingSubpathReachable, manifest)).join("\n")).toContain('exports["./testing"].types');
+
+    // A peer OTHER than the Claude Agent SDK -- rule 7 must know it, derived from
+    // `peerDependenciesMeta` rather than a single hardcoded name.
+    const conformancePeerReachable = { ...clean, "dist/seams/index.d.ts": 'import type { X } from "@yanlinglabs/winter-conformance";\nexport interface OfficialAdapter { launch(): X }\n' };
+    expect((await scanSynthetic(conformancePeerReachable, manifest)).join("\n")).toContain("@yanlinglabs/winter-conformance");
   });
 
   test("the declaration walker and the specifier extractor (plants)", () => {

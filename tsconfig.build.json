@@ -20,6 +20,18 @@
   ],
   "exclude": [
     "src/**/*.test.ts",
-    "src/**/*.test-support.ts"
+    "src/**/*.test-support.ts",
+    // These three name an optional conformance peer in a top-level `import type` and are reachable
+    // from NEITHER published entry (`src/index.ts` never touches `src/testing/**`; `./testing`'s own
+    // entry is `src/testing/host.ts`, built to exclude them -- see its header). Excluding them here
+    // (rather than only from the two `bun`-build entry points, which `include`'s glob does not gate)
+    // is what stops the declaration walk from emitting them as ORPHAN `dist/testing/*.d.ts` -- files
+    // with no matching `.js`, produced only because `src/**/*.ts` matched them directly, that name a
+    // peer no consumer of `./testing` need ever install. `src/testing/index.ts` is the INTERNAL, full
+    // harness this repository's own tests import by relative path -- fine to leave un-emitted, since
+    // nothing published ever resolves it.
+    "src/testing/fakes.ts",
+    "src/testing/conformance.ts",
+    "src/testing/index.ts"
   ]
 }
