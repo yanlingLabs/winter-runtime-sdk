@@ -30,10 +30,13 @@ import { afterAll, describe, expect, test } from "bun:test";
 
 import { WINTER_BRAND, WinterCompatibilitySessionStore, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 
+import { endpointFromOrigin, type ContinuityEndpoint } from "@yanlinglabs/winter-provider-runtime";
+
 import { createInMemoryRuntimeDirectoryStore } from "../../src/index.ts";
 import type { SeamContextWithDirectory } from "../../src/seams/context.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
+import { claudeReadyStore } from "../../src/official/claude-ready-store.ts";
 import { createApprovalBridge } from "../../src/official/callbacks.ts";
 import { createRuntimeMessaging } from "../../src/messaging/index.ts";
 import { createFakeKeychain, createFakeWinterPeer, withLoopbackFake } from "../../src/testing/index.ts";
@@ -247,6 +250,164 @@ describeRuntime("P10b-6 / R1 — query({ resume, sessionStore }) through the pin
         // --- ASSERTION 4 (W18-8): `init` reports the RESUMED id, not a fresh one ------------------------
         const init = messages.find((message) => message.type === "system" && message.subtype === "init");
         expect(init).toBeDefined();
+        expect(init?.session_id).toBe(key.sessionId);
+      });
+    },
+    TIMEOUT,
+  );
+
+  // ==================================================================================================
+  // WS-18 W18-14 / P10b-6 R7 CARRY — R1's proof RE-RUN through the Claude-ready-wrapped store.
+  //
+  // A store this well-formed (every assistant entry already carries `message.id`, no legacy
+  // compaction, no oversized/invalid tool ids, no foreign thinking blocks) is exactly the case
+  // `toClaudeReady` must be a NO-OP on: the wrap changes nothing about what reaches the wrapper, and
+  // the resume proof holds identically. `shared.attach(...)` is NOT used here — it enforces identity
+  // with the RAW shared store, which a legitimately wrapped `sessionStore` never has.
+  // ==================================================================================================
+  test(
+    "R1's proof re-runs green through the claude-ready-wrapped store (W18-14)",
+    async () => {
+      /* c8 ignore next */
+      if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
+      const session = hermeticSession("store-resume-proof-wrapped");
+      const key: SessionKey = { projectKey: "p10b-r7-project", sessionId: randomUUID() };
+
+      const uuidOpen = randomUUID();
+      const uuidToolUse = randomUUID();
+      const uuidToolResult = randomUUID();
+      const uuidReply = randomUUID();
+      const TOOL_CALL_ID = "call_orchid_lookup_r7";
+      const OPEN_MARKER = "remember ORCHID-51, please (R7 marker)";
+      const REPLY_MARKER = "ORCHID-51 is stored (R7 marker)";
+      const NEW_PROMPT = "what's the code word? (R7 follow-up)";
+
+      const base = (uuid: string, parentUuid: string | null): Pick<SessionStoreEntry, "uuid" | "parentUuid" | "sessionId" | "timestamp" | "cwd" | "version" | "isSidechain"> => ({
+        uuid,
+        parentUuid,
+        sessionId: key.sessionId,
+        timestamp: new Date(0).toISOString(),
+        cwd: session.cwd,
+        version: "0.0.0",
+        isSidechain: false,
+      });
+
+      const seeded: SessionStoreEntry[] = [
+        { type: "user", ...base(uuidOpen, null), message: { role: "user", content: OPEN_MARKER } },
+        {
+          type: "assistant",
+          ...base(uuidToolUse, uuidOpen),
+          message: {
+            id: winterMessageIdFor(uuidToolUse),
+            type: "message",
+            role: "assistant",
+            content: [{ type: "tool_use", id: TOOL_CALL_ID, name: "lookup", input: { term: "ORCHID-51" } }],
+          },
+        },
+        {
+          type: "user",
+          ...base(uuidToolResult, uuidToolUse),
+          message: { role: "user", content: [{ type: "tool_result", tool_use_id: TOOL_CALL_ID, content: "stored." }] },
+        },
+        {
+          type: "assistant",
+          ...base(uuidReply, uuidToolResult),
+          message: { id: winterMessageIdFor(uuidReply), type: "message", role: "assistant", content: [{ type: "text", text: REPLY_MARKER }] },
+        },
+      ];
+
+      const { peer } = createFakeWinterPeer();
+      const peers = { winter: { ...peer, WinterCompatibilitySessionStore }, claude: bed.module };
+      const shared = createSharedSessionStore({ peers, winterHome: session.brandHome, policy: { batchWindowMs: 1 } });
+      await shared.store.append(key, seeded);
+      await shared.settle(key);
+      const loadedBefore = (await shared.store.load(key)) ?? [];
+      expect(loadedBefore).toHaveLength(seeded.length);
+
+      const { routes, record } = scriptedLoopback([{ text: "resumed, and this turn is the R7 wrapped-store proof" }]);
+
+      await withLoopbackFake({ routes }, async (fake) => {
+        const directoryStore = createInMemoryRuntimeDirectoryStore();
+        const base_ = { peers, keychain: createFakeKeychain(), brand: WINTER_BRAND, directoryStore };
+        const { directory } = createRuntimeMessaging(base_, {});
+        const context: SeamContextWithDirectory = { ...base_, directory };
+
+        const adapter = createOfficialAdapter(context, hermeticEnvPolicy());
+        await adapter.ready();
+
+        const configuredPlaceholder = resumeStagingRoot(randomUUID(), session.home);
+        const target: ContinuityEndpoint = endpointFromOrigin({ providerId: SELECTION.providerId, modelKey: SELECTION.modelRef, family: SELECTION.family });
+        // THE WRAP UNDER TEST: `load()` alone changes; `append` and everything else pass through to the
+        // SAME `shared.store` R1 measures against directly.
+        const wrappedStore = claudeReadyStore(shared.store, { readSidecar: async () => [], resolveEndpoint: endpointFromOrigin, target });
+
+        const options = adapter.buildOptions({
+          mode: "code" as const,
+          selection: SELECTION,
+          cwd: session.cwd,
+          sessionStore: wrappedStore,
+          autoMemoryDirectory: `${session.brandHome}/projects/${key.projectKey}/memory`,
+          brand: WINTER_BRAND,
+          pathToClaudeCodeExecutable: bed.executable,
+          spawnProxy: adapter.spawnProxy,
+          profile: "store-backed-resume" as const,
+          configDir: configuredPlaceholder,
+        });
+        const env = adapter.buildChildEnv({
+          selection: SELECTION,
+          configDir: configuredPlaceholder,
+          projectKey: key.projectKey,
+          brand: WINTER_BRAND,
+          credentials: { ANTHROPIC_BASE_URL: fake.url.replace(/\/$/, ""), ANTHROPIC_API_KEY: "sk-ant-loopback" },
+          base: { HOME: session.home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
+        });
+
+        const live = adapter.resume({
+          address: `session:${key.sessionId}`,
+          selection: SELECTION,
+          prompt: NEW_PROMPT,
+          cwd: session.cwd,
+          profile: "store-backed-resume",
+          configDir: configuredPlaceholder,
+          resume: key.sessionId,
+          options: {
+            // NO `shared.attach(...)` HERE — it enforces identity with the RAW store, which a
+            // legitimately WRAPPED `sessionStore` never has. `options.sessionStore` is already the
+            // wrapped store, set by `buildOfficialOptions` from `input.sessionStore` above.
+            ...options,
+            env,
+            canUseTool: createApprovalBridge({ brand: WINTER_BRAND, mode: "default", broker: async (request) => ({ behavior: "allow", updatedInput: request.input }) }),
+          },
+        });
+
+        const messages: Array<{ type: string; subtype?: string; session_id?: unknown }> = [];
+        for await (const message of live.query) messages.push(message as { type: string; subtype?: string; session_id?: unknown });
+
+        // The same four assertions R1 makes, unchanged in kind.
+        const observedRoot = live.supervisor.observation?.root;
+        expect(observedRoot?.kind).toBe("sdk-resume-staging");
+        expect(observedRoot?.configDir).not.toBe(configuredPlaceholder);
+
+        const withMessages = record.requests.filter((body) => Array.isArray(body["messages"]));
+        const mainRequest = withMessages.reduce((largest, candidate) =>
+          (candidate["messages"] as unknown[]).length > (largest["messages"] as unknown[]).length ? candidate : largest,
+        );
+        const sent = mainRequest["messages"] as Array<{ role: string; content: unknown }>;
+        const stringify = (content: unknown): string => JSON.stringify(content);
+        const openIndex = sent.findIndex((m) => m.role === "user" && stringify(m.content).includes(OPEN_MARKER));
+        const toolUseIndex = sent.findIndex((m) => m.role === "assistant" && stringify(m.content).includes(TOOL_CALL_ID) && stringify(m.content).includes("tool_use"));
+        const replyIndex = sent.findIndex((m) => m.role === "assistant" && stringify(m.content).includes(REPLY_MARKER));
+        expect(openIndex).toBeGreaterThanOrEqual(0);
+        expect(toolUseIndex).toBeGreaterThan(openIndex);
+        expect(replyIndex).toBeGreaterThan(toolUseIndex);
+        expect(toolUseIndex).not.toBe(replyIndex);
+
+        await shared.settle(key);
+        const loadedAfter = (await shared.store.load(key)) ?? [];
+        expect(loadedAfter.length).toBeGreaterThan(loadedBefore.length);
+        for (let i = 0; i < seeded.length; i++) expect(loadedAfter[i]?.["uuid"]).toBe(seeded[i]?.["uuid"]);
+
+        const init = messages.find((message) => message.type === "system" && message.subtype === "init");
         expect(init?.session_id).toBe(key.sessionId);
       });
     },

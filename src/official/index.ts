@@ -88,6 +88,10 @@ export type { InputShapeFactory, JsonSchemaObject, OfficialMcpModule, WinterMcpH
 export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, brandedFlagSettings, buildOfficialOptions, captureOptions, mergeHooks } from "./options-template.ts";
 export type { OptionsTemplatePolicy } from "./options-template.ts";
 
+// WS-18 W18-14 (P10b): the Claude-ready store wrapper.
+export { claudeReadyStore } from "./claude-ready-store.ts";
+export type { ClaudeReadyStoreDeps, ProviderStateRecord } from "./claude-ready-store.ts";
+
 // `RESUME_STAGING_PREFIX`/`resumeStagingRoot`/`isResumeStagingRoot` are NOT here: they are the
 // vendor's own vocabulary, shared with Lane C, and they live in `src/vendor-paths.ts` with one
 // definition and one argument order (review r4, N13). The package barrel exports them once.

@@ -161,7 +161,11 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     strictMcpConfig: true,
     ...(policy.mcpServers === undefined ? {} : { mcpServers: { ...policy.mcpServers } }),
 
-    // WS-05 §6 / §5: ONE store instance, shared with the other branch.
+    // WS-05 §6 / §5: ONE store instance, shared with the other branch. WS-18 W18-14 (P10b): the
+    // caller (the door, `door.ts`) is the one that wraps it with `claude-ready-store.ts`'s
+    // `claudeReadyStore(...)` before it ever reaches here — this template does not know or care
+    // whether `input.sessionStore` is the raw shared store or that wrapper; both satisfy `SessionStore`
+    // structurally, and `load()` is the only member the wrapper's caller can tell apart.
     sessionStore: input.sessionStore as unknown as SessionStore,
     sessionStoreFlush: policy.advertisesHandoff === true ? "eager" : "batched",
 

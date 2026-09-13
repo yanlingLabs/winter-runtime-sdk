@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import type { ProviderStateRecord } from "@yanlinglabs/winter-provider-runtime";
 
 
 import { RuntimeSdkError } from "../errors.ts";
@@ -71,6 +72,52 @@ export class MaterializedResumeError extends RuntimeSdkError {
 /** Where inside a staging root the destination runtime reads this session's transcript. */
 export function materializedTranscriptPath(stagingRoot: string, key: SessionKey): string {
   return join(stagingRoot, "projects", key.projectKey, `${key.sessionId}.jsonl`);
+}
+
+/** The sidecar's path for `key` — WS-05 §13's own naming, never renamed, never a different suffix. */
+export function providerStateSidecarPath(winterHome: string, key: SessionKey): string {
+  return join(winterHome, "projects", key.projectKey, `${key.sessionId}${PROVIDER_STATE_SUFFIX}`);
+}
+
+/**
+ * Reads and parses the provider-state sidecar into `ProviderStateRecord[]` — WS-18 W18-14/W18-20's
+ * (P10b) one reader, shared by the Claude-ready store (`official/claude-ready-store.ts`) and
+ * `reviewSwitch`. A torn tail line is skipped, never fatal — the sidecar's own write-ahead posture
+ * means a partial line is a crash artefact, not a corruption. An absent sidecar (no session, or one
+ * that never carried opaque state) reads as `[]`.
+ *
+ * NEVER LOGGED, and `payload` is never inspected beyond passing it through opaque (WS-05 §13's global
+ * rule): this function parses the ENVELOPE only.
+ */
+export async function readProviderStateSidecar(winterHome: string, key: SessionKey): Promise<ProviderStateRecord[]> {
+  let raw: string;
+  try {
+    raw = readFileSync(providerStateSidecarPath(winterHome, key), "utf8");
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return [];
+    throw error;
+  }
+  const records: ProviderStateRecord[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.trim().length === 0) continue;
+    try {
+      records.push(JSON.parse(line) as ProviderStateRecord);
+    } catch {
+      /* a torn tail: skipped, never fatal (this sidecar's own write-ahead posture) */
+    }
+  }
+  return records;
+}
+
+/**
+ * WS-18 W18-8/W18-13 (P10b): a "conversational" entry — the shape the resume-vs-fresh door and the
+ * compaction reader both mean by that word: a `user`/`assistant` entry that actually carries a
+ * `message`, never a bookkeeping entry (`attachment`, `queue-operation`, `atis-latch`, `last-prompt`,
+ * `mode`, `winter_dialect_record`, a compaction boundary, …).
+ */
+export function hasConversationalEntry(entries: readonly SessionStoreEntry[] | null): boolean {
+  if (entries === null) return false;
+  return entries.some((entry) => (entry["type"] === "user" || entry["type"] === "assistant") && entry["message"] !== undefined);
 }
 
 // --- the decorator ------------------------------------------------------------------------------------
