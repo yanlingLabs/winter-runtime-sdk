@@ -1182,6 +1182,16 @@ function isCompactBoundary(entry: SessionStoreEntry): boolean {
  * "looks each uuid up directly ... rather than walking the parentUuid chain" — which is a
  * RESUME-CORRECTNESS requirement, so a boundary naming a uuid the transcript does not have is a
  * boundary whose kept segment cannot be rebuilt.
+ *
+ * WS-18 W18-12 (P10b) — THE LATENT BUG, FIXED: `isCompactBoundary` already matched Claude's own
+ * `system/compact_boundary`, but this function then demanded the LEGACY snake_case `compact_metadata`
+ * — which is not what the pinned artifact writes there. MEASURED: the vendor's own boundary carries
+ * CAMELCASE `compactMetadata`, with `preservedMessages.{anchorUuid,uuids}` nested the same way. So
+ * EVERY session compacted on the official leg forked at this step and could not hand off at all — the
+ * boundary Claude itself already mirrors into the canonical file was one this validator refused.
+ * Both shapes are recognised now, forever: the legacy Winter dialect's snake_case (still written by
+ * older sessions and read by `runtime/src/store/resume.ts`'s legacy branch) and Claude's own camelCase.
+ * An entry is read as whichever shape it actually carries — never both, and never guessed.
  */
 function validateCompaction(entries: readonly SessionStoreEntry[]): TranscriptValidation {
   const uuids = new Set(entries.map((entry) => entry["uuid"]).filter((uuid): uuid is string => typeof uuid === "string"));
@@ -1189,19 +1199,27 @@ function validateCompaction(entries: readonly SessionStoreEntry[]): TranscriptVa
   for (const entry of entries) {
     if (!isCompactBoundary(entry)) continue;
     boundaries += 1;
-    const metadata = entry["compact_metadata"];
+    const camelMetadata = entry["compactMetadata"];
+    const snakeMetadata = entry["compact_metadata"];
+    // CAMELCASE WINS ON AN ENTRY THAT SOMEHOW CARRIES BOTH (never observed on any real writer): a
+    // boundary is validated by the shape it presents, not by which dialect produced it.
+    const usingCamel = camelMetadata !== undefined;
+    const metadata = usingCamel ? camelMetadata : snakeMetadata;
+    const metadataField = usingCamel ? "compactMetadata" : "compact_metadata";
     if (typeof metadata !== "object" || metadata === null) {
-      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} carries no compact_metadata, so its kept segment cannot be rebuilt` };
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} carries no compact_metadata/compactMetadata, so its kept segment cannot be rebuilt` };
     }
-    const preserved = (metadata as { preserved_messages?: unknown }).preserved_messages;
+    const preservedField = usingCamel ? "preservedMessages" : "preserved_messages";
+    const anchorField = usingCamel ? "anchorUuid" : "anchor_uuid";
+    const preserved = usingCamel ? (metadata as { preservedMessages?: unknown }).preservedMessages : (metadata as { preserved_messages?: unknown }).preserved_messages;
     if (preserved === undefined) continue; // "unset when compaction summarizes everything" — nothing kept
     if (typeof preserved !== "object" || preserved === null) {
-      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed preserved_messages` };
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed ${preservedField} (in ${metadataField})` };
     }
-    const anchor = (preserved as { anchor_uuid?: unknown }).anchor_uuid;
+    const anchor = usingCamel ? (preserved as { anchorUuid?: unknown }).anchorUuid : (preserved as { anchor_uuid?: unknown }).anchor_uuid;
     const kept = (preserved as { uuids?: unknown }).uuids;
     if (typeof anchor !== "string" || !Array.isArray(kept)) {
-      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed preserved_messages (anchor_uuid and uuids are required together)` };
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed ${preservedField} (${anchorField} and uuids are required together)` };
     }
     if (!uuids.has(anchor)) {
       return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} anchors on ${anchor}, which is not in this transcript` };

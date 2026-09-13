@@ -602,6 +602,94 @@ describe("step 5 — validation", () => {
     });
   });
 
+  // ==================================================================================================
+  // WS-18 W18-12 / P10b-6 R4 — THE LATENT BUG: Claude's OWN `system/compact_boundary` (measured:
+  // camelCase `compactMetadata`, with `preservedMessages.{anchorUuid,uuids}` nested the same way) used
+  // to fork at this step, because `validateCompaction` only ever read the legacy snake_case field name
+  // — even though `isCompactBoundary` already matched the entry TYPE. Every session compacted on the
+  // official leg could not hand off at all until this fix; these tests pin the fix and the boundary's
+  // own second-root shape (WS-18 §5: "the boundary is a second `parentUuid: null` root BY DESIGN").
+  // ==================================================================================================
+  test("Claude's own camelCase compact_boundary passes step 5 — even as a mid-file null-parent root", async () => {
+    await withStoreBed(async (bed) => {
+      const [a, b] = await bed.append(2);
+      const boundaryUuid = "eeeeeeee-0000-4000-8000-000000000001";
+      const boundary = bed.entry({
+        uuid: boundaryUuid,
+        type: "system",
+        subtype: "compact_boundary",
+        content: "Conversation compacted",
+        level: "info",
+        // A SECOND ROOT BY DESIGN (W18-12): not chained to `b`, the transcript's own leaf.
+        parentUuid: null,
+        logicalParentUuid: b!["uuid"],
+        compactMetadata: { trigger: "auto", preTokens: 900, postTokens: 120, durationMs: 40, preservedMessages: { anchorUuid: a!["uuid"], uuids: [b!["uuid"]] } },
+      });
+      await bed.shared.store.append(bed.key, [boundary]);
+      await bed.shared.settle(bed.key);
+      // A post-compaction entry, parented on the boundary itself — `validateChain` already tolerates a
+      // null-parent entry anywhere in the file; this proves the CAMELCASE metadata does not additionally
+      // trip step 5.
+      await bed.shared.store.append(bed.key, [bed.entry({ parentUuid: boundaryUuid, type: "user" })]);
+      await bed.shared.settle(bed.key);
+
+      const validation = await validateSessionTranscript(bed.shared, bed.key, bed.home);
+      expect(validation.ok, validation.ok ? "" : validation.reason).toBe(true);
+      if (!validation.ok) throw new Error("unreachable");
+      expect(validation.detail).toContain("1 compaction boundar");
+    });
+  });
+
+  test("malformed camelCase compactMetadata fails step 5 with a typed reason naming the missing uuid", async () => {
+    await withStoreBed(async (bed) => {
+      const [a] = await bed.append(1);
+      await bed.shared.store.append(bed.key, [
+        bed.entry({
+          type: "system",
+          subtype: "compact_boundary",
+          parentUuid: null,
+          compactMetadata: { trigger: "auto", preTokens: 5, preservedMessages: { anchorUuid: a!["uuid"], uuids: ["ffffffff-0000-4000-8000-000000000009"] } },
+        }),
+      ]);
+      await bed.shared.settle(bed.key);
+      const validation = await validateSessionTranscript(bed.shared, bed.key, bed.home);
+      expect(validation.ok).toBe(false);
+      if (validation.ok) throw new Error("unreachable");
+      expect(validation.reason).toContain("ffffffff-0000-4000-8000-000000000009");
+    });
+  });
+
+  test("a camelCase boundary with a malformed preservedMessages (no anchorUuid) is named as such, not confused with the legacy field", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.append(1);
+      await bed.shared.store.append(bed.key, [
+        bed.entry({ type: "system", subtype: "compact_boundary", parentUuid: null, compactMetadata: { trigger: "auto", preservedMessages: { uuids: [] } } }),
+      ]);
+      await bed.shared.settle(bed.key);
+      const validation = await validateSessionTranscript(bed.shared, bed.key, bed.home);
+      expect(validation.ok).toBe(false);
+      if (validation.ok) throw new Error("unreachable");
+      expect(validation.reason).toContain("preservedMessages");
+      expect(validation.reason).toContain("anchorUuid");
+    });
+  });
+
+  test("the LEGACY snake_case shape still validates exactly as before (no regression)", async () => {
+    await withStoreBed(async (bed) => {
+      const [a, b] = await bed.append(2);
+      await bed.shared.store.append(bed.key, [
+        bed.entry({
+          type: "system",
+          subtype: "compact_boundary",
+          compact_metadata: { trigger: "auto", pre_tokens: 900, preserved_messages: { anchor_uuid: a!["uuid"], uuids: [b!["uuid"]] } },
+        }),
+      ]);
+      await bed.shared.settle(bed.key);
+      const validation = await validateSessionTranscript(bed.shared, bed.key, bed.home);
+      expect(validation.ok, validation.ok ? "" : validation.reason).toBe(true);
+    });
+  });
+
   test("framing is checked on the BYTES, because `load()` repairs the one thing bytes can show", async () => {
     await withStoreBed(async (bed) => {
       await bed.append(2);
