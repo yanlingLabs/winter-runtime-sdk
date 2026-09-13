@@ -1,6 +1,6 @@
 {
   "name": "@yanlinglabs/winter-runtime-sdk",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "license": "MIT",
   "type": "module",
   "description": "One door over the Winter Agent SDK and the official Claude Agent SDK: runtime selection, the official-SDK adapter, the shared session store, the handoff barrier and the cross-runtime messaging router.",
@@ -63,7 +63,7 @@
   },
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.250",
-    "@yanlinglabs/winter-agent-sdk": ">=0.0.3 <0.1.0",
+    "@yanlinglabs/winter-agent-sdk": ">=0.0.10 <0.1.0",
     "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0",
     "@yanlinglabs/winter-provider-catalog": ">=0.0.10 <0.1.0",
     "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0",
@@ -84,17 +84,11 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.250",
     "@types/bun": "^1.3.0",
     "@types/node": "^26.4.0",
-    "@yanlinglabs/winter-agent-sdk": "^0.0.3",
+    "@yanlinglabs/winter-agent-sdk": "^0.0.10",
     "@yanlinglabs/winter-conformance": "^0.0.3",
     "@yanlinglabs/winter-provider-catalog": "^0.0.10",
     "@yanlinglabs/winter-provider-conformance": "^0.0.3",
     "@yanlinglabs/winter-provider-runtime": "^0.0.10",
     "typescript": "^5.9.0"
-  },
-  "pnpm": {
-    "overrides": {
-      "@yanlinglabs/winter-agent-sdk": "link:../../../winter-agent-sdk/.worktrees/p10b-s/packages/sdk",
-      "@yanlinglabs/winter-provider-runtime": "link:../../../winter-agent-sdk/.worktrees/p10b-s/packages/provider-runtime"
-    }
   }
 }
