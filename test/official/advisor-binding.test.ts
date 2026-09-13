@@ -69,8 +69,23 @@ describeRuntime("R-8-1(3) — the standing advisor, through the door, against th
           // planting into a different file and proving nothing.
           const shared = (runtimeSdkInternals(sdk)?.barrier as unknown as { shared: { store: SessionStore } } | undefined)?.shared;
           expect(shared).toBeDefined();
+          // A WELL-FORMED Winter-dialect entry (P10b, W18-8): since the door now decides resume-vs-fresh
+          // by checking whether the canonical transcript already has a conversational entry for this
+          // id, planting one here means THIS launch resumes rather than starts fresh — which is the
+          // correct, unavoidable consequence of "every official reopen with at least one entry" (not a
+          // test artefact to route around), so the plant needs every field a real resume reads.
           await shared!.store.append({ projectKey: bed.projectKey, sessionId: BACKEND_SESSION_ID }, [
-            { type: "user", message: { content: [{ type: "text", text: PLANTED }] } },
+            {
+              type: "user",
+              uuid: "11111111-0000-4000-8000-0000000ad510",
+              parentUuid: null,
+              sessionId: BACKEND_SESSION_ID,
+              timestamp: new Date(0).toISOString(),
+              cwd: bed.session.cwd,
+              version: "0.0.0",
+              isSidechain: false,
+              message: { role: "user", content: [{ type: "text", text: PLANTED }] },
+            },
           ]);
 
           const options = bed.officialOptions() as Record<string, unknown>;

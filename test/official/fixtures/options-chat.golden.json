@@ -9,6 +9,9 @@
     "CLAUDE_CONFIG_DIR": "<redacted>",
     "PATH": "<redacted>"
   },
+  "extraArgs": {
+    "thinking-display": "summarized"
+  },
   "hooks": {
     "PreToolUse": [
       {

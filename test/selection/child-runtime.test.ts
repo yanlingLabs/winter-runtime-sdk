@@ -95,7 +95,9 @@ describe("R-7b-1 — the child's own family decides", () => {
     const refusal = selectChildRuntime(parentOn("claude"), childOf({ credentials: credentials([]) }));
     expect(isSelectionRefusal(refusal)).toBe(true);
     if (!isSelectionRefusal(refusal)) throw new Error("unreachable");
-    expect(refusal.reason).toBe("slot-unservable");
+    // WS-18 W18-3 (P10b): the same structured refusal a top-level session gets for a Claude row with
+    // catalog rows but none credentialed.
+    expect(refusal.reason).toBe("no-credential");
   });
 
   test("R-7b-1 — the child's record stamps the SDK version of the runtime the child chose", () => {

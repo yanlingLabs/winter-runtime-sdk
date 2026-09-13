@@ -12,6 +12,7 @@
 // proven — a host that shows "something went wrong" instead of "step 4: the canonical tail does not
 // match the recorded local-write root" is hiding the only fact the user can act on.
 import type { SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import type { SwitchReview } from "@yanlinglabs/winter-provider-runtime";
 
 import type { RuntimeKind, RuntimeSelection, SelectionRefusal } from "../selection/runtime-selection.ts";
 import type { SelectionReview } from "../selection/select-runtime.ts";
@@ -67,6 +68,23 @@ export interface HandoffPlan {
   tempContinuity: "adopt" | "clone-copy";
   /** What the DESTINATION would run this session on, or the typed refusal that says it cannot. */
   selection: HandoffSelection;
+  /**
+   * WS-18 W18-1/W18-4 (P10b): the FRESH selection a caller decided for a family-crossing model
+   * change, carried verbatim from `plan()`'s `requested` option.
+   *
+   * Present only when the caller supplied one. Its whole shape travels to `confirmInit` unmerged with
+   * anything from the session's persisted selection — no source provider, credential ref or auth
+   * family reaches the destination's credential plan (W18-1, I-3). Absent means D13 applies: the
+   * persisted selection is what `plan.selection.selection` stamps the destination's runtime onto.
+   */
+  requested?: RuntimeSelection;
+  /**
+   * WS-18 W18-20 (P10b): the pre-flight loss review for the row `selection` carries — present exactly
+   * when `selection.kind !== "refused"` (a refused plan has nothing to review). Embeds the SAME
+   * classification `reviewSwitch` would return for this session and this row, so a host does not have
+   * to call both doors to get one answer.
+   */
+  review?: SwitchReview;
 }
 
 export type HandoffOutcome =
@@ -76,6 +94,17 @@ export type HandoffOutcome =
 
 /** WS-05 §12's mechanics. Lane C implements; the spine pins the signature. */
 export interface HandoffBarrier {
-  plan(session: SessionKey, to: RuntimeKind): Promise<HandoffPlan>;
+  /**
+   * `opts.requested` (WS-18 W18-4, P10b): reviews a FRESH selection the caller already decided for a
+   * family-crossing model change, instead of the persisted one. Absent — the pre-10b shape — reviews
+   * the session's persisted selection, stamped with `to` (D13's rule, unchanged for this case).
+   */
+  plan(session: SessionKey, to: RuntimeKind, opts?: { requested?: RuntimeSelection }): Promise<HandoffPlan>;
   execute(plan: HandoffPlan): Promise<HandoffOutcome>;
+  /**
+   * WS-18 W18-20 (P10b): the ONE pre-flight review for every family-crossing model change — same-leg
+   * changes (gpt -> deepseek on Winter) as well as cross-runtime ones. Reads the session's persisted
+   * selection and the canonical transcript/sidecar through the shared store; never rewrites anything.
+   */
+  reviewSwitch(session: SessionKey, requested: RuntimeSelection): Promise<SwitchReview>;
 }

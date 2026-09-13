@@ -55,7 +55,10 @@ import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, rmS
 import { join } from "node:path";
 
 import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import { reviewModelSwitch, toClaudeReady, type ContinuityEndpoint, type SwitchReview } from "@yanlinglabs/winter-provider-runtime";
+import type { MessageOrigin, ProviderStateRecord } from "@yanlinglabs/winter-provider-runtime";
 
+import { defaultEndpointResolver } from "../default-endpoint-resolver.ts";
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
@@ -67,7 +70,7 @@ import type { RuntimeKind, RuntimeSelection, SelectionInput } from "../selection
 // answers "what would a fresh decision say about this session today" without ever rewriting the
 // record — which is exactly the question a handoff has to ask before it moves ownership.
 import { reviewPersistedSelection } from "../selection/select-runtime.ts";
-import { createMaterializedResumeDecorator, materializedTranscriptPath, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
+import { createMaterializedResumeDecorator, materializedTranscriptPath, readProviderStateSidecar, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
 import { resumeStagingRoot } from "../vendor-paths.ts";
 import { canonicalTranscriptPath, compareTranscriptTail, localTranscriptPath, reconcileLocalWriteRoot, scanLocalWriteRoot } from "./reconcile.ts";
 import { materializeTempContinuity, resolveEngineTempLayout, tempContinuityModeFor, type EngineTempLayout } from "./temp-continuity.ts";
@@ -242,6 +245,25 @@ export interface HandoffBarrierDeps {
   /** The handoff note's text. The host owns the wording; this is the default. */
   noteText?: (args: { from: RuntimeKind; to: RuntimeKind; session: SessionKey }) => string;
   now?: () => Date;
+  /** WS-18 W18-5 (P10b): overrides the winter -> official writer-lease retry's delay (default 200ms; tests use a small value). */
+  leaseRetryDelayMs?: number;
+  /**
+   * WS-18 W18-20 (P10b): turns a stamped `MessageOrigin` into full endpoint facts for `reviewSwitch` —
+   * normally `createEndpointResolver(registry)` over the host's own (credentialed, live-discovery-
+   * aware) catalog registry. Absent means `defaultEndpointResolver()` — a registry built from the
+   * COMPILED catalog alone (`default-endpoint-resolver.ts`, fix round 1 CRITICAL): the bare
+   * `endpointFromOrigin` fallback reports `readableState: "none"` for every model, which silently
+   * over-warns a real lossless exposed-reasoning transfer (measured: DeepSeek→GLM came back
+   * `warned-lossy` with no resolver injected, breaking R-10b-2/W18-21 on exactly the row it protects).
+   */
+  resolveEndpoint?: (origin: MessageOrigin) => ContinuityEndpoint;
+  /**
+   * WS-18 W18-20 (P10b): the Claude-ready copy's decoration budget, for the truncation check
+   * `reviewSwitch` folds into `SwitchFacts.truncated` when the destination is the official leg.
+   * Absent = unbounded (`toClaudeReady`'s own default) — a host names one only to exercise or narrow
+   * the truncation path deliberately.
+   */
+  reviewSwitchBudgetChars?: number;
 }
 
 export interface HandoffBarrierHandle extends HandoffBarrier {
@@ -439,43 +461,56 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
    * A REFUSAL IS NEVER A SUBSTITUTION. The barrier does not pick a different provider for the
    * destination — that is the selector's business — so a session whose row is gone entirely
    * (`fresh-refused`) travels with Lane D's own refusal object, verbatim.
+   *
+   * WS-18 W18-1/W18-4 (P10b): `args.requested`, WHEN PRESENT, IS THE WHOLE ROW THIS REVIEW IS ABOUT —
+   * never merged with `persisted`. D13's "stamp the persisted row with the destination's runtimeKind"
+   * is re-scoped to fire only when no new model was requested; the claude-oauth → winter refusal and
+   * the "does the official branch serve this" check both read the DESTINATION's own credential family,
+   * which for a `requested` review is `requested.authFamily`, never `persisted`'s.
    */
-  const reviewSelectionFor = async (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }): Promise<HandoffSelection> => {
-    const { persisted, to } = args;
-    const stamped = { ...persisted, runtimeKind: to };
+  const reviewSelectionFor = async (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection; requested?: RuntimeSelection }): Promise<HandoffSelection> => {
+    const { persisted, to, requested } = args;
+    // THE ROW THIS REVIEW IS ABOUT. A requested target travels WHOLE, by identity — no field of the
+    // session's persisted selection reaches it, which is W18-1's entire point ("nothing from the
+    // persisted source selection is merged in: no provider, credential ref, authRef or auth kind").
+    const row = requested ?? persisted;
+    const stamped = requested ?? { ...persisted, runtimeKind: to };
     if (deps.selectionInputFor === undefined) {
       return {
         kind: "unreviewed",
         selection: stamped,
-        detail: `no selection input was supplied, so nothing checked whether ${to} can serve ${persisted.providerId}/${persisted.modelRef}; the destination's own init is the first thing that will (supply \`selectionInputFor\` to review it here instead)`,
+        detail: `no selection input was supplied, so nothing checked whether ${to} can serve ${row.providerId}/${row.modelRef}; the destination's own init is the first thing that will (supply \`selectionInputFor\` to review it here instead)`,
       };
     }
     const supplied = await deps.selectionInputFor(args);
-    // THE REQUEST IS PINNED TO THE RECORDED ROW, and this is the whole correctness of the check.
+    // THE REQUEST IS PINNED TO THE ROW UNDER REVIEW, and this is the whole correctness of the check.
     // `reviewPersistedSelection` re-decides from `input.requested`, which for a HOST's input means
     // "what would this session ask for if it were new" — a question whose answer is about a different
     // row entirely (with an empty request it falls through to the listing's ACTIVE slot set, so a
     // session persisted on Gemini would be reviewed against a Claude row and pass). What a handoff
-    // has to ask is "is the row this session is RECORDED on still servable, and where does it route
-    // today", so the recorded provider and model are pinned into the resolution — the same technique
-    // `resumeChildSelection` uses for the same question, and for the same reason (WS-10's Phase 6.6
-    // amendment: "the resolved provider id must equal the recorded one").
-    const input: SelectionInput = { ...supplied, requested: { provider: persisted.providerId, model: persisted.modelRef } };
-    const review = reviewPersistedSelection({ ...input, persisted });
+    // has to ask is "is the row under review still servable, and where does it route today", so the
+    // row's provider and model are pinned into the resolution — the same technique `resumeChildSelection`
+    // uses for the same question, and for the same reason (WS-10's Phase 6.6 amendment: "the resolved
+    // provider id must equal the recorded one").
+    const input: SelectionInput = { ...supplied, requested: { provider: row.providerId, model: row.modelRef } };
+    const review = reviewPersistedSelection({ ...input, persisted: row });
     if (review.kind === "fresh-refused") {
       return {
         kind: "refused",
         refusal: review.refusal,
-        detail: `this session's persisted selection is no longer servable at all: ${review.refusal.detail}`,
+        detail:
+          requested === undefined
+            ? `this session's persisted selection is no longer servable at all: ${review.refusal.detail}`
+            : `the requested selection is no longer servable at all: ${review.refusal.detail}`,
       };
     }
-    if (to === "winter-agent" && persisted.authFamily === "claude-oauth") {
+    if (to === "winter-agent" && row.authFamily === "claude-oauth") {
       return {
         kind: "refused",
         refusal: {
           refused: true,
           reason: "runtime-unavailable",
-          detail: `${persisted.modelRef} is persisted under a Claude OAuth credential, which never routes to the Winter runtime (D28, WS-13c §0); handing this session to winter-agent would require a different credential, and choosing one is the selector's business rather than the barrier's`,
+          detail: `${row.modelRef} is ${requested === undefined ? "persisted" : "requested"} under a Claude OAuth credential, which never routes to the Winter runtime (D28, WS-13c §0); handing this session to winter-agent would require a different credential, and choosing one is the selector's business rather than the barrier's`,
         },
         detail: "a Claude OAuth credential never routes to the Winter runtime (D28)",
       };
@@ -486,26 +521,64 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         refusal: {
           refused: true,
           reason: "runtime-unavailable",
-          detail: `a fresh decision over this host's catalog routes ${persisted.providerId}/${persisted.modelRef} to ${review.fresh.runtimeKind} (${review.fresh.reason}), so the official runtime does not serve it; the barrier will not invent a provider the destination can serve (WS-00 §2, D13)`,
+          detail: `a fresh decision over this host's catalog routes ${row.providerId}/${row.modelRef} to ${review.fresh.runtimeKind} (${review.fresh.reason}), so the official runtime does not serve it; the barrier will not invent a provider the destination can serve (WS-00 §2, D13)`,
         },
-        detail: `the official runtime does not serve ${persisted.providerId}/${persisted.modelRef}`,
+        detail: `the official runtime does not serve ${row.providerId}/${row.modelRef}`,
       };
     }
-    // THE SELECTION THAT TRAVELS IS THE PERSISTED ONE, with the destination's runtime stamped on it —
-    // never `review.fresh`. D13 makes the persisted choice authoritative and a handoff moves the
-    // RUNTIME, not the model: adopting a fresh provider here would be the silent rewrite D13 forbids.
-    // `review` is carried beside it so a host can render `handoff-required`'s proposal itself.
+    // THE SELECTION THAT TRAVELS IS `stamped` — the REQUESTED row verbatim when there is one, else the
+    // persisted one with the destination's runtime stamped on it — never `review.fresh`. Without a
+    // `requested` target, D13 makes the persisted choice authoritative and a handoff moves the RUNTIME,
+    // not the model: adopting a fresh provider here would be the silent rewrite D13 forbids. `review` is
+    // carried beside it so a host can render `handoff-required`'s proposal itself.
     return { kind: "servable", selection: stamped, review };
   };
 
-  const plan = async (session: SessionKey, to: RuntimeKind): Promise<HandoffPlan> => {
+  /** A `RuntimeSelection`'s identity, as the continuity module's `MessageOrigin` names it. */
+  const originFrom = (selection: RuntimeSelection): MessageOrigin => ({ providerId: selection.providerId, modelKey: selection.modelRef, family: selection.family });
+
+  /**
+   * WS-18 W18-20 (P10b): the ONE pre-flight review, shared by `plan()`'s embedded `review` and the
+   * public `reviewSwitch`. Reads the canonical entries and the sidecar through the shared store —
+   * never rewrites either — and resolves both endpoints through `deps.resolveEndpoint` (a host's own
+   * catalog registry) or, absent one, `endpointFromOrigin`'s registry-free fallback.
+   *
+   * TRUNCATION IS THE CLAUDE-READY COPY'S `dropped`, and ONLY when the destination is the official
+   * leg: a winter destination's carry-tag rendering happens inside the Winter runtime itself, at
+   * request-build time, which this router never sees and cannot measure.
+   */
+  const computeSwitchReview = async (args: { entry: RuntimeDirectoryEntry; session: SessionKey; requested: RuntimeSelection }): Promise<SwitchReview> => {
+    const store = sharedOf();
+    const entries = (await store.store.load(args.session)) ?? [];
+    const sidecar = await readProviderStateSidecar(homeOf(), args.session);
+    const resolve = deps.resolveEndpoint ?? defaultEndpointResolver();
+    const fromEndpoint = resolve(originFrom(args.entry.selection));
+    const toEndpoint = resolve(originFrom(args.requested));
+    let truncated = false;
+    if (args.requested.runtimeKind === "claude-agent") {
+      const { dropped } = toClaudeReady(entries, sidecar, {
+        target: toEndpoint,
+        resolveEndpoint: resolve,
+        ...(deps.reviewSwitchBudgetChars === undefined ? {} : { budgetChars: deps.reviewSwitchBudgetChars }),
+      });
+      truncated = dropped > 0;
+    }
+    return reviewModelSwitch({ entries, sidecarRecords: sidecar, from: fromEndpoint, to: toEndpoint, truncated });
+  };
+
+  const reviewSwitch = async (session: SessionKey, requested: RuntimeSelection): Promise<SwitchReview> => {
+    const entry = await loadEntry(session);
+    return computeSwitchReview({ entry, session, requested });
+  };
+
+  const plan = async (session: SessionKey, to: RuntimeKind, opts: { requested?: RuntimeSelection } = {}): Promise<HandoffPlan> => {
     const entry = await loadEntry(session);
     assertOneDecoratorStore();
     const from = entry.runtimeKind;
     const owner = (await deps.participants?.source?.(session, from)) ?? undefined;
     const health = owner?.health === undefined ? undefined : await owner.health();
     const markers = markersFor({ entry, to, session, ...(health === undefined ? {} : { health }) });
-    const selection = await reviewSelectionFor({ session, from, to, persisted: entry.selection });
+    const selection = await reviewSelectionFor({ session, from, to, persisted: entry.selection, ...(opts.requested === undefined ? {} : { requested: opts.requested }) });
     // A DESTINATION THAT CANNOT SERVE THE SELECTION MAKES STEP 8 KNOWN-UNPROVABLE, which is exactly
     // what `knownUnprovable` is for: a host renders "this will be a fork, here is why" BEFORE it
     // confirms, instead of after the lease, the drain and the staging have all run.
@@ -514,6 +587,9 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       const knownUnprovable = markers.get(step);
       return knownUnprovable === undefined ? { step, name } : { step, name, knownUnprovable };
     });
+    // W18-20: embedded whenever there is a row to review against — never for a refused plan, which
+    // has nothing to run the review over.
+    const review = selection.kind === "refused" ? undefined : await computeSwitchReview({ entry, session, requested: selection.selection });
     return {
       session,
       from,
@@ -522,6 +598,8 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       decorationDoor: decoratorOf().door,
       tempContinuity: tempContinuityModeFor(to),
       selection,
+      ...(opts.requested === undefined ? {} : { requested: opts.requested }),
+      ...(review === undefined ? {} : { review }),
     };
   };
 
@@ -738,7 +816,24 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       // `repair-required` for the life of the store instance, with no local-write root to reconcile
       // against and nothing that clears the flag. A refusal here must leave the session untouched.
       try {
-        await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+        // WS-18 W18-5 (P10b): winter -> official RETRIES the writer lease a bounded number of times.
+        // The exiting WINTER child's own process exit is asynchronous relative to `owner.close()`
+        // returning above — its pid can still hold the lease for a moment after this barrier considers
+        // it closed — and the lease becomes takeover-able the instant that pid actually exits. Every
+        // other direction keeps the original single-attempt behaviour: a live SOURCE process (a claude
+        // child, or another instance of this daemon) holding the lease is a real conflict, not a race
+        // this barrier should paper over with a retry.
+        const attempts = plan.from === "winter-agent" && plan.to === "claude-agent" ? WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS : 1;
+        const delayMs = deps.leaseRetryDelayMs ?? WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS;
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+            break;
+          } catch (error) {
+            if (!isLeaseError(error) || attempt >= attempts) throw error;
+            await sleepMs(delayMs);
+          }
+        }
       } catch (error) {
         if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
         return lossy(6, `the writer lease could not be verified: ${error instanceof Error ? error.message : String(error)}`);
@@ -816,6 +911,83 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         await unwind();
         return lossy(8, "no destination runtime confirmed the resumed session and level, and the next user message must not be delivered until one does");
       }
+
+      // ---- WS-18 W18-5 (P10b): a WINTER destination commits WRITE-AHEAD, before `confirmInit` -------
+      //
+      // The producer record is itself a canonical append (`commitProducerRecord`), and the instant the
+      // writer lease passes to the winter child, THIS pid must write nothing more to the canonical
+      // transcript — a post-confirm write here would reproduce H1's death on the other side. So for
+      // this direction the order is: commit, release, THEN confirm. If confirm fails, the record
+      // already named a destination that never (successfully) started — takeover the now-releasable
+      // lease and REVERT the record to the source, which is what makes `unwind()` alone insufficient
+      // here (it only clears a marker this branch has already cleared, and a staging root winter never
+      // had). A claude-agent destination is UNCHANGED below: it still confirms first, then commits,
+      // because its mirror writes land under the daemon's own pid regardless of who owns the session.
+      if (plan.to === "winter-agent") {
+        try {
+          await commitProducerRecord({ shared, session, staged });
+          committed = true;
+          pendingWritten = false;
+        } catch (error) {
+          await unwind();
+          const reason = `the producer record could not be written ahead of the winter destination's confirm: ${error instanceof Error ? error.message : String(error)}`;
+          record(8, false, reason);
+          return { kind: "lossy-fork-offered", reason, step: 8, detail: reason, steps: trail };
+        }
+        // FROM HERE THE DAEMON'S PID APPENDS NOTHING MORE TO THIS SESSION'S CANONICAL TRANSCRIPT. The
+        // release is best-effort in its RETURN VALUE only (`false` merely means this pid did not hold
+        // it, which is not an error — `markHandoffPending`'s own acquire two lines above guarantees it
+        // did); a thrown release is a real failure and is allowed to propagate to the outer catch,
+        // which reports honestly off `committed` (already true: the durable record already moved).
+        await shared.releaseLease(session);
+        let confirmed: HandoffStepReport;
+        try {
+          confirmed = await destination.confirmInit(target);
+        } catch (error) {
+          confirmed = { ok: false, reason: error instanceof Error ? error.message : String(error) };
+        }
+        if (!confirmed.ok) {
+          // TAKE OVER AND REVERT (W18-5): the write-ahead record already named the destination; a dead
+          // or refusing child leaves that record dangling unless this pid reclaims the lease (takeover
+          // from a dead holder is allowed — the same rule `acquireHandoffLease` and the writer lease
+          // both already use) and writes ONE more record naming the source again.
+          try {
+            await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+            await shared.store.append(session, [{ ...staged.record, producerRuntime: plan.from }]);
+            await shared.settle(session);
+            committed = false;
+          } catch (revertError) {
+            // THE REVERT ITSELF FAILED: the durable record still names the destination that never
+            // started, so the outer catch's own vocabulary ("past the producer record there is no
+            // honest way to say the source kept the session") is the correct report — `committed`
+            // stays `true` and this propagates there rather than claiming a fork that did not happen.
+            throw new HandoffCommitError(
+              `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source failed: ${revertError instanceof Error ? revertError.message : String(revertError)}`,
+            );
+          }
+          await unwind();
+          record(8, false, confirmed.reason);
+          return { kind: "lossy-fork-offered", reason: confirmed.reason, step: 8, detail: confirmed.reason, steps: trail };
+        }
+        stagedRoot = undefined;
+        const notes: string[] = [];
+        try {
+          await syncDirectoryEntry({ context, entry, plan, staged, now: now() });
+        } catch (error) {
+          notes.push(`the host directory's derived copy is behind and will be repaired on the next plan(): ${error instanceof Error ? error.message : String(error)}`);
+        }
+        record(8, true, confirmed.detail ?? `the destination confirmed ${session.sessionId} at level ${level}, and ownership moved (write-ahead)`);
+        return {
+          kind: "resumed",
+          selection: plan.selection.selection,
+          step: 8,
+          detail: `the session resumed on ${plan.to} at level ${level} through the ${decorated.door} decoration door, write-ahead${notes.length === 0 ? "" : ` — ${notes.join("; ")}`}`,
+          target,
+          steps: trail,
+        };
+      }
+
+      // ---- the pre-existing claude-agent path: CONFIRM first, then commit ----------------------------
       // FROM HERE THE ROOT IS THE DESTINATION'S (F-7). It is about to start a runtime against that
       // exact directory, and whether it answers, throws or never returns, deleting it under a live
       // child is not a cleanup — it is a second failure that hides the first.
@@ -922,6 +1094,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   return {
     plan,
     execute,
+    reviewSwitch,
     get shared() {
       return sharedOf();
     },
@@ -1167,6 +1340,16 @@ function isCompactBoundary(entry: SessionStoreEntry): boolean {
  * "looks each uuid up directly ... rather than walking the parentUuid chain" — which is a
  * RESUME-CORRECTNESS requirement, so a boundary naming a uuid the transcript does not have is a
  * boundary whose kept segment cannot be rebuilt.
+ *
+ * WS-18 W18-12 (P10b) — THE LATENT BUG, FIXED: `isCompactBoundary` already matched Claude's own
+ * `system/compact_boundary`, but this function then demanded the LEGACY snake_case `compact_metadata`
+ * — which is not what the pinned artifact writes there. MEASURED: the vendor's own boundary carries
+ * CAMELCASE `compactMetadata`, with `preservedMessages.{anchorUuid,uuids}` nested the same way. So
+ * EVERY session compacted on the official leg forked at this step and could not hand off at all — the
+ * boundary Claude itself already mirrors into the canonical file was one this validator refused.
+ * Both shapes are recognised now, forever: the legacy Winter dialect's snake_case (still written by
+ * older sessions and read by `runtime/src/store/resume.ts`'s legacy branch) and Claude's own camelCase.
+ * An entry is read as whichever shape it actually carries — never both, and never guessed.
  */
 function validateCompaction(entries: readonly SessionStoreEntry[]): TranscriptValidation {
   const uuids = new Set(entries.map((entry) => entry["uuid"]).filter((uuid): uuid is string => typeof uuid === "string"));
@@ -1174,19 +1357,27 @@ function validateCompaction(entries: readonly SessionStoreEntry[]): TranscriptVa
   for (const entry of entries) {
     if (!isCompactBoundary(entry)) continue;
     boundaries += 1;
-    const metadata = entry["compact_metadata"];
+    const camelMetadata = entry["compactMetadata"];
+    const snakeMetadata = entry["compact_metadata"];
+    // CAMELCASE WINS ON AN ENTRY THAT SOMEHOW CARRIES BOTH (never observed on any real writer): a
+    // boundary is validated by the shape it presents, not by which dialect produced it.
+    const usingCamel = camelMetadata !== undefined;
+    const metadata = usingCamel ? camelMetadata : snakeMetadata;
+    const metadataField = usingCamel ? "compactMetadata" : "compact_metadata";
     if (typeof metadata !== "object" || metadata === null) {
-      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} carries no compact_metadata, so its kept segment cannot be rebuilt` };
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} carries no compact_metadata/compactMetadata, so its kept segment cannot be rebuilt` };
     }
-    const preserved = (metadata as { preserved_messages?: unknown }).preserved_messages;
+    const preservedField = usingCamel ? "preservedMessages" : "preserved_messages";
+    const anchorField = usingCamel ? "anchorUuid" : "anchor_uuid";
+    const preserved = usingCamel ? (metadata as { preservedMessages?: unknown }).preservedMessages : (metadata as { preserved_messages?: unknown }).preserved_messages;
     if (preserved === undefined) continue; // "unset when compaction summarizes everything" — nothing kept
     if (typeof preserved !== "object" || preserved === null) {
-      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed preserved_messages` };
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed ${preservedField} (in ${metadataField})` };
     }
-    const anchor = (preserved as { anchor_uuid?: unknown }).anchor_uuid;
+    const anchor = usingCamel ? (preserved as { anchorUuid?: unknown }).anchorUuid : (preserved as { anchor_uuid?: unknown }).anchor_uuid;
     const kept = (preserved as { uuids?: unknown }).uuids;
     if (typeof anchor !== "string" || !Array.isArray(kept)) {
-      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed preserved_messages (anchor_uuid and uuids are required together)` };
+      return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} has a malformed ${preservedField} (${anchorField} and uuids are required together)` };
     }
     if (!uuids.has(anchor)) {
       return { ok: false, reason: `compaction boundary ${String(entry["uuid"])} anchors on ${anchor}, which is not in this transcript` };
@@ -1386,6 +1577,14 @@ function cryptoRandomUuid(): string {
 
 function isLeaseError(error: unknown): boolean {
   return error instanceof Error && error.name === "WinterStoreLeaseError";
+}
+
+/** WS-18 W18-5 (P10b): the winter -> official writer-lease retry's bound. Overridable by `deps.leaseRetryDelayMs` (tests). */
+const WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS = 5;
+const WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS = 200;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // --- step 1's lease -------------------------------------------------------------------------------------

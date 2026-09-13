@@ -205,11 +205,39 @@ export interface SelectionInput {
  * both are wrong — route to the official runtime (violating D4's "Dispatch and Chat → Winter-only,
  * in-daemon") or route to Winter (violating D28's "Claude oAuth never routes to winter").
  */
+/**
+ * WS-18 W18-3 (P10b): one alternative door a Claude row could be served through — configured or not.
+ *
+ * `authKind` is a `SelectionAuthFamily` for every entry `select-runtime.ts` produces today, but this
+ * field is deliberately wider than that union: it is what a HOST'S hint renders verbatim, and a future
+ * door (a new gateway auth shape the catalog names before this package's auth-family union grows to
+ * match) must still be listable rather than dropped for having no matching literal.
+ */
+export interface SelectionAlternative {
+  providerId: string;
+  authKind: string;
+  /** A short human label ("Anthropic API key", "Amazon Bedrock", …) — never a raw provider id alone. */
+  label: string;
+}
+
 export interface SelectionRefusal {
   refused: true;
-  reason: "slot-unservable" | "claude-oauth-not-approved" | "runtime-unavailable" | "mode-forbids-runtime";
+  /**
+   * `"no-credential"` (W18-3, P10b): a Claude-family model has no credential able to serve it through
+   * ANY door — the catalog has rows for it, every one of them is just unconfigured. Widened to
+   * `string` beyond the four members this package still returns itself, so a host relaying a refusal
+   * value through (e.g. a resume review that read one from elsewhere) never has to invent a member.
+   */
+  reason: "slot-unservable" | "claude-oauth-not-approved" | "runtime-unavailable" | "mode-forbids-runtime" | "no-credential" | (string & {});
   /** One sentence naming what was missing, for the host to surface verbatim. */
   detail: string;
+  /**
+   * `reason: "no-credential"` ONLY: every catalog row able to serve the requested canonical model,
+   * whether or not it is configured, grouped by provider and auth kind (W18-3). The daemon's hint is
+   * built FROM this list, never from a hardcoded provider list — so an entry here is the only way a
+   * door reaches the user.
+   */
+  alternatives?: SelectionAlternative[];
 }
 
 /**

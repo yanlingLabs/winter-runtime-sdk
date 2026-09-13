@@ -81,7 +81,9 @@ describe("WS-17 row 17 — one raw model id, three providers", () => {
     });
     expect(isSelectionRefusal(onlyReseller)).toBe(true);
     if (!isSelectionRefusal(onlyReseller)) throw new Error("unreachable");
-    expect(onlyReseller.reason).toBe("slot-unservable");
+    // WS-18 W18-3 (P10b): the vendor's own row exists in the catalog and is merely uncredentialed, so
+    // this is now the structured `no-credential` refusal rather than the generic `slot-unservable`.
+    expect(onlyReseller.reason).toBe("no-credential");
 
     // And the auth view a selection records is its own provider's, not the family's.
     expect(on("anthropic").authFamily).toBe("api-key");

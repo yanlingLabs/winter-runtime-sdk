@@ -39,7 +39,7 @@ export type { PeerVersionIdentity, PeerVersionSource, VersionMatrixReport } from
 
 // --- D13/D28: selection and its persisted choice ---------------------------------------------------
 export { isSelectionRefusal, selectChildRuntime, selectRuntime, SelectionRefusedError } from "./selection/runtime-selection.ts";
-export type { ChildSelectionInput, CredentialPresence, RuntimeKind, RuntimeSelection, SelectionInput, SelectionRefusal } from "./selection/runtime-selection.ts";
+export type { ChildSelectionInput, CredentialPresence, RuntimeKind, RuntimeSelection, SelectionAlternative, SelectionInput, SelectionRefusal } from "./selection/runtime-selection.ts";
 // Lane D's three doors and the vocabulary they speak (review r1 N1's trimmed set; controller-applied at merge).
 export { CHILD_PROVIDER_UNAVAILABLE, resumeChildSelection, selectChildRuntimePairing } from "./selection/child-runtime.ts";
 export type { ChildResumeOutcome, ChildRuntimePairing } from "./selection/child-runtime.ts";
@@ -144,6 +144,11 @@ export type {
   HandoffOwnerHealth, HandoffParticipants, HandoffResumeTarget, HandoffSourceOwner, HandoffStepReport,
 } from "./store/handoff-barrier.ts";
 export type { HandoffSelection } from "./seams/handoff.ts";
+// WS-18 W18-20 (P10b, fix round 1): the catalog-backed DEFAULT `resolveEndpoint` both
+// `HandoffBarrierDeps` and `OfficialLegDeps` fall back to when a host injects none. Exported so a
+// host can call it directly (e.g. to warm the cache, or to use the same default in its own tooling)
+// rather than only ever reaching it as a fallback.
+export { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 // `HandoffBarrierDeps.decorator` is typed with this — a host building `HandoffBarrierDeps` needs the
 // name to type it, not only the barrier's own construction path.
 export type { MaterializedResumeDecoratorHandle } from "./store/materialized-resume.ts";

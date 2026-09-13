@@ -56,6 +56,11 @@ import type { RuntimeAddress } from "./seams/messaging-contract.ts";
 import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialSession, RemoteConfigPolicy } from "./seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialUserMessage } from "./seams/official-sdk-shapes.ts";
 import type { RuntimeKind, RuntimeSelection } from "./selection/runtime-selection.ts";
+import { claudeReadyStore } from "./official/claude-ready-store.ts";
+import type { ContinuityEndpoint } from "@yanlinglabs/winter-provider-runtime";
+import type { MessageOrigin } from "@yanlinglabs/winter-provider-runtime";
+import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
+import { hasConversationalEntry, readProviderStateSidecar } from "./store/materialized-resume.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
 
@@ -281,6 +286,15 @@ export interface OfficialLegDeps {
   advisor?: { resolveReviewer?: ReviewerResolver; maxChars?: number };
   /** The adapter's own policy, so a host's `env`/`containment` choices reach the door's own builders. */
   policy?: RouterOfficialPolicy;
+  /**
+   * WS-18 W18-14/W18-20 (P10b): turns a stamped `MessageOrigin` into full endpoint facts — normally
+   * `createEndpointResolver(registry)` over the host's own (credentialed, live-discovery-aware)
+   * catalog registry. Absent means `defaultEndpointResolver()` (`default-endpoint-resolver.ts`, fix
+   * round 1 CRITICAL) — a registry built from the COMPILED catalog alone, no credentials, no network:
+   * the bare `endpointFromOrigin` fallback reports `readableState: "none"` for every model, which is
+   * a false "no reasoning to lose" for a family the catalog actually documents.
+   */
+  resolveEndpoint?: (origin: MessageOrigin) => ContinuityEndpoint;
   /**
    * "A leg opened on this runtime" — the door's in-process ledger, told only when it is true
    * (review r1, I-1).
@@ -633,13 +647,33 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     }
     const shared = deps.shared();
     const home = shared.identity.winterHome;
-    const resume = request.options.resume;
-    const profile: OfficialLaunchProfile = resume === undefined ? "fresh-spool" : "store-backed-resume";
-    const configDir = resume === undefined ? (request.input.spool ?? officialSpoolRoot(home)) : (request.input.stagingRoot ?? resumeStagingRoot(resume));
     const cwd = request.options.cwd;
     if (cwd === undefined || cwd.length === 0) {
       throw new RuntimeLaunchInputError({ field: "options.cwd", reason: "the official branch's containment floor, its plugin root and its post-hoc sweep are all anchored on this session's working directory (WS-14 §8)" });
     }
+    // R-7b-13: the WINTER leg's own key for this cwd, computed HERE (not only at its later use site)
+    // because the resume decision below needs it too — both branches must look the canonical store up
+    // under the identical key they will write it under.
+    const projectKey = request.input.projectKey ?? deps.transcriptProjectKey(cwd);
+    // WS-18 W18-8 (P10b-4): THE RESUME-VS-FRESH DECISION LIVES HERE, not with the caller. The caller
+    // still just names the backend id this generation should use or continue — `options.resume` is
+    // honoured verbatim for a caller that already knows it wants resume semantics, and the common case,
+    // `options.sessionId`, is exactly the id a prior generation (a handoff destination, or an official
+    // session simply reopened after a restart) would have reported. Either way, this door decides for
+    // ITSELF whether that id already has a conversation on disk — never trusting the caller's choice of
+    // field name to mean "fresh" or "resume": a caller that has forgotten whether this id was ever used
+    // must still land on the correct profile.
+    const requestedBackendId = request.options.resume ?? request.options.sessionId;
+    const hasConversation =
+      requestedBackendId === undefined || requestedBackendId.length === 0
+        ? false
+        : hasConversationalEntry(await shared.store.load({ projectKey, sessionId: requestedBackendId }));
+    const resume = hasConversation ? requestedBackendId : undefined;
+    // A FRESH id is `sessionId` only when the caller named one AND the store has nothing for it yet — a
+    // request naming NEITHER field still means "let the vendor allocate one", which stays `undefined`.
+    const freshSessionId = resume === undefined ? requestedBackendId : undefined;
+    const profile: OfficialLaunchProfile = resume === undefined ? "fresh-spool" : "store-backed-resume";
+    const configDir = resume === undefined ? (request.input.spool ?? officialSpoolRoot(home)) : (request.input.stagingRoot ?? resumeStagingRoot(resume));
     // §3's child env is a REPLACEMENT, and a replacement without `HOME` is not one (review r1's nit).
     // The runtime derives paths from `os.homedir()`, whose OS-level fallback is the user database —
     // invisible to `CLAUDE_CONFIG_DIR` scoping, and on a developer machine it is the real vendor home
@@ -670,11 +704,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       ...officialConnectionEnv({ selection: request.selection, provider: request.options.provider, explicit: request.input.connectionEnv }),
     };
     const remoteConfig: RemoteConfigPolicy = request.input.remoteConfig ?? deps.policy?.env?.remoteConfig ?? "deny";
-    // R-7b-13: the WINTER leg's own key for this cwd, so both branches write under one project
-    // directory and share one auto-memory directory. The session id — the old default — is a
-    // PER-SESSION key, which put every session in a directory of its own and made the `projectKey`
-    // half of the `SessionKey` a host must pass to `sdk.handoff()` something nothing documented.
-    const projectKey = request.input.projectKey ?? deps.transcriptProjectKey(cwd);
+    // `projectKey` was already computed above, for the resume decision — R-7b-13's key is one
+    // computation per cwd, not two: both branches write under one project directory and share one
+    // auto-memory directory, and the session id (the old default) is a PER-SESSION key, which put
+    // every session in a directory of its own and made the `projectKey` half of the `SessionKey` a
+    // host must pass to `sdk.handoff()` something nothing documented.
     const env = buildOfficialChildEnv(
       {
         selection: request.selection,
@@ -720,12 +754,27 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       ...(routerBuiltMcpServers === undefined && request.input.mcpServers === undefined ? {} : { mcpServers: { ...routerBuiltMcpServers, ...request.input.mcpServers } }),
       ...(bridge === undefined ? {} : { canUseTool: bridge }),
       ...(request.options.permissionMode === undefined ? {} : { permissionMode: request.options.permissionMode as OfficialPermissionMode }),
-      ...(request.options.sessionId === undefined ? {} : { sessionId: request.options.sessionId }),
+      // W18-8/P10b-4: `freshSessionId`/`resume` are THIS door's own decision (above), never the raw
+      // `request.options` fields — the two are never passed together (the pinned runtime refuses that
+      // combination), and which one applies is exactly what the canonical-transcript check decided.
+      ...(freshSessionId === undefined ? {} : { sessionId: freshSessionId }),
       ...(resume === undefined ? {} : { resume }),
       ...(request.options.forkSession === undefined ? {} : { forkSession: request.options.forkSession }),
       ...(request.options.disallowedTools === undefined ? {} : { additionalDisallowedTools: request.options.disallowedTools }),
       ...(deps.policy?.containment === undefined ? {} : { containment: deps.policy.containment }),
     };
+    // WS-18 W18-14 (P10b): the official leg's `sessionStore.load()` returns the CLAUDE-READY copy, not
+    // the canonical entries verbatim — appends still land on the real store, byte-identical, and the
+    // canonical file is never touched by a load. `target` is what THIS session — the destination —
+    // would run this on, from its own decided selection; there is no other endpoint the official leg
+    // could ever be loading for.
+    const resolveEndpoint = deps.resolveEndpoint ?? defaultEndpointResolver();
+    const target = resolveEndpoint({ providerId: request.selection.providerId, modelKey: request.selection.modelRef, family: request.selection.family });
+    const readyStore = claudeReadyStore(shared.store, {
+      readSidecar: (key) => readProviderStateSidecar(home, key),
+      resolveEndpoint,
+      target,
+    });
     const officialOptions: OfficialOptions = buildOfficialOptions(
       {
         // D4/D28: the official runtime serves CODE only — every other mode is refused by the selector
@@ -734,7 +783,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         mode: "code",
         selection: request.selection,
         cwd,
-        sessionStore: shared.store,
+        sessionStore: readyStore,
         autoMemoryDirectory: request.input.autoMemoryDirectory ?? `${home}/projects/${projectKey}/memory`,
         brand: deps.brand,
         pathToClaudeCodeExecutable: executable,

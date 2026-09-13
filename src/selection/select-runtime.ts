@@ -36,6 +36,7 @@ import type {
   CredentialPresence,
   ProviderAuthView,
   RuntimeSelection,
+  SelectionAlternative,
   SelectionAuthFamily,
   SelectionInput,
   SelectionRefusal,
@@ -251,6 +252,103 @@ function candidatesFor(listing: ModelFamilyListing, familyId: string, canonicalM
   return out;
 }
 
+/**
+ * WS-13c §4 step 1 ONLY — the rows for a canonical id that are not blocked, deprecated or KNOWN
+ * absent, with NO credential filter. This is `candidatesFor`'s first half in isolation, kept as its
+ * own function because W18-3's alternatives need exactly this list and nothing `candidatesFor` builds
+ * from it (a `SelectionCandidate` needs an `auth` view, which is precisely the thing a row without a
+ * credential does not have).
+ */
+function uncredentialedRowsFor(listing: ModelFamilyListing, familyId: string, canonicalModelId: string): ModelRow[] {
+  const family = familyById(listing, familyId);
+  const model: ModelEntry | undefined = family?.models.find((entry) => entry.canonicalModelId === canonicalModelId);
+  if (model === undefined) return [];
+  return model.rows.filter((row) => row.status !== "blocked" && row.status !== "deprecated" && row.servable !== "absent");
+}
+
+/** A short human label for a well-known Claude-serving provider id, never invented for an unknown one. */
+function labelForProvider(providerId: string): string {
+  switch (providerId) {
+    case "bedrock":
+      return "Amazon Bedrock";
+    case "vertex":
+      return "Google Vertex AI";
+    case "openrouter":
+      return "OpenRouter";
+    default:
+      return providerId;
+  }
+}
+
+/**
+ * W18-3's `alternatives`: every catalog row able to serve the requested canonical Claude model,
+ * WHETHER OR NOT it is configured, grouped by provider and auth kind.
+ *
+ * ANTHROPIC IS THREE DOORS BEHIND ONE ROW (D13/D14/P10a), which a per-row auth view cannot express —
+ * the catalog names one `anthropic` row for the model, and this package already owns the vocabulary
+ * for its three auth kinds (`api-key`, `console-profile`, `claude-oauth`), so it is the one provider
+ * this function names by id rather than by declared auth view. The subscription door is listed only
+ * while `input.claudeOauthApproved` is true (D14's own ship gate is the "officialSubscriptionAuthEnabled"
+ * input at this layer — a claude.ai subscription IS a Claude OAuth credential, WS-15 §1's own union).
+ *
+ * BEDROCK AND VERTEX ARE NAMED THE SAME WAY, for the same reason: WS-14 §12's own table is what makes
+ * them `cloud-credential-chain` (`officialServesBackend`'s own comment names them as exactly that
+ * table's rows), and that fact does not depend on whether THIS host happens to have one configured —
+ * unlike a reseller row, there is nothing else it could mean.
+ *
+ * EVERY OTHER PROVIDER is named from `input.credentials.authByProvider`'s DECLARED view when a host
+ * supplies one for it — NEVER used to decide whether the row is a candidate (that admission stays
+ * `candidatesFor`'s `byProvider`-gated business); here it is read only for its label-worthy content.
+ * Absent that, the auth kind is reported `"unknown"` rather than guessed: a host that wants a named
+ * auth kind on the hint declares it, and this function never invents a credential shape a row might
+ * not use.
+ */
+function claudeAlternatives(rows: readonly ModelRow[], input: Pick<SelectionInput, "credentials" | "claudeOauthApproved">): SelectionAlternative[] {
+  const out: SelectionAlternative[] = [];
+  const seen = new Set<string>();
+  const push = (entry: SelectionAlternative): void => {
+    const key = `${entry.providerId}/${entry.authKind}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(entry);
+  };
+  for (const row of rows) {
+    if (row.providerId === "anthropic") {
+      push({ providerId: "anthropic", authKind: "api-key", label: "Anthropic API key" });
+      push({ providerId: "anthropic", authKind: "console-profile", label: "Anthropic Console login" });
+      if (input.claudeOauthApproved) push({ providerId: "anthropic", authKind: "claude-oauth", label: "claude.ai subscription" });
+      continue;
+    }
+    if (row.providerId === "bedrock" || row.providerId === "vertex") {
+      push({ providerId: row.providerId, authKind: "cloud-credential-chain", label: labelForProvider(row.providerId) });
+      continue;
+    }
+    const declared = input.credentials.authByProvider?.[row.providerId];
+    push({ providerId: row.providerId, authKind: declared?.authFamily ?? "unknown", label: labelForProvider(row.providerId) });
+  }
+  return out;
+}
+
+/**
+ * W18-3: a Claude-family request with catalog rows but NO credentialed one among them is refused
+ * `reason: "no-credential"`, with `alternatives` naming every door — never the generic
+ * `slot-unservable` a host would have to parse prose to distinguish from "this model does not exist".
+ *
+ * `uncredentialed.length === 0` (every row for this model is blocked/deprecated/absent, or the model
+ * simply has none) is NOT this case — that is still `slot-unservable`, because there is no door to
+ * offer at all, which is a different fact from "doors exist and none is configured".
+ */
+function claudeNoCredentialRefusal(subject: string, uncredentialed: readonly ModelRow[], input: SelectionInput): SelectionRefusal | undefined {
+  if (uncredentialed.length === 0) return undefined;
+  const pinned = input.requested.provider === undefined ? "" : ` pinned to the provider ${JSON.stringify(input.requested.provider)} and`;
+  return {
+    refused: true,
+    reason: "no-credential",
+    detail: `${subject} is${pinned} served by ${uncredentialed.length === 1 ? "a row" : "rows"} with no configured credential ref: add one of the doors this refusal lists`,
+    alternatives: claudeAlternatives(uncredentialed, input),
+  };
+}
+
 /** The shape both entry points share once the child's request has been normalised. */
 interface ChildLikeInput {
   requested: { slot?: string; model?: string; provider?: string };
@@ -339,7 +437,18 @@ export function resolveCandidateRows(input: SelectionInput & { requested: { mode
   const candidates = candidatesFor(input.families, resolved.familyId, resolved.canonicalModelId, input);
   const [first, ...rest] = candidates;
   if (first === undefined) {
-    return refuse("slot-unservable", unservableDetail(`the model ${JSON.stringify(input.requested.model)} (${resolved.familyId}/${resolved.canonicalModelId})`, input));
+    const subject = `the model ${JSON.stringify(input.requested.model)} (${resolved.familyId}/${resolved.canonicalModelId})`;
+    // W18-3: a Claude row with catalog rows but none credentialed gets the structured refusal, not the
+    // generic prose — but only when the pin (if any) admits it: a provider pinned to a row that is not
+    // even in the catalog is still the generic "no such row" refusal.
+    if (resolved.familyId === CLAUDE_FAMILY_ID) {
+      const uncredentialed = uncredentialedRowsFor(input.families, resolved.familyId, resolved.canonicalModelId).filter(
+        (row) => input.requested.provider === undefined || row.providerId === input.requested.provider,
+      );
+      const noCredential = claudeNoCredentialRefusal(subject, uncredentialed, input);
+      if (noCredential !== undefined) return noCredential;
+    }
+    return refuse("slot-unservable", unservableDetail(subject, input));
   }
   return [first, ...rest];
 }
@@ -352,7 +461,15 @@ export function resolveCandidate(input: SelectionInput): SelectionCandidate | Se
     const candidates = candidatesFor(listing, resolved.familyId, resolved.canonicalModelId, input);
     const first = candidates[0];
     if (first !== undefined) return first;
-    return refuse("slot-unservable", unservableDetail(`the slot ${JSON.stringify(input.requested.slot)} (${resolved.familyId}/${resolved.canonicalModelId})`, input));
+    const subject = `the slot ${JSON.stringify(input.requested.slot)} (${resolved.familyId}/${resolved.canonicalModelId})`;
+    if (resolved.familyId === CLAUDE_FAMILY_ID) {
+      const uncredentialed = uncredentialedRowsFor(listing, resolved.familyId, resolved.canonicalModelId).filter(
+        (row) => input.requested.provider === undefined || row.providerId === input.requested.provider,
+      );
+      const noCredential = claudeNoCredentialRefusal(subject, uncredentialed, input);
+      if (noCredential !== undefined) return noCredential;
+    }
+    return refuse("slot-unservable", unservableDetail(subject, input));
   }
   if (input.requested.model !== undefined) {
     const rows = resolveCandidateRows({ ...input, requested: { ...input.requested, model: input.requested.model } });
