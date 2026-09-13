@@ -57,6 +57,14 @@ export interface CanonicalSessionStore extends SessionStore {
   listProjectKeys(): Promise<string[]>;
   readSessionSummary(key: { projectKey: string; sessionId: string }): Promise<SessionSummaryEntry | null>;
   acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void>;
+  /**
+   * WS-18 W18-5 (P10b, SDK 0.0.10's S8): releases the writer lease `acquireSessionLease`/`append`'s
+   * own opening sequence took — same-pid only, idempotent, never another pid's lease (`true` iff THIS
+   * pid held it and released it). The router calls this for a WINTER destination, after its own
+   * write-ahead producer record lands and BEFORE `confirmInit`, so the daemon's pid writes NOTHING to
+   * the canonical transcript once the winter child holds the lease.
+   */
+  releaseSessionLease(key: { projectKey: string; sessionId: string }): Promise<boolean>;
 }
 
 /** The constructor the injected peer exports. */
@@ -195,6 +203,11 @@ export interface SharedSessionStore {
   attach<T extends StoreBearingOptions>(options: T): T & { sessionStore: SessionStore };
   /** WS-14 §5's blind-import ban, as a guard a host calls before `importSessionToStore()`. */
   assertImportAllowed(key: SessionKey): void;
+  /**
+   * WS-18 W18-5 (P10b): delegates to the SDK's `releaseSessionLease` — same-pid, idempotent, never
+   * another pid's lease. `true` iff this pid held the lease and released it.
+   */
+  releaseLease(session: SessionKey): Promise<boolean>;
   /** WS-13 §8.2's no-wash-back mechanism. Shared with the decorator and the reconciler. */
   readonly decorations: DecorationRegistry;
 }
@@ -628,6 +641,9 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
       if (state.health !== "ok") {
         throw new BlindStoreImportError(key, `the mirror recorded ${state.errors.length} failure(s) for this session`);
       }
+    },
+    releaseLease(session) {
+      return canonical.releaseSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
     },
     decorations,
   };

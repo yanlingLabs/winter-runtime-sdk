@@ -242,6 +242,8 @@ export interface HandoffBarrierDeps {
   /** The handoff note's text. The host owns the wording; this is the default. */
   noteText?: (args: { from: RuntimeKind; to: RuntimeKind; session: SessionKey }) => string;
   now?: () => Date;
+  /** WS-18 W18-5 (P10b): overrides the winter -> official writer-lease retry's delay (default 200ms; tests use a small value). */
+  leaseRetryDelayMs?: number;
 }
 
 export interface HandoffBarrierHandle extends HandoffBarrier {
@@ -753,7 +755,24 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       // `repair-required` for the life of the store instance, with no local-write root to reconcile
       // against and nothing that clears the flag. A refusal here must leave the session untouched.
       try {
-        await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+        // WS-18 W18-5 (P10b): winter -> official RETRIES the writer lease a bounded number of times.
+        // The exiting WINTER child's own process exit is asynchronous relative to `owner.close()`
+        // returning above — its pid can still hold the lease for a moment after this barrier considers
+        // it closed — and the lease becomes takeover-able the instant that pid actually exits. Every
+        // other direction keeps the original single-attempt behaviour: a live SOURCE process (a claude
+        // child, or another instance of this daemon) holding the lease is a real conflict, not a race
+        // this barrier should paper over with a retry.
+        const attempts = plan.from === "winter-agent" && plan.to === "claude-agent" ? WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS : 1;
+        const delayMs = deps.leaseRetryDelayMs ?? WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS;
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+            break;
+          } catch (error) {
+            if (!isLeaseError(error) || attempt >= attempts) throw error;
+            await sleepMs(delayMs);
+          }
+        }
       } catch (error) {
         if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
         return lossy(6, `the writer lease could not be verified: ${error instanceof Error ? error.message : String(error)}`);
@@ -831,6 +850,83 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         await unwind();
         return lossy(8, "no destination runtime confirmed the resumed session and level, and the next user message must not be delivered until one does");
       }
+
+      // ---- WS-18 W18-5 (P10b): a WINTER destination commits WRITE-AHEAD, before `confirmInit` -------
+      //
+      // The producer record is itself a canonical append (`commitProducerRecord`), and the instant the
+      // writer lease passes to the winter child, THIS pid must write nothing more to the canonical
+      // transcript — a post-confirm write here would reproduce H1's death on the other side. So for
+      // this direction the order is: commit, release, THEN confirm. If confirm fails, the record
+      // already named a destination that never (successfully) started — takeover the now-releasable
+      // lease and REVERT the record to the source, which is what makes `unwind()` alone insufficient
+      // here (it only clears a marker this branch has already cleared, and a staging root winter never
+      // had). A claude-agent destination is UNCHANGED below: it still confirms first, then commits,
+      // because its mirror writes land under the daemon's own pid regardless of who owns the session.
+      if (plan.to === "winter-agent") {
+        try {
+          await commitProducerRecord({ shared, session, staged });
+          committed = true;
+          pendingWritten = false;
+        } catch (error) {
+          await unwind();
+          const reason = `the producer record could not be written ahead of the winter destination's confirm: ${error instanceof Error ? error.message : String(error)}`;
+          record(8, false, reason);
+          return { kind: "lossy-fork-offered", reason, step: 8, detail: reason, steps: trail };
+        }
+        // FROM HERE THE DAEMON'S PID APPENDS NOTHING MORE TO THIS SESSION'S CANONICAL TRANSCRIPT. The
+        // release is best-effort in its RETURN VALUE only (`false` merely means this pid did not hold
+        // it, which is not an error — `markHandoffPending`'s own acquire two lines above guarantees it
+        // did); a thrown release is a real failure and is allowed to propagate to the outer catch,
+        // which reports honestly off `committed` (already true: the durable record already moved).
+        await shared.releaseLease(session);
+        let confirmed: HandoffStepReport;
+        try {
+          confirmed = await destination.confirmInit(target);
+        } catch (error) {
+          confirmed = { ok: false, reason: error instanceof Error ? error.message : String(error) };
+        }
+        if (!confirmed.ok) {
+          // TAKE OVER AND REVERT (W18-5): the write-ahead record already named the destination; a dead
+          // or refusing child leaves that record dangling unless this pid reclaims the lease (takeover
+          // from a dead holder is allowed — the same rule `acquireHandoffLease` and the writer lease
+          // both already use) and writes ONE more record naming the source again.
+          try {
+            await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+            await shared.store.append(session, [{ ...staged.record, producerRuntime: plan.from }]);
+            await shared.settle(session);
+            committed = false;
+          } catch (revertError) {
+            // THE REVERT ITSELF FAILED: the durable record still names the destination that never
+            // started, so the outer catch's own vocabulary ("past the producer record there is no
+            // honest way to say the source kept the session") is the correct report — `committed`
+            // stays `true` and this propagates there rather than claiming a fork that did not happen.
+            throw new HandoffCommitError(
+              `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source failed: ${revertError instanceof Error ? revertError.message : String(revertError)}`,
+            );
+          }
+          await unwind();
+          record(8, false, confirmed.reason);
+          return { kind: "lossy-fork-offered", reason: confirmed.reason, step: 8, detail: confirmed.reason, steps: trail };
+        }
+        stagedRoot = undefined;
+        const notes: string[] = [];
+        try {
+          await syncDirectoryEntry({ context, entry, plan, staged, now: now() });
+        } catch (error) {
+          notes.push(`the host directory's derived copy is behind and will be repaired on the next plan(): ${error instanceof Error ? error.message : String(error)}`);
+        }
+        record(8, true, confirmed.detail ?? `the destination confirmed ${session.sessionId} at level ${level}, and ownership moved (write-ahead)`);
+        return {
+          kind: "resumed",
+          selection: plan.selection.selection,
+          step: 8,
+          detail: `the session resumed on ${plan.to} at level ${level} through the ${decorated.door} decoration door, write-ahead${notes.length === 0 ? "" : ` — ${notes.join("; ")}`}`,
+          target,
+          steps: trail,
+        };
+      }
+
+      // ---- the pre-existing claude-agent path: CONFIRM first, then commit ----------------------------
       // FROM HERE THE ROOT IS THE DESTINATION'S (F-7). It is about to start a runtime against that
       // exact directory, and whether it answers, throws or never returns, deleting it under a live
       // child is not a cleanup — it is a second failure that hides the first.
@@ -1419,6 +1515,14 @@ function cryptoRandomUuid(): string {
 
 function isLeaseError(error: unknown): boolean {
   return error instanceof Error && error.name === "WinterStoreLeaseError";
+}
+
+/** WS-18 W18-5 (P10b): the winter -> official writer-lease retry's bound. Overridable by `deps.leaseRetryDelayMs` (tests). */
+const WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS = 5;
+const WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS = 200;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // --- step 1's lease -------------------------------------------------------------------------------------

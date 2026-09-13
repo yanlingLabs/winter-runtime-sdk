@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { DIALECT_RECORD_ENTRY_TYPE, WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import { DIALECT_RECORD_ENTRY_TYPE, WinterCompatibilitySessionStore, WinterStoreLeaseError, WINTER_BRAND, envName, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 
 import {
   acquireHandoffLease,
@@ -682,6 +682,26 @@ describe("step 5 — validation", () => {
           type: "system",
           subtype: "compact_boundary",
           compact_metadata: { trigger: "auto", pre_tokens: 900, preserved_messages: { anchor_uuid: a!["uuid"], uuids: [b!["uuid"]] } },
+        }),
+      ]);
+      await bed.shared.settle(bed.key);
+      const validation = await validateSessionTranscript(bed.shared, bed.key, bed.home);
+      expect(validation.ok, validation.ok ? "" : validation.reason).toBe(true);
+    });
+  });
+
+  test("R1-R5 review carry (Minor m2): a boundary carrying BOTH compact_metadata and compactMetadata validates the CAMELCASE one", async () => {
+    await withStoreBed(async (bed) => {
+      const [a, b] = await bed.append(2);
+      // The snake_case side is deliberately BROKEN (a dangling anchor no entry has) — if this boundary
+      // were read by the legacy field, it would fail; validating the camelCase field instead is the
+      // only way this passes, which is what makes the test meaningful rather than vacuous.
+      await bed.shared.store.append(bed.key, [
+        bed.entry({
+          type: "system",
+          subtype: "compact_boundary",
+          compact_metadata: { trigger: "manual", pre_tokens: 1, preserved_messages: { anchor_uuid: "00000000-dead-4000-8000-000000000000", uuids: [] } },
+          compactMetadata: { trigger: "auto", preTokens: 900, preservedMessages: { anchorUuid: a!["uuid"], uuids: [b!["uuid"]] } },
         }),
       ]);
       await bed.shared.settle(bed.key);
@@ -2118,5 +2138,204 @@ describe("N12 — the fourth arm, closed", () => {
       expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 1 });
       expect(outcome.detail).toContain("hermetic test must never resolve the real Winter home");
     });
+  });
+});
+
+// ====================================================================================================
+// WS-18 W18-5 / P10b-6 R6 — A WINTER DESTINATION COMMITS WRITE-AHEAD, RELEASES THE LEASE, THEN CONFIRMS.
+//
+// The producer record is itself a canonical append (`commitProducerRecord`), and once the writer lease
+// passes to a winter child THIS pid must write nothing more to that session's canonical transcript — a
+// post-confirm write would reproduce H1's death (two writers, one file) on the other side. So for this
+// one direction the order inverts: commit, release, THEN confirm — and a confirm that fails has to
+// TAKE OVER the lease it just gave away and revert the record, because `unwind()` alone (which only
+// clears a marker already cleared by the commit, and a staging root winter never had) is not enough
+// once the durable record has already moved. `winter -> official` is the other new behaviour: the
+// writer lease gets a bounded retry, because the exiting winter child's own process exit is
+// asynchronous relative to `owner.close()` returning.
+// ====================================================================================================
+describe("P10b-6 R6 — winter destination write-ahead + lease release (W18-5)", () => {
+  test("success ordering: the producer record commits and the lease releases BEFORE confirmInit is ever called", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      const order: string[] = [];
+      const originalRelease = bed.shared.releaseLease.bind(bed.shared);
+      bed.shared.releaseLease = async (session) => {
+        order.push("release");
+        return originalRelease(session);
+      };
+      const seen: { summary?: Record<string, unknown> | null } = {};
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ runtimeKind: "claude-agent" }),
+          destination: () => ({
+            runtimeKind: "winter-agent" as const,
+            confirmInit: async () => {
+              order.push("confirmInit");
+              // THE DURABLE PROOF: by the time confirmInit runs, the write-ahead has ALREADY landed —
+              // read straight off the store, not off any in-process flag.
+              seen.summary = (await bed.shared.canonical.readSessionSummary(bed.key)) as Record<string, unknown> | null;
+              return OK;
+            },
+          }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+      expect(outcome.kind).toBe("resumed");
+      expect(order).toEqual(["release", "confirmInit"]);
+      expect(seen.summary).not.toBeNull();
+      expect(seen.summary?.["producerRuntime"]).toBe("winter-agent");
+      expect(seen.summary?.["pendingHandoff"]).toBeNull();
+      void entry;
+    });
+  });
+
+  test("the failure revert: a winter destination that does not confirm leaves the SOURCE as the one consistent owner", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ runtimeKind: "claude-agent" }),
+          destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+      // THE REVERT LANDED: the transcript's own authoritative record names the SOURCE again.
+      const summary = await bed.shared.canonical.readSessionSummary(bed.key);
+      expect(summary?.["producerRuntime"]).toBe("claude-agent");
+      // AND THE DIRECTORY AGREES — one consistent owner, not a fork between the two stores.
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.runtimeKind).toBe("claude-agent");
+    });
+  });
+
+  test("no post-release append: once the lease is released, this pid's OWN store.append is never called again for this session on the success path", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      let released = false;
+      const originalRelease = bed.shared.releaseLease.bind(bed.shared);
+      bed.shared.releaseLease = async (session) => {
+        const result = await originalRelease(session);
+        released = true;
+        return result;
+      };
+      const originalAppend = bed.shared.store.append.bind(bed.shared.store);
+      const appendsAfterRelease: unknown[] = [];
+      bed.shared.store.append = async (key, entries) => {
+        if (released) appendsAfterRelease.push(entries);
+        return originalAppend(key, entries);
+      };
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ runtimeKind: "claude-agent" }),
+          destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+      expect(outcome.kind).toBe("resumed");
+      expect(appendsAfterRelease).toHaveLength(0);
+    });
+  });
+
+  test("a crash between the write-ahead and the confirm is repaired on the next plan() — the DESTINATION wins", async () => {
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      const [seed] = await bed.append(1);
+      // SIMULATES THE CRASH DIRECTLY: exactly what the write-ahead commits — a producer record naming
+      // the winter destination and clearing the pending marker — with NOTHING after it. No release, no
+      // confirmInit, no directory patch: the whole process died right here.
+      await bed.shared.store.append(bed.key, [
+        {
+          type: DIALECT_RECORD_ENTRY_TYPE,
+          backendSessionId: bed.key.sessionId,
+          transcriptProjectKey: bed.key.projectKey,
+          dialectFamily: "claude-code-jsonl",
+          producerRuntime: "winter-agent",
+          compatibilityLevel: "conversation",
+          health: "clean",
+          projectionCursor: seed!["uuid"],
+          sourceGenerationCompleted: entry.generation,
+          handoffAt: new Date(0).toISOString(),
+          pendingHandoff: null,
+        },
+      ]);
+      await bed.shared.settle(bed.key);
+      // THE DIRECTORY STILL NAMES THE SOURCE — the daemon record was never touched by the crash.
+      expect((await bed.directoryStore.load())[0]?.runtimeKind).toBe("claude-agent");
+
+      // COLD RESUME THROUGH THE DOOR: a brand-new barrier instance, exactly as a restarted daemon would
+      // build one, calling `plan()` — the router's own resume-context door for "who owns this session" —
+      // before doing anything else with it. `loadEntry` (`handoff-barrier.ts:357-396`) is reached on
+      // every `plan()` call, cold or warm, so it needs no separate resume entry point to be reachable.
+      const cold = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "winter-agent" }) } });
+      const plan = await cold.plan(bed.key, "claude-agent");
+
+      // ONE CONSISTENT OWNER: the transcript's own atomic producer record is authoritative (WS-05 §5.4),
+      // so `loadEntry`'s existing repair patches the directory to match it — THE DESTINATION WINS, not
+      // the daemon's stale pre-crash record, because the write-ahead ordering makes the commit (not the
+      // confirm) the moment ownership actually moves.
+      expect(plan.from).toBe("winter-agent");
+      const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+      expect(row?.runtimeKind).toBe("winter-agent");
+    });
+  });
+
+  test("winter -> official: a transient lease-held gets a bounded retry while the exiting winter child's lease becomes takeover-able", async () => {
+    class FlakyLeaseTwice extends WinterCompatibilitySessionStore {
+      attempts = 0;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.attempts += 1;
+        if (this.attempts < 3) throw new WinterStoreLeaseError("held by the exiting winter child", 999999);
+        return super.acquireSessionLease(key);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        const entry = await bed.record({ runtimeKind: "winter-agent", selection: selectionFor("winter-agent") });
+        await bed.append(1);
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "winter-agent" }),
+            destination: () => ({ runtimeKind: "claude-agent" as const, confirmInit: () => OK }),
+          },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+        expect(outcome.kind).toBe("resumed");
+        expect((bed.peers.winter as unknown as { WinterCompatibilitySessionStore: typeof FlakyLeaseTwice }).WinterCompatibilitySessionStore).toBe(FlakyLeaseTwice);
+        // Read the attempt count off the ACTUAL canonical instance the barrier used.
+        expect((bed.shared.canonical as FlakyLeaseTwice).attempts).toBe(3);
+        void entry;
+      },
+      { store: FlakyLeaseTwice },
+    );
+  });
+
+  test("every OTHER direction keeps the original single-attempt behaviour — no retry papers over a real conflict", async () => {
+    class AlwaysLeaseHeld extends WinterCompatibilitySessionStore {
+      attempts = 0;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.attempts += 1;
+        throw new WinterStoreLeaseError("held by a live process", 999999);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }), destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }) },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+        expect(outcome).toMatchObject({ kind: "blocked", reason: "lease-held" });
+        expect((bed.shared.canonical as AlwaysLeaseHeld).attempts).toBe(1);
+      },
+      { store: AlwaysLeaseHeld },
+    );
   });
 });

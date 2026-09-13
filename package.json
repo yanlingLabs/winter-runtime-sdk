@@ -65,7 +65,8 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.250",
     "@yanlinglabs/winter-agent-sdk": ">=0.0.3 <0.1.0",
     "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0",
-    "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0"
+    "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0",
+    "@yanlinglabs/winter-provider-runtime": ">=0.0.10 <0.1.0"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/claude-agent-sdk": {
@@ -85,6 +86,13 @@
     "@yanlinglabs/winter-agent-sdk": "^0.0.3",
     "@yanlinglabs/winter-conformance": "^0.0.3",
     "@yanlinglabs/winter-provider-conformance": "^0.0.3",
+    "@yanlinglabs/winter-provider-runtime": "^0.0.10",
     "typescript": "^5.9.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@yanlinglabs/winter-agent-sdk": "link:../../../winter-agent-sdk/.worktrees/p10b-s/packages/sdk",
+      "@yanlinglabs/winter-provider-runtime": "link:../../../winter-agent-sdk/.worktrees/p10b-s/packages/provider-runtime"
+    }
   }
 }
