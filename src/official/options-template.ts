@@ -195,7 +195,12 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     ...(policy.sessionId === undefined ? {} : { sessionId: policy.sessionId }),
     ...(policy.resume === undefined ? {} : { resume: policy.resume }),
     ...(policy.forkSession === undefined ? {} : { forkSession: policy.forkSession }),
-    ...(policy.appendSystemPromptFile === undefined ? {} : { extraArgs: { "append-system-prompt-file": policy.appendSystemPromptFile } }),
+    // WS-18 W18-17 door 1 (P10b): request Claude's own SUMMARIZED thinking display on every official
+    // launch, without touching the thinking TYPE or budget the leg already derives — `extraArgs` is
+    // the ONLY documented route (§5.1), and `--thinking-display` is present in the pinned 2.1.250
+    // binary though hidden from `--help` (measured). Merged with `appendSystemPromptFile`'s own
+    // `extraArgs` entry rather than replacing it — a host using both gets both.
+    extraArgs: { "thinking-display": "summarized", ...(policy.appendSystemPromptFile === undefined ? {} : { "append-system-prompt-file": policy.appendSystemPromptFile }) },
 
     // §5.1: the VENDORED runtime, never the user's installed binary.
     pathToClaudeCodeExecutable: input.pathToClaudeCodeExecutable,
@@ -287,9 +292,11 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
   const extraArgs = options["extraArgs"];
   if (extraArgs !== undefined) {
     const keys = Object.keys(extraArgs as Record<string, unknown>);
-    const stray = keys.filter((key) => key !== "append-system-prompt-file");
+    // `thinking-display` is W18-17 door 1 (P10b): the router's own request for summarized thinking,
+    // present on every official launch — `append-system-prompt-file` stays the other documented route.
+    const stray = keys.filter((key) => key !== "append-system-prompt-file" && key !== "thinking-display");
     if (stray.length > 0) {
-      refuse("extraArgs", `${stray.join(", ")} is outside the pinned contract; only the documented append-system-prompt-file route is available (WS-14 §5.1)`);
+      refuse("extraArgs", `${stray.join(", ")} is outside the pinned contract; only the documented append-system-prompt-file and thinking-display routes are available (WS-14 §5.1, WS-18 §6)`);
     }
   }
 }
