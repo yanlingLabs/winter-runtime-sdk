@@ -12,6 +12,7 @@
 // proven — a host that shows "something went wrong" instead of "step 4: the canonical tail does not
 // match the recorded local-write root" is hiding the only fact the user can act on.
 import type { SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import type { SwitchReview } from "@yanlinglabs/winter-provider-runtime";
 
 import type { RuntimeKind, RuntimeSelection, SelectionRefusal } from "../selection/runtime-selection.ts";
 import type { SelectionReview } from "../selection/select-runtime.ts";
@@ -77,6 +78,13 @@ export interface HandoffPlan {
    * persisted selection is what `plan.selection.selection` stamps the destination's runtime onto.
    */
   requested?: RuntimeSelection;
+  /**
+   * WS-18 W18-20 (P10b): the pre-flight loss review for the row `selection` carries — present exactly
+   * when `selection.kind !== "refused"` (a refused plan has nothing to review). Embeds the SAME
+   * classification `reviewSwitch` would return for this session and this row, so a host does not have
+   * to call both doors to get one answer.
+   */
+  review?: SwitchReview;
 }
 
 export type HandoffOutcome =
@@ -93,4 +101,10 @@ export interface HandoffBarrier {
    */
   plan(session: SessionKey, to: RuntimeKind, opts?: { requested?: RuntimeSelection }): Promise<HandoffPlan>;
   execute(plan: HandoffPlan): Promise<HandoffOutcome>;
+  /**
+   * WS-18 W18-20 (P10b): the ONE pre-flight review for every family-crossing model change — same-leg
+   * changes (gpt -> deepseek on Winter) as well as cross-runtime ones. Reads the session's persisted
+   * selection and the canonical transcript/sidecar through the shared store; never rewrites anything.
+   */
+  reviewSwitch(session: SessionKey, requested: RuntimeSelection): Promise<SwitchReview>;
 }

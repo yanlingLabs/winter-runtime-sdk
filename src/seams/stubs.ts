@@ -113,6 +113,9 @@ export function stubHandoffBarrier(context: SeamContextWithDirectory): HandoffBa
     async execute() {
       throw new NotImplementedYet("lane-c", "HandoffBarrier.execute (WS-05 §12's eight steps)");
     },
+    async reviewSwitch() {
+      throw new NotImplementedYet("lane-c", "HandoffBarrier.reviewSwitch (WS-18 W18-20, P10b)");
+    },
   };
 }
 

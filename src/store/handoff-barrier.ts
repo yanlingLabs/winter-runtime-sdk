@@ -55,6 +55,8 @@ import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, rmS
 import { join } from "node:path";
 
 import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import { endpointFromOrigin, reviewModelSwitch, toClaudeReady, type ContinuityEndpoint, type SwitchReview } from "@yanlinglabs/winter-provider-runtime";
+import type { MessageOrigin, ProviderStateRecord } from "@yanlinglabs/winter-provider-runtime";
 
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
@@ -67,7 +69,7 @@ import type { RuntimeKind, RuntimeSelection, SelectionInput } from "../selection
 // answers "what would a fresh decision say about this session today" without ever rewriting the
 // record — which is exactly the question a handoff has to ask before it moves ownership.
 import { reviewPersistedSelection } from "../selection/select-runtime.ts";
-import { createMaterializedResumeDecorator, materializedTranscriptPath, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
+import { createMaterializedResumeDecorator, materializedTranscriptPath, readProviderStateSidecar, type MaterializedResumeDecoratorHandle } from "./materialized-resume.ts";
 import { resumeStagingRoot } from "../vendor-paths.ts";
 import { canonicalTranscriptPath, compareTranscriptTail, localTranscriptPath, reconcileLocalWriteRoot, scanLocalWriteRoot } from "./reconcile.ts";
 import { materializeTempContinuity, resolveEngineTempLayout, tempContinuityModeFor, type EngineTempLayout } from "./temp-continuity.ts";
@@ -244,6 +246,19 @@ export interface HandoffBarrierDeps {
   now?: () => Date;
   /** WS-18 W18-5 (P10b): overrides the winter -> official writer-lease retry's delay (default 200ms; tests use a small value). */
   leaseRetryDelayMs?: number;
+  /**
+   * WS-18 W18-20 (P10b): turns a stamped `MessageOrigin` into full endpoint facts for `reviewSwitch` —
+   * normally `createEndpointResolver(registry)` over the host's own catalog registry. Absent means
+   * `endpointFromOrigin`, `@yanlinglabs/winter-provider-runtime`'s registry-free fallback.
+   */
+  resolveEndpoint?: (origin: MessageOrigin) => ContinuityEndpoint;
+  /**
+   * WS-18 W18-20 (P10b): the Claude-ready copy's decoration budget, for the truncation check
+   * `reviewSwitch` folds into `SwitchFacts.truncated` when the destination is the official leg.
+   * Absent = unbounded (`toClaudeReady`'s own default) — a host names one only to exercise or narrow
+   * the truncation path deliberately.
+   */
+  reviewSwitchBudgetChars?: number;
 }
 
 export interface HandoffBarrierHandle extends HandoffBarrier {
@@ -514,6 +529,43 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     return { kind: "servable", selection: stamped, review };
   };
 
+  /** A `RuntimeSelection`'s identity, as the continuity module's `MessageOrigin` names it. */
+  const originFrom = (selection: RuntimeSelection): MessageOrigin => ({ providerId: selection.providerId, modelKey: selection.modelRef, family: selection.family });
+
+  /**
+   * WS-18 W18-20 (P10b): the ONE pre-flight review, shared by `plan()`'s embedded `review` and the
+   * public `reviewSwitch`. Reads the canonical entries and the sidecar through the shared store —
+   * never rewrites either — and resolves both endpoints through `deps.resolveEndpoint` (a host's own
+   * catalog registry) or, absent one, `endpointFromOrigin`'s registry-free fallback.
+   *
+   * TRUNCATION IS THE CLAUDE-READY COPY'S `dropped`, and ONLY when the destination is the official
+   * leg: a winter destination's carry-tag rendering happens inside the Winter runtime itself, at
+   * request-build time, which this router never sees and cannot measure.
+   */
+  const computeSwitchReview = async (args: { entry: RuntimeDirectoryEntry; session: SessionKey; requested: RuntimeSelection }): Promise<SwitchReview> => {
+    const store = sharedOf();
+    const entries = (await store.store.load(args.session)) ?? [];
+    const sidecar = await readProviderStateSidecar(homeOf(), args.session);
+    const resolve = deps.resolveEndpoint ?? endpointFromOrigin;
+    const fromEndpoint = resolve(originFrom(args.entry.selection));
+    const toEndpoint = resolve(originFrom(args.requested));
+    let truncated = false;
+    if (args.requested.runtimeKind === "claude-agent") {
+      const { dropped } = toClaudeReady(entries, sidecar, {
+        target: toEndpoint,
+        resolveEndpoint: resolve,
+        ...(deps.reviewSwitchBudgetChars === undefined ? {} : { budgetChars: deps.reviewSwitchBudgetChars }),
+      });
+      truncated = dropped > 0;
+    }
+    return reviewModelSwitch({ entries, sidecarRecords: sidecar, from: fromEndpoint, to: toEndpoint, truncated });
+  };
+
+  const reviewSwitch = async (session: SessionKey, requested: RuntimeSelection): Promise<SwitchReview> => {
+    const entry = await loadEntry(session);
+    return computeSwitchReview({ entry, session, requested });
+  };
+
   const plan = async (session: SessionKey, to: RuntimeKind, opts: { requested?: RuntimeSelection } = {}): Promise<HandoffPlan> => {
     const entry = await loadEntry(session);
     assertOneDecoratorStore();
@@ -530,6 +582,9 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       const knownUnprovable = markers.get(step);
       return knownUnprovable === undefined ? { step, name } : { step, name, knownUnprovable };
     });
+    // W18-20: embedded whenever there is a row to review against — never for a refused plan, which
+    // has nothing to run the review over.
+    const review = selection.kind === "refused" ? undefined : await computeSwitchReview({ entry, session, requested: selection.selection });
     return {
       session,
       from,
@@ -539,6 +594,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       tempContinuity: tempContinuityModeFor(to),
       selection,
       ...(opts.requested === undefined ? {} : { requested: opts.requested }),
+      ...(review === undefined ? {} : { review }),
     };
   };
 
@@ -1033,6 +1089,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   return {
     plan,
     execute,
+    reviewSwitch,
     get shared() {
       return sharedOf();
     },
