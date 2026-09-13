@@ -24,6 +24,10 @@
       "ANTHROPIC_AUTH_TOKEN",
       "ANTHROPIC_BASE_URL"
     ],
+    "console-profile": [
+      "ANTHROPIC_PROFILE",
+      "ANTHROPIC_CONFIG_DIR"
+    ],
     "bedrock": [
       "CLAUDE_CODE_USE_BEDROCK",
       "AWS_REGION",
