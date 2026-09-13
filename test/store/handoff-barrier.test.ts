@@ -1688,7 +1688,9 @@ describe("item 20 — plan() reviews the persisted selection against the DESTINA
       expect(plan.selection.kind).toBe("refused");
       if (plan.selection.kind === "refused") {
         expect(plan.selection.detail).toContain("no longer servable at all");
-        expect(["slot-unservable", "runtime-unavailable", "claude-oauth-not-approved", "mode-forbids-runtime"]).toContain(plan.selection.refusal.reason);
+        // WS-18 W18-3 (P10b): the persisted row's own provider (anthropic) still has a catalog row, so
+        // this now surfaces as the structured `no-credential` refusal alongside the pre-10b reasons.
+        expect(["slot-unservable", "runtime-unavailable", "claude-oauth-not-approved", "mode-forbids-runtime", "no-credential"]).toContain(plan.selection.refusal.reason);
       }
     });
   });

@@ -239,21 +239,23 @@ describe("the persisted choice", () => {
     expect(review.kind).toBe("fresh-refused");
     if (review.kind !== "fresh-refused") throw new Error("unreachable");
     expect(review.persisted).toBe(persisted);
-    expect(review.refusal.reason).toBe("slot-unservable");
+    // WS-18 W18-3 (P10b): a Claude row with catalog rows but none credentialed is now the structured
+    // `no-credential` refusal, not the generic `slot-unservable` prose.
+    expect(review.refusal.reason).toBe("no-credential");
   });
 });
 
 describe("WS-13c §4 resolution and its typed refusals", () => {
-  test("a slot with no configured credential ref anywhere is slot-unservable, never a substitution", () => {
+  test("a slot with no configured credential ref anywhere is refused no-credential, never a substitution", () => {
     const refusal = refused({ credentials: credentials([]) });
-    expect(refusal.reason).toBe("slot-unservable");
+    expect(refusal.reason).toBe("no-credential");
     expect(refusal.detail).toContain("no configured credential ref");
   });
 
   test("a pinned provider narrows the candidate rows and never widens them", () => {
     // `agentrouter` has the row but no credential; the pin must refuse rather than fall to anthropic.
     const refusal = refused({ requested: { slot: "opus", provider: "agentrouter" }, credentials: credentials(["anthropic"]) });
-    expect(refusal.reason).toBe("slot-unservable");
+    expect(refusal.reason).toBe("no-credential");
     expect(refusal.detail).toContain("agentrouter");
   });
 
