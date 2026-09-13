@@ -54,6 +54,17 @@ export const AUTH_FAMILY_VARIABLES = {
   bedrock: ["CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL"],
   vertex: ["CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_VERTEX_BASE_URL"],
   /**
+   * router 0.0.4, C1: the Anthropic Console CLI's own PROFILE. Both names are NON-SECRET (a profile
+   * name and a directory path, not material) and NEITHER is a bearer credential — the profile store the
+   * CLI already manages at `ANTHROPIC_CONFIG_DIR` owns the token, so this family injects nothing that
+   * could re-point billing by itself. `officialCredentialPlan` (`door.ts`) treats it exactly like
+   * `claude-oauth`/`local-none`: an EMPTY plan, even when `provider.authRef` resolves to material, so a
+   * host that also has an API key configured never leaks it in here by accident. `ANTHROPIC_API_KEY`
+   * and `ANTHROPIC_AUTH_TOKEN` are refused for this family by the same family-membership check every
+   * other row already gets (§12's "exactly one auth family").
+   */
+  "console-profile": ["ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR"],
+  /**
    * §12's last row: NONE. "Claude OAuth (D14-gated) — stored subscription credentials live inside the
    * spool namespace; no env credential injected." The empty set is the rule, not an oversight.
    */
@@ -190,6 +201,18 @@ export function validateAuthEnvironment(args: {
       throw new OfficialConfigurationError({
         option: "credentials.ANTHROPIC_BASE_URL",
         reason: "a gateway endpoint without its bearer token leaves a stored subscription credential active behind the new endpoint (WS-14 §12's gateway caveat) — set the full pair or neither",
+        branchLabel: args.branchLabel,
+      });
+    }
+    // router 0.0.4, C1: `console-profile`'s own pairing caveat, the same shape as the gateway one above.
+    // A config dir with no profile name (or vice versa) is a half-configured child: the CLI resolves
+    // `ANTHROPIC_PROFILE` against whatever `ANTHROPIC_CONFIG_DIR` already holds, and a partial pair
+    // either points at the wrong stored profile or leaves the CLI falling back to its own default —
+    // silently, because neither variable alone is invalid on its own terms.
+    if (args.selection.authFamily === "console-profile" && names.includes("ANTHROPIC_PROFILE") !== names.includes("ANTHROPIC_CONFIG_DIR")) {
+      throw new OfficialConfigurationError({
+        option: "credentials",
+        reason: "the console-profile family sets ANTHROPIC_PROFILE and ANTHROPIC_CONFIG_DIR together or not at all — one without the other resolves against whatever the CLI's own default profile store holds, silently (router 0.0.4, C1)",
         branchLabel: args.branchLabel,
       });
     }

@@ -185,8 +185,11 @@ Four decisions the composition forced, each with its reasoning at the site:
    attached, and delivery to it is `unavailable` rather than a push into nothing.
 4. **Credentials come from `Options.provider`,** the pinned contract's own credential surface, which a
    host already fills for the Winter leg. Only families whose variable mapping is unambiguous are
-   derived (`api-key`, `console-oauth`, and the two that inject nothing); a cloud credential chain and
-   the open `custom` family name their own variables, because only the host knows them.
+   derived (`api-key`, `console-oauth`, and the three that inject nothing — `claude-oauth`,
+   `local-none`, and router 0.0.4's `console-profile`, whose `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`
+   pair is non-secret and travels through `connectionEnv` instead of a keychain-backed plan); a cloud
+   credential chain and the open `custom` family name their own variables, because only the host knows
+   them.
 
 R-7b-1's cross-runtime CHILD is the same leg with `runtime.official.parentSessionId`: the row is an
 `agent:<parent>:<child>` address with `transport: "claude-handle"` — a session in its own right rather

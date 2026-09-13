@@ -121,11 +121,13 @@ export interface RouterOfficialInput {
    */
   credentials?: readonly AuthCredentialPlan[];
   /**
-   * NON-SECRET family variables: a gateway's `ANTHROPIC_BASE_URL`, a region, a project.
+   * NON-SECRET family variables: a gateway's `ANTHROPIC_BASE_URL`, a region, a project, or (router
+   * 0.0.4, C1) a `console-profile` session's `ANTHROPIC_PROFILE` name and `ANTHROPIC_CONFIG_DIR` path.
    *
    * Separate from `credentials` because they are not secrets and must not travel through a keychain
    * read — and because §12's gateway caveat ("set the full credential pair or neither") is checked
-   * across both halves by the auth validator, whichever side each variable came from.
+   * across both halves by the auth validator, whichever side each variable came from. The same shape
+   * applies to `console-profile`'s pairing rule: set both names here or neither.
    */
   connectionEnv?: Readonly<Record<string, string>>;
   /** §3's minimal OS set. Build it with `minimalOsEnvironmentFrom(process.env)` at the host's call site. */
@@ -379,17 +381,25 @@ export function officialUserTurn(text: string, sessionId: string): OfficialUserM
  * DERIVED ONLY WHERE THE MAPPING IS UNAMBIGUOUS. `api-key` is one variable; `console-oauth` is a
  * bearer token whose endpoint is non-secret and travels in `connectionEnv` (§12's "gateway configs
  * MUST set the full credential pair" is then checked by the auth validator, across both halves). The
- * two families that inject nothing inject nothing. A cloud credential chain and a `custom` family name
- * their own variables, because their sets are the host's: a chain's variables depend on which of
- * Bedrock's or Vertex's several auth modes the deployment uses, and `custom` is open by definition.
+ * three families that inject nothing (`claude-oauth`, `local-none`, and router 0.0.4's
+ * `console-profile` — its `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR` pair are non-secret and travel in
+ * `connectionEnv` exactly like `console-oauth`'s base URL, never through a keychain-backed plan)
+ * inject nothing. A cloud credential chain and a `custom` family name their own variables, because
+ * their sets are the host's: a chain's variables depend on which of Bedrock's or Vertex's several auth
+ * modes the deployment uses, and `custom` is open by definition.
  */
 export function officialCredentialPlan(args: {
   selection: RuntimeSelection;
   provider: ProviderSelection | undefined;
   explicit: readonly AuthCredentialPlan[] | undefined;
 }): readonly AuthCredentialPlan[] {
-  if (args.explicit !== undefined) return args.explicit;
   const family = authVariableSetKey(args.selection);
+  // router 0.0.4, C1: NEVER derived from `provider.authRef`, even when it resolves to material, and
+  // never from an `explicit` plan either — the profile store at `ANTHROPIC_CONFIG_DIR` already owns
+  // the token, so a plan entry here would mean fetching a keychain secret this family has no use for.
+  // (The pair itself is non-secret and travels through `connectionEnv`, checked just below.)
+  if (family === "console-profile") return [];
+  if (args.explicit !== undefined) return args.explicit;
   if (family === "claude-oauth" || family === "local-none") return [];
   const ref = args.provider?.authRef;
   if (family === "bedrock" || family === "vertex" || family === "custom") {
@@ -407,7 +417,19 @@ export function officialCredentialPlan(args: {
   return family === "console-oauth" ? [{ variable: "ANTHROPIC_AUTH_TOKEN", ref }] : [{ variable: "ANTHROPIC_API_KEY", ref }];
 }
 
-/** Non-secret connection variables a family sets, from the contract's own `ProviderConnectionConfig`. */
+/**
+ * Non-secret connection variables a family sets, from the contract's own `ProviderConnectionConfig`
+ * plus whatever the host names in `RouterOfficialInput.connectionEnv`.
+ *
+ * ROUTER 0.0.4, C1: `console-profile`'s `ANTHROPIC_PROFILE` and `ANTHROPIC_CONFIG_DIR` have no
+ * counterpart on `ProviderConnectionConfig` (that shape carries only `baseUrl`, a pinned contract type
+ * this package does not extend) and are non-secret by the same reasoning `ANTHROPIC_BASE_URL` is, so a
+ * host sets them the identical way — `connectionEnv: { ANTHROPIC_PROFILE, ANTHROPIC_CONFIG_DIR }` —
+ * and they ride through `explicit` here unchanged, exactly like any other family's non-secret pair.
+ * No family-specific derivation is needed for them the way `console-oauth`'s base URL gets one below,
+ * because the host already has both values in hand (a profile name, a directory it manages) and there
+ * is no `ProviderSelection` field to read them from instead.
+ */
 export function officialConnectionEnv(args: { selection: RuntimeSelection; provider: ProviderSelection | undefined; explicit: Readonly<Record<string, string>> | undefined }): Record<string, string> {
   const explicit = { ...(args.explicit ?? {}) };
   // §12's gateway caveat, from the field the host already fills: a bearer family's endpoint is part of

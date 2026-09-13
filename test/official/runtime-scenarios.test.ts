@@ -42,6 +42,7 @@ const TIMEOUT = 180_000;
 export const SELECTION_FIXTURES: Readonly<Record<RuntimeSelection["authFamily"], RuntimeSelection>> = {
   "api-key": selectionFixture({ authFamily: "api-key", providerId: "anthropic", reason: "D13: Claude family, Anthropic-protocol backend, Code mode" }),
   "console-oauth": selectionFixture({ authFamily: "console-oauth", providerId: "anthropic-console", reason: "D13: a bearer credential on an approved gateway" }),
+  "console-profile": selectionFixture({ authFamily: "console-profile", providerId: "anthropic-console", reason: "router 0.0.4, C1: the Anthropic Console CLI's own profile, no bearer credential in the child" }),
   "cloud-credential-chain": selectionFixture({ authFamily: "cloud-credential-chain", providerId: "bedrock", reason: "D13: a cloud credential chain" }),
   "claude-oauth": selectionFixture({ authFamily: "claude-oauth", providerId: "anthropic", reason: "D13/D14: subscription OAuth, ship-gated" }),
   "local-none": selectionFixture({ authFamily: "local-none", providerId: "local", reason: "a local endpoint with no credential" }),
@@ -281,9 +282,15 @@ describe("the RuntimeSelection fixture per auth family", () => {
       CLAUDE_CODE_USE_BEDROCK: "1",
       CLAUDE_CONFIG_DIR: "/spool",
     });
-    // The two families that inject NOTHING inject nothing.
+    expect(build(SELECTION_FIXTURES["console-profile"], { ANTHROPIC_PROFILE: "work", ANTHROPIC_CONFIG_DIR: "/home/.acme/anthropic" })).toEqual({
+      ANTHROPIC_PROFILE: "work",
+      ANTHROPIC_CONFIG_DIR: "/home/.acme/anthropic",
+      CLAUDE_CONFIG_DIR: "/spool",
+    });
+    // The three families that inject NOTHING inject nothing.
     expect(build(SELECTION_FIXTURES["claude-oauth"], {})).toEqual({ CLAUDE_CONFIG_DIR: "/spool" });
     expect(build(SELECTION_FIXTURES["local-none"], {})).toEqual({ CLAUDE_CONFIG_DIR: "/spool" });
+    expect(build(SELECTION_FIXTURES["console-profile"], {})).toEqual({ CLAUDE_CONFIG_DIR: "/spool" });
     // …and `custom` is the only open one, still fenced by the MUST-NOT list.
     expect(build(SELECTION_FIXTURES.custom, { ANTHROPIC_BASE_URL: "http://127.0.0.1:1", ANTHROPIC_API_KEY: "k" })).toEqual({
       ANTHROPIC_API_KEY: "k",
@@ -297,6 +304,6 @@ describe("the RuntimeSelection fixture per auth family", () => {
     for (const [family, selection] of Object.entries(SELECTION_FIXTURES)) {
       expect([family, selection.authFamily]).toEqual([family, family as RuntimeSelection["authFamily"]]);
     }
-    expect(Object.keys(AUTH_FAMILY_VARIABLES).sort()).toEqual(["api-key", "bedrock", "claude-oauth", "console-oauth", "local-none", "vertex"]);
+    expect(Object.keys(AUTH_FAMILY_VARIABLES).sort()).toEqual(["api-key", "bedrock", "claude-oauth", "console-oauth", "console-profile", "local-none", "vertex"]);
   });
 });

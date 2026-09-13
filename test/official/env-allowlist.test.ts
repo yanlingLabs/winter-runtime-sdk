@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
+import { WINTER_BRAND, type CredentialRef } from "@yanlinglabs/winter-agent-sdk";
 
 import { OfficialConfigurationError } from "../../src/official/errors.ts";
 import {
@@ -34,6 +34,7 @@ import {
   type OfficialEnvInput,
 } from "../../src/official/env-allowlist.ts";
 import { fetchAuthCredentials, validateAuthEnvironment, authVariableSetKey, allowedAuthVariables } from "../../src/official/auth.ts";
+import { officialCredentialPlan } from "../../src/door.ts";
 import { NON_CREDENTIAL_ENV_REGISTRY, PINNED_ENV_REGISTRY_SIZE } from "../../src/official/env-registry.ts";
 import { extractEnvRegistry, isCredentialByName } from "../../src/official/env-registry-rule.ts";
 import { createFakeKeychain } from "../../src/testing/index.ts";
@@ -164,6 +165,49 @@ describe("WS-14 §12 — exactly one auth family, fetched at spawn", () => {
     const gateway = selection({ authFamily: "console-oauth", providerId: "anthropic-console" });
     expect(() => buildOfficialChildEnv(input({ selection: gateway, credentials: { ANTHROPIC_BASE_URL: "https://gw.example" } }))).toThrow(/leaves a stored subscription credential active/);
     expect(() => buildOfficialChildEnv(input({ selection: gateway, credentials: { ANTHROPIC_BASE_URL: "https://gw.example", ANTHROPIC_AUTH_TOKEN: "t" } }))).not.toThrow();
+  });
+
+  describe("router 0.0.4, C1 — console-profile: no bearer credential, ever", () => {
+    const profile = selection({ authFamily: "console-profile", providerId: "anthropic-console" });
+
+    test("both vars land in the child, and nothing else this family doesn't set", () => {
+      const env = buildOfficialChildEnv(input({ selection: profile, credentials: { ANTHROPIC_PROFILE: "work", ANTHROPIC_CONFIG_DIR: "/home/.acme/anthropic" } }));
+      expect(env["ANTHROPIC_PROFILE"]).toBe("work");
+      expect(env["ANTHROPIC_CONFIG_DIR"]).toBe("/home/.acme/anthropic");
+      expect(env["ANTHROPIC_API_KEY"]).toBeUndefined();
+      expect(env["ANTHROPIC_AUTH_TOKEN"]).toBeUndefined();
+    });
+
+    test("officialCredentialPlan yields an EMPTY plan, even when provider.authRef resolves to material", () => {
+      const resolvableRef: CredentialRef = { kind: "keychain", service: "com.acme.core", account: "anthropic" };
+      expect(officialCredentialPlan({ selection: profile, provider: { providerId: "anthropic-console", authRef: resolvableRef }, explicit: undefined })).toEqual([]);
+      // …and it stays empty even if a host mistakenly hands it an explicit plan for this family.
+      expect(officialCredentialPlan({ selection: profile, provider: undefined, explicit: [{ variable: "ANTHROPIC_API_KEY", ref: resolvableRef }] })).toEqual([]);
+    });
+
+    test("ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN stay forbidden for this family, from credentials or extras", () => {
+      expect(() => buildOfficialChildEnv(input({ selection: profile, credentials: { ANTHROPIC_PROFILE: "work", ANTHROPIC_CONFIG_DIR: "/d", ANTHROPIC_API_KEY: "k" } }))).toThrow(
+        /does not belong to the console-profile family/,
+      );
+      expect(() => buildOfficialChildEnv(input({ selection: profile, credentials: { ANTHROPIC_AUTH_TOKEN: "t" } }))).toThrow(/does not belong to the console-profile family/);
+      expect(() =>
+        buildOfficialChildEnv(input({ selection: profile, credentials: { ANTHROPIC_PROFILE: "work", ANTHROPIC_CONFIG_DIR: "/d" } }), { configuredExtras: { ANTHROPIC_API_KEY: "k" } }),
+      ).toThrow(/outside this session's console-profile family/);
+    });
+
+    test("the pairing caveat: one name without the other is refused", () => {
+      expect(() => buildOfficialChildEnv(input({ selection: profile, credentials: { ANTHROPIC_PROFILE: "work" } }))).toThrow(/together or not at all/);
+      expect(() => buildOfficialChildEnv(input({ selection: profile, credentials: { ANTHROPIC_CONFIG_DIR: "/d" } }))).toThrow(/together or not at all/);
+      expect(() => buildOfficialChildEnv(input({ selection: profile, credentials: {} }))).not.toThrow();
+    });
+  });
+
+  test("regression pin: the api-key family's env is byte-identical to 0.0.3", () => {
+    const env = buildOfficialChildEnv(input({ credentials: { ANTHROPIC_API_KEY: "sk-fixture" } }));
+    expect(Object.keys(env)).toEqual(["ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", ...TRAFFIC_OPT_OUT_VARIABLE_NAMES].sort());
+    expect(env["ANTHROPIC_API_KEY"]).toBe("sk-fixture");
+    const ref: CredentialRef = { kind: "inline", value: "sk-fixture" };
+    expect(officialCredentialPlan({ selection: selection(), provider: { providerId: "anthropic", authRef: ref }, explicit: undefined })).toEqual([{ variable: "ANTHROPIC_API_KEY", ref }]);
   });
 
   test("review r1, M1: `configuredExtras` cannot smuggle a SECOND family, or shadow a variable we own", () => {
