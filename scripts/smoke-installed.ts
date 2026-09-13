@@ -9,14 +9,17 @@
 // install and the peer's come from the registry, so a local run without network access fails at the
 // install step rather than in anything this script is about. CI always has it.
 //
-// THE REQUIRED PEER IS AN ORDINARY REGISTRY INSTALL (R6, the close-out collapse).
-// `@yanlinglabs/winter-agent-sdk` is a REQUIRED PEER: the router's `dist/index.js` opens with
-// `export * from "@yanlinglabs/winter-agent-sdk"`, so importing the package without a resolvable
-// peer is not a failure of the tarball, it is the documented consequence of not installing a peer.
-// Now that the peer is published, the probe installs the EXACT version this checkout has resolved
-// (read off the installed copy's own manifest, not re-spelled as a range) alongside the tarball —
-// which is exactly what a host with both packages vendored will have — and asserts the ROUTER's
-// tarball is the dist-only thing under test.
+// THE REQUIRED PEERS ARE ORDINARY REGISTRY INSTALLS (R6, the close-out collapse; widened P10b-6 R9
+// when W18-14/W18-20's continuity work added two more).
+// `@yanlinglabs/winter-agent-sdk`, `@yanlinglabs/winter-provider-runtime` and
+// `@yanlinglabs/winter-provider-catalog` are REQUIRED PEERS: the router's `dist/index.js` opens with
+// `export * from "@yanlinglabs/winter-agent-sdk"` and its continuity/default-resolver modules import
+// the other two directly, so importing the package without a resolvable peer is not a failure of the
+// tarball, it is the documented consequence of not installing one. Now that all three are published,
+// the probe installs the EXACT version this checkout has resolved for each (read off the installed
+// copy's own manifest, not re-spelled as a range) alongside the tarball — which is exactly what a
+// host with every package vendored will have — and asserts the ROUTER's tarball is the dist-only
+// thing under test.
 //
 // WHAT THIS PROVES, precisely: the packed manifest resolves, the compiled `default` entry runs under
 // Node (which cannot execute TypeScript), the `bun` condition is gone from the published manifest,
@@ -34,8 +37,8 @@ import { releasePack } from "./release-pack.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
-/** The one peer this package cannot be imported without. Spelled once. */
-const REQUIRED_PEER = "@yanlinglabs/winter-agent-sdk";
+/** The peers this package cannot be imported (or its declarations resolved) without. Spelled once. */
+const REQUIRED_PEERS = ["@yanlinglabs/winter-agent-sdk", "@yanlinglabs/winter-provider-runtime", "@yanlinglabs/winter-provider-catalog"];
 /** The peer a consumer may legitimately NOT have — the whole subject of the type-check leg below. */
 const OPTIONAL_PEER = "@anthropic-ai/claude-agent-sdk";
 
@@ -240,17 +243,21 @@ export async function runSmoke(opts: { runtimes?: readonly SmokeRuntime[]; root?
     if (packed.violations.length > 0) throw new Error(`release-pack found violations, refusing to smoke-test:\n${packed.violations.join("\n")}`);
     const targets = deriveImportTargets(root);
 
-    // The EXACT version this checkout has resolved (never re-spelled as a range): the smoke tests
-    // the same peer version the tarball was built and tested against, not "whatever satisfies the
-    // range that day."
-    const peerDir = peerPackageDir(REQUIRED_PEER, root);
-    if (peerDir === undefined) throw new Error(`smoke-installed: the required peer ${REQUIRED_PEER} is not resolvable from this repository — run \`pnpm install\``);
-    const peerManifest = JSON.parse(readFileSync(join(peerDir, "package.json"), "utf8")) as { version?: unknown };
-    if (typeof peerManifest.version !== "string") throw new Error(`smoke-installed: ${REQUIRED_PEER}'s installed package.json carries no \`version\``);
+    // The EXACT version this checkout has resolved for EACH required peer (never re-spelled as a
+    // range): the smoke tests the same peer versions the tarball was built and tested against, not
+    // "whatever satisfies the range that day."
+    const peerSpecs = REQUIRED_PEERS.map((name) => {
+      const peerDir = peerPackageDir(name, root);
+      if (peerDir === undefined) throw new Error(`smoke-installed: the required peer ${name} is not resolvable from this repository — run \`pnpm install\``);
+      const peerManifest = JSON.parse(readFileSync(join(peerDir, "package.json"), "utf8")) as { version?: unknown };
+      if (typeof peerManifest.version !== "string") throw new Error(`smoke-installed: ${name}'s installed package.json carries no \`version\``);
+      return `${name}@${peerManifest.version}`;
+    });
 
     // Outside the repository on purpose: a fresh mkdtemp, no workspace file, no lockfile, and no
     // configuration but the registry pin below. What makes this succeed is the tarball itself plus an
-    // ORDINARY public-registry install of the required peer (R6) — no symlink, no sibling checkout.
+    // ORDINARY public-registry install of every required peer (R6, widened P10b-6 R9) — no symlink,
+    // no sibling checkout.
     writeFileSync(join(probeDir, "package.json"), `${JSON.stringify({ name: "winter-runtime-sdk-smoke-probe", private: true, version: "0.0.0" }, null, 2)}\n`);
     // …with ONE piece of configuration, and it is the registry (see `PROBE_NPMRC`): a project-level
     // `.npmrc` here outranks whatever userconfig the surrounding job wrote, so the peer comes from the
@@ -258,9 +265,9 @@ export async function runSmoke(opts: { runtimes?: readonly SmokeRuntime[]; root?
     writeFileSync(join(probeDir, ".npmrc"), PROBE_NPMRC);
     // `--legacy-peer-deps`: npm 7+ tries to INSTALL peer dependencies, and the OPTIONAL peer
     // (`@anthropic-ai/claude-agent-sdk`) is deliberately absent here — `typecheckWithoutOptionalPeer`
-    // below is what that absence exists to prove. No `--offline`: the required peer's install below
-    // needs the registry now that it is a real dependency, not a symlink onto this checkout.
-    const install = Bun.spawnSync(["npm", "install", "--legacy-peer-deps", packed.packed.tarballPath, `${REQUIRED_PEER}@${peerManifest.version}`], { cwd: probeDir, stdout: "pipe", stderr: "pipe" });
+    // below is what that absence exists to prove. No `--offline`: the required peers' install below
+    // needs the registry now that they are real dependencies, not a symlink onto this checkout.
+    const install = Bun.spawnSync(["npm", "install", "--legacy-peer-deps", packed.packed.tarballPath, ...peerSpecs], { cwd: probeDir, stdout: "pipe", stderr: "pipe" });
     if (install.exitCode !== 0) {
       throw new Error(`npm install failed (exit ${install.exitCode}):\n${new TextDecoder().decode(install.stdout)}${new TextDecoder().decode(install.stderr)}`);
     }
