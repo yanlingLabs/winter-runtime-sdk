@@ -57,8 +57,9 @@ import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, Offici
 import type { OfficialOptions, OfficialQuery, OfficialUserMessage } from "./seams/official-sdk-shapes.ts";
 import type { RuntimeKind, RuntimeSelection } from "./selection/runtime-selection.ts";
 import { claudeReadyStore } from "./official/claude-ready-store.ts";
-import { endpointFromOrigin, type ContinuityEndpoint } from "@yanlinglabs/winter-provider-runtime";
+import type { ContinuityEndpoint } from "@yanlinglabs/winter-provider-runtime";
 import type { MessageOrigin } from "@yanlinglabs/winter-provider-runtime";
+import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { hasConversationalEntry, readProviderStateSidecar } from "./store/materialized-resume.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
@@ -287,10 +288,11 @@ export interface OfficialLegDeps {
   policy?: RouterOfficialPolicy;
   /**
    * WS-18 W18-14/W18-20 (P10b): turns a stamped `MessageOrigin` into full endpoint facts — normally
-   * `createEndpointResolver(registry)` over the host's own catalog registry. Absent means
-   * `endpointFromOrigin`, `@yanlinglabs/winter-provider-runtime`'s registry-free fallback: everything
-   * the stamp itself carries, with `readableState: "none"` (absence of evidence is not evidence of a
-   * summary — the ONLY conservative direction, since a registry-free host cannot certify otherwise).
+   * `createEndpointResolver(registry)` over the host's own (credentialed, live-discovery-aware)
+   * catalog registry. Absent means `defaultEndpointResolver()` (`default-endpoint-resolver.ts`, fix
+   * round 1 CRITICAL) — a registry built from the COMPILED catalog alone, no credentials, no network:
+   * the bare `endpointFromOrigin` fallback reports `readableState: "none"` for every model, which is
+   * a false "no reasoning to lose" for a family the catalog actually documents.
    */
   resolveEndpoint?: (origin: MessageOrigin) => ContinuityEndpoint;
   /**
@@ -766,7 +768,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // canonical file is never touched by a load. `target` is what THIS session — the destination —
     // would run this on, from its own decided selection; there is no other endpoint the official leg
     // could ever be loading for.
-    const resolveEndpoint = deps.resolveEndpoint ?? endpointFromOrigin;
+    const resolveEndpoint = deps.resolveEndpoint ?? defaultEndpointResolver();
     const target = resolveEndpoint({ providerId: request.selection.providerId, modelKey: request.selection.modelRef, family: request.selection.family });
     const readyStore = claudeReadyStore(shared.store, {
       readSidecar: (key) => readProviderStateSidecar(home, key),

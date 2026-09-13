@@ -31,6 +31,9 @@ importers:
       '@yanlinglabs/winter-conformance':
         specifier: ^0.0.3
         version: 0.0.3
+      '@yanlinglabs/winter-provider-catalog':
+        specifier: ^0.0.10
+        version: 0.0.10
       '@yanlinglabs/winter-provider-conformance':
         specifier: ^0.0.3
         version: 0.0.3
@@ -132,6 +135,10 @@ packages:
 
   '@yanlinglabs/winter-conformance@0.0.3':
     resolution: {integrity: sha512-oT/HvEv/i6XfvL/4pu0YXa6OT66Glv1cGCa5psbDkBQD3GLXzl0yZoE9WwyjXufrukeYsuMcZBk2ZjRlwk6e0A==}
+    engines: {node: '>=18'}
+
+  '@yanlinglabs/winter-provider-catalog@0.0.10':
+    resolution: {integrity: sha512-jCbxAmeYzTgi6nvNf/x64eKCDvTZDRiA7E9Vr6369VTanUH58ETKNHe57QKPQTHrBhoHM8C1adqTMpuGCDFv8g==}
     engines: {node: '>=18'}
 
   '@yanlinglabs/winter-provider-catalog@0.0.3':
@@ -607,6 +614,8 @@ snapshots:
       undici-types: 8.9.0
 
   '@yanlinglabs/winter-conformance@0.0.3': {}
+
+  '@yanlinglabs/winter-provider-catalog@0.0.10': {}
 
   '@yanlinglabs/winter-provider-catalog@0.0.3': {}
 

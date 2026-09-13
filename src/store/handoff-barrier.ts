@@ -55,9 +55,10 @@ import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, rmS
 import { join } from "node:path";
 
 import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
-import { endpointFromOrigin, reviewModelSwitch, toClaudeReady, type ContinuityEndpoint, type SwitchReview } from "@yanlinglabs/winter-provider-runtime";
+import { reviewModelSwitch, toClaudeReady, type ContinuityEndpoint, type SwitchReview } from "@yanlinglabs/winter-provider-runtime";
 import type { MessageOrigin, ProviderStateRecord } from "@yanlinglabs/winter-provider-runtime";
 
+import { defaultEndpointResolver } from "../default-endpoint-resolver.ts";
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
@@ -248,8 +249,12 @@ export interface HandoffBarrierDeps {
   leaseRetryDelayMs?: number;
   /**
    * WS-18 W18-20 (P10b): turns a stamped `MessageOrigin` into full endpoint facts for `reviewSwitch` —
-   * normally `createEndpointResolver(registry)` over the host's own catalog registry. Absent means
-   * `endpointFromOrigin`, `@yanlinglabs/winter-provider-runtime`'s registry-free fallback.
+   * normally `createEndpointResolver(registry)` over the host's own (credentialed, live-discovery-
+   * aware) catalog registry. Absent means `defaultEndpointResolver()` — a registry built from the
+   * COMPILED catalog alone (`default-endpoint-resolver.ts`, fix round 1 CRITICAL): the bare
+   * `endpointFromOrigin` fallback reports `readableState: "none"` for every model, which silently
+   * over-warns a real lossless exposed-reasoning transfer (measured: DeepSeek→GLM came back
+   * `warned-lossy` with no resolver injected, breaking R-10b-2/W18-21 on exactly the row it protects).
    */
   resolveEndpoint?: (origin: MessageOrigin) => ContinuityEndpoint;
   /**
@@ -546,7 +551,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     const store = sharedOf();
     const entries = (await store.store.load(args.session)) ?? [];
     const sidecar = await readProviderStateSidecar(homeOf(), args.session);
-    const resolve = deps.resolveEndpoint ?? endpointFromOrigin;
+    const resolve = deps.resolveEndpoint ?? defaultEndpointResolver();
     const fromEndpoint = resolve(originFrom(args.entry.selection));
     const toEndpoint = resolve(originFrom(args.requested));
     let truncated = false;

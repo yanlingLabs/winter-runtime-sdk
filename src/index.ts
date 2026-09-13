@@ -144,6 +144,11 @@ export type {
   HandoffOwnerHealth, HandoffParticipants, HandoffResumeTarget, HandoffSourceOwner, HandoffStepReport,
 } from "./store/handoff-barrier.ts";
 export type { HandoffSelection } from "./seams/handoff.ts";
+// WS-18 W18-20 (P10b, fix round 1): the catalog-backed DEFAULT `resolveEndpoint` both
+// `HandoffBarrierDeps` and `OfficialLegDeps` fall back to when a host injects none. Exported so a
+// host can call it directly (e.g. to warm the cache, or to use the same default in its own tooling)
+// rather than only ever reaching it as a fallback.
+export { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 // `HandoffBarrierDeps.decorator` is typed with this — a host building `HandoffBarrierDeps` needs the
 // name to type it, not only the barrier's own construction path.
 export type { MaterializedResumeDecoratorHandle } from "./store/materialized-resume.ts";
