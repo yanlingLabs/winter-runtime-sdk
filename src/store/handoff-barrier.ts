@@ -439,43 +439,56 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
    * A REFUSAL IS NEVER A SUBSTITUTION. The barrier does not pick a different provider for the
    * destination — that is the selector's business — so a session whose row is gone entirely
    * (`fresh-refused`) travels with Lane D's own refusal object, verbatim.
+   *
+   * WS-18 W18-1/W18-4 (P10b): `args.requested`, WHEN PRESENT, IS THE WHOLE ROW THIS REVIEW IS ABOUT —
+   * never merged with `persisted`. D13's "stamp the persisted row with the destination's runtimeKind"
+   * is re-scoped to fire only when no new model was requested; the claude-oauth → winter refusal and
+   * the "does the official branch serve this" check both read the DESTINATION's own credential family,
+   * which for a `requested` review is `requested.authFamily`, never `persisted`'s.
    */
-  const reviewSelectionFor = async (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }): Promise<HandoffSelection> => {
-    const { persisted, to } = args;
-    const stamped = { ...persisted, runtimeKind: to };
+  const reviewSelectionFor = async (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection; requested?: RuntimeSelection }): Promise<HandoffSelection> => {
+    const { persisted, to, requested } = args;
+    // THE ROW THIS REVIEW IS ABOUT. A requested target travels WHOLE, by identity — no field of the
+    // session's persisted selection reaches it, which is W18-1's entire point ("nothing from the
+    // persisted source selection is merged in: no provider, credential ref, authRef or auth kind").
+    const row = requested ?? persisted;
+    const stamped = requested ?? { ...persisted, runtimeKind: to };
     if (deps.selectionInputFor === undefined) {
       return {
         kind: "unreviewed",
         selection: stamped,
-        detail: `no selection input was supplied, so nothing checked whether ${to} can serve ${persisted.providerId}/${persisted.modelRef}; the destination's own init is the first thing that will (supply \`selectionInputFor\` to review it here instead)`,
+        detail: `no selection input was supplied, so nothing checked whether ${to} can serve ${row.providerId}/${row.modelRef}; the destination's own init is the first thing that will (supply \`selectionInputFor\` to review it here instead)`,
       };
     }
     const supplied = await deps.selectionInputFor(args);
-    // THE REQUEST IS PINNED TO THE RECORDED ROW, and this is the whole correctness of the check.
+    // THE REQUEST IS PINNED TO THE ROW UNDER REVIEW, and this is the whole correctness of the check.
     // `reviewPersistedSelection` re-decides from `input.requested`, which for a HOST's input means
     // "what would this session ask for if it were new" — a question whose answer is about a different
     // row entirely (with an empty request it falls through to the listing's ACTIVE slot set, so a
     // session persisted on Gemini would be reviewed against a Claude row and pass). What a handoff
-    // has to ask is "is the row this session is RECORDED on still servable, and where does it route
-    // today", so the recorded provider and model are pinned into the resolution — the same technique
-    // `resumeChildSelection` uses for the same question, and for the same reason (WS-10's Phase 6.6
-    // amendment: "the resolved provider id must equal the recorded one").
-    const input: SelectionInput = { ...supplied, requested: { provider: persisted.providerId, model: persisted.modelRef } };
-    const review = reviewPersistedSelection({ ...input, persisted });
+    // has to ask is "is the row under review still servable, and where does it route today", so the
+    // row's provider and model are pinned into the resolution — the same technique `resumeChildSelection`
+    // uses for the same question, and for the same reason (WS-10's Phase 6.6 amendment: "the resolved
+    // provider id must equal the recorded one").
+    const input: SelectionInput = { ...supplied, requested: { provider: row.providerId, model: row.modelRef } };
+    const review = reviewPersistedSelection({ ...input, persisted: row });
     if (review.kind === "fresh-refused") {
       return {
         kind: "refused",
         refusal: review.refusal,
-        detail: `this session's persisted selection is no longer servable at all: ${review.refusal.detail}`,
+        detail:
+          requested === undefined
+            ? `this session's persisted selection is no longer servable at all: ${review.refusal.detail}`
+            : `the requested selection is no longer servable at all: ${review.refusal.detail}`,
       };
     }
-    if (to === "winter-agent" && persisted.authFamily === "claude-oauth") {
+    if (to === "winter-agent" && row.authFamily === "claude-oauth") {
       return {
         kind: "refused",
         refusal: {
           refused: true,
           reason: "runtime-unavailable",
-          detail: `${persisted.modelRef} is persisted under a Claude OAuth credential, which never routes to the Winter runtime (D28, WS-13c §0); handing this session to winter-agent would require a different credential, and choosing one is the selector's business rather than the barrier's`,
+          detail: `${row.modelRef} is ${requested === undefined ? "persisted" : "requested"} under a Claude OAuth credential, which never routes to the Winter runtime (D28, WS-13c §0); handing this session to winter-agent would require a different credential, and choosing one is the selector's business rather than the barrier's`,
         },
         detail: "a Claude OAuth credential never routes to the Winter runtime (D28)",
       };
@@ -486,26 +499,27 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         refusal: {
           refused: true,
           reason: "runtime-unavailable",
-          detail: `a fresh decision over this host's catalog routes ${persisted.providerId}/${persisted.modelRef} to ${review.fresh.runtimeKind} (${review.fresh.reason}), so the official runtime does not serve it; the barrier will not invent a provider the destination can serve (WS-00 §2, D13)`,
+          detail: `a fresh decision over this host's catalog routes ${row.providerId}/${row.modelRef} to ${review.fresh.runtimeKind} (${review.fresh.reason}), so the official runtime does not serve it; the barrier will not invent a provider the destination can serve (WS-00 §2, D13)`,
         },
-        detail: `the official runtime does not serve ${persisted.providerId}/${persisted.modelRef}`,
+        detail: `the official runtime does not serve ${row.providerId}/${row.modelRef}`,
       };
     }
-    // THE SELECTION THAT TRAVELS IS THE PERSISTED ONE, with the destination's runtime stamped on it —
-    // never `review.fresh`. D13 makes the persisted choice authoritative and a handoff moves the
-    // RUNTIME, not the model: adopting a fresh provider here would be the silent rewrite D13 forbids.
-    // `review` is carried beside it so a host can render `handoff-required`'s proposal itself.
+    // THE SELECTION THAT TRAVELS IS `stamped` — the REQUESTED row verbatim when there is one, else the
+    // persisted one with the destination's runtime stamped on it — never `review.fresh`. Without a
+    // `requested` target, D13 makes the persisted choice authoritative and a handoff moves the RUNTIME,
+    // not the model: adopting a fresh provider here would be the silent rewrite D13 forbids. `review` is
+    // carried beside it so a host can render `handoff-required`'s proposal itself.
     return { kind: "servable", selection: stamped, review };
   };
 
-  const plan = async (session: SessionKey, to: RuntimeKind): Promise<HandoffPlan> => {
+  const plan = async (session: SessionKey, to: RuntimeKind, opts: { requested?: RuntimeSelection } = {}): Promise<HandoffPlan> => {
     const entry = await loadEntry(session);
     assertOneDecoratorStore();
     const from = entry.runtimeKind;
     const owner = (await deps.participants?.source?.(session, from)) ?? undefined;
     const health = owner?.health === undefined ? undefined : await owner.health();
     const markers = markersFor({ entry, to, session, ...(health === undefined ? {} : { health }) });
-    const selection = await reviewSelectionFor({ session, from, to, persisted: entry.selection });
+    const selection = await reviewSelectionFor({ session, from, to, persisted: entry.selection, ...(opts.requested === undefined ? {} : { requested: opts.requested }) });
     // A DESTINATION THAT CANNOT SERVE THE SELECTION MAKES STEP 8 KNOWN-UNPROVABLE, which is exactly
     // what `knownUnprovable` is for: a host renders "this will be a fork, here is why" BEFORE it
     // confirms, instead of after the lease, the drain and the staging have all run.
@@ -522,6 +536,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       decorationDoor: decoratorOf().door,
       tempContinuity: tempContinuityModeFor(to),
       selection,
+      ...(opts.requested === undefined ? {} : { requested: opts.requested }),
     };
   };
 

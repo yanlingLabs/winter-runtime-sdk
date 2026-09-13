@@ -1715,6 +1715,116 @@ describe("item 20 — plan() reviews the persisted selection against the DESTINA
 });
 
 // ====================================================================================================
+// WS-18 W18-4 / P10b-6 R2 — `plan()` REVIEWS THE REQUESTED TARGET, WHOLE, NEVER MERGED WITH THE
+// SESSION'S PERSISTED SELECTION (W18-1). D13's "stamp the persisted row with the destination's
+// runtimeKind" applies only when the caller supplies no `requested` — the tests just above this block
+// (item 20) pin exactly that meaning with no `requested` passed at all.
+// ====================================================================================================
+describe("P10b-6 R2 — plan(session, to, { requested }) reviews the FRESH selection, unmerged", () => {
+  const gptSelection = (over: Partial<RuntimeSelection> = {}): RuntimeSelection => ({
+    runtimeKind: "winter-agent",
+    providerId: "openai",
+    modelRef: "openai/gpt-6-astra",
+    family: "gpt",
+    authFamily: "api-key",
+    sdkVersion: "0.0.2",
+    reason: "fixture: a fresh gpt selection",
+    decidedAt: NOW,
+    ...over,
+  });
+
+  const claudeSelection = (over: Partial<RuntimeSelection> = {}): RuntimeSelection => ({
+    runtimeKind: "winter-agent",
+    providerId: "anthropic",
+    modelRef: "anthropic/claude-opus-5",
+    family: "claude",
+    authFamily: "api-key",
+    sdkVersion: "0.0.2",
+    reason: "fixture: a fresh claude selection",
+    decidedAt: NOW,
+    ...over,
+  });
+
+  const inputFor = (over: Partial<SelectionInput> = {}): SelectionInput => ({
+    mode: "code",
+    requested: {},
+    families: listing(undefined),
+    credentials: credentials(["anthropic", "openai", "google"]),
+    hasClaudePeer: true,
+    claudeOauthApproved: false,
+    versions: VERSIONS,
+    now: NOW,
+    ...over,
+  });
+
+  test("requested Claude on a codex-oauth-style GPT source session → servable, and the WHOLE requested row travels — no source field present", async () => {
+    await withStoreBed(async (bed) => {
+      // The persisted (SOURCE) row: a Winter-served GPT session under a codex-style credential ref —
+      // named distinctively (`openai-codex`) so its presence anywhere in the reviewed selection would
+      // be unmistakable.
+      const codexSourceSelection = gptSelection({ providerId: "openai-codex", modelRef: "openai-codex/gpt-5-codex", authFamily: "custom", reason: "fixture: codex-oauth-style GPT source" });
+      await bed.record({ runtimeKind: "winter-agent", selection: codexSourceSelection });
+
+      const requested = claudeSelection({ runtimeKind: "claude-agent" });
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner() }, selectionInputFor: () => inputFor() });
+      const plan = await barrier.plan(bed.key, "claude-agent", { requested });
+
+      expect(plan.selection.kind).toBe("servable");
+      if (plan.selection.kind === "servable") {
+        // THE WHOLE REQUESTED ROW, BY VALUE — provider, auth family and everything else come from
+        // `requested`; nothing is merged from the persisted source.
+        expect(plan.selection.selection).toEqual(requested);
+      }
+      // NO SOURCE FIELD LEAKED (W18-1's "nothing from the persisted source selection is merged in: no
+      // provider, credential ref, authRef or auth kind"): the distinctive source marker never appears.
+      expect(JSON.stringify(plan.selection)).not.toContain("codex");
+      // `plan.requested` IS CARRIED, for the daemon's `confirmInit` to read (Interfaces).
+      expect(plan.requested).toEqual(requested);
+      expect(plan.steps[7]?.knownUnprovable).toBeUndefined();
+    });
+  });
+
+  test("requested GPT on a Claude (official) session → servable", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: claudeSelection({ runtimeKind: "claude-agent" }) });
+      const requested = gptSelection();
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }) }, selectionInputFor: () => inputFor() });
+      const plan = await barrier.plan(bed.key, "winter-agent", { requested });
+
+      expect(plan.selection.kind).toBe("servable");
+      if (plan.selection.kind === "servable") expect(plan.selection.selection).toEqual(requested);
+      expect(plan.requested).toEqual(requested);
+    });
+  });
+
+  test("a requested Claude OAuth credential handed to WINTER is refused — checked against the REQUESTED row's own credential family, not the persisted one", async () => {
+    await withStoreBed(async (bed) => {
+      // The persisted source has an ordinary API-key credential; only the REQUESTED row is Claude OAuth.
+      await bed.record({ runtimeKind: "claude-agent", selection: claudeSelection({ runtimeKind: "claude-agent" }) });
+      const requested = claudeSelection({ runtimeKind: "claude-agent", authFamily: "claude-oauth" });
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }) }, selectionInputFor: () => inputFor({ claudeOauthApproved: true }) });
+      const plan = await barrier.plan(bed.key, "winter-agent", { requested });
+      expect(plan.selection.kind).toBe("refused");
+      if (plan.selection.kind === "refused") expect(plan.selection.refusal.detail).toContain("never routes to the Winter runtime");
+    });
+  });
+
+  test("with no `requested`, plan.requested is absent and D13's stamp-the-persisted-row behaviour is exactly as before", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ selection: claudeSelection() });
+      const barrier = barrierFor(bed, { participants: { source: () => idleOwner() }, selectionInputFor: () => inputFor() });
+      const plan = await barrier.plan(bed.key, "claude-agent");
+      expect("requested" in plan).toBe(false);
+      expect(plan.selection.kind).toBe("servable");
+      if (plan.selection.kind === "servable") {
+        expect(plan.selection.selection.providerId).toBe("anthropic");
+        expect(plan.selection.selection.runtimeKind).toBe("claude-agent");
+      }
+    });
+  });
+});
+
+// ====================================================================================================
 // F-2 — THREE WRITERS, ONE ROW: the barrier must not erase what the destination wrote.
 //
 // The one write a real destination makes during a handoff is the one no test ever saw, because every

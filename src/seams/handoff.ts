@@ -67,6 +67,16 @@ export interface HandoffPlan {
   tempContinuity: "adopt" | "clone-copy";
   /** What the DESTINATION would run this session on, or the typed refusal that says it cannot. */
   selection: HandoffSelection;
+  /**
+   * WS-18 W18-1/W18-4 (P10b): the FRESH selection a caller decided for a family-crossing model
+   * change, carried verbatim from `plan()`'s `requested` option.
+   *
+   * Present only when the caller supplied one. Its whole shape travels to `confirmInit` unmerged with
+   * anything from the session's persisted selection — no source provider, credential ref or auth
+   * family reaches the destination's credential plan (W18-1, I-3). Absent means D13 applies: the
+   * persisted selection is what `plan.selection.selection` stamps the destination's runtime onto.
+   */
+  requested?: RuntimeSelection;
 }
 
 export type HandoffOutcome =
@@ -76,6 +86,11 @@ export type HandoffOutcome =
 
 /** WS-05 §12's mechanics. Lane C implements; the spine pins the signature. */
 export interface HandoffBarrier {
-  plan(session: SessionKey, to: RuntimeKind): Promise<HandoffPlan>;
+  /**
+   * `opts.requested` (WS-18 W18-4, P10b): reviews a FRESH selection the caller already decided for a
+   * family-crossing model change, instead of the persisted one. Absent — the pre-10b shape — reviews
+   * the session's persisted selection, stamped with `to` (D13's rule, unchanged for this case).
+   */
+  plan(session: SessionKey, to: RuntimeKind, opts?: { requested?: RuntimeSelection }): Promise<HandoffPlan>;
   execute(plan: HandoffPlan): Promise<HandoffOutcome>;
 }
