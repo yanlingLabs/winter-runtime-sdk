@@ -51,7 +51,7 @@
 // MECHANICS and the Claude-leg injection; "switch UX/confirmations" stay with the host (Phase 8,
 // D19c). `plan()` produces something a host can render and confirm; `execute()` acts on the plan it is
 // given.
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
@@ -379,6 +379,31 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   const loadEntry = async (session: SessionKey): Promise<RuntimeDirectoryEntry> => {
     const entry = await findEntry(session);
     const shared = sharedOf();
+
+    // MAJOR M1b's convergence half: a revert that could not complete leaves a durable note beside the
+    // handoff lease (see `writePendingRevert`'s doc comment). Every load — cold or warm — gets exactly
+    // ONE fresh attempt to finish it: never a blocking retry loop, since `loadEntry` runs on every
+    // `plan()` and a session stuck mid-revert must not make each one hang for a second or more.
+    //
+    // WHILE THE NOTE IS OUTSTANDING, THE REPAIR BELOW MUST NOT RUN: it trusts the transcript's producer
+    // record over the directory, and that record still (wrongly) names the destination that never
+    // confirmed — running the repair here is exactly how the fixed bug used to "complete" a handoff
+    // that never happened. So `entry` — still the SOURCE, never touched by the failed write-ahead path
+    // — is what this returns whether or not the retry below lands; the difference is invisible to the
+    // caller and only shows up in whether the note is still there on the NEXT load.
+    const pendingRevert = readPendingRevert(leaseRootOf(), session);
+    if (pendingRevert !== undefined) {
+      try {
+        await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+        await shared.store.append(session, [pendingRevert.record]);
+        await shared.settle(session);
+        clearPendingRevert(leaseRootOf(), session);
+      } catch {
+        /* still held; the next load tries again, and `entry` (the source) is what THIS one reports */
+      }
+      return entry;
+    }
+
     const summary = await shared.canonical.readSessionSummary({ projectKey: session.projectKey, sessionId: session.sessionId });
     if (summary === null) return entry;
     const pending = summary["pendingHandoff"];
@@ -673,7 +698,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       record(step, false, reason);
       return { kind: "lossy-fork-offered", reason, step, detail: reason, steps: trail };
     };
-    const blocked = (step: HandoffStepNumber, reason: "repair-required" | "mirror-error" | "lease-held", detail: string): DetailedHandoffOutcome => {
+    const blocked = (step: HandoffStepNumber, reason: "repair-required" | "mirror-error" | "lease-held" | "revert-pending", detail: string): DetailedHandoffOutcome => {
       record(step, false, detail);
       return { kind: "blocked", reason, step, detail, steps: trail };
     };
@@ -884,8 +909,8 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // other direction keeps the original single-attempt behaviour: a live SOURCE process (a claude
         // child, or another instance of this daemon) holding the lease is a real conflict, not a race
         // this barrier should paper over with a retry.
-        const attempts = plan.from === "winter-agent" && plan.to === "claude-agent" ? WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS : 1;
-        const delayMs = deps.leaseRetryDelayMs ?? WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS;
+        const attempts = plan.from === "winter-agent" && plan.to === "claude-agent" ? HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS : 1;
+        const delayMs = deps.leaseRetryDelayMs ?? HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS;
         for (let attempt = 1; ; attempt++) {
           try {
             await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
@@ -1008,23 +1033,53 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           confirmed = { ok: false, reason: error instanceof Error ? error.message : String(error) };
         }
         if (!confirmed.ok) {
-          // TAKE OVER AND REVERT (W18-5): the write-ahead record already named the destination; a dead
-          // or refusing child leaves that record dangling unless this pid reclaims the lease (takeover
-          // from a dead holder is allowed — the same rule `acquireHandoffLease` and the writer lease
-          // both already use) and writes ONE more record naming the source again.
-          try {
-            await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
-            await shared.store.append(session, [{ ...staged.record, producerRuntime: plan.from }]);
-            await shared.settle(session);
-            committed = false;
-          } catch (revertError) {
-            // THE REVERT ITSELF FAILED: the durable record still names the destination that never
-            // started, so the outer catch's own vocabulary ("past the producer record there is no
-            // honest way to say the source kept the session") is the correct report — `committed`
-            // stays `true` and this propagates there rather than claiming a fork that did not happen.
-            throw new HandoffCommitError(
-              `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source failed: ${revertError instanceof Error ? revertError.message : String(revertError)}`,
-            );
+          // TAKE OVER AND REVERT (W18-5), with a BOUNDED RETRY (fix wave 2, MAJOR M1a): the write-ahead
+          // record already named the destination; a dead or refusing child leaves that record dangling
+          // unless this pid reclaims the lease (takeover from a dead holder is allowed — the same rule
+          // `acquireHandoffLease` and the writer lease both already use). The single-attempt version of
+          // this used to throw `HandoffCommitError` on the FIRST refusal even though the dying child's
+          // own lease release is a race this exact retry bound already exists to absorb one call site
+          // up (see `HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS`'s doc comment) — so the identical race here
+          // gets the identical bound, not a one-shot check.
+          const revertRecord: SessionStoreEntry = { ...staged.record, producerRuntime: plan.from };
+          const revertDelayMs = deps.leaseRetryDelayMs ?? HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS;
+          let reverted = false;
+          let lastRevertError: unknown;
+          for (let attempt = 1; attempt <= HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS; attempt++) {
+            try {
+              await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+              await shared.store.append(session, [revertRecord]);
+              await shared.settle(session);
+              committed = false;
+              reverted = true;
+              break;
+            } catch (revertError) {
+              lastRevertError = revertError;
+              if (attempt < HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS) await sleepMs(revertDelayMs);
+            }
+          }
+          if (!reverted) {
+            // MAJOR M1b: past this point there is NO honest way to say the revert happened — the
+            // durable record still names the destination that never confirmed. The old behaviour threw
+            // `HandoffCommitError` here, which the outer catch read as success (`committed` was already
+            // `true` from the write-ahead commit) and reported `resumed`: the host believed the move
+            // succeeded while the transcript, the live model and the running process all disagreed, and
+            // the NEXT `plan()` then "repaired" the directory to match the dangling producer record —
+            // converging on the runtime that never actually took the session.
+            //
+            // So this is `blocked`, never `resumed`, with a reason a host can render — and the still-
+            // owed revert is written to a durable, router-owned note (`writePendingRevert`) so ownership
+            // converges ON THE SOURCE instead: `loadEntry` retries this exact append on every future
+            // load, and reports the directory's own (untouched, source) value rather than repairing
+            // toward the destination for as long as the note is outstanding.
+            try {
+              writePendingRevert(leaseRootOf(), session, revertRecord, now().toISOString());
+            } catch {
+              /* best-effort: the `blocked` outcome below is honest either way, even without the note */
+            }
+            await unwind();
+            const reason = `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source could not be completed after ${HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS} attempt(s): ${lastRevertError instanceof Error ? lastRevertError.message : String(lastRevertError)}`;
+            return blocked(8, "revert-pending", reason);
           }
           await unwind();
           record(8, false, confirmed.reason);
@@ -1640,12 +1695,74 @@ function isLeaseError(error: unknown): boolean {
   return error instanceof Error && error.name === "WinterStoreLeaseError";
 }
 
-/** WS-18 W18-5 (P10b): the winter -> official writer-lease retry's bound. Overridable by `deps.leaseRetryDelayMs` (tests). */
-const WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS = 5;
-const WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS = 200;
+/**
+ * WS-18 W18-5 (P10b), widened by fix wave 2's MAJOR M1a: the writer-lease TAKEOVER retry bound, shared
+ * by BOTH sides of the same race — a winter destination's own exit lagging `owner.close()` (step 6),
+ * and a winter destination's dying/refusing child still holding the lease when its `confirmInit`
+ * failure forces this pid to take the lease back for a revert (step 8). Both are "a process's actual
+ * exit lags the call that logically ended it" — the same shape, just observed from the other side of
+ * the handoff — so this reuses the SAME measured bound rather than inventing a second one: Norma's own
+ * `end()` returns to the caller in ~240 ms while the aborted child is still alive, and 5 attempts at
+ * 200 ms gives a live-but-dying holder up to 800 ms of waiting BETWEEN attempts (1000 ms including the
+ * first), more than 3x that measured figure, before this pid gives up and reports the revert as
+ * `blocked` rather than a false `resumed`. Overridable by `deps.leaseRetryDelayMs` (tests, both sites).
+ */
+const HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS = 5;
+const HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS = 200;
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// --- MAJOR M1b: the durable, router-owned note for a revert that could not complete -----------------
+//
+// Written ONLY when the takeover retry above is exhausted: the durable transcript record still names
+// the destination that never confirmed (this pid could not get the writer lease back to say otherwise),
+// so a plain fact is left beside the handoff lease — never in the canonical transcript, which is
+// exactly what could not be written just now, and never on the host's own directory row, which is a
+// cross-repo schema (Norma's `runtime-state.db`) this fix does not touch. `loadEntry` reads it on every
+// future load and retries the SAME append; until it lands, `loadEntry` reports the directory's OWN
+// value — untouched by the failed write-ahead path, still the source — instead of running its usual
+// producer-vs-directory repair, which would otherwise "complete" a handoff that never actually happened
+// by repairing toward the dangling producer record (exactly the bug this fix closes).
+
+interface PendingRevert {
+  /** The exact record a successful revert would append — built once, at the moment the retry gave up. */
+  record: SessionStoreEntry;
+  at: string;
+}
+
+function pendingRevertPathFor(leaseRoot: string, session: SessionKey): string {
+  return join(leaseRoot, session.projectKey, `${session.sessionId}.pending-revert.json`);
+}
+
+function writePendingRevert(leaseRoot: string, session: SessionKey, record: SessionStoreEntry, at: string): void {
+  const dir = join(leaseRoot, session.projectKey);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = pendingRevertPathFor(leaseRoot, session);
+  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(temp, JSON.stringify({ record, at } satisfies PendingRevert), { mode: 0o600 });
+  renameSync(temp, path); // atomic: a reader never sees a half-written note
+}
+
+function readPendingRevert(leaseRoot: string, session: SessionKey): PendingRevert | undefined {
+  const path = pendingRevertPathFor(leaseRoot, session);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PendingRevert>;
+    if (parsed.record === undefined) return undefined;
+    return { record: parsed.record, at: typeof parsed.at === "string" ? parsed.at : new Date(0).toISOString() };
+  } catch {
+    return undefined; // an unreadable note blocks nothing; the takeover it describes is simply forgotten
+  }
+}
+
+function clearPendingRevert(leaseRoot: string, session: SessionKey): void {
+  try {
+    unlinkSync(pendingRevertPathFor(leaseRoot, session));
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "ENOENT") throw error;
+  }
 }
 
 // --- step 1's lease -------------------------------------------------------------------------------------

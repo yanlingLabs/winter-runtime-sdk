@@ -90,7 +90,18 @@ export interface HandoffPlan {
 export type HandoffOutcome =
   | { kind: "resumed"; selection: RuntimeSelection }
   | { kind: "lossy-fork-offered"; reason: string; step: HandoffStepNumber }
-  | { kind: "blocked"; reason: "repair-required" | "mirror-error" | "lease-held" };
+  | {
+      kind: "blocked";
+      /**
+       * `"revert-pending"` (fix wave 2, MAJOR M1): a winter destination's write-ahead commit landed but
+       * its `confirmInit` never did, and the takeover that reverts the durable record back to the
+       * source could not get the writer lease within the retry bound — most likely a dying destination
+       * child still holding it. This is NEVER reported as `resumed`: the move did not happen. The
+       * revert is retried automatically on a durable, router-owned note; a later `plan()` or any load
+       * completes it once the lease frees up, converging ownership back onto the source.
+       */
+      reason: "repair-required" | "mirror-error" | "lease-held" | "revert-pending";
+    };
 
 /** WS-05 §12's mechanics. Lane C implements; the spine pins the signature. */
 export interface HandoffBarrier {
