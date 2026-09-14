@@ -2442,3 +2442,40 @@ describe("P10b fix wave 2, MAJOR M1 — the revert takeover retries, and a faile
   // through to the untouched pre-existing repair-to-the-destination logic. It is re-run, unmodified, as
   // part of this same file's full suite — the fix's job was to leave it alone, not to change it.
 });
+
+// --- fix wave 2, MINOR m3 — `reviewSwitch` is READ-ONLY -----------------------------------------------
+describe("P10b fix wave 2, MINOR m3 — reviewSwitch never repairs, and crash residue never turns a review into a thrown append", () => {
+  test("reviewSwitch over a transcript with a leftover (dead-pid) pendingHandoff marker performs ZERO appends", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      // CRASH RESIDUE: a `pendingHandoff` marker from a pid that is not (and never will be) alive —
+      // exactly the leftover `loadEntry`'s repair clears with a canonical append (`:379-398`'s own
+      // logic) when `plan()`/`execute()` reads it. `reviewSwitch` must never reach that code path.
+      await bed.shared.store.append(bed.key, [
+        {
+          type: DIALECT_RECORD_ENTRY_TYPE,
+          pendingHandoff: { pid: 999999999, from: "claude-agent", to: "winter-agent", at: new Date(0).toISOString(), level: "conversation", sourceGeneration: 1, cursor: "" },
+        },
+      ]);
+      await bed.shared.settle(bed.key);
+
+      // MAKE ANY FURTHER APPEND THROW: if `reviewSwitch` ever reached `loadEntry`'s repair-on-read, the
+      // call below throws instead of returning a review — exactly the daemon-wide symptom the bug
+      // report describes ("that append throws, and the daemon then prompts generically on every
+      // change, even Sonnet <-> Opus").
+      bed.shared.store.append = (): Promise<void> => {
+        throw new Error("reviewSwitch must never write to the canonical transcript");
+      };
+
+      const review = await barrierFor(bed, {
+        resolveEndpoint: (origin) => ({ providerId: origin.providerId, modelKey: origin.modelKey, family: origin.family, readableState: "none" }),
+      }).reviewSwitch(bed.key, selectionFor("claude-agent"));
+      expect(review).toBeDefined();
+
+      // AND THE MARKER IS STILL THERE, untouched — exactly what a bare read leaves behind.
+      const summary = await bed.shared.canonical.readSessionSummary(bed.key);
+      expect(summary?.["pendingHandoff"]).not.toBeNull();
+    });
+  });
+});

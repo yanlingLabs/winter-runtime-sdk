@@ -634,6 +634,10 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
    * request-build time, which this router never sees and cannot measure.
    */
   const computeSwitchReview = async (args: { entry: RuntimeDirectoryEntry; session: SessionKey; requested: RuntimeSelection }): Promise<SwitchReview> => {
+    // MINOR m3 (fix wave 2): READ-ONLY. `loadEntry` can repair a crash-residue directory row with a
+    // canonical append — exactly the write `reviewSwitch` must never make, now that it runs on every
+    // `setModel`, including while a winter child holds the lease. `args.entry` is ALREADY the caller's
+    // (repaired-or-not) entry; this function reads the store directly and appends nothing.
     const store = sharedOf();
     const entries = (await store.store.load(args.session)) ?? [];
     const sidecar = await readProviderStateSidecar(homeOf(), args.session);
@@ -652,8 +656,15 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     return reviewModelSwitch({ entries, sidecarRecords: sidecar, from: fromEndpoint, to: toEndpoint, truncated });
   };
 
+  /**
+   * MINOR m3 (fix wave 2): `reviewSwitch` READS, never repairs. `loadEntry` is `plan()`/`execute()`'s
+   * own door (it can append a `pendingHandoff:null` repair for a crash-residue marker); a bare
+   * directory read here means a stale marker left over from an in-flight or crashed handoff never
+   * turns a same-family review into a thrown append failure — the repair stays exactly where step
+   * 6/8 already own it.
+   */
   const reviewSwitch = async (session: SessionKey, requested: RuntimeSelection): Promise<SwitchReview> => {
-    const entry = await loadEntry(session);
+    const entry = await findEntry(session);
     return computeSwitchReview({ entry, session, requested });
   };
 
