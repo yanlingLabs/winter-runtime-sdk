@@ -114,8 +114,14 @@ export interface HandoffBarrier {
   execute(plan: HandoffPlan): Promise<HandoffOutcome>;
   /**
    * WS-18 W18-20 (P10b): the ONE pre-flight review for every family-crossing model change — same-leg
-   * changes (gpt -> deepseek on Winter) as well as cross-runtime ones. Reads the session's persisted
-   * selection and the canonical transcript/sidecar through the shared store; never rewrites anything.
+   * changes (gpt -> deepseek on Winter) as well as cross-runtime ones. Reads the canonical transcript
+   * and sidecar through the shared store; never rewrites anything.
+   *
+   * fix wave 2, CRITICAL C1: the switch's SOURCE is the live tip's own identity, not the persisted
+   * `RuntimeSelection` — that record moves only on a cross-runtime handoff, so it goes stale across
+   * any same-runtime model change. The tip's sidecar `kind:"origin"` record wins when Winter wrote
+   * one; otherwise the official leg's own `message.model` is read directly. The persisted selection is
+   * the fallback ONLY when the lineage has no assistant entry at all (a session with no reply yet).
    */
   reviewSwitch(session: SessionKey, requested: RuntimeSelection): Promise<SwitchReview>;
 }

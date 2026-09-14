@@ -1712,11 +1712,17 @@ function isLeaseError(error: unknown): boolean {
  * and a winter destination's dying/refusing child still holding the lease when its `confirmInit`
  * failure forces this pid to take the lease back for a revert (step 8). Both are "a process's actual
  * exit lags the call that logically ended it" — the same shape, just observed from the other side of
- * the handoff — so this reuses the SAME measured bound rather than inventing a second one: Norma's own
- * `end()` returns to the caller in ~240 ms while the aborted child is still alive, and 5 attempts at
- * 200 ms gives a live-but-dying holder up to 800 ms of waiting BETWEEN attempts (1000 ms including the
- * first), more than 3x that measured figure, before this pid gives up and reports the revert as
- * `blocked` rather than a false `resumed`. Overridable by `deps.leaseRetryDelayMs` (tests, both sites).
+ * the handoff.
+ *
+ * THE JUSTIFICATION, HONESTLY: this reuses step 6's EXISTING bound by parity, not by a fresh
+ * measurement of THIS race. What is known is that Norma's `end()` RETURNS to the caller in ~240 ms
+ * while the child is still alive — that is when this pid regains control, not how long the child then
+ * takes to actually exit; nothing in that figure bounds the exit lag itself, and this hermetic package
+ * has no live child to measure it against. Absent that measurement, matching the bound already trusted
+ * for the identical race shape one call site up is the defensible choice over inventing an unmeasured
+ * second number. If a host-side measurement later shows the post-`end()` exit lag exceeds 5 x 200 ms,
+ * THAT is what should widen this toward the ~2 s the fix wave allowed for — not a guess made here.
+ * Overridable by `deps.leaseRetryDelayMs` (tests, both sites).
  */
 const HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS = 5;
 const HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS = 200;

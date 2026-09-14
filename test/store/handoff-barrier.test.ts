@@ -2418,6 +2418,20 @@ describe("P10b fix wave 2, MAJOR M1 — the revert takeover retries, and a faile
         // "repaired" toward the dangling producer record the way the old bug's next `plan()` would.
         const rowAfterFailure = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
         expect(rowAfterFailure?.runtimeKind).toBe("claude-agent");
+        const notePath = join(bed.home, "runtimes", "handoff-leases", bed.key.projectKey, `${bed.key.sessionId}.pending-revert.json`);
+        expect(existsSync(notePath)).toBe(true);
+
+        // A plan() WHILE THE LEASE IS STILL STUCK must NOT "repair" toward the dangling producer
+        // record — the property the old bug got backwards. Without `loadEntry`'s pending-revert guard,
+        // this is exactly where it would silently hand ownership to the destination that never
+        // confirmed, because the transcript's own record (still `winter-agent`) is what the pre-
+        // existing repair trusts.
+        const stillStuck = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }) } });
+        const planWhileStuck = await stillStuck.plan(bed.key, "claude-agent");
+        expect(planWhileStuck.from).toBe("claude-agent");
+        expect((await bed.shared.canonical.readSessionSummary(bed.key))?.["producerRuntime"]).toBe("winter-agent");
+        expect((await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address)?.runtimeKind).toBe("claude-agent");
+        expect(existsSync(notePath)).toBe(true); // the retry attempted (and failed) again; the note survives
 
         // THE LEASE FREES UP — the dying child has now actually exited.
         (bed.shared.canonical as StuckRevertTakeover).stillHeld = false;
@@ -2431,6 +2445,7 @@ describe("P10b fix wave 2, MAJOR M1 — the revert takeover retries, and a faile
         expect(summaryAfterConverge?.["producerRuntime"]).toBe("claude-agent");
         const rowAfterConverge = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
         expect(rowAfterConverge?.runtimeKind).toBe("claude-agent");
+        expect(existsSync(notePath)).toBe(false); // the note clears once the revert actually lands
       },
       { store: StuckRevertTakeover },
     );
