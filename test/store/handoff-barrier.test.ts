@@ -2339,3 +2339,360 @@ describe("P10b-6 R6 — winter destination write-ahead + lease release (W18-5)",
     );
   });
 });
+
+// --- fix wave 2, MAJOR M1 — the revert takeover is RETRIED, and a revert that never lands is NEVER --
+// reported as `resumed`. The write-ahead commit (R6, above) can leave the durable record naming a
+// winter destination whose `confirmInit` never succeeded; the takeover that reverts it back to the
+// source used to make exactly ONE attempt at the writer lease and, on failure, threw a
+// `HandoffCommitError` the outer catch read as success purely because `committed` was already `true`.
+describe("P10b fix wave 2, MAJOR M1 — the revert takeover retries, and a failed revert converges on the source instead of lying `resumed`", () => {
+  test("the revert succeeds after two failed takeovers — the dying winter destination's writer lease frees up within the bound", async () => {
+    class FlakyRevertTakeover extends WinterCompatibilitySessionStore {
+      calls = 0;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.calls += 1;
+        // call 1 = step 6's OWN acquire (single-attempt for this direction), which must succeed to
+        // reach the write-ahead commit and confirmInit at all. Calls 2-3 = the revert takeover's own
+        // retries, held by the "dying" destination child; call 4 is where it actually lets go.
+        if (this.calls >= 2 && this.calls <= 3) throw new WinterStoreLeaseError("held by the dying winter-destination child", 999999);
+        return super.acquireSessionLease(key);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "claude-agent" }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+          },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+        expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+        expect((bed.shared.canonical as FlakyRevertTakeover).calls).toBe(4);
+        // THE REVERT LANDED, exactly as the single-attempt version's happy path already proved above —
+        // this test is only about surviving the takeover being contended a couple of times first.
+        const summary = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summary?.["producerRuntime"]).toBe("claude-agent");
+        const row = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+        expect(row?.runtimeKind).toBe("claude-agent");
+      },
+      { store: FlakyRevertTakeover },
+    );
+  });
+
+  test("a revert that never succeeds returns `blocked: revert-pending` — NEVER `resumed` — and the next plan() converges on the source once the lease frees up", async () => {
+    class StuckRevertTakeover extends WinterCompatibilitySessionStore {
+      calls = 0;
+      /** Flips to `false` mid-test, standing in for "the dying destination child has now actually exited". */
+      stillHeld = true;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.calls += 1;
+        if (this.calls === 1) return super.acquireSessionLease(key); // step 6's own acquire succeeds
+        if (this.stillHeld) throw new WinterStoreLeaseError("held by a live destination child that never exits", 999999);
+        return super.acquireSessionLease(key);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "claude-agent" }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+          },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+        // NEVER `resumed`: the durable record still names the destination that never confirmed, and
+        // the old bug's `HandoffCommitError` — read by the outer catch as success because `committed`
+        // was already `true` — is exactly what used to report this as a completed move.
+        expect(outcome).toMatchObject({ kind: "blocked", reason: "revert-pending" });
+        expect(outcome.kind).not.toBe("resumed");
+        const summaryAfterFailure = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterFailure?.["producerRuntime"]).toBe("winter-agent");
+        // THE DIRECTORY STILL NAMES THE SOURCE — untouched by the failed write-ahead path, and NOT
+        // "repaired" toward the dangling producer record the way the old bug's next `plan()` would.
+        const rowAfterFailure = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+        expect(rowAfterFailure?.runtimeKind).toBe("claude-agent");
+        const notePath = join(bed.home, "runtimes", "handoff-leases", bed.key.projectKey, `${bed.key.sessionId}.pending-revert.json`);
+        expect(existsSync(notePath)).toBe(true);
+
+        // A plan() WHILE THE LEASE IS STILL STUCK must NOT "repair" toward the dangling producer
+        // record — the property the old bug got backwards. Without `loadEntry`'s pending-revert guard,
+        // this is exactly where it would silently hand ownership to the destination that never
+        // confirmed, because the transcript's own record (still `winter-agent`) is what the pre-
+        // existing repair trusts.
+        const stillStuck = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }) } });
+        const planWhileStuck = await stillStuck.plan(bed.key, "claude-agent");
+        expect(planWhileStuck.from).toBe("claude-agent");
+        expect((await bed.shared.canonical.readSessionSummary(bed.key))?.["producerRuntime"]).toBe("winter-agent");
+        expect((await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address)?.runtimeKind).toBe("claude-agent");
+        expect(existsSync(notePath)).toBe(true); // the retry attempted (and failed) again; the note survives
+
+        // THE LEASE FREES UP — the dying child has now actually exited.
+        (bed.shared.canonical as StuckRevertTakeover).stillHeld = false;
+
+        // A COLD LOAD CONVERGES: the router's own resume door (`plan()`, via `loadEntry`) completes
+        // the still-owed revert on this very read, before anything else about the session is decided.
+        const cold = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }) } });
+        const plan = await cold.plan(bed.key, "claude-agent");
+        expect(plan.from).toBe("claude-agent");
+        const summaryAfterConverge = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterConverge?.["producerRuntime"]).toBe("claude-agent");
+        const rowAfterConverge = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+        expect(rowAfterConverge?.runtimeKind).toBe("claude-agent");
+        expect(existsSync(notePath)).toBe(false); // the note clears once the revert actually lands
+      },
+      { store: StuckRevertTakeover },
+    );
+  });
+
+  test("a stale pending-revert note is reconciled by step 6 BEFORE a brand-new handoff stages — it never un-does a later, successful move", async () => {
+    class StuckThenFreedRevertTakeover extends WinterCompatibilitySessionStore {
+      calls = 0;
+      /** True for the whole of execute() #1; flips mid-execute() #2, at its own step 2 (drain). */
+      stillHeld = true;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.calls += 1;
+        if (this.calls === 1) return super.acquireSessionLease(key); // execute() #1's own step-6 acquire
+        if (this.stillHeld) throw new WinterStoreLeaseError("held by a live destination child", 999999);
+        return super.acquireSessionLease(key);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+        const notePath = join(bed.home, "runtimes", "handoff-leases", bed.key.projectKey, `${bed.key.sessionId}.pending-revert.json`);
+
+        // EXECUTE #1: the write-ahead commits, confirmInit fails, the takeover never frees the lease in
+        // time — exactly the STuckRevertTakeover scenario above. Left BEHIND: a pending-revert note.
+        const barrier1 = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "claude-agent" }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+          },
+        });
+        const outcome1 = await barrier1.execute(await barrier1.plan(bed.key, "winter-agent"));
+        expect(outcome1).toMatchObject({ kind: "blocked", reason: "revert-pending" });
+        expect(existsSync(notePath)).toBe(true);
+
+        // EXECUTE #2: a BRAND NEW handoff attempt for the SAME session, same direction. The dying
+        // child from attempt #1 finally exits partway through THIS attempt's own drain step (step 2) —
+        // well before its step 6 takes the writer lease. Nothing calls `loadEntry` a second time by
+        // hand here: `plan()` and `execute()` each call it once on their own, both still inside the
+        // window where the lease is contended, so both find the note and leave it exactly as attempt
+        // #1 did — proving the fix does NOT depend on an early, lucky reconciliation.
+        const barrier2 = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () =>
+              idleOwner({
+                runtimeKind: "claude-agent",
+                drainToIdleBoundary: () => {
+                  (bed.shared.canonical as StuckThenFreedRevertTakeover).stillHeld = false;
+                  return OK;
+                },
+              }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }),
+          },
+        });
+        const plan2 = await barrier2.plan(bed.key, "winter-agent");
+        expect(plan2.from).toBe("claude-agent"); // the note is still outstanding; the directory (source) is what plan() reports
+        const outcome2 = await barrier2.execute(plan2);
+        expect(outcome2.kind).toBe("resumed");
+
+        // THE STALE NOTE IS GONE — step 6 reconciled it with the SAME writer lease it just took for
+        // THIS handoff, before staging anything new.
+        expect(existsSync(notePath)).toBe(false);
+        const summaryAfterSuccess = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterSuccess?.["producerRuntime"]).toBe("winter-agent");
+        const rowAfterSuccess = (await bed.directoryStore.load()).find((candidate) => candidate.address === entry.address);
+        expect(rowAfterSuccess?.runtimeKind).toBe("winter-agent");
+
+        // AND A LATER LOAD DOES NOT UN-DO IT: without the step-6 reconciliation, the stale note would
+        // still be sitting on disk describing a revert to claude-agent that is no longer true, and this
+        // very `plan()` call is exactly where the old bug would have applied it — silently reverting a
+        // handoff that had already succeeded.
+        const cold = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "winter-agent" }) } });
+        const plan3 = await cold.plan(bed.key, "claude-agent");
+        expect(plan3.from).toBe("winter-agent");
+        const summaryAfterCold = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterCold?.["producerRuntime"]).toBe("winter-agent");
+      },
+      { store: StuckThenFreedRevertTakeover },
+    );
+  });
+
+  // THE PRE-EXISTING CRASH CASE (R6, above — "a crash between the write-ahead and the confirm is
+  // repaired on the next plan()") is deliberately NOT duplicated here: it has no pending-revert note at
+  // all (nothing ever attempted a revert), so `loadEntry`'s new check finds nothing and falls straight
+  // through to the untouched pre-existing repair-to-the-destination logic. It is re-run, unmodified, as
+  // part of this same file's full suite — the fix's job was to leave it alone, not to change it.
+});
+
+// --- fix wave 2, MINOR m3 — `reviewSwitch` is READ-ONLY -----------------------------------------------
+describe("P10b fix wave 2, MINOR m3 — reviewSwitch never repairs, and crash residue never turns a review into a thrown append", () => {
+  test("reviewSwitch over a transcript with a leftover (dead-pid) pendingHandoff marker performs ZERO appends", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      // CRASH RESIDUE: a `pendingHandoff` marker from a pid that is not (and never will be) alive —
+      // exactly the leftover `loadEntry`'s repair clears with a canonical append (`:379-398`'s own
+      // logic) when `plan()`/`execute()` reads it. `reviewSwitch` must never reach that code path.
+      await bed.shared.store.append(bed.key, [
+        {
+          type: DIALECT_RECORD_ENTRY_TYPE,
+          pendingHandoff: { pid: 999999999, from: "claude-agent", to: "winter-agent", at: new Date(0).toISOString(), level: "conversation", sourceGeneration: 1, cursor: "" },
+        },
+      ]);
+      await bed.shared.settle(bed.key);
+
+      // MAKE ANY FURTHER APPEND THROW: if `reviewSwitch` ever reached `loadEntry`'s repair-on-read, the
+      // call below throws instead of returning a review — exactly the daemon-wide symptom the bug
+      // report describes ("that append throws, and the daemon then prompts generically on every
+      // change, even Sonnet <-> Opus").
+      bed.shared.store.append = (): Promise<void> => {
+        throw new Error("reviewSwitch must never write to the canonical transcript");
+      };
+
+      const review = await barrierFor(bed, {
+        resolveEndpoint: (origin) => ({ providerId: origin.providerId, modelKey: origin.modelKey, family: origin.family, readableState: "none" }),
+      }).reviewSwitch(bed.key, selectionFor("claude-agent"));
+      expect(review).toBeDefined();
+
+      // AND THE MARKER IS STILL THERE, untouched — exactly what a bare read leaves behind.
+      const summary = await bed.shared.canonical.readSessionSummary(bed.key);
+      expect(summary?.["pendingHandoff"]).not.toBeNull();
+    });
+  });
+});
+
+// --- fix wave 2 re-review, MINOR — a late revert restores ONLY producerRuntime, never the whole ------
+// staged snapshot.
+describe("fix wave 2 re-review, MINOR — a late revert does not re-apply stale fields over newer ones", () => {
+  test("a late revert after the source advanced leaves projectionCursor and health at their newer values", async () => {
+    class StuckRevertTakeover extends WinterCompatibilitySessionStore {
+      calls = 0;
+      stillHeld = true;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.calls += 1;
+        if (this.calls === 1) return super.acquireSessionLease(key); // step 6's own acquire succeeds
+        if (this.stillHeld) throw new WinterStoreLeaseError("held by a live destination child", 999999);
+        return super.acquireSessionLease(key);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "claude-agent" }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+          },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+        expect(outcome).toMatchObject({ kind: "blocked", reason: "revert-pending" });
+
+        // THE STALE SNAPSHOT: whatever step 6 captured BEFORE the write-ahead commit — `health` is
+        // "clean" here (a fresh session, nothing to repair) and `projectionCursor` names the ONE
+        // pre-handoff entry.
+        const summaryRightAfterFailure = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryRightAfterFailure?.["health"]).toBe("clean");
+        const staleCursor = summaryRightAfterFailure?.["projectionCursor"];
+        expect(typeof staleCursor).toBe("string");
+
+        // THE SOURCE ADVANCES WHILE THE REVERT IS STILL OWED: a new entry lands (bumping the real
+        // cursor forward) and the mirror picks up a genuine repair-required fault — exactly the kind of
+        // newer fact a wholesale-snapshot revert would have silently clobbered.
+        const [newEntry] = await bed.append(1);
+        await bed.shared.store.append(bed.key, [{ type: DIALECT_RECORD_ENTRY_TYPE, projectionCursor: newEntry!["uuid"], health: "repair-required" }]);
+        await bed.shared.settle(bed.key);
+        const summaryAfterAdvance = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterAdvance?.["projectionCursor"]).not.toBe(staleCursor);
+        expect(summaryAfterAdvance?.["health"]).toBe("repair-required");
+
+        // THE LEASE FREES UP, and a load completes the now-late revert.
+        (bed.shared.canonical as StuckRevertTakeover).stillHeld = false;
+        const cold = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }) } });
+        const plan = await cold.plan(bed.key, "claude-agent");
+        expect(plan.from).toBe("claude-agent");
+
+        // THE REVERT LANDED (producerRuntime is back to the source) — but it restored ONLY that: the
+        // newer projectionCursor and the newer, more honest health stayed exactly where the source's
+        // own later record left them, never folded back to the stale pre-handoff snapshot.
+        const summaryAfterRevert = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterRevert?.["producerRuntime"]).toBe("claude-agent");
+        expect(summaryAfterRevert?.["projectionCursor"]).toBe(newEntry!["uuid"]);
+        expect(summaryAfterRevert?.["health"]).toBe("repair-required");
+      },
+      { store: StuckRevertTakeover },
+    );
+  });
+});
+
+// --- fix wave 2 re-review, MINOR — a `writePendingRevert` failure is logged, and named in the --------
+// returned detail, never silently swallowed.
+describe("fix wave 2 re-review, MINOR — a pending-revert note that fails to write is logged and named in the outcome", () => {
+  test("a failed revert whose note ALSO cannot be written logs once and says so in the outcome's detail", async () => {
+    class AlwaysStuckTakeover extends WinterCompatibilitySessionStore {
+      calls = 0;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.calls += 1;
+        if (this.calls === 1) return super.acquireSessionLease(key); // step 6's own acquire succeeds
+        throw new WinterStoreLeaseError("held by a live destination child", 999999);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+
+        // BLOCK THE NOTE'S OWN RENAME, without touching the handoff lease's own lock file: the pending-
+        // revert path is pre-created as a DIRECTORY, so `writePendingRevert`'s `renameSync(temp, path)`
+        // fails onto it (a real, reproducible fs fault — never a mocked one).
+        const leaseDir = join(bed.home, "runtimes", "handoff-leases", bed.key.projectKey);
+        mkdirSync(leaseDir, { recursive: true });
+        mkdirSync(join(leaseDir, `${bed.key.sessionId}.pending-revert.json`), { recursive: true });
+
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "claude-agent" }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+          },
+        });
+        const errors: unknown[][] = [];
+        const originalError = console.error;
+        console.error = (...args: unknown[]) => {
+          errors.push(args);
+        };
+        let outcome: Awaited<ReturnType<(typeof barrier)["execute"]>>;
+        try {
+          outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+        } finally {
+          console.error = originalError;
+        }
+
+        // NEVER `resumed`, exactly as an ordinary failed revert — the note failing to write does not
+        // change WHICH outcome kind is reported, only how loudly the compounding failure is named.
+        expect(outcome).toMatchObject({ kind: "blocked", reason: "revert-pending" });
+        expect((outcome as { detail?: string }).detail).toMatch(/durable pending-revert note ALSO could not be written/);
+
+        // AND IT WAS LOGGED — names and error class only, never a payload.
+        expect(errors.length).toBeGreaterThan(0);
+        const logged = errors[0]!.join(" ");
+        expect(logged).toContain("pending-revert note");
+        expect(logged).toContain("could not be written");
+      },
+      { store: AlwaysStuckTakeover },
+    );
+  });
+});

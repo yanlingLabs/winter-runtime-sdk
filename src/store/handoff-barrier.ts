@@ -51,14 +51,14 @@
 // MECHANICS and the Claude-leg injection; "switch UX/confirmations" stay with the host (Phase 8,
 // D19c). `plan()` produces something a host can render and confirm; `execute()` acts on the plan it is
 // given.
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 import { reviewModelSwitch, toClaudeReady, type ContinuityEndpoint, type SwitchReview } from "@yanlinglabs/winter-provider-runtime";
 import type { MessageOrigin, ProviderStateRecord } from "@yanlinglabs/winter-provider-runtime";
 
-import { defaultEndpointResolver } from "../default-endpoint-resolver.ts";
+import { catalogKnowsModel, defaultEndpointResolver } from "../default-endpoint-resolver.ts";
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
@@ -379,6 +379,24 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   const loadEntry = async (session: SessionKey): Promise<RuntimeDirectoryEntry> => {
     const entry = await findEntry(session);
     const shared = sharedOf();
+
+    // MAJOR M1b's convergence half: a revert that could not complete leaves a durable note beside the
+    // handoff lease (see `writePendingRevert`'s doc comment). Every load — cold or warm — gets exactly
+    // ONE fresh attempt to finish it: never a blocking retry loop, since `loadEntry` runs on every
+    // `plan()` and a session stuck mid-revert must not make each one hang for a second or more.
+    //
+    // WHILE THE NOTE IS OUTSTANDING, THE REPAIR BELOW MUST NOT RUN: it trusts the transcript's producer
+    // record over the directory, and that record still (wrongly) names the destination that never
+    // confirmed — running the repair here is exactly how the fixed bug used to "complete" a handoff
+    // that never happened. So `entry` — still the SOURCE, never touched by the failed write-ahead path
+    // — is what this returns whether or not the retry below lands; the difference is invisible to the
+    // caller and only shows up in whether the note is still there on the NEXT load.
+    if ((await completePendingRevert(shared, session, leaseRootOf())) !== "absent") {
+      // Applied or still owed, either way: `entry` (the source, untouched by the failed write-ahead
+      // path) is what THIS load reports. See `completePendingRevert`'s own doc comment.
+      return entry;
+    }
+
     const summary = await shared.canonical.readSessionSummary({ projectKey: session.projectKey, sessionId: session.sessionId });
     if (summary === null) return entry;
     const pending = summary["pendingHandoff"];
@@ -538,6 +556,99 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   const originFrom = (selection: RuntimeSelection): MessageOrigin => ({ providerId: selection.providerId, modelKey: selection.modelRef, family: selection.family });
 
   /**
+   * fix wave 2 re-review, MAJOR (new) — a failed-call residue entry is not a real reply and must
+   * never stand in as the live tip. Claude writes a failed call as an assistant entry carrying
+   * `isApiErrorMessage: true` and a synthetic `model: "<synthetic>"` — exactly the shape W18-13(c)'s
+   * SDK reader already skips for its own purposes. Left untreated, that entry's unknown model/family
+   * defeats the same-family skip right when a user is most likely to switch: immediately after an
+   * error.
+   */
+  const isApiErrorOrSyntheticTip = (entry: SessionStoreEntry): boolean => {
+    if (entry["isApiErrorMessage"] === true) return true;
+    const message = entry["message"];
+    const model = typeof message === "object" && message !== null ? (message as { model?: unknown }).model : undefined;
+    return model === "<synthetic>";
+  };
+
+  /**
+   * WS-18 W18-20 fix wave 2, CRITICAL C1 — walks the lineage BACKWARDS from the true tip (the last
+   * chain-linked entry, skipping trailing bookkeeping entries with no uuid) to the most recent REAL
+   * ASSISTANT entry — one that is neither `isApiErrorMessage:true` nor the synthetic error-residue
+   * model id (fix wave 2 re-review, MAJOR (new)): those are walked PAST, exactly like a non-chainable
+   * bookkeeping entry, never returned and never treated as "no assistant entry at all". `undefined`
+   * means the lineage has no REAL assistant entry at all — a session that has not replied yet (or
+   * whose only replies are error residue), which `liveSourceOrigin` reads as "nothing live to derive
+   * from".
+   */
+  const findLiveTipAssistant = (entries: readonly SessionStoreEntry[]): SessionStoreEntry | undefined => {
+    const chainable = entries.filter((entry) => typeof entry["uuid"] === "string");
+    if (chainable.length === 0) return undefined;
+    const byUuid = new Map(chainable.map((entry) => [entry["uuid"] as string, entry]));
+    let cursor: SessionStoreEntry | undefined = chainable[chainable.length - 1];
+    const seen = new Set<string>();
+    while (cursor !== undefined) {
+      const uuid = cursor["uuid"] as string;
+      if (seen.has(uuid)) return undefined; // a cycle: not a real transcript, and never our business to fix here
+      seen.add(uuid);
+      if (cursor["type"] === "assistant" && !isApiErrorOrSyntheticTip(cursor)) return cursor;
+      const parentUuid: unknown = cursor["parentUuid"];
+      cursor = typeof parentUuid === "string" ? byUuid.get(parentUuid) : undefined;
+    }
+    return undefined;
+  };
+
+  /**
+   * WS-18 W18-20 fix wave 2, CRITICAL C1 — THE REVIEW'S SOURCE IS THE LIVE MODEL, never
+   * `entry.selection` alone. That directory record is updated ONLY on a cross-runtime handoff
+   * (`patchDirectoryRow`'s own call sites); a same-runtime model change (gpt -> deepseek, both on
+   * Winter) or the engine's own fallback/interrupt switch never touches it, so a session created on
+   * deepseek and long since talking through gpt still read `entry.selection.family === "deepseek"` —
+   * silently reviewing gpt -> claude as deepseek -> claude (`lossless-portable`, no prompt, when the
+   * live answer is `warned-lossy`), and reviewing a switch BACK to the stale recorded model as
+   * same-profile (silent) when it is really a genuine family change.
+   *
+   * THE ORDER, per the fix ruling:
+   *   1. the tip's own sidecar `kind:"origin"` record (a Winter-written turn always stamps one) —
+   *      used WHOLE, verbatim;
+   *   2. otherwise (an official-leg-written entry: the official leg never writes a sidecar record for
+   *      its own turns) the tip's own `message.model` — upstream-id-qualified, so the registry's own
+   *      alias table resolves it — with the provider from the session's recorded official provider
+   *      (`entry.selection.providerId` when that record's `runtimeKind` is `claude-agent`) or
+   *      `"anthropic"` as the honest last resort when even that is stale. fix wave 2 re-review: used
+   *      ONLY when `catalogKnowsModel` confirms it names a real catalog row — a dated snapshot id
+   *      (`claude-opus-5-20260301`) or a Bedrock ARN-style id (`us.anthropic.claude-opus-5-v1:0`) the
+   *      catalog does not recognise is NOT handed to the review as if it resolved. When it does not
+   *      resolve AND the directory's own `entry.selection` already names the official leg
+   *      (`runtimeKind === "claude-agent"`), that persisted (and presumably canonical) row is a
+   *      strictly better substitute than an id the catalog cannot place — per the fix ruling. When
+   *      `entry.selection` does NOT already name the official leg (the adversarial staleness case:
+   *      the directory is stuck on some other family entirely), falling back to IT would report the
+   *      WRONG family outright, which is worse than an unresolved-but-still-`family:"claude"`
+   *      candidate — so the raw candidate is kept in that case instead;
+   *   3. `entry.selection` — when the lineage has no REAL assistant entry at all.
+   *
+   * `switchFactsFor`'s source-turn counting and `reviewModelSwitch`'s same-profile/same-family skips
+   * all read whatever this returns for `from` — there is no second place to wire the fix.
+   */
+  const liveSourceOrigin = (args: { entries: readonly SessionStoreEntry[]; sidecarRecords: readonly ProviderStateRecord[]; entry: RuntimeDirectoryEntry }): MessageOrigin => {
+    const tip = findLiveTipAssistant(args.entries);
+    if (tip === undefined) return originFrom(args.entry.selection);
+    const tipUuid = tip["uuid"] as string;
+    const origin = args.sidecarRecords.find((record) => record.anchorUuid === tipUuid && record.kind === "origin");
+    if (origin !== undefined) return { providerId: origin.provider, modelKey: origin.model, family: origin.family };
+    const message = tip["message"];
+    const model = typeof message === "object" && message !== null ? (message as { model?: unknown }).model : undefined;
+    if (typeof model === "string" && model.length > 0) {
+      const officialLegSelection = args.entry.selection.runtimeKind === "claude-agent";
+      const providerId = officialLegSelection ? args.entry.selection.providerId : "anthropic";
+      const candidate: MessageOrigin = { providerId, modelKey: model, family: "claude" };
+      if (catalogKnowsModel(candidate)) return candidate;
+      return officialLegSelection ? originFrom(args.entry.selection) : candidate;
+    }
+    return originFrom(args.entry.selection);
+  };
+
+  /**
    * WS-18 W18-20 (P10b): the ONE pre-flight review, shared by `plan()`'s embedded `review` and the
    * public `reviewSwitch`. Reads the canonical entries and the sidecar through the shared store —
    * never rewrites either — and resolves both endpoints through `deps.resolveEndpoint` (a host's own
@@ -548,11 +659,15 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
    * request-build time, which this router never sees and cannot measure.
    */
   const computeSwitchReview = async (args: { entry: RuntimeDirectoryEntry; session: SessionKey; requested: RuntimeSelection }): Promise<SwitchReview> => {
+    // MINOR m3 (fix wave 2): READ-ONLY. `loadEntry` can repair a crash-residue directory row with a
+    // canonical append — exactly the write `reviewSwitch` must never make, now that it runs on every
+    // `setModel`, including while a winter child holds the lease. `args.entry` is ALREADY the caller's
+    // (repaired-or-not) entry; this function reads the store directly and appends nothing.
     const store = sharedOf();
     const entries = (await store.store.load(args.session)) ?? [];
     const sidecar = await readProviderStateSidecar(homeOf(), args.session);
     const resolve = deps.resolveEndpoint ?? defaultEndpointResolver();
-    const fromEndpoint = resolve(originFrom(args.entry.selection));
+    const fromEndpoint = resolve(liveSourceOrigin({ entries, sidecarRecords: sidecar, entry: args.entry }));
     const toEndpoint = resolve(originFrom(args.requested));
     let truncated = false;
     if (args.requested.runtimeKind === "claude-agent") {
@@ -566,8 +681,15 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     return reviewModelSwitch({ entries, sidecarRecords: sidecar, from: fromEndpoint, to: toEndpoint, truncated });
   };
 
+  /**
+   * MINOR m3 (fix wave 2): `reviewSwitch` READS, never repairs. `loadEntry` is `plan()`/`execute()`'s
+   * own door (it can append a `pendingHandoff:null` repair for a crash-residue marker); a bare
+   * directory read here means a stale marker left over from an in-flight or crashed handoff never
+   * turns a same-family review into a thrown append failure — the repair stays exactly where step
+   * 6/8 already own it.
+   */
   const reviewSwitch = async (session: SessionKey, requested: RuntimeSelection): Promise<SwitchReview> => {
-    const entry = await loadEntry(session);
+    const entry = await findEntry(session);
     return computeSwitchReview({ entry, session, requested });
   };
 
@@ -612,7 +734,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       record(step, false, reason);
       return { kind: "lossy-fork-offered", reason, step, detail: reason, steps: trail };
     };
-    const blocked = (step: HandoffStepNumber, reason: "repair-required" | "mirror-error" | "lease-held", detail: string): DetailedHandoffOutcome => {
+    const blocked = (step: HandoffStepNumber, reason: "repair-required" | "mirror-error" | "lease-held" | "revert-pending", detail: string): DetailedHandoffOutcome => {
       record(step, false, detail);
       return { kind: "blocked", reason, step, detail, steps: trail };
     };
@@ -823,8 +945,8 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // other direction keeps the original single-attempt behaviour: a live SOURCE process (a claude
         // child, or another instance of this daemon) holding the lease is a real conflict, not a race
         // this barrier should paper over with a retry.
-        const attempts = plan.from === "winter-agent" && plan.to === "claude-agent" ? WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS : 1;
-        const delayMs = deps.leaseRetryDelayMs ?? WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS;
+        const attempts = plan.from === "winter-agent" && plan.to === "claude-agent" ? HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS : 1;
+        const delayMs = deps.leaseRetryDelayMs ?? HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS;
         for (let attempt = 1; ; attempt++) {
           try {
             await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
@@ -837,6 +959,17 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       } catch (error) {
         if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
         return lossy(6, `the writer lease could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      // MAJOR M1 residue (fix wave 2 review): a PRIOR handoff's revert can still be owed for this exact
+      // session — `loadEntry`'s own attempt above (inside `entry = await loadEntry(session)`) is a
+      // single, non-blocking try that may have found the lease still held and left the note in place.
+      // Nothing about reaching step 6 with a live writer lease implies that note is resolved, and
+      // staging a BRAND NEW handoff over an unreconciled one is exactly how a later `loadEntry` would
+      // "complete" a stale revert and silently undo THIS handoff after it succeeds. This pid already
+      // holds the writer lease (the acquire above just proved it), so a failure here is a genuine store
+      // fault, not contention — refusing outright is the honest outcome, not a race to paper over.
+      if ((await completePendingRevert(shared, session, leaseRootOf())) === "still-owed") {
+        return blocked(6, "revert-pending", "a previous handoff's revert to the source is still owed and could not be completed even with the writer lease held; no new handoff may start until it lands");
       }
       let staged: PendingCommit;
       // Armed for exactly the window nit 1 was about: a throw from the marker's own append/settle.
@@ -947,23 +1080,80 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           confirmed = { ok: false, reason: error instanceof Error ? error.message : String(error) };
         }
         if (!confirmed.ok) {
-          // TAKE OVER AND REVERT (W18-5): the write-ahead record already named the destination; a dead
-          // or refusing child leaves that record dangling unless this pid reclaims the lease (takeover
-          // from a dead holder is allowed — the same rule `acquireHandoffLease` and the writer lease
-          // both already use) and writes ONE more record naming the source again.
-          try {
-            await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
-            await shared.store.append(session, [{ ...staged.record, producerRuntime: plan.from }]);
-            await shared.settle(session);
-            committed = false;
-          } catch (revertError) {
-            // THE REVERT ITSELF FAILED: the durable record still names the destination that never
-            // started, so the outer catch's own vocabulary ("past the producer record there is no
-            // honest way to say the source kept the session") is the correct report — `committed`
-            // stays `true` and this propagates there rather than claiming a fork that did not happen.
-            throw new HandoffCommitError(
-              `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source failed: ${revertError instanceof Error ? revertError.message : String(revertError)}`,
-            );
+          // TAKE OVER AND REVERT (W18-5), with a BOUNDED RETRY (fix wave 2, MAJOR M1a): the write-ahead
+          // record already named the destination; a dead or refusing child leaves that record dangling
+          // unless this pid reclaims the lease (takeover from a dead holder is allowed — the same rule
+          // `acquireHandoffLease` and the writer lease both already use). The single-attempt version of
+          // this used to throw `HandoffCommitError` on the FIRST refusal even though the dying child's
+          // own lease release is a race this exact retry bound already exists to absorb one call site
+          // up (see `HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS`'s doc comment) — so the identical race here
+          // gets the identical bound, not a one-shot check.
+          // MINOR (re-review): the revert carries ONLY what it must restore — never the whole staged
+          // record. `staged.record` was snapshotted at step 6, BEFORE the write-ahead commit; a revert
+          // applied LATE (after this bounded retry, or after `writePendingRevert`'s note is picked up
+          // by a much later `loadEntry`) folded that stale snapshot's `projectionCursor`,
+          // `compatibilityLevel`, `sourceGenerationCompleted` and `handoffAt` back OVER whatever the
+          // source has since advanced to — and `health: "clean"` specifically could paper over a REAL
+          // `repair-required` the source picked up in the meantime. The dialect record is an
+          // incremental fold (exactly how `unwind()`'s own `{ type, pendingHandoff: null }` append
+          // already works, above), so naming only these three fields leaves every other field at
+          // whatever the CURRENT summary already has.
+          const revertRecord: SessionStoreEntry = { type: DIALECT_RECORD_ENTRY_TYPE, producerRuntime: plan.from, pendingHandoff: null };
+          const revertDelayMs = deps.leaseRetryDelayMs ?? HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS;
+          let reverted = false;
+          let lastRevertError: unknown;
+          for (let attempt = 1; attempt <= HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS; attempt++) {
+            try {
+              await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+              await shared.store.append(session, [revertRecord]);
+              await shared.settle(session);
+              committed = false;
+              reverted = true;
+              break;
+            } catch (revertError) {
+              lastRevertError = revertError;
+              if (attempt < HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS) await sleepMs(revertDelayMs);
+            }
+          }
+          if (!reverted) {
+            // MAJOR M1b: past this point there is NO honest way to say the revert happened — the
+            // durable record still names the destination that never confirmed. The old behaviour threw
+            // `HandoffCommitError` here, which the outer catch read as success (`committed` was already
+            // `true` from the write-ahead commit) and reported `resumed`: the host believed the move
+            // succeeded while the transcript, the live model and the running process all disagreed, and
+            // the NEXT `plan()` then "repaired" the directory to match the dangling producer record —
+            // converging on the runtime that never actually took the session.
+            //
+            // So this is `blocked`, never `resumed`, with a reason a host can render — and the still-
+            // owed revert is written to a durable, router-owned note (`writePendingRevert`) so ownership
+            // converges ON THE SOURCE instead: `loadEntry` retries this exact append on every future
+            // load, and reports the directory's own (untouched, source) value rather than repairing
+            // toward the destination for as long as the note is outstanding.
+            // MINOR (re-review): the note write is the ONE thing standing between this failure and
+            // the ORIGINAL bug's exact symptom — without it, the next `loadEntry` has no way to know a
+            // revert is owed and "repairs" the directory toward the dangling producer record, which is
+            // precisely what M1's convergence design exists to prevent. So a failure to write it is
+            // reported DISTINCTLY: logged (names and error class only — WS-05 §13's rule, never a
+            // payload), and folded into the returned `detail` so a host or an on-call operator sees
+            // "the durable note ALSO could not be written" rather than reading an ordinary
+            // `revert-pending` and assuming the self-healing convergence is already in motion. The
+            // OUTCOME stays `blocked: revert-pending` either way — there is no new `HandoffOutcome`
+            // shape for "converges eventually" vs "requires a human" (hosts switch exhaustively on
+            // `kind`, and reusing `blocked`'s existing reason is the fix wave's own preference over a
+            // new union member) — but the detail text is the cheap, honest signal this case earns.
+            let noteWritten = true;
+            try {
+              writePendingRevert(leaseRootOf(), session, revertRecord, now().toISOString());
+            } catch (noteError) {
+              noteWritten = false;
+              // eslint-disable-next-line no-console
+              console.error(
+                `winter-runtime-sdk: the pending-revert note for a failed handoff takeover could not be written (${noteError instanceof Error ? noteError.constructor.name : typeof noteError}: ${noteError instanceof Error ? noteError.message : String(noteError)}) — without it, ownership will NOT self-converge back to the source on a later load; this session needs manual reconciliation until the writer lease frees up on its own`,
+              );
+            }
+            await unwind();
+            const reason = `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source could not be completed after ${HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS} attempt(s): ${lastRevertError instanceof Error ? lastRevertError.message : String(lastRevertError)}${noteWritten ? "" : "; the durable pending-revert note ALSO could not be written, so this will not self-converge — it needs manual reconciliation"}`;
+            return blocked(8, "revert-pending", reason);
           }
           await unwind();
           record(8, false, confirmed.reason);
@@ -1579,12 +1769,116 @@ function isLeaseError(error: unknown): boolean {
   return error instanceof Error && error.name === "WinterStoreLeaseError";
 }
 
-/** WS-18 W18-5 (P10b): the winter -> official writer-lease retry's bound. Overridable by `deps.leaseRetryDelayMs` (tests). */
-const WINTER_TO_OFFICIAL_LEASE_RETRY_ATTEMPTS = 5;
-const WINTER_TO_OFFICIAL_LEASE_RETRY_DELAY_MS = 200;
+/**
+ * WS-18 W18-5 (P10b), widened by fix wave 2's MAJOR M1a: the writer-lease TAKEOVER retry bound, shared
+ * by BOTH sides of the same race — a winter destination's own exit lagging `owner.close()` (step 6),
+ * and a winter destination's dying/refusing child still holding the lease when its `confirmInit`
+ * failure forces this pid to take the lease back for a revert (step 8). Both are "a process's actual
+ * exit lags the call that logically ended it" — the same shape, just observed from the other side of
+ * the handoff.
+ *
+ * THE JUSTIFICATION, HONESTLY: this reuses step 6's EXISTING bound by parity, not by a fresh
+ * measurement of THIS race. What is known is that Norma's `end()` RETURNS to the caller in ~240 ms
+ * while the child is still alive — that is when this pid regains control, not how long the child then
+ * takes to actually exit; nothing in that figure bounds the exit lag itself, and this hermetic package
+ * has no live child to measure it against. Absent that measurement, matching the bound already trusted
+ * for the identical race shape one call site up is the defensible choice over inventing an unmeasured
+ * second number. If a host-side measurement later shows the post-`end()` exit lag exceeds 5 x 200 ms,
+ * THAT is what should widen this toward the ~2 s the fix wave allowed for — not a guess made here.
+ * Overridable by `deps.leaseRetryDelayMs` (tests, both sites).
+ */
+const HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS = 5;
+const HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS = 200;
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// --- MAJOR M1b: the durable, router-owned note for a revert that could not complete -----------------
+//
+// Written ONLY when the takeover retry above is exhausted: the durable transcript record still names
+// the destination that never confirmed (this pid could not get the writer lease back to say otherwise),
+// so a plain fact is left beside the handoff lease — never in the canonical transcript, which is
+// exactly what could not be written just now, and never on the host's own directory row, which is a
+// cross-repo schema (Norma's `runtime-state.db`) this fix does not touch. `loadEntry` reads it on every
+// future load and retries the SAME append; until it lands, `loadEntry` reports the directory's OWN
+// value — untouched by the failed write-ahead path, still the source — instead of running its usual
+// producer-vs-directory repair, which would otherwise "complete" a handoff that never actually happened
+// by repairing toward the dangling producer record (exactly the bug this fix closes).
+
+interface PendingRevert {
+  /** The exact record a successful revert would append — built once, at the moment the retry gave up. */
+  record: SessionStoreEntry;
+  at: string;
+}
+
+function pendingRevertPathFor(leaseRoot: string, session: SessionKey): string {
+  return join(leaseRoot, session.projectKey, `${session.sessionId}.pending-revert.json`);
+}
+
+function writePendingRevert(leaseRoot: string, session: SessionKey, record: SessionStoreEntry, at: string): void {
+  const dir = join(leaseRoot, session.projectKey);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = pendingRevertPathFor(leaseRoot, session);
+  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(temp, JSON.stringify({ record, at } satisfies PendingRevert), { mode: 0o600 });
+  renameSync(temp, path); // atomic: a reader never sees a half-written note
+}
+
+function readPendingRevert(leaseRoot: string, session: SessionKey): PendingRevert | undefined {
+  const path = pendingRevertPathFor(leaseRoot, session);
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PendingRevert>;
+    if (parsed.record === undefined) return undefined;
+    return { record: parsed.record, at: typeof parsed.at === "string" ? parsed.at : new Date(0).toISOString() };
+  } catch {
+    return undefined; // an unreadable note blocks nothing; the takeover it describes is simply forgotten
+  }
+}
+
+function clearPendingRevert(leaseRoot: string, session: SessionKey): void {
+  try {
+    unlinkSync(pendingRevertPathFor(leaseRoot, session));
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "ENOENT") throw error;
+  }
+}
+
+/**
+ * `"absent"` — no note; `"applied"` — the owed revert just landed and the note is gone; `"still-owed"`
+ * — the note is there and the append could not be made THIS time (the caller decides what that means).
+ */
+type PendingRevertOutcome = "absent" | "applied" | "still-owed";
+
+/**
+ * THE ONE PLACE THIS PID RETRIES AN OWED REVERT — shared by BOTH doors that can find one outstanding:
+ * `loadEntry` (every `plan()`, cold or warm) and step 6 of a BRAND NEW `execute()` on the same session
+ * (fix wave 2 residue review). The second door exists because the first one's single, non-blocking
+ * attempt is not enough on its own: a `loadEntry` that fails to reacquire the lease leaves the note in
+ * place and returns the SOURCE, exactly as designed — but nothing then stops a caller from proceeding
+ * to plan and EXECUTE a brand new handoff on that same, still-unreconciled session. If that new
+ * handoff's own step 6 acquire succeeds (the dying child from the FIRST attempt has now actually
+ * exited) and the handoff runs to completion, the note is still sitting on disk describing a revert
+ * that is no longer true — and the NEXT `loadEntry` would apply it, silently undoing a handoff that
+ * just succeeded. So step 6 checks for and clears any outstanding note itself, using the SAME writer
+ * lease it just acquired, before staging anything new: a session is never handed a marker for a fresh
+ * move while an old one is still unresolved.
+ */
+async function completePendingRevert(shared: SharedSessionStore, session: SessionKey, leaseRoot: string): Promise<PendingRevertOutcome> {
+  const pendingRevert = readPendingRevert(leaseRoot, session);
+  if (pendingRevert === undefined) return "absent";
+  try {
+    // Re-entrant for this pid (the store's own writer lease is per-pid, per the doc comment on
+    // `HandoffLease` above) — a caller that already holds it (step 6) pays nothing extra here.
+    await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+    await shared.store.append(session, [pendingRevert.record]);
+    await shared.settle(session);
+    clearPendingRevert(leaseRoot, session);
+    return "applied";
+  } catch {
+    return "still-owed";
+  }
 }
 
 // --- step 1's lease -------------------------------------------------------------------------------------

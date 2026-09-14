@@ -28,7 +28,7 @@
 // registry (live discovery, custom/disabled providers, real credentials) is what the daemon injects;
 // this module is the floor under an uninjected default, not a replacement for one.
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
-import { createEndpointResolver, createRegistry, endpointFromOrigin } from "@yanlinglabs/winter-provider-runtime";
+import { createEndpointResolver, createRegistry, endpointFromOrigin, WinterProviderResolutionError } from "@yanlinglabs/winter-provider-runtime";
 import type { ContinuityEndpoint, MessageOrigin, ProviderAdapter, ProviderRegistry } from "@yanlinglabs/winter-provider-runtime";
 
 /**
@@ -73,6 +73,14 @@ function buildCatalogRegistry(): ProviderRegistry {
 
 let cached: ((origin: MessageOrigin) => ContinuityEndpoint) | undefined;
 let loggedFailureOnce = false;
+/** Shared with `catalogKnowsModel` (fix wave 2 re-review, MAJOR (new)) — one registry build, not two. */
+let cachedRegistry: ProviderRegistry | undefined;
+
+/** Builds (once) and memoises the registry both this module's exports read. Throws on failure — callers decide how to react. */
+function registry(): ProviderRegistry {
+  if (cachedRegistry === undefined) cachedRegistry = buildCatalogRegistry();
+  return cachedRegistry;
+}
 
 /**
  * The router's DEFAULT `resolveEndpoint`, used at both call sites (`store/handoff-barrier.ts`'s
@@ -86,8 +94,7 @@ let loggedFailureOnce = false;
 export function defaultEndpointResolver(): (origin: MessageOrigin) => ContinuityEndpoint {
   if (cached !== undefined) return cached;
   try {
-    const registry = buildCatalogRegistry();
-    cached = createEndpointResolver(registry);
+    cached = createEndpointResolver(registry());
   } catch (error) {
     if (!loggedFailureOnce) {
       loggedFailureOnce = true;
@@ -103,8 +110,30 @@ export function defaultEndpointResolver(): (origin: MessageOrigin) => Continuity
   return cached;
 }
 
+/**
+ * fix wave 2 re-review, MAJOR (new): does this identifier name a REAL catalog row, independent of
+ * whichever `resolveEndpoint` a host may have injected for FACTS. `message.model` is always an
+ * upstream wire id, and only the catalog's own alias table can say whether one is recognised — a
+ * generic `ContinuityEndpoint`'s shape cannot: `endpointFromRegistry`'s own registry-miss fallback
+ * echoes the bare origin back verbatim (no `continuationDomain`/`continuation`/`summaryRequest`), and
+ * some real rows carry none of those either, so probing the OUTPUT shape is not reliable — this asks
+ * `ProviderRegistry.resolve()` directly, the one place that distinguishes a hit from a miss.
+ *
+ * A catalog that fails to load answers `false` — conservatively, since the caller's fallback for
+ * "unknown" is the session's own persisted selection, never a guess.
+ */
+export function catalogKnowsModel(origin: { providerId: string; modelKey: string }): boolean {
+  try {
+    const resolved = registry().resolve({ model: origin.modelKey, provider: { providerId: origin.providerId } });
+    return !(resolved instanceof WinterProviderResolutionError);
+  } catch {
+    return false;
+  }
+}
+
 /** Test seam: forces the next call to rebuild (and, on failure, re-log once more). */
 export function __resetDefaultEndpointResolverForTests(): void {
   cached = undefined;
   loggedFailureOnce = false;
+  cachedRegistry = undefined;
 }

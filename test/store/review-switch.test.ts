@@ -320,3 +320,223 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
     });
   });
 });
+
+// --- fix wave 2, CRITICAL C1 — computeSwitchReview's `from` is the LIVE tip, never the stale --------
+// directory record. The directory's `selection` is updated ONLY on a cross-runtime handoff; a
+// same-runtime model change (gpt -> deepseek, both winter-agent) or the engine's own fallback/interrupt
+// switch never touches it, so `entry.selection` can name a model several turns behind the one that
+// actually produced the session's last reply. These four tests are the reviewer's own A-5 repro
+// (`stale.ts`), the symmetric switch-BACK-to-the-stale-model case, the official-leg (`message.model`)
+// fallback, and the no-assistant-entry fallback — the three branches `liveSourceOrigin` walks, in order.
+describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE source, never the stale directory record", () => {
+  test("A-5 chain, directory LEFT STALE at deepseek: claude -> deepseek (handoff) -> GLM -> gpt (both same-runtime, record never moves) -> claude PROMPTS", async () => {
+    await withStoreBed(async (bed) => {
+      // THE DIRECTORY ROW: exactly what a real host would have after the ORIGINAL claude -> deepseek
+      // handoff wrote it — and exactly what it still says after two SAME-RUNTIME winter moves
+      // (deepseek -> GLM -> gpt) that never touch it, per the bug this fix closes.
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(DEEPSEEK) });
+
+      const t1 = turn(bed.key, null, "deepseek's full reasoning trace");
+      await bed.shared.store.append(bed.key, t1.entries);
+      writeOrigin(bed.home, bed.key, t1.assistantUuid, DEEPSEEK);
+      writeSummary(bed.home, bed.key, t1.assistantUuid, DEEPSEEK, { text: "deepseek's full reasoning trace", material: "exposed", complete: true });
+
+      const t2 = turn(bed.key, t1.assistantUuid, "glm's full reasoning trace");
+      await bed.shared.store.append(bed.key, t2.entries);
+      writeOrigin(bed.home, bed.key, t2.assistantUuid, GLM);
+      writeSummary(bed.home, bed.key, t2.assistantUuid, GLM, { text: "glm's full reasoning trace", material: "exposed", complete: true });
+
+      // THE LIVE TIP: a same-runtime switch to gpt, AFTER the handoff — this is the turn the review
+      // must read as the source. The directory row above never learns about it.
+      const t3 = turn(bed.key, t2.assistantUuid, "gpt's reasoning summary");
+      await bed.shared.store.append(bed.key, t3.entries);
+      await bed.shared.settle(bed.key);
+      writeOrigin(bed.home, bed.key, t3.assistantUuid, GPT);
+      writeSummary(bed.home, bed.key, t3.assistantUuid, GPT, { text: "gpt's reasoning summary" });
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      // THE STALE-SOURCE (deepseek) ANSWER WOULD BE: prompt:false, lossless-portable (a fully-exposed
+      // reasoning trace survives a switch away losslessly). THE LIVE-SOURCE (gpt) ANSWER IS THIS ONE —
+      // gpt's readable state is summary-only, so leaving it for Claude (which cannot read it back
+      // either) is a genuine, warned loss.
+      expect(review.skipped).toBeUndefined();
+      expect(review.prompt).toBe(true);
+      expect(review.classification?.lossClass).toBe("warned-lossy");
+    });
+  });
+
+  test("switching BACK to the stale recorded model prompts — a live family change the same-profile skip used to swallow", async () => {
+    // "Claude on OpenRouter" (winter-agent, family claude, NOT the official leg) — absent from the
+    // fixture resolver's own list, so it resolves through `endpointFromOrigin`'s registry-free
+    // fallback (`readableState: "none"`, same posture as CLAUDE_OPUS/CLAUDE_SONNET).
+    const CLAUDE_ON_OPENROUTER: ContinuityEndpoint = { providerId: "openrouter", modelKey: "openrouter/anthropic/claude-opus-5", family: "claude", readableState: "none" };
+    await withStoreBed(async (bed) => {
+      // THE DIRECTORY ROW STILL NAMES "Claude on OpenRouter" — the session's ORIGINAL runtime, never
+      // updated by the later same-runtime switch to gpt below.
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(CLAUDE_ON_OPENROUTER, { runtimeKind: "winter-agent" }) });
+
+      const t1 = turn(bed.key, null, "claude on openrouter's reply");
+      await bed.shared.store.append(bed.key, t1.entries);
+      writeOrigin(bed.home, bed.key, t1.assistantUuid, CLAUDE_ON_OPENROUTER);
+
+      // THE LIVE TIP: a same-runtime switch to gpt (confirmed) — the directory row above never learns
+      // about it either.
+      const t2 = turn(bed.key, t1.assistantUuid, "gpt's reasoning summary");
+      await bed.shared.store.append(bed.key, t2.entries);
+      await bed.shared.settle(bed.key);
+      writeOrigin(bed.home, bed.key, t2.assistantUuid, GPT);
+      writeSummary(bed.home, bed.key, t2.assistantUuid, GPT, { text: "gpt's reasoning summary" });
+
+      // REQUESTING A SWITCH BACK TO THE STALE RECORD'S OWN MODEL: the old bug's `from` (the directory
+      // row) and `to` (this request) name the IDENTICAL provider+model, so the same-profile skip fired
+      // and nothing was ever shown to the host. The live source is gpt — a real family change.
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_ON_OPENROUTER, { runtimeKind: "winter-agent" }));
+      expect(review.skipped).toBeUndefined();
+      expect(review.prompt).toBe(true);
+      expect(review.classification?.lossClass).toBe("warned-lossy");
+    });
+  });
+
+  test("an official-leg-written tip (message.model Sonnet, no sidecar record) -> Opus is skipped same-family", async () => {
+    await withStoreBed(async (bed) => {
+      // THE DIRECTORY ROW IS DELIBERATELY WRONG-FAMILY (gpt, winter-agent) — proving the review reads
+      // the tip's own `message.model`, never this stale row, to reach "same-family".
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
+
+      const t = turn(bed.key, null, "sonnet's reply");
+      // AN OFFICIAL-LEG-WRITTEN ENTRY CARRIES NO SIDECAR RECORD AT ALL (Winter never wrote one for a
+      // turn it did not produce) — just the SDK's own `message.model`, exactly as `session-driver.ts`
+      // stamps it on every official-leg assistant message.
+      (t.entries[1]!.message as { model?: string }).model = CLAUDE_SONNET.modelKey;
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
+      expect(review.classification).toBeUndefined();
+    });
+  });
+
+  test("no assistant entry at all in the lineage falls back to the directory's own selection", async () => {
+    await withStoreBed(async (bed) => {
+      // A BRAND-NEW SESSION: recorded, but nothing has been appended to its transcript yet — not even
+      // an opening user turn. `findLiveTipAssistant` must return `undefined` here rather than throw,
+      // and the review must fall back to `entry.selection` exactly as it always did.
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("no-source-turns");
+      expect(review.prompt).toBe(false);
+    });
+  });
+});
+
+// --- fix wave 2 re-review, MAJOR (new) — a failed-call/off-catalog tip must never defeat the -------
+// same-family skip. `findLiveTipAssistant` walks PAST `isApiErrorMessage:true`/`model:"<synthetic>"`
+// residue to the real reply underneath it, and `liveSourceOrigin`'s `message.model` branch is gated on
+// `catalogKnowsModel` — an id the catalog does not recognise (a dated snapshot, a Bedrock ARN) is never
+// handed to the review as if it had resolved.
+describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog tip does not defeat the same-family skip", () => {
+  /**
+   * A DELIBERATELY HOSTILE `resolveEndpoint`, standing in for a host resolver (like the reviewer's own
+   * `daemonResolveEndpoint`) that reports `family: "unknown"` for anything off its own tiny allowlist,
+   * rather than preserving the stamped origin's family the way this router's own `endpointFromOrigin`/
+   * `defaultEndpointResolver` do. Without `liveSourceOrigin`'s OWN pre-check (`catalogKnowsModel`,
+   * which reads the SDK's compiled catalog directly and never calls this function at all for an id it
+   * does not recognise), an unfamiliar tip id reaching THIS resolver is exactly how the bug report's
+   * same-family skip broke — proving these tests fail without the fix, not merely pass with it.
+   */
+  const KNOWN_CANONICAL_KEYS = new Set(["anthropic/claude-opus-5", "anthropic/claude-sonnet-5", "openai/gpt-5.6-luna"]);
+  const hostileResolveEndpoint = (origin: MessageOrigin): ContinuityEndpoint =>
+    KNOWN_CANONICAL_KEYS.has(origin.modelKey) ? { ...origin, readableState: "summary" } : { providerId: origin.providerId, modelKey: origin.modelKey, family: "unknown", readableState: "none" };
+
+  /** An `isApiErrorMessage:true`, `model:"<synthetic>"` assistant entry chained onto `parent` — exactly the shape Claude writes for a failed call. */
+  function errorResidueEntry(key: SessionKey, parent: string): SessionStoreEntry {
+    const uuid = randomUUID();
+    return {
+      type: "assistant",
+      uuid,
+      parentUuid: parent,
+      sessionId: key.sessionId,
+      timestamp: NOW,
+      cwd: "/review-switch",
+      version: "0.0.0",
+      isSidechain: false,
+      isApiErrorMessage: true,
+      message: { id: `msg_${uuid}`, type: "message", role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: overloaded" }] },
+    };
+  }
+
+  test("a <synthetic> error-residue tip after a real Opus turn: -> Sonnet is skipped same-family", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's real reply");
+      (t.entries[1]!.message as { model?: string }).model = CLAUDE_OPUS.modelKey; // official-leg-written: no sidecar
+      await bed.shared.store.append(bed.key, t.entries);
+      // THE FAILED CALL, as the LIVE TIP — must be walked past, not read as the source.
+      await bed.shared.store.append(bed.key, [errorResidueEntry(bed.key, t.assistantUuid)]);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
+    });
+  });
+
+  test("a dated snapshot id tip (claude-opus-5-20260301) -> Sonnet is skipped same-family", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's reply, dated snapshot id");
+      (t.entries[1]!.message as { model?: string }).model = "claude-opus-5-20260301"; // not a catalog key verbatim
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
+    });
+  });
+
+  test("a Bedrock ARN-style id tip (us.anthropic.claude-opus-5-v1:0) -> Sonnet is skipped same-family", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's reply, bedrock ARN id");
+      (t.entries[1]!.message as { model?: string }).model = "us.anthropic.claude-opus-5-v1:0";
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
+    });
+  });
+
+  test("GPT -> Claude from any of these tips still prompts — the skip is same-FAMILY, not blanket", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
+      const t = turn(bed.key, null, "gpt's reasoning summary");
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+      writeOrigin(bed.home, bed.key, t.assistantUuid, GPT);
+      writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBeUndefined();
+      expect(review.prompt).toBe(true);
+    });
+
+    // AND from an off-catalog Claude tip specifically (the exact shape this fix wave is about):
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's reply, dated snapshot id");
+      (t.entries[1]!.message as { model?: string }).model = "claude-opus-5-20260301";
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GPT));
+      expect(review.skipped).toBeUndefined();
+      expect(review.prompt).toBe(true);
+    });
+  });
+});
