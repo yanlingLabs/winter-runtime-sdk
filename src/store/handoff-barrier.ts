@@ -391,16 +391,9 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     // that never happened. So `entry` — still the SOURCE, never touched by the failed write-ahead path
     // — is what this returns whether or not the retry below lands; the difference is invisible to the
     // caller and only shows up in whether the note is still there on the NEXT load.
-    const pendingRevert = readPendingRevert(leaseRootOf(), session);
-    if (pendingRevert !== undefined) {
-      try {
-        await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
-        await shared.store.append(session, [pendingRevert.record]);
-        await shared.settle(session);
-        clearPendingRevert(leaseRootOf(), session);
-      } catch {
-        /* still held; the next load tries again, and `entry` (the source) is what THIS one reports */
-      }
+    if ((await completePendingRevert(shared, session, leaseRootOf())) !== "absent") {
+      // Applied or still owed, either way: `entry` (the source, untouched by the failed write-ahead
+      // path) is what THIS load reports. See `completePendingRevert`'s own doc comment.
       return entry;
     }
 
@@ -934,6 +927,17 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       } catch (error) {
         if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
         return lossy(6, `the writer lease could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      // MAJOR M1 residue (fix wave 2 review): a PRIOR handoff's revert can still be owed for this exact
+      // session — `loadEntry`'s own attempt above (inside `entry = await loadEntry(session)`) is a
+      // single, non-blocking try that may have found the lease still held and left the note in place.
+      // Nothing about reaching step 6 with a live writer lease implies that note is resolved, and
+      // staging a BRAND NEW handoff over an unreconciled one is exactly how a later `loadEntry` would
+      // "complete" a stale revert and silently undo THIS handoff after it succeeds. This pid already
+      // holds the writer lease (the acquire above just proved it), so a failure here is a genuine store
+      // fault, not contention — refusing outright is the honest outcome, not a race to paper over.
+      if ((await completePendingRevert(shared, session, leaseRootOf())) === "still-owed") {
+        return blocked(6, "revert-pending", "a previous handoff's revert to the source is still owed and could not be completed even with the writer lease held; no new handoff may start until it lands");
       }
       let staged: PendingCommit;
       // Armed for exactly the window nit 1 was about: a throw from the marker's own append/settle.
@@ -1779,6 +1783,42 @@ function clearPendingRevert(leaseRoot: string, session: SessionKey): void {
     unlinkSync(pendingRevertPathFor(leaseRoot, session));
   } catch (error) {
     if ((error as { code?: unknown }).code !== "ENOENT") throw error;
+  }
+}
+
+/**
+ * `"absent"` — no note; `"applied"` — the owed revert just landed and the note is gone; `"still-owed"`
+ * — the note is there and the append could not be made THIS time (the caller decides what that means).
+ */
+type PendingRevertOutcome = "absent" | "applied" | "still-owed";
+
+/**
+ * THE ONE PLACE THIS PID RETRIES AN OWED REVERT — shared by BOTH doors that can find one outstanding:
+ * `loadEntry` (every `plan()`, cold or warm) and step 6 of a BRAND NEW `execute()` on the same session
+ * (fix wave 2 residue review). The second door exists because the first one's single, non-blocking
+ * attempt is not enough on its own: a `loadEntry` that fails to reacquire the lease leaves the note in
+ * place and returns the SOURCE, exactly as designed — but nothing then stops a caller from proceeding
+ * to plan and EXECUTE a brand new handoff on that same, still-unreconciled session. If that new
+ * handoff's own step 6 acquire succeeds (the dying child from the FIRST attempt has now actually
+ * exited) and the handoff runs to completion, the note is still sitting on disk describing a revert
+ * that is no longer true — and the NEXT `loadEntry` would apply it, silently undoing a handoff that
+ * just succeeded. So step 6 checks for and clears any outstanding note itself, using the SAME writer
+ * lease it just acquired, before staging anything new: a session is never handed a marker for a fresh
+ * move while an old one is still unresolved.
+ */
+async function completePendingRevert(shared: SharedSessionStore, session: SessionKey, leaseRoot: string): Promise<PendingRevertOutcome> {
+  const pendingRevert = readPendingRevert(leaseRoot, session);
+  if (pendingRevert === undefined) return "absent";
+  try {
+    // Re-entrant for this pid (the store's own writer lease is per-pid, per the doc comment on
+    // `HandoffLease` above) — a caller that already holds it (step 6) pays nothing extra here.
+    await shared.canonical.acquireSessionLease({ projectKey: session.projectKey, sessionId: session.sessionId });
+    await shared.store.append(session, [pendingRevert.record]);
+    await shared.settle(session);
+    clearPendingRevert(leaseRoot, session);
+    return "applied";
+  } catch {
+    return "still-owed";
   }
 }
 
