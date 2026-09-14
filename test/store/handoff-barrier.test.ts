@@ -2572,3 +2572,68 @@ describe("P10b fix wave 2, MINOR m3 — reviewSwitch never repairs, and crash re
     });
   });
 });
+
+// --- fix wave 2 re-review, MINOR — a late revert restores ONLY producerRuntime, never the whole ------
+// staged snapshot.
+describe("fix wave 2 re-review, MINOR — a late revert does not re-apply stale fields over newer ones", () => {
+  test("a late revert after the source advanced leaves projectionCursor and health at their newer values", async () => {
+    class StuckRevertTakeover extends WinterCompatibilitySessionStore {
+      calls = 0;
+      stillHeld = true;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.calls += 1;
+        if (this.calls === 1) return super.acquireSessionLease(key); // step 6's own acquire succeeds
+        if (this.stillHeld) throw new WinterStoreLeaseError("held by a live destination child", 999999);
+        return super.acquireSessionLease(key);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "claude-agent" }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+          },
+        });
+        const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+        expect(outcome).toMatchObject({ kind: "blocked", reason: "revert-pending" });
+
+        // THE STALE SNAPSHOT: whatever step 6 captured BEFORE the write-ahead commit — `health` is
+        // "clean" here (a fresh session, nothing to repair) and `projectionCursor` names the ONE
+        // pre-handoff entry.
+        const summaryRightAfterFailure = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryRightAfterFailure?.["health"]).toBe("clean");
+        const staleCursor = summaryRightAfterFailure?.["projectionCursor"];
+        expect(typeof staleCursor).toBe("string");
+
+        // THE SOURCE ADVANCES WHILE THE REVERT IS STILL OWED: a new entry lands (bumping the real
+        // cursor forward) and the mirror picks up a genuine repair-required fault — exactly the kind of
+        // newer fact a wholesale-snapshot revert would have silently clobbered.
+        const [newEntry] = await bed.append(1);
+        await bed.shared.store.append(bed.key, [{ type: DIALECT_RECORD_ENTRY_TYPE, projectionCursor: newEntry!["uuid"], health: "repair-required" }]);
+        await bed.shared.settle(bed.key);
+        const summaryAfterAdvance = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterAdvance?.["projectionCursor"]).not.toBe(staleCursor);
+        expect(summaryAfterAdvance?.["health"]).toBe("repair-required");
+
+        // THE LEASE FREES UP, and a load completes the now-late revert.
+        (bed.shared.canonical as StuckRevertTakeover).stillHeld = false;
+        const cold = barrierFor(bed, { participants: { source: () => idleOwner({ runtimeKind: "claude-agent" }) } });
+        const plan = await cold.plan(bed.key, "claude-agent");
+        expect(plan.from).toBe("claude-agent");
+
+        // THE REVERT LANDED (producerRuntime is back to the source) — but it restored ONLY that: the
+        // newer projectionCursor and the newer, more honest health stayed exactly where the source's
+        // own later record left them, never folded back to the stale pre-handoff snapshot.
+        const summaryAfterRevert = await bed.shared.canonical.readSessionSummary(bed.key);
+        expect(summaryAfterRevert?.["producerRuntime"]).toBe("claude-agent");
+        expect(summaryAfterRevert?.["projectionCursor"]).toBe(newEntry!["uuid"]);
+        expect(summaryAfterRevert?.["health"]).toBe("repair-required");
+      },
+      { store: StuckRevertTakeover },
+    );
+  });
+});

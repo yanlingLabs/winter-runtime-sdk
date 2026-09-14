@@ -1088,7 +1088,17 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           // own lease release is a race this exact retry bound already exists to absorb one call site
           // up (see `HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS`'s doc comment) — so the identical race here
           // gets the identical bound, not a one-shot check.
-          const revertRecord: SessionStoreEntry = { ...staged.record, producerRuntime: plan.from };
+          // MINOR (re-review): the revert carries ONLY what it must restore — never the whole staged
+          // record. `staged.record` was snapshotted at step 6, BEFORE the write-ahead commit; a revert
+          // applied LATE (after this bounded retry, or after `writePendingRevert`'s note is picked up
+          // by a much later `loadEntry`) folded that stale snapshot's `projectionCursor`,
+          // `compatibilityLevel`, `sourceGenerationCompleted` and `handoffAt` back OVER whatever the
+          // source has since advanced to — and `health: "clean"` specifically could paper over a REAL
+          // `repair-required` the source picked up in the meantime. The dialect record is an
+          // incremental fold (exactly how `unwind()`'s own `{ type, pendingHandoff: null }` append
+          // already works, above), so naming only these three fields leaves every other field at
+          // whatever the CURRENT summary already has.
+          const revertRecord: SessionStoreEntry = { type: DIALECT_RECORD_ENTRY_TYPE, producerRuntime: plan.from, pendingHandoff: null };
           const revertDelayMs = deps.leaseRetryDelayMs ?? HANDOFF_LEASE_TAKEOVER_RETRY_DELAY_MS;
           let reverted = false;
           let lastRevertError: unknown;
