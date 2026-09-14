@@ -538,6 +538,67 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   const originFrom = (selection: RuntimeSelection): MessageOrigin => ({ providerId: selection.providerId, modelKey: selection.modelRef, family: selection.family });
 
   /**
+   * WS-18 W18-20 fix wave 2, CRITICAL C1 — walks the lineage BACKWARDS from the true tip (the last
+   * chain-linked entry, skipping trailing bookkeeping entries with no uuid) to the most recent
+   * ASSISTANT entry. `undefined` means the lineage has no assistant entry at all — a session that has
+   * not replied yet, which `liveSourceOrigin` reads as "nothing live to derive from".
+   */
+  const findLiveTipAssistant = (entries: readonly SessionStoreEntry[]): SessionStoreEntry | undefined => {
+    const chainable = entries.filter((entry) => typeof entry["uuid"] === "string");
+    if (chainable.length === 0) return undefined;
+    const byUuid = new Map(chainable.map((entry) => [entry["uuid"] as string, entry]));
+    let cursor: SessionStoreEntry | undefined = chainable[chainable.length - 1];
+    const seen = new Set<string>();
+    while (cursor !== undefined) {
+      const uuid = cursor["uuid"] as string;
+      if (seen.has(uuid)) return undefined; // a cycle: not a real transcript, and never our business to fix here
+      seen.add(uuid);
+      if (cursor["type"] === "assistant") return cursor;
+      const parentUuid = cursor["parentUuid"];
+      cursor = typeof parentUuid === "string" ? byUuid.get(parentUuid) : undefined;
+    }
+    return undefined;
+  };
+
+  /**
+   * WS-18 W18-20 fix wave 2, CRITICAL C1 — THE REVIEW'S SOURCE IS THE LIVE MODEL, never
+   * `entry.selection` alone. That directory record is updated ONLY on a cross-runtime handoff
+   * (`patchDirectoryRow`'s own call sites); a same-runtime model change (gpt -> deepseek, both on
+   * Winter) or the engine's own fallback/interrupt switch never touches it, so a session created on
+   * deepseek and long since talking through gpt still read `entry.selection.family === "deepseek"` —
+   * silently reviewing gpt -> claude as deepseek -> claude (`lossless-portable`, no prompt, when the
+   * live answer is `warned-lossy`), and reviewing a switch BACK to the stale recorded model as
+   * same-profile (silent) when it is really a genuine family change.
+   *
+   * THE ORDER, per the fix ruling:
+   *   1. the tip's own sidecar `kind:"origin"` record (a Winter-written turn always stamps one) —
+   *      used WHOLE, verbatim;
+   *   2. otherwise (an official-leg-written entry: the official leg never writes a sidecar record for
+   *      its own turns) the tip's own `message.model` — upstream-id-qualified, so the registry's own
+   *      alias table resolves it — with the provider from the session's recorded official provider
+   *      (`entry.selection.providerId` when that record's `runtimeKind` is `claude-agent`) or
+   *      `"anthropic"` as the honest last resort when even that is stale;
+   *   3. `entry.selection` ONLY when the lineage has no assistant entry at all.
+   *
+   * `switchFactsFor`'s source-turn counting and `reviewModelSwitch`'s same-profile/same-family skips
+   * all read whatever this returns for `from` — there is no second place to wire the fix.
+   */
+  const liveSourceOrigin = (args: { entries: readonly SessionStoreEntry[]; sidecarRecords: readonly ProviderStateRecord[]; entry: RuntimeDirectoryEntry }): MessageOrigin => {
+    const tip = findLiveTipAssistant(args.entries);
+    if (tip === undefined) return originFrom(args.entry.selection);
+    const tipUuid = tip["uuid"] as string;
+    const origin = args.sidecarRecords.find((record) => record.anchorUuid === tipUuid && record.kind === "origin");
+    if (origin !== undefined) return { providerId: origin.provider, modelKey: origin.model, family: origin.family };
+    const message = tip["message"];
+    const model = typeof message === "object" && message !== null ? (message as { model?: unknown }).model : undefined;
+    if (typeof model === "string" && model.length > 0) {
+      const providerId = args.entry.selection.runtimeKind === "claude-agent" ? args.entry.selection.providerId : "anthropic";
+      return { providerId, modelKey: model, family: "claude" };
+    }
+    return originFrom(args.entry.selection);
+  };
+
+  /**
    * WS-18 W18-20 (P10b): the ONE pre-flight review, shared by `plan()`'s embedded `review` and the
    * public `reviewSwitch`. Reads the canonical entries and the sidecar through the shared store —
    * never rewrites either — and resolves both endpoints through `deps.resolveEndpoint` (a host's own
@@ -552,7 +613,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     const entries = (await store.store.load(args.session)) ?? [];
     const sidecar = await readProviderStateSidecar(homeOf(), args.session);
     const resolve = deps.resolveEndpoint ?? defaultEndpointResolver();
-    const fromEndpoint = resolve(originFrom(args.entry.selection));
+    const fromEndpoint = resolve(liveSourceOrigin({ entries, sidecarRecords: sidecar, entry: args.entry }));
     const toEndpoint = resolve(originFrom(args.requested));
     let truncated = false;
     if (args.requested.runtimeKind === "claude-agent") {
