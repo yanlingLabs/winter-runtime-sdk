@@ -788,6 +788,25 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     let pendingWritten = false;
     /** True once the producer record has landed: from that instant the handoff IS committed. */
     let committed = false;
+    /**
+     * DEFECT 3 (Norma e2e A-3a): true from the instant step 6's OWN `acquireSessionLease` succeeds,
+     * until this pid legitimately relinquishes it (the write-ahead branch's own `releaseLease`, below)
+     * or the handoff actually completes and stays on this pid (a confirmed claude-agent destination,
+     * which runs IN-PROCESS and never needs the lease released for anyone else to use it).
+     *
+     * EVERY OTHER OUTCOME MUST RELEASE IT — `unwind()` does, unconditionally, whenever this is still
+     * true. Before this flag existed, a winter -> official handoff whose destination failed to confirm
+     * (or failed ANY later step) left this pid holding the writer lease FOREVER: the daemon process
+     * never exits, so the lease is never stale, and the Winter source — whose ownership the transcript
+     * never actually gave up — could never be re-spawned again. Every later `session.send` re-spawned
+     * the winter child for the same backend session id, and the child's own `--resume` refused with
+     * `ResumeTargetError: session <id> is in use by another live process (pid <this daemon's pid>)`,
+     * surfacing to the host as `CLIConnectionError: runtime exited before init` — the runtime never
+     * even reached its `system/init` handshake. Measured directly: acquiring this lease and NOT
+     * releasing it, then spawning the real `winter` binary with `resume: <sessionId>`, reproduces that
+     * exact error message and exception class; releasing it first lets the same resume reach init.
+     */
+    let writerLeaseHeld = false;
     /** The step `execute()` is inside, so an unexpected throw is still attributed (review r2, N3). */
     let at: HandoffStepNumber = 1;
 
@@ -814,8 +833,19 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
           rmSync(stagedRoot, { recursive: true, force: true });
           stagedRoot = undefined;
         }
+        // DEFECT 3: give the writer lease back whenever this pid still holds it and the handoff did
+        // NOT land somewhere that keeps it in-process. See `writerLeaseHeld`'s own doc comment — this
+        // is the one release point every failure path after step 6's acquire funnels through.
+        if (writerLeaseHeld) {
+          await shared.releaseLease(session);
+          writerLeaseHeld = false;
+        }
       } catch {
-        /* the marker self-heals on the next plan(); a leaked copy is inert once its root is gone */
+        /* the marker self-heals on the next plan(); a leaked copy is inert once its root is gone; a
+           lease this release attempt could not clear is exactly what DEFECT 3's OWN M1 convergence
+           machinery (the pending-revert note, `loadEntry`'s retry) is NOT wired for here — but a
+           `releaseLease` failure this soon after this same pid's own successful acquire has no
+           plausible cause, and `unwind()`'s contract (never throw) rules out doing more here. */
       }
     };
 
@@ -960,6 +990,10 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         if (isLeaseError(error)) return blocked(6, "lease-held", (error as Error).message);
         return lossy(6, `the writer lease could not be verified: ${error instanceof Error ? error.message : String(error)}`);
       }
+      // DEFECT 3: from this instant, THIS pid holds the writer lease and `unwind()` must give it back
+      // on any path that does not end with a confirmed claude-agent destination (in-process; never
+      // needs it released) or the write-ahead branch's own explicit hand-off (below).
+      writerLeaseHeld = true;
       // MAJOR M1 residue (fix wave 2 review): a PRIOR handoff's revert can still be owed for this exact
       // session — `loadEntry`'s own attempt above (inside `entry = await loadEntry(session)`) is a
       // single, non-blocking try that may have found the lease still held and left the note in place.
@@ -969,6 +1003,9 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       // holds the writer lease (the acquire above just proved it), so a failure here is a genuine store
       // fault, not contention — refusing outright is the honest outcome, not a race to paper over.
       if ((await completePendingRevert(shared, session, leaseRootOf())) === "still-owed") {
+        // DEFECT 3: refusing here must not ALSO strand the lease this pid just took at step 6 — the
+        // exact same class of bug this fix wave closes, reached from a different refusal.
+        await unwind();
         return blocked(6, "revert-pending", "a previous handoff's revert to the source is still owed and could not be completed even with the writer lease held; no new handoff may start until it lands");
       }
       let staged: PendingCommit;
@@ -1073,6 +1110,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
         // did); a thrown release is a real failure and is allowed to propagate to the outer catch,
         // which reports honestly off `committed` (already true: the durable record already moved).
         await shared.releaseLease(session);
+        writerLeaseHeld = false; // DEFECT 3: handed off deliberately here — `unwind()` must not try again below
         let confirmed: HandoffStepReport;
         try {
           confirmed = await destination.confirmInit(target);
