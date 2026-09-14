@@ -2637,3 +2637,62 @@ describe("fix wave 2 re-review, MINOR — a late revert does not re-apply stale 
     );
   });
 });
+
+// --- fix wave 2 re-review, MINOR — a `writePendingRevert` failure is logged, and named in the --------
+// returned detail, never silently swallowed.
+describe("fix wave 2 re-review, MINOR — a pending-revert note that fails to write is logged and named in the outcome", () => {
+  test("a failed revert whose note ALSO cannot be written logs once and says so in the outcome's detail", async () => {
+    class AlwaysStuckTakeover extends WinterCompatibilitySessionStore {
+      calls = 0;
+      override async acquireSessionLease(key: { projectKey: string; sessionId: string }): Promise<void> {
+        this.calls += 1;
+        if (this.calls === 1) return super.acquireSessionLease(key); // step 6's own acquire succeeds
+        throw new WinterStoreLeaseError("held by a live destination child", 999999);
+      }
+    }
+    await withStoreBed(
+      async (bed) => {
+        await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+        await bed.append(1);
+
+        // BLOCK THE NOTE'S OWN RENAME, without touching the handoff lease's own lock file: the pending-
+        // revert path is pre-created as a DIRECTORY, so `writePendingRevert`'s `renameSync(temp, path)`
+        // fails onto it (a real, reproducible fs fault — never a mocked one).
+        const leaseDir = join(bed.home, "runtimes", "handoff-leases", bed.key.projectKey);
+        mkdirSync(leaseDir, { recursive: true });
+        mkdirSync(join(leaseDir, `${bed.key.sessionId}.pending-revert.json`), { recursive: true });
+
+        const barrier = barrierFor(bed, {
+          leaseRetryDelayMs: 1,
+          participants: {
+            source: () => idleOwner({ runtimeKind: "claude-agent" }),
+            destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => ({ ok: false, reason: "the winter child never started" }) }),
+          },
+        });
+        const errors: unknown[][] = [];
+        const originalError = console.error;
+        console.error = (...args: unknown[]) => {
+          errors.push(args);
+        };
+        let outcome: Awaited<ReturnType<(typeof barrier)["execute"]>>;
+        try {
+          outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+        } finally {
+          console.error = originalError;
+        }
+
+        // NEVER `resumed`, exactly as an ordinary failed revert — the note failing to write does not
+        // change WHICH outcome kind is reported, only how loudly the compounding failure is named.
+        expect(outcome).toMatchObject({ kind: "blocked", reason: "revert-pending" });
+        expect((outcome as { detail?: string }).detail).toMatch(/durable pending-revert note ALSO could not be written/);
+
+        // AND IT WAS LOGGED — names and error class only, never a payload.
+        expect(errors.length).toBeGreaterThan(0);
+        const logged = errors[0]!.join(" ");
+        expect(logged).toContain("pending-revert note");
+        expect(logged).toContain("could not be written");
+      },
+      { store: AlwaysStuckTakeover },
+    );
+  });
+});

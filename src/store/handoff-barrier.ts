@@ -1129,13 +1129,30 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
             // converges ON THE SOURCE instead: `loadEntry` retries this exact append on every future
             // load, and reports the directory's own (untouched, source) value rather than repairing
             // toward the destination for as long as the note is outstanding.
+            // MINOR (re-review): the note write is the ONE thing standing between this failure and
+            // the ORIGINAL bug's exact symptom — without it, the next `loadEntry` has no way to know a
+            // revert is owed and "repairs" the directory toward the dangling producer record, which is
+            // precisely what M1's convergence design exists to prevent. So a failure to write it is
+            // reported DISTINCTLY: logged (names and error class only — WS-05 §13's rule, never a
+            // payload), and folded into the returned `detail` so a host or an on-call operator sees
+            // "the durable note ALSO could not be written" rather than reading an ordinary
+            // `revert-pending` and assuming the self-healing convergence is already in motion. The
+            // OUTCOME stays `blocked: revert-pending` either way — there is no new `HandoffOutcome`
+            // shape for "converges eventually" vs "requires a human" (hosts switch exhaustively on
+            // `kind`, and reusing `blocked`'s existing reason is the fix wave's own preference over a
+            // new union member) — but the detail text is the cheap, honest signal this case earns.
+            let noteWritten = true;
             try {
               writePendingRevert(leaseRootOf(), session, revertRecord, now().toISOString());
-            } catch {
-              /* best-effort: the `blocked` outcome below is honest either way, even without the note */
+            } catch (noteError) {
+              noteWritten = false;
+              // eslint-disable-next-line no-console
+              console.error(
+                `winter-runtime-sdk: the pending-revert note for a failed handoff takeover could not be written (${noteError instanceof Error ? noteError.constructor.name : typeof noteError}: ${noteError instanceof Error ? noteError.message : String(noteError)}) — without it, ownership will NOT self-converge back to the source on a later load; this session needs manual reconciliation until the writer lease frees up on its own`,
+              );
             }
             await unwind();
-            const reason = `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source could not be completed after ${HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS} attempt(s): ${lastRevertError instanceof Error ? lastRevertError.message : String(lastRevertError)}`;
+            const reason = `the winter destination did not confirm init (${confirmed.reason}) and the revert to the source could not be completed after ${HANDOFF_LEASE_TAKEOVER_RETRY_ATTEMPTS} attempt(s): ${lastRevertError instanceof Error ? lastRevertError.message : String(lastRevertError)}${noteWritten ? "" : "; the durable pending-revert note ALSO could not be written, so this will not self-converge — it needs manual reconciliation"}`;
             return blocked(8, "revert-pending", reason);
           }
           await unwind();
