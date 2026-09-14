@@ -431,3 +431,112 @@ describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE s
     });
   });
 });
+
+// --- fix wave 2 re-review, MAJOR (new) — a failed-call/off-catalog tip must never defeat the -------
+// same-family skip. `findLiveTipAssistant` walks PAST `isApiErrorMessage:true`/`model:"<synthetic>"`
+// residue to the real reply underneath it, and `liveSourceOrigin`'s `message.model` branch is gated on
+// `catalogKnowsModel` — an id the catalog does not recognise (a dated snapshot, a Bedrock ARN) is never
+// handed to the review as if it had resolved.
+describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog tip does not defeat the same-family skip", () => {
+  /**
+   * A DELIBERATELY HOSTILE `resolveEndpoint`, standing in for a host resolver (like the reviewer's own
+   * `daemonResolveEndpoint`) that reports `family: "unknown"` for anything off its own tiny allowlist,
+   * rather than preserving the stamped origin's family the way this router's own `endpointFromOrigin`/
+   * `defaultEndpointResolver` do. Without `liveSourceOrigin`'s OWN pre-check (`catalogKnowsModel`,
+   * which reads the SDK's compiled catalog directly and never calls this function at all for an id it
+   * does not recognise), an unfamiliar tip id reaching THIS resolver is exactly how the bug report's
+   * same-family skip broke — proving these tests fail without the fix, not merely pass with it.
+   */
+  const KNOWN_CANONICAL_KEYS = new Set(["anthropic/claude-opus-5", "anthropic/claude-sonnet-5", "openai/gpt-5.6-luna"]);
+  const hostileResolveEndpoint = (origin: MessageOrigin): ContinuityEndpoint =>
+    KNOWN_CANONICAL_KEYS.has(origin.modelKey) ? { ...origin, readableState: "summary" } : { providerId: origin.providerId, modelKey: origin.modelKey, family: "unknown", readableState: "none" };
+
+  /** An `isApiErrorMessage:true`, `model:"<synthetic>"` assistant entry chained onto `parent` — exactly the shape Claude writes for a failed call. */
+  function errorResidueEntry(key: SessionKey, parent: string): SessionStoreEntry {
+    const uuid = randomUUID();
+    return {
+      type: "assistant",
+      uuid,
+      parentUuid: parent,
+      sessionId: key.sessionId,
+      timestamp: NOW,
+      cwd: "/review-switch",
+      version: "0.0.0",
+      isSidechain: false,
+      isApiErrorMessage: true,
+      message: { id: `msg_${uuid}`, type: "message", role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: overloaded" }] },
+    };
+  }
+
+  test("a <synthetic> error-residue tip after a real Opus turn: -> Sonnet is skipped same-family", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's real reply");
+      (t.entries[1]!.message as { model?: string }).model = CLAUDE_OPUS.modelKey; // official-leg-written: no sidecar
+      await bed.shared.store.append(bed.key, t.entries);
+      // THE FAILED CALL, as the LIVE TIP — must be walked past, not read as the source.
+      await bed.shared.store.append(bed.key, [errorResidueEntry(bed.key, t.assistantUuid)]);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
+    });
+  });
+
+  test("a dated snapshot id tip (claude-opus-5-20260301) -> Sonnet is skipped same-family", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's reply, dated snapshot id");
+      (t.entries[1]!.message as { model?: string }).model = "claude-opus-5-20260301"; // not a catalog key verbatim
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
+    });
+  });
+
+  test("a Bedrock ARN-style id tip (us.anthropic.claude-opus-5-v1:0) -> Sonnet is skipped same-family", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's reply, bedrock ARN id");
+      (t.entries[1]!.message as { model?: string }).model = "us.anthropic.claude-opus-5-v1:0";
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
+    });
+  });
+
+  test("GPT -> Claude from any of these tips still prompts — the skip is same-FAMILY, not blanket", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
+      const t = turn(bed.key, null, "gpt's reasoning summary");
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+      writeOrigin(bed.home, bed.key, t.assistantUuid, GPT);
+      writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      expect(review.skipped).toBeUndefined();
+      expect(review.prompt).toBe(true);
+    });
+
+    // AND from an off-catalog Claude tip specifically (the exact shape this fix wave is about):
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's reply, dated snapshot id");
+      (t.entries[1]!.message as { model?: string }).model = "claude-opus-5-20260301";
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GPT));
+      expect(review.skipped).toBeUndefined();
+      expect(review.prompt).toBe(true);
+    });
+  });
+});

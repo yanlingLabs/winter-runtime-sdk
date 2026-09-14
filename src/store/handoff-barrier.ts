@@ -58,7 +58,7 @@ import { DIALECT_RECORD_ENTRY_TYPE, type SessionKey, type SessionStoreEntry } fr
 import { reviewModelSwitch, toClaudeReady, type ContinuityEndpoint, type SwitchReview } from "@yanlinglabs/winter-provider-runtime";
 import type { MessageOrigin, ProviderStateRecord } from "@yanlinglabs/winter-provider-runtime";
 
-import { defaultEndpointResolver } from "../default-endpoint-resolver.ts";
+import { catalogKnowsModel, defaultEndpointResolver } from "../default-endpoint-resolver.ts";
 import { RuntimeSdkError } from "../errors.ts";
 import type { SeamContextWithDirectory } from "../seams/context.ts";
 import type { RuntimeDirectoryEntry } from "../seams/directory-store.ts";
@@ -556,10 +556,29 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   const originFrom = (selection: RuntimeSelection): MessageOrigin => ({ providerId: selection.providerId, modelKey: selection.modelRef, family: selection.family });
 
   /**
+   * fix wave 2 re-review, MAJOR (new) — a failed-call residue entry is not a real reply and must
+   * never stand in as the live tip. Claude writes a failed call as an assistant entry carrying
+   * `isApiErrorMessage: true` and a synthetic `model: "<synthetic>"` — exactly the shape W18-13(c)'s
+   * SDK reader already skips for its own purposes. Left untreated, that entry's unknown model/family
+   * defeats the same-family skip right when a user is most likely to switch: immediately after an
+   * error.
+   */
+  const isApiErrorOrSyntheticTip = (entry: SessionStoreEntry): boolean => {
+    if (entry["isApiErrorMessage"] === true) return true;
+    const message = entry["message"];
+    const model = typeof message === "object" && message !== null ? (message as { model?: unknown }).model : undefined;
+    return model === "<synthetic>";
+  };
+
+  /**
    * WS-18 W18-20 fix wave 2, CRITICAL C1 — walks the lineage BACKWARDS from the true tip (the last
-   * chain-linked entry, skipping trailing bookkeeping entries with no uuid) to the most recent
-   * ASSISTANT entry. `undefined` means the lineage has no assistant entry at all — a session that has
-   * not replied yet, which `liveSourceOrigin` reads as "nothing live to derive from".
+   * chain-linked entry, skipping trailing bookkeeping entries with no uuid) to the most recent REAL
+   * ASSISTANT entry — one that is neither `isApiErrorMessage:true` nor the synthetic error-residue
+   * model id (fix wave 2 re-review, MAJOR (new)): those are walked PAST, exactly like a non-chainable
+   * bookkeeping entry, never returned and never treated as "no assistant entry at all". `undefined`
+   * means the lineage has no REAL assistant entry at all — a session that has not replied yet (or
+   * whose only replies are error residue), which `liveSourceOrigin` reads as "nothing live to derive
+   * from".
    */
   const findLiveTipAssistant = (entries: readonly SessionStoreEntry[]): SessionStoreEntry | undefined => {
     const chainable = entries.filter((entry) => typeof entry["uuid"] === "string");
@@ -571,8 +590,8 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       const uuid = cursor["uuid"] as string;
       if (seen.has(uuid)) return undefined; // a cycle: not a real transcript, and never our business to fix here
       seen.add(uuid);
-      if (cursor["type"] === "assistant") return cursor;
-      const parentUuid = cursor["parentUuid"];
+      if (cursor["type"] === "assistant" && !isApiErrorOrSyntheticTip(cursor)) return cursor;
+      const parentUuid: unknown = cursor["parentUuid"];
       cursor = typeof parentUuid === "string" ? byUuid.get(parentUuid) : undefined;
     }
     return undefined;
@@ -595,8 +614,18 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
    *      its own turns) the tip's own `message.model` — upstream-id-qualified, so the registry's own
    *      alias table resolves it — with the provider from the session's recorded official provider
    *      (`entry.selection.providerId` when that record's `runtimeKind` is `claude-agent`) or
-   *      `"anthropic"` as the honest last resort when even that is stale;
-   *   3. `entry.selection` ONLY when the lineage has no assistant entry at all.
+   *      `"anthropic"` as the honest last resort when even that is stale. fix wave 2 re-review: used
+   *      ONLY when `catalogKnowsModel` confirms it names a real catalog row — a dated snapshot id
+   *      (`claude-opus-5-20260301`) or a Bedrock ARN-style id (`us.anthropic.claude-opus-5-v1:0`) the
+   *      catalog does not recognise is NOT handed to the review as if it resolved. When it does not
+   *      resolve AND the directory's own `entry.selection` already names the official leg
+   *      (`runtimeKind === "claude-agent"`), that persisted (and presumably canonical) row is a
+   *      strictly better substitute than an id the catalog cannot place — per the fix ruling. When
+   *      `entry.selection` does NOT already name the official leg (the adversarial staleness case:
+   *      the directory is stuck on some other family entirely), falling back to IT would report the
+   *      WRONG family outright, which is worse than an unresolved-but-still-`family:"claude"`
+   *      candidate — so the raw candidate is kept in that case instead;
+   *   3. `entry.selection` — when the lineage has no REAL assistant entry at all.
    *
    * `switchFactsFor`'s source-turn counting and `reviewModelSwitch`'s same-profile/same-family skips
    * all read whatever this returns for `from` — there is no second place to wire the fix.
@@ -610,8 +639,11 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     const message = tip["message"];
     const model = typeof message === "object" && message !== null ? (message as { model?: unknown }).model : undefined;
     if (typeof model === "string" && model.length > 0) {
-      const providerId = args.entry.selection.runtimeKind === "claude-agent" ? args.entry.selection.providerId : "anthropic";
-      return { providerId, modelKey: model, family: "claude" };
+      const officialLegSelection = args.entry.selection.runtimeKind === "claude-agent";
+      const providerId = officialLegSelection ? args.entry.selection.providerId : "anthropic";
+      const candidate: MessageOrigin = { providerId, modelKey: model, family: "claude" };
+      if (catalogKnowsModel(candidate)) return candidate;
+      return officialLegSelection ? originFrom(args.entry.selection) : candidate;
     }
     return originFrom(args.entry.selection);
   };
