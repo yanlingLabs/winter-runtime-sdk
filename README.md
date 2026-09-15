@@ -33,6 +33,13 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
+**What `0.0.7` changes** (DEFECT 3 — a blocking product defect Norma's hermetic e2e found; no peer
+floor change):
+
+| | |
+|---|---|
+| a failed winter -> official handoff releases the SDK writer lease it took, not just the router's own bookkeeping | For the confirm-first direction (winter -> official: `destination.confirmInit` runs before anything commits), step 6 acquires the SDK's own `WinterCompatibilitySessionStore` session writer lease before staging the pending-handoff marker. When `confirmInit` refused (or any later step failed), `unwind()` cleared the router's own `pendingHandoff` marker and staged copy but never released that lease — and the daemon process holding it never exits, so the lease was never stale. Every later attempt to re-spawn the Winter source for the same backend session id found its own lease held by a live, foreign pid and refused outright. Measured directly against the real `winter` binary (v0.0.11): this reproduces `ResumeTargetError: session <id> is in use by another live process (pid <n>)`, surfaced by the SDK wrapper as `CLIConnectionError: runtime exited before init` — the reported symptom, byte for byte. `unwind()` now releases the writer lease on any path that does not end with a confirmed claude-agent destination (in-process; never needs it released for anyone else to use it); the same gap in the M1 pending-revert refusal at step 6 is closed too. |
+
 **What `0.0.6` changes** (Phase 10b fix wave 2 — three bugs an Opus whole-branch review found in
 `0.0.5`'s handoff barrier, plus a re-review's own MAJOR/MINOR/cosmetic micro-round; no peer floor
 change):

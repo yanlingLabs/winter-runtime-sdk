@@ -2696,3 +2696,89 @@ describe("fix wave 2 re-review, MINOR — a pending-revert note that fails to wr
     );
   });
 });
+
+// --- DEFECT 3 (Norma e2e A-3a) — a winter -> official handoff whose destination fails to confirm ----
+// must not strand the Winter SOURCE by leaving the SDK's own writer lease held by this (daemon) pid,
+// which never exits and so is never stale. `unwind()` cleared the router's own bookkeeping
+// (`pendingHandoff`, a staged copy) but never released the lease step 6 took — measured, with the
+// real `winter` binary (v0.0.11): a `--resume` against a session whose lockfile still names a LIVE pid
+// refuses with `ResumeTargetError: session <id> is in use by another live process (pid <n>)`, which the
+// SDK wrapper surfaces as `CLIConnectionError: runtime exited before init` — byte-for-byte the bug
+// report's own symptom. Releasing the lease first lets the identical `--resume` reach `system/init`.
+describe("DEFECT 3 — a winter -> official handoff whose destination never confirms releases the writer lease it took at step 6", () => {
+  /** `<home>/projects/<projectKey>/<sessionId>.lock` — the SDK's OWN writer-lease lockfile (leases.ts's `acquireLease`/`releaseLease`), never `runtimes/handoff-leases/` (the router's own, separate handoff lease). */
+  function writerLeaseLockPath(bed: StoreBed): string {
+    return join(bed.home, "projects", bed.key.projectKey, `${bed.key.sessionId}.lock`);
+  }
+
+  test("confirmInit refusing (a dead official destination) releases the writer lease, not just the router's own pendingHandoff marker", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "winter-agent", selection: selectionFor("winter-agent") });
+      await bed.append(1);
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ runtimeKind: "winter-agent" }),
+          destination: () => ({ runtimeKind: "claude-agent" as const, confirmInit: () => ({ ok: false, reason: "the official destination is a dead stub (/usr/bin/true)" }) }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 8 });
+
+      // THE ROUTER'S OWN HANDOFF LEASE is fine either way (already released in a `finally`, and this
+      // is a DIFFERENT file from the one this defect is about) — asserted here so a future change
+      // that "fixes" this by touching the wrong lease is caught immediately.
+      expect(existsSync(join(bed.home, "runtimes", "handoff-leases", bed.key.projectKey, `${bed.key.sessionId}.lock`))).toBe(false);
+
+      // THE SDK'S WRITER-LEASE LOCKFILE must be GONE — this is the actual defect.
+      expect(existsSync(writerLeaseLockPath(bed))).toBe(false);
+
+      // AND A FRESH ACQUIRE (standing in for the re-spawned Winter child's own startup check) must
+      // succeed cleanly — the direct, hermetic proxy for "the child reaches system/init instead of
+      // refusing with ResumeTargetError", which is what the real binary does end to end (verified
+      // separately against `dist/winter` 0.0.11 in the investigation for this fix).
+      const freshStore = new WinterCompatibilitySessionStore({ winterHome: bed.home });
+      await expect(freshStore.acquireSessionLease({ projectKey: bed.key.projectKey, sessionId: bed.key.sessionId })).resolves.toBeUndefined();
+    });
+  });
+
+  test("a temp-continuity failure at step 7 (after step 6 already took the lease) also releases it", async () => {
+    // A DIFFERENT failure point, same underlying bug class: unwind() runs on ANY post-step-6 failure
+    // in the confirm-first (claude-agent destination) path, not only a confirmInit refusal.
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "winter-agent", selection: selectionFor("winter-agent") });
+      await bed.append(1);
+      const barrier = barrierFor(bed, {
+        tempLayoutFor: () => {
+          throw new Error("temp continuity deliberately refused for this test");
+        },
+        participants: {
+          source: () => idleOwner({ runtimeKind: "winter-agent" }),
+          destination: () => ({ runtimeKind: "claude-agent" as const, confirmInit: () => OK }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "claude-agent"));
+      expect(outcome).toMatchObject({ kind: "lossy-fork-offered", step: 7 });
+      expect(existsSync(writerLeaseLockPath(bed))).toBe(false);
+    });
+  });
+
+  test("the winter destination's own write-ahead branch is unaffected — success still keeps the lease released exactly once", async () => {
+    // A REGRESSION GUARD for the OTHER direction (official -> winter, R6's own write-ahead order):
+    // this fix's new unconditional release-in-unwind() must not double up with, or interfere with,
+    // the write-ahead branch's own explicit `releaseLease` before `confirmInit`.
+    await withStoreBed(async (bed) => {
+      const entry = await bed.record({ runtimeKind: "claude-agent", selection: selectionFor("claude-agent") });
+      await bed.append(1);
+      const barrier = barrierFor(bed, {
+        participants: {
+          source: () => idleOwner({ runtimeKind: "claude-agent" }),
+          destination: () => ({ runtimeKind: "winter-agent" as const, confirmInit: () => OK }),
+        },
+      });
+      const outcome = await barrier.execute(await barrier.plan(bed.key, "winter-agent"));
+      expect(outcome.kind).toBe("resumed");
+      expect(existsSync(writerLeaseLockPath(bed))).toBe(false);
+      void entry;
+    });
+  });
+});
