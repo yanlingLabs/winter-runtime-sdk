@@ -81,11 +81,14 @@ export interface RuntimeSelection {
    * + `ANTHROPIC_CONFIG_DIR`, no bearer credential in the child at all (the profile store the CLI already
    * manages owns the token). Distinct from `"console-oauth"`, which injects a bearer pair the router
    * itself resolves (`ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`) — reusing that family would either
-   * demand a token this flow never has or let the two mechanisms silently race on precedence. Reachable
-   * only by explicit declaration, the same as `claude-oauth`: never inferred from a credential ref's
-   * storage kind (`authFamilyFromRefKind`) and not a member of `OFFICIAL_SERVED_AUTH_FAMILIES`, so the
-   * D13 auto-selector never routes to it on its own — a host that wants this family builds the
-   * `RuntimeSelection` for it directly, the same shape a `custom` or `claude-oauth` host already does.
+   * demand a token this flow never has or let the two mechanisms silently race on precedence.
+   *
+   * WS-20: reachable automatically, by the row's PROVIDER rather than by declaration — the catalog's
+   * `console` provider IS the Console arm, so `candidatesFor` (`./select-runtime.ts`) overrides any
+   * row with `providerId === "console"` to this family regardless of its credential ref's storage kind.
+   * It IS a member of `OFFICIAL_SERVED_AUTH_FAMILIES`, served unconditionally (no protocol gate) —
+   * the D13 auto-selector routes to it on its own for a `console/*` row, the same as any other served
+   * family.
    */
   authFamily: "api-key" | "cloud-credential-chain" | "claude-oauth" | "console-oauth" | "console-profile" | "local-none" | "custom";
   sdkVersion: string;
@@ -224,11 +227,14 @@ export interface SelectionRefusal {
   refused: true;
   /**
    * `"no-credential"` (W18-3, P10b): a Claude-family model has no credential able to serve it through
-   * ANY door — the catalog has rows for it, every one of them is just unconfigured. Widened to
-   * `string` beyond the four members this package still returns itself, so a host relaying a refusal
-   * value through (e.g. a resume review that read one from elsewhere) never has to invent a member.
+   * ANY door — the catalog has rows for it, every one of them is just unconfigured. `"bare-model-id"`
+   * (WS-20): `requested.model` had no `/` — a provider-qualified tag is the only spelling this phase
+   * accepts. `"provider-mismatch"` (WS-20, review fix): the request's provider field names a different
+   * provider than its model tag's prefix. Widened to `string` beyond the members this package still
+   * returns itself, so a host relaying a refusal value through (e.g. a resume review that read one
+   * from elsewhere) never has to invent a member.
    */
-  reason: "slot-unservable" | "claude-oauth-not-approved" | "runtime-unavailable" | "mode-forbids-runtime" | "no-credential" | (string & {});
+  reason: "slot-unservable" | "claude-oauth-not-approved" | "runtime-unavailable" | "mode-forbids-runtime" | "no-credential" | "bare-model-id" | "provider-mismatch" | (string & {});
   /** One sentence naming what was missing, for the host to surface verbatim. */
   detail: string;
   /**

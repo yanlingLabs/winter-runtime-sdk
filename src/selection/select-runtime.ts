@@ -94,7 +94,7 @@ export const UNKNOWN_VERSION = "unknown";
  * the alternative was two places to edit, and review r1's I1 was the first time that cost something
  * real (a family was added to the rule and the constant said otherwise, with nothing failing).
  */
-export const OFFICIAL_SERVED_AUTH_FAMILIES: readonly SelectionAuthFamily[] = ["api-key", "console-oauth", "cloud-credential-chain", "claude-oauth"];
+export const OFFICIAL_SERVED_AUTH_FAMILIES: readonly SelectionAuthFamily[] = ["api-key", "console-oauth", "console-profile", "cloud-credential-chain", "claude-oauth"];
 
 // --- the rules, by id -----------------------------------------------------------------------------
 
@@ -229,24 +229,38 @@ function familyById(listing: ModelFamilyListing, id: string): FamilyEntry | unde
   return listing.families.find((family) => family.id === id);
 }
 
-/** WS-13c §4 step 1 + step 2: the rows for a canonical id, filtered to what this session can serve. */
-function candidatesFor(listing: ModelFamilyListing, familyId: string, canonicalModelId: string, input: SelectionInput | ChildLikeInput): SelectionCandidate[] {
+/**
+ * WS-13c §4 step 1 + step 2: the rows for a canonical id, filtered to what this session can serve.
+ *
+ * `tagProviderId` (REVIEW FIX, post-L2.1): the provider `resolveModel` read off the matched row's own
+ * key, when the request named a tag. It pins the candidate set exactly the way an explicit
+ * `requested.provider` does — the tag's prefix IS a provider pin, whether or not the request repeats
+ * it in the `provider` field — but `requested.provider`, when present, wins (callers that mismatch the
+ * two are refused earlier, in `resolveCandidateRows`, before this function ever runs).
+ */
+function candidatesFor(listing: ModelFamilyListing, familyId: string, canonicalModelId: string, input: SelectionInput | ChildLikeInput, tagProviderId?: string): SelectionCandidate[] {
   const family = familyById(listing, familyId);
   const model: ModelEntry | undefined = family?.models.find((entry) => entry.canonicalModelId === canonicalModelId);
   if (model === undefined) return [];
   const out: SelectionCandidate[] = [];
+  const pinned = input.requested.provider ?? tagProviderId;
   for (const row of model.rows) {
     // A pinned provider narrows the candidate set; it never widens it and never substitutes.
-    if (input.requested.provider !== undefined && row.providerId !== input.requested.provider) continue;
+    if (pinned !== undefined && row.providerId !== pinned) continue;
     // The catalog's own unservable statuses (WS-13c §4 step 1, `isSlotServableRow`).
     if (row.status === "blocked" || row.status === "deprecated") continue;
     // "we know there is none" excludes; "unknown" does not — a configured credential ref is the
     // admission test, and an unprobed provider with a ref is exactly the row a host wants offered.
     if (row.servable === "absent") continue;
-    const auth = providerAuthView(row.providerId, input.credentials);
+    const declaredAuth = providerAuthView(row.providerId, input.credentials);
     // WS-13c §4 step 2: "filter by configured credential ref". No ref, no candidate — and never an
     // environment scan to find one (WS-14, Execution amendments — Phase 6).
-    if (auth === undefined) continue;
+    if (declaredAuth === undefined) continue;
+    // WS-20: the `console` catalog provider IS the Anthropic Console arm — its auth family is the
+    // provider's identity, never a credential-ref guess (`authFamilyFromRefKind` cannot spell
+    // `console-profile`, by the same rule that keeps every other OAuth family undiscoverable). A
+    // configured ref still admits the row; only the auth family it reports is overridden.
+    const auth: ProviderAuthView = row.providerId === "console" ? { ...declaredAuth, authFamily: "console-profile" } : declaredAuth;
     out.push({ family: familyId, canonicalModelId, row, auth });
   }
   return out;
@@ -388,13 +402,29 @@ function resolveSlot(listing: ModelFamilyListing, slot: string): { familyId: str
   return refuse("slot-unservable", `no family in this session's listing offers a slot named ${JSON.stringify(slot)}`);
 }
 
-/** A canonical model id or a catalog row key, resolved to the family that owns it (WS-13c §5's two spellings). */
-function resolveModel(listing: ModelFamilyListing, model: string): { familyId: string; canonicalModelId: string } | SelectionRefusal {
-  const hits: Array<{ familyId: string; canonicalModelId: string }> = [];
+/**
+ * A catalog row key — a provider-qualified tag, WS-20's only spelling — resolved to the family that
+ * owns it AND the provider of the one row the tag names.
+ *
+ * REVIEW FIX (post-L2.1): the tag alone must pin the provider. A caller that names
+ * `"kie/claude-opus-5"` with no `requested.provider` must land on `kie`'s row, never on whichever row
+ * the listing happens to order first — `providerId` here is what lets `resolveCandidateRows` narrow
+ * `candidatesFor` to that one row even when the request's own `provider` field is absent.
+ */
+function resolveModel(listing: ModelFamilyListing, model: string): { familyId: string; canonicalModelId: string; providerId: string } | SelectionRefusal {
+  // WS-20: `requested.model` is a provider-qualified tag ("<providerId>/<modelId>") or nothing at all.
+  // A bare id (no `/`) is refused here, before any row is even looked at — never resolved by guessing
+  // a provider, and never silently matched against a canonical id (WS-13c §5's OTHER spelling, which
+  // this phase removes: two providers serving the same raw id must not resolve to "pick one").
+  if (!model.includes("/")) {
+    return refuse("bare-model-id", `${JSON.stringify(model)} is a bare model id; WS-20 requires a provider-qualified tag "<providerId>/<modelId>"`);
+  }
+  const hits: Array<{ familyId: string; canonicalModelId: string; providerId: string }> = [];
   for (const family of listing.families) {
     for (const entry of family.models) {
-      if (entry.canonicalModelId === model || entry.rows.some((row) => row.key === model)) {
-        hits.push({ familyId: family.id, canonicalModelId: entry.canonicalModelId });
+      const matched = entry.rows.find((row) => row.key === model);
+      if (matched !== undefined) {
+        hits.push({ familyId: family.id, canonicalModelId: entry.canonicalModelId, providerId: matched.providerId });
       }
     }
   }
@@ -414,9 +444,9 @@ const isRefusal = (value: unknown): value is SelectionRefusal => typeof value ==
  *
  * ORDER OF PRECEDENCE: an explicit slot, else an explicit model, else the session's active slot set —
  * whose slots are tried in the order the listing publishes them, because that order IS §4's
- * deterministic order (vendorProviders, subscription before token, `settings.preferredProviders`, then
- * `admission.tier`). This package re-sorts nothing: the listing is produced by the code that owns
- * those rules, and a second ordering here would be a second answer.
+ * deterministic order (the listing's own row order; WS-20: a request always names its provider, so
+ * order is never a tie-break). This package re-sorts nothing: the listing is produced by the code that
+ * owns those rules, and a second ordering here would be a second answer.
  */
 /** A candidate list that is non-empty BY TYPE, so a caller never has to guard an impossible empty. */
 export type NonEmptyCandidates = [SelectionCandidate, ...SelectionCandidate[]];
@@ -434,7 +464,16 @@ export type NonEmptyCandidates = [SelectionCandidate, ...SelectionCandidate[]];
 export function resolveCandidateRows(input: SelectionInput & { requested: { model: string } }): NonEmptyCandidates | SelectionRefusal {
   const resolved = resolveModel(input.families, input.requested.model);
   if (isRefusal(resolved)) return resolved;
-  const candidates = candidatesFor(input.families, resolved.familyId, resolved.canonicalModelId, input);
+  // REVIEW FIX (post-L2.1): a request naming BOTH a tag and a provider must agree with itself — the
+  // tag's own prefix already IS the provider pin, so a `provider` field naming something else is a
+  // self-contradicting request, never resolved by picking one side silently.
+  if (input.requested.provider !== undefined && input.requested.provider !== resolved.providerId) {
+    return refuse(
+      "provider-mismatch",
+      `the request's provider field (${JSON.stringify(input.requested.provider)}) names a different provider than its model tag's prefix (${JSON.stringify(input.requested.model)} names ${JSON.stringify(resolved.providerId)})`,
+    );
+  }
+  const candidates = candidatesFor(input.families, resolved.familyId, resolved.canonicalModelId, input, resolved.providerId);
   const [first, ...rest] = candidates;
   if (first === undefined) {
     const subject = `the model ${JSON.stringify(input.requested.model)} (${resolved.familyId}/${resolved.canonicalModelId})`;

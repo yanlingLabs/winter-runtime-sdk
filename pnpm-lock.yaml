@@ -18,8 +18,8 @@ importers:
         specifier: ^26.4.0
         version: 26.5.0
       '@yanlinglabs/winter-agent-sdk':
-        specifier: ^0.0.10
-        version: 0.0.10
+        specifier: ^0.0.13
+        version: 0.0.13
       '@yanlinglabs/winter-conformance':
         specifier: ^0.0.3
         version: 0.0.3
@@ -134,8 +134,18 @@ packages:
     os: [darwin]
     hasBin: true
 
+  '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.13':
+    resolution: {integrity: sha512-hqiRNZCVqykLhyyNcV+N1/sz7DU24i2gzX5T/cFNzHV23I/reasFsV2ZxKctoF+GYkWYzMa9zksmn0NjbePy7A==}
+    cpu: [arm64]
+    os: [darwin]
+    hasBin: true
+
   '@yanlinglabs/winter-agent-sdk@0.0.10':
     resolution: {integrity: sha512-dLCzYSl7wtxlktIpj+Vu8kHD6Fl2TEPgTG62+ouCHoraTBUgg+WxMxXc1cgydSvd3xpaC66jNIt3gqhLmNrriQ==}
+    engines: {node: '>=18'}
+
+  '@yanlinglabs/winter-agent-sdk@0.0.13':
+    resolution: {integrity: sha512-5MQtRfbcSbKHcdXuammHCN0X+Oyl34ipPq8vWwF8nu0fmMxsZjaum1as7vO1cJeDqkuu3XhbosBp8Az/wp17/g==}
     engines: {node: '>=18'}
 
   '@yanlinglabs/winter-agent-sdk@0.0.3':
@@ -148,6 +158,10 @@ packages:
 
   '@yanlinglabs/winter-provider-catalog@0.0.10':
     resolution: {integrity: sha512-jCbxAmeYzTgi6nvNf/x64eKCDvTZDRiA7E9Vr6369VTanUH58ETKNHe57QKPQTHrBhoHM8C1adqTMpuGCDFv8g==}
+    engines: {node: '>=18'}
+
+  '@yanlinglabs/winter-provider-catalog@0.0.13':
+    resolution: {integrity: sha512-nQuE7IDBeguCKrQ4mQz8BIf79sMWMq/l1V5bp95zNRH8rUsEgGZOM3DxgPy3eDB2Oe19izZiCqAgvm1N4ltldQ==}
     engines: {node: '>=18'}
 
   '@yanlinglabs/winter-provider-catalog@0.0.3':
@@ -633,11 +647,20 @@ snapshots:
   '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.10':
     optional: true
 
+  '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.13':
+    optional: true
+
   '@yanlinglabs/winter-agent-sdk@0.0.10':
     dependencies:
       '@yanlinglabs/winter-provider-catalog': 0.0.10
     optionalDependencies:
       '@yanlinglabs/winter-agent-sdk-darwin-arm64': 0.0.10
+
+  '@yanlinglabs/winter-agent-sdk@0.0.13':
+    dependencies:
+      '@yanlinglabs/winter-provider-catalog': 0.0.13
+    optionalDependencies:
+      '@yanlinglabs/winter-agent-sdk-darwin-arm64': 0.0.13
 
   '@yanlinglabs/winter-agent-sdk@0.0.3':
     dependencies:
@@ -646,6 +669,8 @@ snapshots:
   '@yanlinglabs/winter-conformance@0.0.3': {}
 
   '@yanlinglabs/winter-provider-catalog@0.0.10': {}
+
+  '@yanlinglabs/winter-provider-catalog@0.0.13': {}
 
   '@yanlinglabs/winter-provider-catalog@0.0.3': {}
 
