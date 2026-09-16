@@ -463,26 +463,38 @@ describe("WS-20 tags", () => {
 
   test("a tag resolves to exactly its own row even when a sibling provider serves the same model", () => {
     // `claude-opus-5` is one canonical id behind three provider rows in the fixture (row 17's own
-    // point) — the pin plus the tag must land on `kie`'s row, never `anthropic`'s, even though
-    // `anthropic` comes first in listing order and both are credentialed.
+    // point) — the TAG ALONE (no `provider` field) must land on `kie`'s row, never `anthropic`'s, even
+    // though `anthropic` comes first in listing order and both are credentialed. REVIEW FIX: the tag's
+    // own prefix pins the provider; a caller no longer has to repeat it in `requested.provider`.
     const result = selectRuntime(
       input({
-        requested: { model: "kie/claude-opus-5", provider: "kie" },
+        requested: { model: "kie/claude-opus-5" },
         credentials: credentials(["anthropic", "kie"]),
       }),
     );
     expect(result).toMatchObject({ modelRef: "kie/claude-opus-5", providerId: "kie" });
   });
 
+  test("a request whose provider field disagrees with its model tag's prefix is refused provider-mismatch", () => {
+    const result = selectRuntime(
+      input({
+        requested: { model: "kie/claude-opus-5", provider: "anthropic" },
+        credentials: credentials(["anthropic", "kie"]),
+      }),
+    );
+    expect(result).toMatchObject({ refused: true, reason: "provider-mismatch" });
+  });
+
+  // The `console` catalog provider is not part of the shared fixture, so these two tests build their
+  // own family (a `claude-sonnet-5` row behind `console`) rather than editing `fixtures.ts`.
+  const consoleFamily = {
+    ...claudeFamily,
+    models: claudeFamily.models.map((entry) =>
+      entry.canonicalModelId === "claude-sonnet-5" ? { ...entry, rows: [...entry.rows, row("console/claude-sonnet-5", "console")] } : entry,
+    ),
+  };
+
   test("a console/<id> tag derives authFamily console-profile and serves the official runtime", () => {
-    // The `console` catalog provider is not part of the shared fixture, so this test builds its own
-    // family (a `claude-sonnet-5` row behind `console`) rather than editing `fixtures.ts`.
-    const consoleFamily = {
-      ...claudeFamily,
-      models: claudeFamily.models.map((entry) =>
-        entry.canonicalModelId === "claude-sonnet-5" ? { ...entry, rows: [...entry.rows, row("console/claude-sonnet-5", "console")] } : entry,
-      ),
-    };
     const result = selectRuntime(
       input({
         requested: { model: "console/claude-sonnet-5", provider: "console" },
@@ -493,5 +505,19 @@ describe("WS-20 tags", () => {
       }),
     );
     expect(result).toMatchObject({ providerId: "console", authFamily: "console-profile", runtimeKind: "claude-agent" });
+  });
+
+  test("a console/<id> row with no console credential ref is not admitted — 'no ref, no candidate' still holds", () => {
+    // The catalog provider override in `candidatesFor` fires only AFTER a declared auth view is found
+    // (`providerAuthView` returning `undefined` still excludes the row before the override ever runs) —
+    // WS-20 widens WHICH auth family a console row reports, never WHETHER it needs a configured ref.
+    const result = selectRuntime(
+      input({
+        requested: { model: "console/claude-sonnet-5", provider: "console" },
+        families: listing("claude", [consoleFamily, gptFamily]),
+        credentials: credentials([]),
+      }),
+    );
+    expect(isSelectionRefusal(result)).toBe(true);
   });
 });
