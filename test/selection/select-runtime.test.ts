@@ -430,7 +430,7 @@ describe("the structural rules", () => {
       const gated = authFamily === "api-key" || authFamily === "console-oauth";
       expect({ authFamily, served: officialServesBackend("kie", otherDialect) }).toEqual({ authFamily, served: inSet && !gated });
     }
-    expect([...OFFICIAL_SERVED_AUTH_FAMILIES]).toEqual(["api-key", "console-oauth", "cloud-credential-chain", "claude-oauth"]);
+    expect([...OFFICIAL_SERVED_AUTH_FAMILIES]).toEqual(["api-key", "console-oauth", "console-profile", "cloud-credential-chain", "claude-oauth"]);
   });
 
   test("ruleIdOf never returns an inherited property name for an untrusted persisted reason", () => {
@@ -452,5 +452,46 @@ describe("the structural rules", () => {
       checkedAt: NOW,
     });
     expect(versions).toEqual({ winterSdkVersion: "0.0.3", claudeSdkVersion: "0.3.250" });
+  });
+});
+
+describe("WS-20 tags", () => {
+  test("a bare model id is refused with reason bare-model-id", () => {
+    const result = selectRuntime(input({ requested: { model: "gpt-5.6-terra" } }));
+    expect(result).toMatchObject({ refused: true, reason: "bare-model-id" });
+  });
+
+  test("a tag resolves to exactly its own row even when a sibling provider serves the same model", () => {
+    // `claude-opus-5` is one canonical id behind three provider rows in the fixture (row 17's own
+    // point) — the pin plus the tag must land on `kie`'s row, never `anthropic`'s, even though
+    // `anthropic` comes first in listing order and both are credentialed.
+    const result = selectRuntime(
+      input({
+        requested: { model: "kie/claude-opus-5", provider: "kie" },
+        credentials: credentials(["anthropic", "kie"]),
+      }),
+    );
+    expect(result).toMatchObject({ modelRef: "kie/claude-opus-5", providerId: "kie" });
+  });
+
+  test("a console/<id> tag derives authFamily console-profile and serves the official runtime", () => {
+    // The `console` catalog provider is not part of the shared fixture, so this test builds its own
+    // family (a `claude-sonnet-5` row behind `console`) rather than editing `fixtures.ts`.
+    const consoleFamily = {
+      ...claudeFamily,
+      models: claudeFamily.models.map((entry) =>
+        entry.canonicalModelId === "claude-sonnet-5" ? { ...entry, rows: [...entry.rows, row("console/claude-sonnet-5", "console")] } : entry,
+      ),
+    };
+    const result = selectRuntime(
+      input({
+        requested: { model: "console/claude-sonnet-5", provider: "console" },
+        families: listing("claude", [consoleFamily, gptFamily]),
+        // No declared `authByProvider` view for `console` — the ref kind alone is `custom`
+        // (`authFamilyFromRefKind("file")`), and the override to `console-profile` must still fire.
+        credentials: { byProvider: { console: "file" } },
+      }),
+    );
+    expect(result).toMatchObject({ providerId: "console", authFamily: "console-profile", runtimeKind: "claude-agent" });
   });
 });

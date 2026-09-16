@@ -22,6 +22,10 @@ const FOUR_DOOR_MODEL = "claude-opus-5-four-door";
 
 const fourDoorClaudeFamily: ModelFamilyListing["families"][number] = {
   ...claudeFamily,
+  // WS-20: `requested.model` must be a provider-qualified tag, which can only ever name ONE row — this
+  // fixture is deliberately about ALL FOUR doors for one canonical model, so it is reached the same way
+  // any other multi-row canonical id is: a slot name, not a bare model id.
+  slots: [...claudeFamily.slots, { name: "four-door", canonicalModelId: FOUR_DOOR_MODEL, description: "the four-door fixture slot", reason: "fixture: four-door" }],
   models: [
     ...claudeFamily.models,
     {
@@ -42,7 +46,7 @@ const fourDoorListing: ModelFamilyListing = { active: undefined, families: [four
 function input(over: Partial<SelectionInput> = {}): SelectionInput {
   return {
     mode: "code",
-    requested: { model: FOUR_DOOR_MODEL },
+    requested: { slot: "four-door" },
     families: fourDoorListing,
     credentials: credentials([]),
     hasClaudePeer: true,
@@ -139,7 +143,7 @@ describe("WS-18 W18-3 — the structured no-credential refusal", () => {
         },
       ],
     };
-    const refusal = refused({ requested: { model: "claude-blocked-only" }, families: noRowsListing });
+    const refusal = refused({ requested: { model: "anthropic/claude-blocked-only" }, families: noRowsListing });
     expect(refusal.reason).toBe("slot-unservable");
     expect(refusal.alternatives).toBeUndefined();
   });
@@ -149,7 +153,7 @@ describe("WS-18 W18-3 — the structured no-credential refusal", () => {
       active: undefined,
       families: [{ id: "gemini", displayName: "Gemini", vendor: "Google", slots: [], models: [{ canonicalModelId: "gemini-3-pro", displayName: "Gemini 3 Pro", rows: [row("google/gemini-3-pro", "google")] }] }],
     };
-    const refusal = refused({ requested: { model: "gemini-3-pro" }, families: geminiOnly, credentials: credentials([]) });
+    const refusal = refused({ requested: { model: "google/gemini-3-pro" }, families: geminiOnly, credentials: credentials([]) });
     expect(refusal.reason).toBe("slot-unservable");
     expect(refusal.alternatives).toBeUndefined();
   });
