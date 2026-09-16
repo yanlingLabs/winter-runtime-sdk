@@ -153,7 +153,7 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
     const decided = sdk.selectRuntime({
       mode: "code",
-      requested: { model: "m-1" },
+      requested: { model: "local/m-1" },
       families: {
         active: undefined,
         families: [

@@ -26,7 +26,9 @@ const RAW_ID = "claude-opus-5";
 function on(provider: string, over: Partial<SelectionInput> = {}): RuntimeSelection {
   const result = selectRuntime({
     mode: "code",
-    requested: { model: RAW_ID, provider },
+    // WS-20: a request always names its own row's tag, not the bare raw id — every fixture row here
+    // is keyed `${providerId}/${RAW_ID}`, so the tag is built the same way for every provider.
+    requested: { model: `${provider}/${RAW_ID}`, provider },
     families: listing("claude"),
     credentials: credentials([provider]),
     hasClaudePeer: true,
@@ -72,7 +74,7 @@ describe("WS-17 row 17 — one raw model id, three providers", () => {
     // raw model id is present in the listing and one of its rows is perfectly servable.
     const onlyReseller = selectRuntime({
       mode: "code",
-      requested: { model: RAW_ID, provider: "anthropic" },
+      requested: { model: `anthropic/${RAW_ID}`, provider: "anthropic" },
       families: listing("claude"),
       credentials: credentials(["kie"]),
       hasClaudePeer: true,
@@ -87,7 +89,7 @@ describe("WS-17 row 17 — one raw model id, three providers", () => {
 
     // And the auth view a selection records is its own provider's, not the family's.
     expect(on("anthropic").authFamily).toBe("api-key");
-    expect(on("bedrock", { requested: { model: "claude-haiku-4.5", provider: "bedrock" }, credentials: credentials(["bedrock"]) }).authFamily).toBe("cloud-credential-chain");
+    expect(on("bedrock", { requested: { model: "bedrock/anthropic.claude-haiku-4-5", provider: "bedrock" }, credentials: credentials(["bedrock"]) }).authFamily).toBe("cloud-credential-chain");
   });
 
   test("row 17 continuation — the same raw id routes to DIFFERENT runtimes depending on the provider", () => {
@@ -140,8 +142,8 @@ describe("WS-17 row 17 — one raw model id, three providers", () => {
       versions: VERSIONS,
       now: NOW,
     };
-    const viaVendor = selectChildRuntime(parent, { ...childContext, model: RAW_ID, provider: "anthropic" });
-    const viaReseller = selectChildRuntime(parent, { ...childContext, model: RAW_ID, provider: "kie" });
+    const viaVendor = selectChildRuntime(parent, { ...childContext, model: `anthropic/${RAW_ID}`, provider: "anthropic" });
+    const viaReseller = selectChildRuntime(parent, { ...childContext, model: `kie/${RAW_ID}`, provider: "kie" });
     if (isSelectionRefusal(viaVendor) || isSelectionRefusal(viaReseller)) throw new Error("unreachable");
     expect(viaVendor.modelRef).not.toBe(viaReseller.modelRef);
     expect(viaVendor.providerId).not.toBe(viaReseller.providerId);

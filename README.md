@@ -33,6 +33,15 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
+**What `0.0.8` changes** (WS-20 — provider-qualified model tags; peer floor:
+`@yanlinglabs/winter-agent-sdk >=0.0.13 <0.1.0`):
+
+| | |
+|---|---|
+| `requested.model` is now a tag, always (`bare-model-id`) | A bare model id (no `/`) is refused typed (`bare-model-id`) before any row is even resolved — `resolveModel`'s other spelling ("or a canonical model id") is gone: the provider-qualified catalog row key (`"<providerId>/<modelId>"`) is the only shape it accepts, so two providers serving the same raw id never resolve to "pick one". |
+| the tag alone pins the provider (`provider-mismatch`) | `resolveModel` now carries the matched row's own `providerId` through to `candidatesFor`, so a tag with no `requested.provider` field lands on exactly its own row — never the first row the listing happens to order — even when a sibling provider serves the same canonical model and both are credentialed. A request naming both a tag and a `provider` field that disagree is refused typed (`provider-mismatch`) rather than resolved by picking one side silently. |
+| `console/<id>` derives `authFamily: "console-profile"` | The catalog's new `console` provider IS the Anthropic Console arm: `candidatesFor` overrides any row with `providerId === "console"` to `console-profile` regardless of its credential ref's storage kind, and `console-profile` is now a member of `OFFICIAL_SERVED_AUTH_FAMILIES` (served unconditionally, no protocol gate) — a `console/*` row routes to the official runtime on its own. Admission is unchanged: a `console` row with no configured credential ref anywhere is still excluded before the override ever runs. |
+
 **What `0.0.7` changes** (DEFECT 3 — a blocking product defect Norma's hermetic e2e found; no peer
 floor change):
 
