@@ -229,15 +229,24 @@ function familyById(listing: ModelFamilyListing, id: string): FamilyEntry | unde
   return listing.families.find((family) => family.id === id);
 }
 
-/** WS-13c §4 step 1 + step 2: the rows for a canonical id, filtered to what this session can serve. */
-function candidatesFor(listing: ModelFamilyListing, familyId: string, canonicalModelId: string, input: SelectionInput | ChildLikeInput): SelectionCandidate[] {
+/**
+ * WS-13c §4 step 1 + step 2: the rows for a canonical id, filtered to what this session can serve.
+ *
+ * `tagProviderId` (REVIEW FIX, post-L2.1): the provider `resolveModel` read off the matched row's own
+ * key, when the request named a tag. It pins the candidate set exactly the way an explicit
+ * `requested.provider` does — the tag's prefix IS a provider pin, whether or not the request repeats
+ * it in the `provider` field — but `requested.provider`, when present, wins (callers that mismatch the
+ * two are refused earlier, in `resolveCandidateRows`, before this function ever runs).
+ */
+function candidatesFor(listing: ModelFamilyListing, familyId: string, canonicalModelId: string, input: SelectionInput | ChildLikeInput, tagProviderId?: string): SelectionCandidate[] {
   const family = familyById(listing, familyId);
   const model: ModelEntry | undefined = family?.models.find((entry) => entry.canonicalModelId === canonicalModelId);
   if (model === undefined) return [];
   const out: SelectionCandidate[] = [];
+  const pinned = input.requested.provider ?? tagProviderId;
   for (const row of model.rows) {
     // A pinned provider narrows the candidate set; it never widens it and never substitutes.
-    if (input.requested.provider !== undefined && row.providerId !== input.requested.provider) continue;
+    if (pinned !== undefined && row.providerId !== pinned) continue;
     // The catalog's own unservable statuses (WS-13c §4 step 1, `isSlotServableRow`).
     if (row.status === "blocked" || row.status === "deprecated") continue;
     // "we know there is none" excludes; "unknown" does not — a configured credential ref is the
@@ -393,8 +402,16 @@ function resolveSlot(listing: ModelFamilyListing, slot: string): { familyId: str
   return refuse("slot-unservable", `no family in this session's listing offers a slot named ${JSON.stringify(slot)}`);
 }
 
-/** A catalog row key — a provider-qualified tag, WS-20's only spelling — resolved to the family that owns it. */
-function resolveModel(listing: ModelFamilyListing, model: string): { familyId: string; canonicalModelId: string } | SelectionRefusal {
+/**
+ * A catalog row key — a provider-qualified tag, WS-20's only spelling — resolved to the family that
+ * owns it AND the provider of the one row the tag names.
+ *
+ * REVIEW FIX (post-L2.1): the tag alone must pin the provider. A caller that names
+ * `"kie/claude-opus-5"` with no `requested.provider` must land on `kie`'s row, never on whichever row
+ * the listing happens to order first — `providerId` here is what lets `resolveCandidateRows` narrow
+ * `candidatesFor` to that one row even when the request's own `provider` field is absent.
+ */
+function resolveModel(listing: ModelFamilyListing, model: string): { familyId: string; canonicalModelId: string; providerId: string } | SelectionRefusal {
   // WS-20: `requested.model` is a provider-qualified tag ("<providerId>/<modelId>") or nothing at all.
   // A bare id (no `/`) is refused here, before any row is even looked at — never resolved by guessing
   // a provider, and never silently matched against a canonical id (WS-13c §5's OTHER spelling, which
@@ -402,11 +419,12 @@ function resolveModel(listing: ModelFamilyListing, model: string): { familyId: s
   if (!model.includes("/")) {
     return refuse("bare-model-id", `${JSON.stringify(model)} is a bare model id; WS-20 requires a provider-qualified tag "<providerId>/<modelId>"`);
   }
-  const hits: Array<{ familyId: string; canonicalModelId: string }> = [];
+  const hits: Array<{ familyId: string; canonicalModelId: string; providerId: string }> = [];
   for (const family of listing.families) {
     for (const entry of family.models) {
-      if (entry.rows.some((row) => row.key === model)) {
-        hits.push({ familyId: family.id, canonicalModelId: entry.canonicalModelId });
+      const matched = entry.rows.find((row) => row.key === model);
+      if (matched !== undefined) {
+        hits.push({ familyId: family.id, canonicalModelId: entry.canonicalModelId, providerId: matched.providerId });
       }
     }
   }
@@ -446,7 +464,16 @@ export type NonEmptyCandidates = [SelectionCandidate, ...SelectionCandidate[]];
 export function resolveCandidateRows(input: SelectionInput & { requested: { model: string } }): NonEmptyCandidates | SelectionRefusal {
   const resolved = resolveModel(input.families, input.requested.model);
   if (isRefusal(resolved)) return resolved;
-  const candidates = candidatesFor(input.families, resolved.familyId, resolved.canonicalModelId, input);
+  // REVIEW FIX (post-L2.1): a request naming BOTH a tag and a provider must agree with itself — the
+  // tag's own prefix already IS the provider pin, so a `provider` field naming something else is a
+  // self-contradicting request, never resolved by picking one side silently.
+  if (input.requested.provider !== undefined && input.requested.provider !== resolved.providerId) {
+    return refuse(
+      "provider-mismatch",
+      `the request's provider field (${JSON.stringify(input.requested.provider)}) names a different provider than its model tag's prefix (${JSON.stringify(input.requested.model)} names ${JSON.stringify(resolved.providerId)})`,
+    );
+  }
+  const candidates = candidatesFor(input.families, resolved.familyId, resolved.canonicalModelId, input, resolved.providerId);
   const [first, ...rest] = candidates;
   if (first === undefined) {
     const subject = `the model ${JSON.stringify(input.requested.model)} (${resolved.familyId}/${resolved.canonicalModelId})`;
