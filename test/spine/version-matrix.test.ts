@@ -19,9 +19,9 @@ const keychain = createFakeKeychain();
 
 describe("satisfiesRange (plants)", () => {
   test("the matrix's own two entries", () => {
-    expect(satisfiesRange("0.0.10", SUPPORTED.winterAgentSdk)).toBe(true);
+    expect(satisfiesRange("0.0.13", SUPPORTED.winterAgentSdk)).toBe(true);
     expect(satisfiesRange("0.0.99", SUPPORTED.winterAgentSdk)).toBe(true);
-    expect(satisfiesRange("0.0.9", SUPPORTED.winterAgentSdk)).toBe(false);
+    expect(satisfiesRange("0.0.12", SUPPORTED.winterAgentSdk)).toBe(false);
     expect(satisfiesRange("0.0.1", SUPPORTED.winterAgentSdk)).toBe(false);
     expect(satisfiesRange("0.1.0", SUPPORTED.winterAgentSdk)).toBe(false);
     expect(satisfiesRange("1.0.0", SUPPORTED.winterAgentSdk)).toBe(false);
@@ -89,7 +89,7 @@ describe("assertVersionMatrix — peerVersions (R2)", () => {
     const error = thrown as RuntimeSdkVersionError;
     // SAME SHAPE as the existing peer-export refusal test above: `expected` names the matrix entry,
     // `actual` names the package and the identity that missed it.
-    expect(error.expected).toBe("@yanlinglabs/winter-agent-sdk >=0.0.10 <0.1.0");
+    expect(error.expected).toBe("@yanlinglabs/winter-agent-sdk >=0.0.13 <0.1.0");
     expect(error.actual).toBe("@yanlinglabs/winter-agent-sdk 0.9.9");
     expect(error.message).toContain("version matrix refuses this peer set");
   });
@@ -112,7 +112,7 @@ describe("assertVersionMatrix — peerVersions (R2)", () => {
     const unresolvable = (): string => {
       throw new Error("Cannot find module (simulated compiled-binary resolution failure)");
     };
-    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.10" });
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.13" });
     // A claude peer exporting NO version identity of its own (probe 1 fails too).
     const noVersionClaude = {} as unknown as NonNullable<RuntimeSdkPeers["claude"]>;
 
@@ -129,10 +129,10 @@ describe("assertVersionMatrix — peerVersions (R2)", () => {
   });
 
   test("(e) an ABSENT `peerVersions` leaves the existing peer-export/resolved-manifest behaviour untouched", () => {
-    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.10" });
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.13" });
     const report = assertVersionMatrix({ winter: peer });
     expect(report.winterAgentSdk.source).toBe("peer-export");
-    expect(report.winterAgentSdk.packageVersion).toBe("0.0.10");
+    expect(report.winterAgentSdk.packageVersion).toBe("0.0.13");
     // The one-arg call shape (no second parameter at all) stays legal too.
     const claudeReport = assertVersionMatrix({ winter: peer, claude: createFakeClaudePeer() });
     expect(claudeReport.claudeAgentSdk?.source).toBe("peer-export");
@@ -141,9 +141,9 @@ describe("assertVersionMatrix — peerVersions (R2)", () => {
 
 describe("assertVersionMatrix", () => {
   test("an in-range Winter peer reports its identity and its protocol version", () => {
-    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.10" });
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.13" });
     const report = assertVersionMatrix({ winter: peer });
-    expect(report.winterAgentSdk.packageVersion).toBe("0.0.10");
+    expect(report.winterAgentSdk.packageVersion).toBe("0.0.13");
     expect(report.winterAgentSdk.source).toBe("peer-export");
     expect(report.winterAgentSdk.protocolVersion).toBe("1.0");
     expect(report.winterAgentSdk.supported).toBe(SUPPORTED.winterAgentSdk);
@@ -162,19 +162,19 @@ describe("assertVersionMatrix", () => {
     }
     expect(thrown).toBeInstanceOf(RuntimeSdkVersionError);
     const error = thrown as RuntimeSdkVersionError;
-    expect(error.expected).toBe("@yanlinglabs/winter-agent-sdk >=0.0.10 <0.1.0");
+    expect(error.expected).toBe("@yanlinglabs/winter-agent-sdk >=0.0.13 <0.1.0");
     expect(error.actual).toBe("@yanlinglabs/winter-agent-sdk 0.0.1");
     expect(error.message).toContain("version matrix refuses this peer set");
   });
 
   test("AN ABSENT OFFICIAL PEER IS ALLOWED -- a Winter-only host is a supported configuration", () => {
-    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.10" });
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.13" });
     const report = assertVersionMatrix({ winter: peer });
     expect(report.claudeAgentSdk).toBeUndefined();
   });
 
   test("an in-range official peer is reported; an out-of-range one refuses", () => {
-    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.10" });
+    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.13" });
     const ok = assertVersionMatrix({ winter: peer, claude: createFakeClaudePeer() });
     expect(ok.claudeAgentSdk?.packageVersion).toBe("0.3.250");
     expect(ok.claudeAgentSdk?.packageName).toBe("@anthropic-ai/claude-agent-sdk");
@@ -190,10 +190,10 @@ describe("assertVersionMatrix", () => {
   });
 
   test("a missing or unsupported PROTOCOL_VERSION refuses -- it is the second identity, not a detail", () => {
-    const noProtocol = { SDK_VERSION: "0.0.10" } as unknown as RuntimeSdkPeers["winter"];
+    const noProtocol = { SDK_VERSION: "0.0.13" } as unknown as RuntimeSdkPeers["winter"];
     expect(() => assertVersionMatrix({ winter: noProtocol })).toThrow(RuntimeSdkVersionError);
 
-    const { peer } = createFakeWinterPeer({ protocolVersion: "2.0", packageVersion: "0.0.10" });
+    const { peer } = createFakeWinterPeer({ protocolVersion: "2.0", packageVersion: "0.0.13" });
     let thrown: unknown;
     try {
       assertVersionMatrix({ winter: peer });
@@ -241,9 +241,9 @@ describe("assertVersionMatrix", () => {
   test("`createRuntimeSdk` asserts the matrix BEFORE it builds anything", () => {
     const { peer } = createFakeWinterPeer({ packageVersion: "0.0.1" });
     expect(() => createRuntimeSdk({ peers: { winter: peer }, keychain })).toThrow(RuntimeSdkVersionError);
-    const { peer: good } = createFakeWinterPeer({ packageVersion: "0.0.10" });
+    const { peer: good } = createFakeWinterPeer({ packageVersion: "0.0.13" });
     const sdk = createRuntimeSdk({ peers: { winter: good }, keychain });
-    expect(sdk.versions.winterAgentSdk.packageVersion).toBe("0.0.10");
+    expect(sdk.versions.winterAgentSdk.packageVersion).toBe("0.0.13");
   });
 });
 

@@ -14,6 +14,9 @@ package owns, who owns which files, and the interfaces the four lanes build behi
 - **Runtime selection and its persisted choice** (D13/D28, WS-13 §9, WS-13c §6). The runtime is
   decided at session creation and persisted; a family or runtime change mid-session is the certified
   handoff or a visible fork, **never a silent rewrite**.
+
+  WS-20 (0.0.8): `requested.model` is always a provider-qualified tag; bare ids are refused
+  (`bare-model-id`). `console/*` rows resolve to the official runtime's console-profile arm.
 - **The official-SDK adapter** (WS-14 §1–§15): launch profiles and the `CLAUDE_CONFIG_DIR` spool, the
   `Options` template, the allowlist child environment, the shared session-store wiring and
   `mirror_error`, the supervised spawn proxy, tool aliases and the deny floor, builtin-path
