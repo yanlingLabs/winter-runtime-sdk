@@ -84,7 +84,7 @@ describe("R-7b-1 — the child's own family decides", () => {
 
   test("R-7b-1 — a child may name a model or a provider instead of a slot", () => {
     const { slot: _slot, ...noSlot } = childOf();
-    const byModel = must(selectChildRuntime(parentOn("gpt"), { ...noSlot, model: "claude-opus-5" }));
+    const byModel = must(selectChildRuntime(parentOn("gpt"), { ...noSlot, model: "anthropic/claude-opus-5" }));
     expect(byModel.modelRef).toBe("anthropic/claude-opus-5");
     const pinned = must(selectChildRuntime(parentOn("gpt"), childOf({ slot: "opus", provider: "kie" })));
     expect(pinned.providerId).toBe("kie");

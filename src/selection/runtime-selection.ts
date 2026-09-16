@@ -224,11 +224,13 @@ export interface SelectionRefusal {
   refused: true;
   /**
    * `"no-credential"` (W18-3, P10b): a Claude-family model has no credential able to serve it through
-   * ANY door — the catalog has rows for it, every one of them is just unconfigured. Widened to
-   * `string` beyond the four members this package still returns itself, so a host relaying a refusal
-   * value through (e.g. a resume review that read one from elsewhere) never has to invent a member.
+   * ANY door — the catalog has rows for it, every one of them is just unconfigured. `"bare-model-id"`
+   * (WS-20): `requested.model` had no `/` — a provider-qualified tag is the only spelling this phase
+   * accepts. Widened to `string` beyond the members this package still returns itself, so a host
+   * relaying a refusal value through (e.g. a resume review that read one from elsewhere) never has to
+   * invent a member.
    */
-  reason: "slot-unservable" | "claude-oauth-not-approved" | "runtime-unavailable" | "mode-forbids-runtime" | "no-credential" | (string & {});
+  reason: "slot-unservable" | "claude-oauth-not-approved" | "runtime-unavailable" | "mode-forbids-runtime" | "no-credential" | "bare-model-id" | (string & {});
   /** One sentence naming what was missing, for the host to surface verbatim. */
   detail: string;
   /**
