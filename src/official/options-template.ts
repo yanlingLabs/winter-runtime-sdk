@@ -84,6 +84,19 @@ export interface OptionsTemplatePolicy {
   settings?: Readonly<Record<string, unknown>>;
   /** §11's server entry, already materialized. */
   mcpServers?: Readonly<Record<string, unknown>>;
+  /**
+   * The daemon's subagent definitions, handed to BOTH runtime legs from one owner (Winter leg:
+   * `Options.agents` on the pinned SDK; this leg: the identical pinned `Options.agents?:
+   * Record<string, AgentDefinition>` on the official runtime — no new capability, only the same one
+   * reaching the second leg). Typed as loosely as `mcpServers`/`settings` (`Readonly<Record<string,
+   * unknown>>`, the strictest of this policy's own untyped-passthrough fields) rather than against
+   * the Winter SDK's own `AgentDefinition`, so accepting it never forces this package's peer floor
+   * upward — the value crosses unchanged, this branch never reads a field of one. Absent stays
+   * absent (see `buildOfficialOptions`): an empty object here would tell the runtime "zero subagents
+   * are defined" instead of "the host declared none", which is a different, narrower agent surface
+   * than a session that never mentioned `agents` at all.
+   */
+  agents?: Readonly<Record<string, unknown>>;
   /** §10's bridge. Absent -> a fail-closed one is installed, because the invariants require one. */
   canUseTool?: OfficialApprovalBridge;
   /** The session's permission mode, for the fail-closed bridge the template installs. */
@@ -160,6 +173,10 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
 
     strictMcpConfig: true,
     ...(policy.mcpServers === undefined ? {} : { mcpServers: { ...policy.mcpServers } }),
+    // The SAME subagent set the Winter leg is handed via `Options.agents`, forwarded verbatim (own
+    // key, same shallow-copy discipline as `mcpServers` above) — never read here, never merged with
+    // anything this branch owns.
+    ...(policy.agents === undefined ? {} : { agents: { ...policy.agents } }),
 
     // WS-05 §6 / §5: ONE store instance, shared with the other branch. WS-18 W18-14 (P10b): the
     // caller (the door, `door.ts`) is the one that wraps it with `claude-ready-store.ts`'s
