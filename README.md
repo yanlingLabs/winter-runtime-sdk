@@ -33,6 +33,14 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
+**What `0.0.9` changes** (subagent-definition parity on the official leg; devDependency:
+`@yanlinglabs/winter-agent-sdk ^0.0.16`, no peer floor change):
+
+| | |
+|---|---|
+| `OptionsTemplatePolicy.agents` | The daemon now owns subagent definitions and must hand the SAME set to both runtime legs. The Winter leg already takes them through `Options.agents`; this leg had no door for them at all — `buildOfficialOptions` assembles `OfficialOptions` field by field, so a stray `agents` key on the policy was silently dropped rather than forwarded. The new field is typed `Readonly<Record<string, unknown>>` (the strictest of this policy's own untyped-passthrough fields, `mcpServers`/`settings`) rather than against either SDK's own `AgentDefinition` — the value crosses to the official runtime's own pinned `Options.agents?: Record<string, AgentDefinition>` unread and unchanged, exactly like `mcpServers`, and accepting it never forces this package's peer floor upward. Absent stays absent: an omitted `agents` key, never an empty object, because "the host declared none" and "the host said nothing" are different official-leg agent surfaces. |
+| `src/testing/peers.ts`'s fake `Query` gained `supportedAgents` | The devDependency bump to `^0.0.16` is what pulls in `Query.supportedAgents(): Promise<AgentInfo[]>` (spawn-surface parity, landed in the SDK's own 0.0.15) as a REQUIRED interface member; `scriptedQuery`'s literal is fixed the same way every other undriven `Query` method on this fake already is — `unsupported("supportedAgents")`, so a test can never mistake "nothing scripted this" for "the answer is zero agents". No router BEHAVIOUR reads `supportedAgents` anywhere; the peer floor (`peerDependencies`, `SUPPORTED.winterAgentSdk`, both still `>=0.0.13 <0.1.0`) is untouched because nothing here needs a Winter peer newer than that to run correctly — only the TYPES this package tests against moved. |
+
 **What `0.0.8` changes** (WS-20 — provider-qualified model tags; peer floor:
 `@yanlinglabs/winter-agent-sdk >=0.0.13 <0.1.0`):
 

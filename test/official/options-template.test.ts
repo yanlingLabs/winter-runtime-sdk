@@ -163,6 +163,27 @@ describe("WS-14 §2 — the Options template", () => {
     expect(options.pathToClaudeCodeExecutable).toBe("/vendored/runtimes/claude");
     expect(options.enableFileCheckpointing).toBeUndefined();
   });
+
+  test("a policy carrying `agents` reaches the built options unchanged -- names, order, every field", () => {
+    const researcher = { description: "Researches a narrow question and reports back", prompt: "You are a research subagent.", tools: ["Read", "Grep", "WebFetch"] };
+    const reviewer = { description: "Reviews a diff for correctness", prompt: "You are a review subagent.", model: "inherit" };
+    // An object literal's own-key enumeration order is insertion order (both are string keys here) --
+    // asserted below, because a host handing the SAME set to both legs needs the SECOND leg to see the
+    // set in the order it declared it, not whatever order a rebuild happened to produce.
+    const agents = { researcher, reviewer };
+    const options = buildOfficialOptions(input("code"), { agents });
+    expect(options["agents"]).toEqual(agents);
+    expect(Object.keys(options["agents"] as Record<string, unknown>)).toEqual(["researcher", "reviewer"]);
+    // Only the OUTER map is copied (the same shallow-copy discipline `mcpServers` uses above); each
+    // definition crosses BY REFERENCE, so no field of one is silently re-shaped on the way through.
+    expect((options["agents"] as Record<string, unknown>)["researcher"]).toBe(researcher);
+    expect((options["agents"] as Record<string, unknown>)["reviewer"]).toBe(reviewer);
+  });
+
+  test("absent `agents` means absent -- no empty object is emitted", () => {
+    const options = buildOfficialOptions(input("code"));
+    expect("agents" in options).toBe(false);
+  });
 });
 
 describe("WS-14 §5.1 — the withheld options, as refusals", () => {
