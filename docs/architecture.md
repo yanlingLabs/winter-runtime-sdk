@@ -101,7 +101,7 @@ These are the signatures every lane builds against. They are in `src/`; this tab
 | `RuntimeKind`, `RuntimeSelection`, `SelectionInput`, `SelectionRefusal`, `selectRuntime`, `selectChildRuntime` | `src/selection/runtime-selection.ts` |
 | `RuntimeDirectoryStore`, `RuntimeDirectoryEntry`, `RuntimeTransport`, `CursorStore`, `MailboxStore`, `DeliveryRecordStore`, `IdleSubscriptionStore`, `NameLeaseStore`, `createInMemoryRuntimeDirectoryStore` | `src/seams/directory-store.ts` |
 | `SeamContext`, `SeamContextWithDirectory` (what every seam factory is handed) | `src/seams/context.ts` |
-| `OfficialSdkModule`, `OfficialOptions`, `OfficialQuery`, `OfficialUserMessage`, `OfficialSpawnOptions`, `OfficialSpawnedProcess`, `OfficialSpawnClaudeCodeProcess` | `src/seams/official-sdk-shapes.ts` |
+| `OfficialSdkModule`, `OfficialOptions`, `OfficialQuery`, `OfficialPermissionMode`, `OfficialUserMessage`, `OfficialSpawnOptions`, `OfficialSpawnedProcess`, `OfficialSpawnClaudeCodeProcess` | `src/seams/official-sdk-shapes.ts` |
 | `OfficialAdapter`, `OfficialLaunchPlan`, `OfficialResumePlan`, `OfficialSession`, `OptionsTemplateInput`, `EnvInput` | `src/seams/official-adapter.ts` |
 | `HandoffBarrier`, `HandoffPlan`, `HandoffOutcome` | `src/seams/handoff.ts` |
 | `MaterializedResumeDecorator` and its probe report | `src/seams/materialized-resume.ts` |
@@ -180,7 +180,11 @@ Four decisions the composition forced, each with its reasoning at the site:
 2. **The handle forwards every member of the vendor's `Query`,** by trap rather than by a facade that
    would have to name them (this package never puts the vendor's types on its published surface).
    `then`/`catch`/`finally` are never forwarded, because a thenable handle would be swallowed by any
-   `await`; `close()` is synchronous and cancels an unstarted launch.
+   `await`; `close()` is synchronous and cancels an unstarted launch. THREE members are named rather
+   than trapped (0.0.10): the iterator, `interrupt()` and `setPermissionMode()` — the last one because
+   the trap would otherwise forward a mode the LAUNCH path refuses (`assertPermissionModeAllowed` is
+   the one rule both doors run, and the door's member also keeps the approval bridge's mode in step
+   with the child's, since `dontAsk` is the one mode that short-circuits the host's broker).
 3. **The prompt IS the session's input stream** (R-7b-4). An `AsyncIterable<string>` prompt is pumped
    into a stream the door owns, with the caller's backpressure preserved, and the messaging registry's
    pushes interleave into the same stream — so the session is attached as a live receiver. A STRING

@@ -33,7 +33,7 @@ import { OfficialConfigurationError, OfficialInvalidResumeError } from "./errors
 // the model can send to. Both the parser and the refusal are shared with the directory's own door.
 import { parseRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { UnaddressableEntryError } from "../errors.ts";
-import { assertOptionsInvariants, buildOfficialOptions, type OptionsTemplatePolicy } from "./options-template.ts";
+import { assertOptionsInvariants, assertPermissionModeAllowed, buildOfficialOptions, type OptionsTemplatePolicy } from "./options-template.ts";
 import type { OfficialContainmentBreachError } from "./errors.ts";
 import { classifyLocalWriteRoot } from "./spool.ts";
 import {
@@ -77,6 +77,17 @@ export interface OfficialSessionHandle extends OfficialSession {
   whenObserved(): Promise<string>;
   /** WS-14 §9: stops the foreground turn, preserving background agents (`perTaskStopAffordance`). */
   interrupt(): Promise<unknown>;
+  /**
+   * WS-14 §10 (0.0.10): the permission mode of the LIVE child, changed through the pin's own control
+   * request on the streaming input.
+   *
+   * Refuses BEFORE the request is sent, with the launch path's own rule and error
+   * (`assertPermissionModeAllowed` → `OfficialConfigurationError { option: "permissionMode" }`): a live
+   * switch must never reach a mode a launch would have refused. Anything the child itself refuses
+   * rejects with the child's own failure, unwrapped — a host has to be able to tell "this mode is not
+   * offered here" from "the runtime would not take it".
+   */
+  setPermissionMode(mode: OfficialPermissionMode): Promise<void>;
   /** The generation's proxy — its stderr tail, its record, its exit gate. */
   readonly supervisor: SupervisedSpawnProxy;
   /** §8's post-hoc sweep findings for this session (review r2, NEW-3). Empty is the normal case. */
@@ -457,6 +468,12 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
       return observed;
     },
     interrupt: () => args.query.interrupt(),
+    // THE SAME RULE THE LAUNCH PATH RUNS, and it runs FIRST: a refused mode must never reach the child
+    // as a control request that the runtime would answer by auto-approving everything.
+    setPermissionMode: async (mode: OfficialPermissionMode) => {
+      assertPermissionModeAllowed(mode, branchLabel);
+      await args.query.setPermissionMode(mode);
+    },
   });
 
   return {
