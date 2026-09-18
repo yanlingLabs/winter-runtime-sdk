@@ -85,7 +85,7 @@ export type { OfficialCrashClass, OfficialErrorCode, WinterErrorClassName } from
 export { OFFICIAL_MATERIALIZATION_DROPS, canonicalToolNames, materializeOfficialMcpServer, officialMcpServers, winterMcpServerDescriptor } from "./mcp-descriptors.ts";
 export type { InputShapeFactory, JsonSchemaObject, OfficialMcpModule, WinterMcpHandler, WinterMcpServerDescriptor, WinterMcpToolDescriptor, WinterMcpToolResult } from "./mcp-descriptors.ts";
 
-export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, brandedFlagSettings, buildOfficialOptions, captureOptions, mergeHooks } from "./options-template.ts";
+export { AUTO_MEMORY_LOAD_CAP, DEFAULT_EXCLUDE_DYNAMIC_SECTIONS, PINNED_SYSTEM_PROMPT_PRESET, assertOptionsInvariants, assertPermissionModeAllowed, brandedFlagSettings, buildOfficialOptions, captureOptions, mergeHooks } from "./options-template.ts";
 export type { OptionsTemplatePolicy } from "./options-template.ts";
 
 // WS-18 W18-14 (P10b): the Claude-ready store wrapper.

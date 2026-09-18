@@ -57,9 +57,20 @@ function fakeChild(): SpawnedChildProcess {
   };
 }
 
-/** A fake official module: it records the params and answers with an inert query handle. */
-function fakeClaudeModule(): { module: OfficialSdkModule; calls: Array<{ prompt: unknown; options?: OfficialOptions }> } {
+/**
+ * A fake official module: it records the params and answers with an inert query handle.
+ *
+ * `modes` is what the live permission-mode setter is measured against (0.0.10) — the control requests
+ * the child would have received, in order. `refuseMode` makes the CHILD the one that says no, which is
+ * the case a host has to be able to tell apart from this branch's own refusal.
+ */
+function fakeClaudeModule(options: { refuseMode?: boolean } = {}): {
+  module: OfficialSdkModule;
+  calls: Array<{ prompt: unknown; options?: OfficialOptions }>;
+  modes: string[];
+} {
   const calls: Array<{ prompt: unknown; options?: OfficialOptions }> = [];
+  const modes: string[] = [];
   const module: OfficialSdkModule = {
     query(params) {
       calls.push(params);
@@ -68,11 +79,15 @@ function fakeClaudeModule(): { module: OfficialSdkModule; calls: Array<{ prompt:
           /* no messages: this fake never runs a turn */
         },
         interrupt: async () => "interrupted",
+        setPermissionMode: async (mode) => {
+          if (options.refuseMode === true) throw new Error("the runtime refused the control request");
+          modes.push(mode);
+        },
       };
       return query;
     },
   };
-  return { module, calls };
+  return { module, calls, modes };
 }
 
 function context(claude?: OfficialSdkModule): SeamContextWithDirectory {
@@ -202,6 +217,58 @@ describe("the official adapter", () => {
     const good = adapter.buildOptions(templateInput(adapter.spawnProxy));
     expect(() => adapter.launch(plan({ ...good, enableFileCheckpointing: true }))).toThrow(/incompatible with a store-backed session/);
     expect(() => adapter.launch(plan({ ...good, pathToClaudeCodeExecutable: "claude" }))).toThrow(/bare command name/);
+  });
+
+  // ==================================================================================================
+  // 0.0.10 — THE LIVE PERMISSION-MODE CHANGE.
+  //
+  // `Options.permissionMode` is fixed for a generation, so a session spawned `acceptEdits` went on
+  // auto-approving edits inside the child no matter what the host's policy said. The pin has carried
+  // `Query.setPermissionMode` all along; these prove the adapter's handle forwards it AND that the
+  // refusal in front of it is the launch path's own rule rather than a second copy of it.
+  // ==================================================================================================
+  describe("setPermissionMode on a live session", () => {
+    test("forwards the mode to the child's own control request", async () => {
+      const { module, modes } = fakeClaudeModule();
+      const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() });
+      const session = adapter.launch(plan(adapter.buildOptions(templateInput(adapter.spawnProxy))));
+      await session.setPermissionMode("plan");
+      await session.setPermissionMode("default");
+      expect(modes).toEqual(["plan", "default"]);
+    });
+
+    test("`bypassPermissions` is refused with the LAUNCH path's own error, and never reaches the child", async () => {
+      const { module, modes } = fakeClaudeModule();
+      const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() });
+      const session = adapter.launch(plan(adapter.buildOptions(templateInput(adapter.spawnProxy))));
+      // THE SAME CLASS, THE SAME `option`, THE SAME SENTENCE the launch path refuses with — one rule.
+      const live = await session.setPermissionMode("bypassPermissions").then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(live).toBeInstanceOf(OfficialConfigurationError);
+      expect((live as OfficialConfigurationError).option).toBe("permissionMode");
+      expect((live as Error).message).toMatch(/shadows `canUseTool`/);
+      const atLaunch = (() => {
+        try {
+          assertOptionsInvariants({ ...adapter.buildOptions(templateInput(adapter.spawnProxy)), permissionMode: "bypassPermissions" }, "x");
+          return undefined;
+        } catch (error) {
+          return error as OfficialConfigurationError;
+        }
+      })();
+      expect(atLaunch?.option).toBe("permissionMode");
+      expect((live as Error).message.replace(/^[^:]*: /, "")).toBe((atLaunch as Error).message.replace(/^[^:]*: /, ""));
+      // ...and the child was never told: a refused mode must not be sent and then apologised for.
+      expect(modes).toEqual([]);
+    });
+
+    test("a child that refuses the control request rejects — never a swallowed success", async () => {
+      const { module } = fakeClaudeModule({ refuseMode: true });
+      const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() });
+      const session = adapter.launch(plan(adapter.buildOptions(templateInput(adapter.spawnProxy))));
+      await expect(session.setPermissionMode("plan")).rejects.toThrow(/refused the control request/);
+    });
   });
 
   test("resume and launch disagree loudly rather than quietly", () => {

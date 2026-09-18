@@ -14,9 +14,9 @@
 // `bun test` sees the gate acknowledged rather than silently absent.
 import { describe, expect, test } from "bun:test";
 
-import type { Options as RealOptions, Query as RealQuery, SDKUserMessage as RealUserMessage, SpawnOptions as RealSpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import type { Options as RealOptions, PermissionMode as RealPermissionMode, Query as RealQuery, SDKUserMessage as RealUserMessage, SpawnOptions as RealSpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 
-import type { OfficialOptions, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions, OfficialUserMessage } from "../../src/seams/official-sdk-shapes.ts";
+import type { OfficialOptions, OfficialPermissionMode, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions, OfficialUserMessage } from "../../src/seams/official-sdk-shapes.ts";
 
 // --- the real declarations satisfy the structural ones --------------------------------------------
 //
@@ -73,6 +73,22 @@ const _envFits: Narrower<OfficialOptions["env"], RealOptions["env"]> = true;
 // runtime's `('user'|'project'|'local')[]`, so this line failed until the seam was narrowed. Kept as
 // the record that the direction is checked, not assumed.
 const _settingSourcesIsNarrow: Assignable<Array<"flag">, NonNullable<OfficialOptions["settingSources"]>> extends false ? true : false = true;
+// 0.0.10 — THE LIVE PERMISSION-MODE SETTER, in both directions.
+//
+// `_queryFits` alone does NOT cover this: `OfficialQuery.setPermissionMode` is declared with METHOD
+// syntax, so its parameter is compared bivariantly and a mode union WIDER than the runtime's would
+// still satisfy it. The line that matters is the narrow one — every value this seam can spell is a
+// value the pinned runtime accepts.
+const _setPermissionModeFits: Assignable<RealQuery["setPermissionMode"], OfficialQuery["setPermissionMode"]> = true;
+const _permissionModeIsNarrow: Narrower<OfficialPermissionMode, RealPermissionMode> = true;
+// ...AND THE PIN'S SIXTH MEMBER IS ABSENT ON PURPOSE (`OfficialPermissionMode`'s own doc carries the
+// reasoning: `auto` auto-allows, which is the class `assertPermissionModeAllowed` refuses). Pinned as
+// an assertion so that widening the union is a deliberate edit to this line rather than a silent drift
+// — and so that a FUTURE pin renaming or removing `auto` fails here instead of in a live spawn.
+const _autoIsNotOurs: Assignable<"auto", OfficialPermissionMode> extends false ? true : false = true;
+const _autoIsTheirs: Assignable<"auto", RealPermissionMode> = true;
+// The resolution is `void`, not `interrupt`'s response object — the seam says so rather than widening.
+const _setPermissionModeResolvesVoid: Assignable<Awaited<ReturnType<RealQuery["setPermissionMode"]>>, void> = true;
 
 // --- A MEASUREMENT THIS ROUND MADE, WORTH PINNING: three fields WS-14 §2 names are NOT on the
 // pinned runtime's `Options` at all. -----------------------------------------------------------------
@@ -118,6 +134,11 @@ void [
   _toolAliasesFit,
   _envFits,
   _settingSourcesIsNarrow,
+  _setPermissionModeFits,
+  _permissionModeIsNarrow,
+  _autoIsNotOurs,
+  _autoIsTheirs,
+  _setPermissionModeResolvesVoid,
   _plansDirectoryIsNotAnOption,
   _autoMemoryEnabledIsNotAnOption,
   _autoMemoryDirectoryIsNotAnOption,

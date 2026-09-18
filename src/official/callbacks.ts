@@ -25,11 +25,16 @@
 // it means "do not ask", and the floor still denies.
 import type { BrandProfile, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
 
+import type { OfficialPermissionMode } from "../seams/official-sdk-shapes.ts";
 import { containmentDecisionFor, resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
 import { officialBranchLabel } from "./branding.ts";
 
-/** The permission modes a host session can be in. Mirrors the pinned runtime's own vocabulary. */
-export type OfficialPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk";
+// THE MODE UNION MOVED TO THE SEAM (0.0.10) and is RE-EXPORTED here, so that every import site and
+// `src/index.ts`'s published name are unchanged. It had to move: the seam's `OfficialQuery` now names
+// it (`setPermissionMode`), and a lane-owned copy of a type the seam depends on is the duplicate
+// `test/spine/barrel-exports.test.ts` exists to forbid. Its own doc comment carries the reasoning for
+// why the union is five members where the pin's is six.
+export type { OfficialPermissionMode } from "../seams/official-sdk-shapes.ts";
 
 /** Everything the pinned `CanUseTool` hands a callback, carried through to the broker unchanged. */
 export interface ApprovalRequest {
@@ -57,8 +62,19 @@ export type OfficialApprovalBridge = (toolName: string, input: Record<string, un
 export interface ApprovalBridgeOptions {
   broker: ApprovalBroker;
   brand: Pick<BrandProfile, "projectDirName" | "processLabel">;
-  /** The session's mode. `dontAsk` never reaches the broker (§10). */
-  mode: OfficialPermissionMode;
+  /**
+   * The session's mode. `dontAsk` never reaches the broker (§10).
+   *
+   * A FUNCTION IS ACCEPTED, AND IT IS WHAT A LIVE SESSION MUST PASS (0.0.10). The mode used to be
+   * captured here once, at spawn — and `Query.setPermissionMode` makes that a bug rather than a
+   * simplification: a session spawned `dontAsk` and switched live to `default` starts receiving
+   * `canUseTool` requests from the child, and a bridge still holding `dontAsk` would auto-allow every
+   * one of them without the broker ever seeing a call. Read per decision, exactly as the host's own
+   * policy getter is (`@yanlinglabs/winter-core`'s `approval-bridge.ts`). A bare literal is still
+   * accepted, for a bridge whose session cannot change mode (`buildOfficialOptions`'s own fail-closed
+   * default) and for every existing caller.
+   */
+  mode: OfficialPermissionMode | (() => OfficialPermissionMode);
   /** §8's dispositions. The floor reads them; `projectDirName` is filled from `brand` if absent. */
   containment?: ContainmentPolicy;
   /** Called with every decision, so a host can log or count without wrapping the broker. */
@@ -99,7 +115,8 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
 
     // 2. `dontAsk` NEVER INVOKES THE CALLBACK (§10). The broker is not consulted, not awaited, and
     //    not given the chance to prompt; `PreToolUse` hooks are where must-see-every-call logic goes.
-    if (options.mode === "dontAsk") {
+    //    READ NOW, not at construction: a live `setPermissionMode` moved it (see `mode`'s own doc).
+    if ((typeof options.mode === "function" ? options.mode() : options.mode) === "dontAsk") {
       const result: PermissionResult = { behavior: "allow", updatedInput: input, toolUseID: request.toolUseID };
       options.onDecision?.({ request, result, source: "dont-ask" });
       return result;

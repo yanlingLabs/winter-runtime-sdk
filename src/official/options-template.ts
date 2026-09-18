@@ -234,6 +234,38 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
 }
 
 /**
+ * THE ONE PERMISSION-MODE RULE, for the launch path and for every live setter (0.0.10).
+ *
+ * `bypassPermissions` IS REFUSED, and the runtime says why itself. Measured (review r3, NEW-13): in
+ * that mode a session with the template's own fail-closed bridge ran `Write` and `Bash` anyway, and the
+ * runtime emitted `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` — "canUseTool will not be invoked: permissionMode
+ * 'bypassPermissions' auto-approves every tool call … To gate every tool call, use a PreToolUse hook
+ * instead." This branch owns permissions (its `settingSources` is empty), so a mode that shadows the
+ * owner is not a mode it can offer. Containment is unaffected either way — the floor is a hook and it
+ * holds in that mode — but the bridge's claim to decide would be false.
+ *
+ * WHY IT IS A FUNCTION RATHER THAN A LINE INSIDE `assertOptionsInvariants`: `Query.setPermissionMode`
+ * gives a host a SECOND way to reach a mode, one that never passes through the options template at
+ * all. Two copies of this refusal would be two rules one edit apart, and the failure mode is silent —
+ * a live switch into a mode the launch path refuses, on a session whose bridge then decides nothing.
+ * The refusal is the same class, the same `option` field and the same sentence at both doors.
+ *
+ * THE VOCABULARY IS NOT RE-CHECKED HERE, deliberately: `OfficialPermissionMode` is what makes a mode
+ * outside the seam's five unspellable, and adding a runtime vocabulary check on this door alone would
+ * make the live rule STRICTER than the launch rule — which is the asymmetry this function exists to
+ * remove.
+ */
+export function assertPermissionModeAllowed(mode: unknown, branchLabel: string): void {
+  if (mode !== "bypassPermissions") return;
+  throw new OfficialConfigurationError({
+    option: "permissionMode",
+    reason:
+      "`bypassPermissions` auto-approves every tool call and shadows `canUseTool` (the runtime warns `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED`), so the broker this branch bridges to would never be asked — this branch owns permissions and cannot offer a mode that removes its own owner (WS-14 §10)",
+    branchLabel,
+  });
+}
+
+/**
  * §5.1's withheld options and §2's required ones, as refusals.
  *
  * WHY A VALIDATOR AND NOT JUST A CAREFUL BUILDER: `launch()` accepts an options object the CALLER
@@ -296,19 +328,11 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
     );
   }
 
-  // REVIEW r3, NEW-13 — `bypassPermissions` IS REFUSED, and the runtime says why itself. Measured:
-  // in that mode a session with the template's own fail-closed bridge ran `Write` and `Bash` anyway,
-  // and the runtime emitted `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` — "canUseTool will not be invoked:
-  // permissionMode 'bypassPermissions' auto-approves every tool call … To gate every tool call, use a
-  // PreToolUse hook instead." This branch owns permissions (its `settingSources` is empty), so a mode
-  // that shadows the owner is not a mode it can offer. Containment is unaffected either way — the
-  // floor is a hook and it holds in that mode — but the bridge's claim to decide would be false.
-  if (options["permissionMode"] === "bypassPermissions") {
-    refuse(
-      "permissionMode",
-      "`bypassPermissions` auto-approves every tool call and shadows `canUseTool` (the runtime warns `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED`), so the broker this branch bridges to would never be asked — this branch owns permissions and cannot offer a mode that removes its own owner (WS-14 §10)",
-    );
-  }
+  // REVIEW r3, NEW-13 — `bypassPermissions` IS REFUSED. ONE RULE, TWO DOORS since 0.0.10: the launch
+  // path asserts it here and the LIVE setters (`OfficialSessionHandle.setPermissionMode`, and the door
+  // handle's own member) call the same function, so a mid-session switch can never reach a mode a
+  // launch would have refused. See `assertPermissionModeAllowed` for the measurement.
+  assertPermissionModeAllowed(options["permissionMode"], branchLabel);
 
   const extraArgs = options["extraArgs"];
   if (extraArgs !== undefined) {

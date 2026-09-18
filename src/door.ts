@@ -47,7 +47,7 @@ import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
 import { buildOfficialChildEnv, type OfficialEnvPolicy } from "./official/env-allowlist.ts";
 import { fetchAuthCredentials, authVariableSetKey, type AuthCredentialPlan } from "./official/auth.ts";
-import { buildOfficialOptions, type OptionsTemplatePolicy } from "./official/options-template.ts";
+import { assertPermissionModeAllowed, buildOfficialOptions, type OptionsTemplatePolicy } from "./official/options-template.ts";
 import { capabilityNameCollisionError, officialMcpServers, winterMcpServerDescriptor, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import { officialSpoolRoot } from "./official/spool.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
@@ -577,6 +577,23 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   let sawInit = false;
   let live = false;
   let ended = false;
+  /**
+   * THE SESSION'S PERMISSION MODE, LIVE (0.0.10).
+   *
+   * `request.options.permissionMode` is the mode this session is SPAWNED with, and before this it was
+   * also the only mode it could ever have: the child's own `Options.permissionMode` is fixed for the
+   * generation, and the approval bridge below captured the same literal once. `Query.setPermissionMode`
+   * changes the first; this variable is what changes the second, and the two move together — it is
+   * assigned only AFTER the child has accepted the control request (`deferredOfficialQuery`'s `adopt`),
+   * so a refused switch leaves the bridge describing the mode the child is actually in.
+   *
+   * WHY THE BRIDGE CARES AT ALL: `createApprovalBridge`'s step 2 short-circuits `dontAsk` to allow
+   * WITHOUT consulting the host's broker. A session spawned `dontAsk` and switched live to `default`
+   * starts receiving `canUseTool` requests from the child — and a bridge frozen at `dontAsk` would
+   * auto-approve every one of them, which is the exact hole this whole change exists to close, one
+   * layer further in.
+   */
+  let currentMode: OfficialPermissionMode = (request.options.permissionMode ?? "default") as OfficialPermissionMode;
 
   /**
    * THE SESSION'S END, RECORDED (review r1, I-3).
@@ -730,7 +747,8 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         ? undefined
         : createApprovalBridge({
             brand: deps.brand,
-            mode: (request.options.permissionMode ?? "default") as OfficialPermissionMode,
+            // READ PER DECISION, never captured (see `currentMode`): a live `setPermissionMode` moved it.
+            mode: () => currentMode,
             ...(deps.policy?.containment === undefined ? {} : { containment: deps.policy.containment }),
             broker: async (approval) => {
               const answer = await hostBroker(approval.toolName, approval.input, approval as never);
@@ -869,6 +887,12 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
 
   return deferredOfficialQuery({
     start,
+    branchLabel,
+    // 0.0.10: refuse with the LAUNCH path's own rule, before the child is reached; adopt only after it
+    // accepted, so the bridge's mode and the child's mode can never disagree.
+    adoptPermissionMode: (mode) => {
+      currentMode = mode;
+    },
     onMessage: noteFrame,
     onEnd: markEnded,
     onClose: () => {
@@ -932,7 +956,8 @@ export function pumpCallerPrompt(prompt: AsyncIterable<string>, stream: Official
  * The handle: the vendor's `Query`, once there is one.
  *
  * WHY A `Proxy` AND NOT A HAND-WRITTEN FACADE. The pinned `Query` has twenty-six members and this
- * package deliberately names two of them (`seams/official-sdk-shapes.ts`: the vendor's types never
+ * package deliberately names three of them — the iterator, `interrupt` and (since 0.0.10)
+ * `setPermissionMode` (`seams/official-sdk-shapes.ts`: the vendor's types never
  * reach this package's published declarations, so a Winter-only host can type-check without installing
  * the optional peer). A facade would therefore have to either import those types — breaking that rule
  * — or silently drop every member it did not know about, which is exactly "the contract loses a
@@ -950,6 +975,10 @@ export function pumpCallerPrompt(prompt: AsyncIterable<string>, stream: Official
  */
 interface DeferredQueryHooks {
   start: () => Promise<OfficialQuery>;
+  /** For the refusal `setPermissionMode` raises — the same `OfficialConfigurationError` a launch raises. */
+  branchLabel: string;
+  /** Called with the new mode ONLY once the child has accepted it (0.0.10). */
+  adoptPermissionMode: (mode: OfficialPermissionMode) => void;
   onClose: () => void;
   /** Called for each message BEFORE it is yielded, so a row update lands before a host acts on it. */
   onMessage?: (message: unknown) => Promise<void>;
@@ -960,7 +989,7 @@ interface DeferredQueryHooks {
 /** Names a RUNTIME calls on its own — never a host asking this session to do something (M-3). */
 const NEVER_FORWARDED: ReadonlySet<string> = new Set(["then", "catch", "finally", "toJSON", "inspect", "asymmetricMatch"]);
 
-function deferredOfficialQuery({ start, onClose, onMessage, onEnd }: DeferredQueryHooks): OfficialQuery {
+function deferredOfficialQuery({ start, branchLabel, adoptPermissionMode, onClose, onMessage, onEnd }: DeferredQueryHooks): OfficialQuery {
   let started: Promise<OfficialQuery> | undefined;
   let closed = false;
   const ready = (): Promise<OfficialQuery> => {
@@ -995,6 +1024,30 @@ function deferredOfficialQuery({ start, onClose, onMessage, onEnd }: DeferredQue
       }
     },
     interrupt: async () => (await ready()).interrupt(),
+    /**
+     * WS-14 §10 (0.0.10): the live permission-mode change, as a NAMED member rather than a trapped one.
+     *
+     * IT HAS TO BE NAMED, for the refusal. The `get` trap below forwards any member it does not know
+     * straight to the vendor's handle — so without this the launch path's own `bypassPermissions`
+     * refusal would be bypassable by one method call on the handle the host already holds, and the
+     * runtime would then auto-approve every tool call for the rest of the generation while this
+     * branch's bridge went on claiming to decide them. The refusal runs BEFORE `ready()`, so a refused
+     * call on an unstarted handle does not spawn a child in order to fail.
+     *
+     * THE THREE EDGES, mirroring `interrupt()` exactly (they go through the same `ready()`):
+     *   * CLOSED handle → `RuntimeLaunchInputError` ("there is no session to act on"), ours;
+     *   * NOT YET SPAWNED → the lazy launch happens and then the mode is set. Deliberately not a
+     *     silent no-op: `Options.permissionMode` is already fixed by then, so answering "fine" while
+     *     the child comes up in the old mode is the lie this change removes;
+     *   * ENDED generation → the vendor's own rejection passes through unwrapped, exactly as an
+     *     `interrupt()` after the last frame does. A host that wants "live only" asks its own session
+     *     record, which is the only place that fact is authoritative.
+     */
+    setPermissionMode: async (mode: OfficialPermissionMode) => {
+      assertPermissionModeAllowed(mode, branchLabel);
+      await (await ready()).setPermissionMode(mode);
+      adoptPermissionMode(mode);
+    },
     close: () => {
       closed = true;
       onClose();

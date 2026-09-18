@@ -37,8 +37,35 @@
 export type OfficialUserMessage = { readonly [key: string]: unknown };
 
 /**
+ * The permission modes a host session can be in — this package's mirror of the pinned runtime's own
+ * `PermissionMode`, and the parameter of the live setter below.
+ *
+ * DECLARED HERE, NOT IN `src/official/callbacks.ts`, since 0.0.10: it is a structural mirror of a
+ * vendor union, which is what this file is for, and it is now reachable from the seam's `OfficialQuery`
+ * — so a second definition in a lane would be exactly the collision `barrel-exports.test.ts` exists to
+ * forbid. `callbacks.ts` re-exports it, so every import site (and `src/index.ts`'s published name)
+ * is unchanged.
+ *
+ * FIVE MEMBERS, AND THE PIN HAS SIX. `0.3.250` declares `'default' | 'acceptEdits' |
+ * 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'`; `auto` is deliberately absent here. It is not
+ * drift and the conformance test pins the absence: the pinned runtime's own
+ * `setMcpPermissionModeOverride` doc states the override "applies only when the session mode would
+ * already auto-allow (bypassPermissions/auto)" — so `auto` is an AUTO-ALLOWING mode, in the same class
+ * as the one `assertOptionsInvariants` already refuses because it shadows `canUseTool`. This branch
+ * owns permissions (`settingSources: []`), so a mode it cannot be the owner of is not a mode it can
+ * name. A host that wants it must argue for it as a reviewed compatibility event, exactly like a
+ * version bump.
+ *
+ * The union stays a SUBSET of the vendor's, which is the direction that has to hold: every value this
+ * seam can spell is a value the runtime accepts (`Narrower<OfficialPermissionMode, PermissionMode>` in
+ * `test/spine/official-shapes-conformance.test.ts`).
+ */
+export type OfficialPermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk";
+
+/**
  * The official runtime's query handle, reduced to what the router's own surface touches: the message
- * stream (passed through verbatim — the router never re-shapes it) and WS-14 §9's interrupt.
+ * stream (passed through verbatim — the router never re-shapes it) and the TWO control requests a host
+ * makes on a LIVE session — WS-14 §9's interrupt and, since 0.0.10, §10's permission-mode change.
  */
 export interface OfficialQuery extends AsyncIterable<unknown> {
   /**
@@ -50,6 +77,26 @@ export interface OfficialQuery extends AsyncIterable<unknown> {
    * response shape it has no use for.
    */
   interrupt(): Promise<unknown>;
+
+  /**
+   * WS-14 §10, 0.0.10: the session's permission mode, CHANGED ON THE LIVE CHILD.
+   *
+   * The pin declares `setPermissionMode(mode: PermissionMode): Promise<void>` and says "only available
+   * in streaming input mode" — it is a control request on the same streaming stdin `interrupt()` uses,
+   * so it applies to the turn that is running rather than to the next one. That is the whole point of
+   * naming it here: without it a session spawned `acceptEdits` keeps auto-approving edits inside the
+   * child for the rest of the generation, no matter what the host's own policy says, because
+   * `Options.permissionMode` is fixed at spawn and `canUseTool` is not even consulted for an edit in
+   * that mode. The Winter leg has always had this member; this is parity, not a new capability.
+   *
+   * `Promise<void>` here, unlike `interrupt`'s `Promise<unknown>`: the pin really does resolve nothing.
+   *
+   * THE MODE IS NOT THE VENDOR'S WHOLE UNION (see `OfficialPermissionMode`), and the refusal it stands
+   * in front of is the LAUNCH path's own: `assertPermissionModeAllowed` is the one rule, called by
+   * `assertOptionsInvariants` at spawn and by both live setters, so a live switch can never reach a
+   * mode a launch would have refused.
+   */
+  setPermissionMode(mode: OfficialPermissionMode): Promise<void>;
 }
 
 /** WS-14 §6's spawn options — the ONE member the spec makes load-bearing is `env`. */
