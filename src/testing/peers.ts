@@ -10,7 +10,7 @@
 // identity, not deep equality) and yields exactly the messages it was scripted with, so "the stream
 // passes through verbatim" is checkable rather than assumed.
 import { InvalidBrandError, resolveBrand, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import type { AccountInfo, ModelFamilyListing, ModelInfo, Options, PermissionMode, Query, RewindFilesResult, SdkMessage } from "@yanlinglabs/winter-agent-sdk";
+import type { AccountInfo, AgentInfo, ModelFamilyListing, ModelInfo, Options, PermissionMode, Query, RewindFilesResult, SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 
 import type { RuntimeSdkPeers } from "../sdk.ts";
 
@@ -80,6 +80,10 @@ function scriptedQuery(messages: SdkMessage[]): Query {
     interrupt: unsupported("interrupt"),
     setModel: unsupported("setModel") as (model?: string) => Promise<void>,
     supportedModels: unsupported("supportedModels") as () => Promise<ModelInfo[]>,
+    // Spawn-surface parity (0.0.15): the same "answers with data, never a rejection standing in for
+    // absence" posture as its `supportedModels` sibling above -- but this fake is scripted for the
+    // door's own pass-through tests, none of which drive it, so it stays `unsupported` like the rest.
+    supportedAgents: unsupported("supportedAgents") as () => Promise<AgentInfo[]>,
     listModelFamilies: unsupported("listModelFamilies") as () => Promise<ModelFamilyListing>,
     accountInfo: unsupported("accountInfo") as () => Promise<AccountInfo>,
     rewindFiles: unsupported("rewindFiles") as (userMessageId: string, options?: { dryRun?: boolean }) => Promise<RewindFilesResult>,

@@ -385,6 +385,10 @@ describe("query(): prompt and stream", () => {
     // The fake rejects every non-scripted `Query` method by name; a wrapper that swallowed the call
     // (or answered it itself) would not produce this message.
     await expect(query.interrupt()).rejects.toThrow(/Query.interrupt\(\) is not scripted/);
+    // `supportedAgents` (0.0.15's spawn-surface-parity member) behaves exactly like its
+    // `supportedModels`/`interrupt` siblings on this fake: unscripted, so a caller can never mistake
+    // "no test drove this" for "the answer is zero agents".
+    await expect(query.supportedAgents()).rejects.toThrow(/Query.supportedAgents\(\) is not scripted/);
   });
 });
 
