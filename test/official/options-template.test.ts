@@ -164,7 +164,7 @@ describe("WS-14 §2 — the Options template", () => {
     expect(options.enableFileCheckpointing).toBeUndefined();
   });
 
-  test("WS-01 §5 parity: a policy carrying `agents` reaches the built options unchanged -- names, order, every field", () => {
+  test("a policy carrying `agents` reaches the built options unchanged -- names, order, every field", () => {
     const researcher = { description: "Researches a narrow question and reports back", prompt: "You are a research subagent.", tools: ["Read", "Grep", "WebFetch"] };
     const reviewer = { description: "Reviews a diff for correctness", prompt: "You are a review subagent.", model: "inherit" };
     // An object literal's own-key enumeration order is insertion order (both are string keys here) --
