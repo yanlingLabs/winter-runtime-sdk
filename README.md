@@ -33,7 +33,7 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
-**What `0.0.9` changes** (WS-01 §5 — subagent-definition parity on the official leg; devDependency:
+**What `0.0.9` changes** (subagent-definition parity on the official leg; devDependency:
 `@yanlinglabs/winter-agent-sdk ^0.0.16`, no peer floor change):
 
 | | |
