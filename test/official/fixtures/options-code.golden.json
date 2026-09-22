@@ -31,13 +31,6 @@
   },
   "pathToClaudeCodeExecutable": "/vendored/runtimes/claude",
   "perTaskStopAffordance": true,
-  "plugins": [
-    {
-      "path": "/work/repo/.acme",
-      "skipMcpDiscovery": true,
-      "type": "local"
-    }
-  ],
   "sessionId": "00000000-0000-4000-8000-000000000001",
   "sessionStore": "<instance FakeCompatibilityStore>",
   "sessionStoreFlush": "eager",

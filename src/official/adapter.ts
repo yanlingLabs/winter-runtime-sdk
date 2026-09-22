@@ -398,7 +398,10 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     // options object that arrived without them is fixed and an object that cannot be fixed is refused,
     // rather than launching uncontained.
     const withFloor = installFloor(plan);
-    assertOptionsInvariants(withFloor, branchLabel);
+    // The brand's project directory and the PLAN's working directory ride along (0.0.11), so a plugin
+    // entry naming the session's own project directory is refused on this path too — including for
+    // hand-built options that carry no `cwd` of their own.
+    assertOptionsInvariants(withFloor, branchLabel, { projectDirName: brand.projectDirName, cwd: plan.cwd });
     if (resume !== undefined && resume.resume.length === 0) {
       throw new OfficialInvalidResumeError({ reason: "a resume needs the backend session id it is resuming", branchLabel });
     }

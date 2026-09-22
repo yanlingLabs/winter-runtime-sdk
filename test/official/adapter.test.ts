@@ -219,6 +219,18 @@ describe("the official adapter", () => {
     expect(() => adapter.launch(plan({ ...good, pathToClaudeCodeExecutable: "claude" }))).toThrow(/bare command name/);
   });
 
+  test("0.0.11: a launch refuses the session's own project directory as a plugin, however it is spelled", () => {
+    const { module, calls } = fakeClaudeModule();
+    const adapter = createOfficialAdapter(context(module), { spawnChild: () => fakeChild() });
+    const good = adapter.buildOptions(templateInput(adapter.spawnProxy));
+    const projectDir = `/work/repo/${WINTER_BRAND.projectDirName}/`;
+    expect(() => adapter.launch(plan({ ...good, plugins: [{ type: "local", path: projectDir, skipMcpDiscovery: true }] }))).toThrow(/project directory/);
+    // Options with no `cwd` of their own: the plan's working directory is what the child is checked against.
+    const { cwd: _dropped, ...cwdless } = good;
+    expect(() => adapter.launch(plan({ ...cwdless, plugins: [{ type: "local", path: `/work/./repo/${WINTER_BRAND.projectDirName}`, skipMcpDiscovery: true }] }))).toThrow(/project directory/);
+    expect(calls).toHaveLength(0);
+  });
+
   // ==================================================================================================
   // 0.0.10 — THE LIVE PERMISSION-MODE CHANGE.
   //
