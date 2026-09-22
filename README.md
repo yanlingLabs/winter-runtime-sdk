@@ -33,7 +33,7 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
-**What `0.0.11` changes** (UNRELEASED — a security fix: the official leg no longer loads the session's
+**What `0.0.11` changes** (a security fix: the official leg no longer loads the session's
 own project directory as a plugin; no peer floor change, no devDependency change):
 
 > **Behaviour change for hosts.** After this bump the official leg loads **no** project
@@ -41,7 +41,7 @@ own project directory as a plugin; no peer floor change, no devDependency change
 > none until the host passes a trust-gated `OptionsTemplatePolicy.plugins` list. The follow-up is the
 > host's: decide which plugin directories a session trusts, and name them. **Treat every file in a
 > named directory as code, skill files included.** A "skills-only" directory narrows what loads but
-> sanitises nothing (see the next-to-last row). Exposing a project's skills, or anyone's, is the same
+> sanitises nothing (see the "a skill file is code" row). Exposing a project's skills, or anyone's, is the same
 > trust decision as exposing its hooks.
 
 | | |
