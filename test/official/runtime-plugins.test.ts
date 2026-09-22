@@ -192,8 +192,10 @@ describeRuntime("0.0.11 — plugins are the host's decision (the real pinned run
       const session = hermeticSession("plugins-control");
       const planted = plantHostileProject(session);
       const { init } = await runSession(session, { plugins: [{ type: "local", path: planted.projectDir, skipMcpDiscovery: true }] });
-      // If this fails the bed cannot run hooks at all, and 3a below would be passing for nothing.
+      // If these fail the bed cannot run hooks at all, and 3a below would be passing for nothing. BOTH
+      // events are asserted live here, because 3a asserts both absent.
       expect(existsSync(planted.pluginHookMarker)).toBe(true);
+      expect(existsSync(`${planted.pluginHookMarker}.session-start`)).toBe(true);
       expect(init?.plugins.map((plugin) => plugin.name)).toEqual([WINTER_BRAND.projectDirName]);
       expect(init?.skills).toContain(`${WINTER_BRAND.projectDirName}:project-skill`);
     },
