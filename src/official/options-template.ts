@@ -23,7 +23,7 @@
 // GOLDEN CAPTURES PER MODE (§15) are `test/official/fixtures/options-<mode>.golden.json`: the built
 // object with functions and instances replaced by markers, so a diff shows a field that moved, an
 // invariant that was dropped, or a name that stopped being brand-derived.
-import { isAbsolute } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 import { mcpToolName, type BrandProfile, type SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
 import type { OfficialOptions, OfficialPluginConfig } from "../seams/official-sdk-shapes.ts";
@@ -100,28 +100,45 @@ export interface OptionsTemplatePolicy {
   agents?: Readonly<Record<string, unknown>>;
   /**
    * The plugins this session loads — the HOST's decision, and the only way a plugin reaches this
-   * branch (0.0.11). Forwarded to `Options.plugins` unread; absent means the key is absent and the
-   * session loads no plugin at all.
+   * branch (0.0.11). Forwarded to `Options.plugins`; absent means the key is absent and the session
+   * loads no plugin at all.
    *
-   * THE ROUTER NAMES NONE OF ITS OWN, and the reason is a measurement: the pinned runtime treats a
-   * local plugin directory as code — `hooks/hooks.json` runs by default, and its skills, agents and
-   * commands load with it. Through 0.0.10 this template named `<cwd>/<projectDirName>` here with no
-   * trust decision anywhere, so a cloned repository's own hooks ran on the first prompt of a Code
-   * session opened on it (`test/official/runtime-plugins.test.ts`). Only the host knows which
-   * directories it trusts; a host that wants a project's skills builds a view of them and names it.
+   * THE ROUTER NAMES NONE OF ITS OWN, and the reason is a measurement: through 0.0.10 this template
+   * named `<cwd>/<projectDirName>` here with no trust decision anywhere, and a cloned repository's own
+   * `hooks/hooks.json` ran on the first prompt of a Code session opened on it
+   * (`test/official/runtime-plugins.test.ts`). Since 0.0.11 the official leg therefore loads NO project
+   * skills, agents or commands until the host names a trust-gated list here.
    *
-   * WHAT THE RUNTIME LOADS FROM AN ENTRY IS EVERYTHING IN IT: hooks, skills, agents, commands, output
-   * styles, and whatever else the pinned runtime reads from a plugin root. This branch validates the
-   * ENTRY (`assertOptionsInvariants`: `local` only, an absolute path with no `..` segment, and
-   * `skipMcpDiscovery: true` so §11 holds) and never the directory's contents — a host handing over
-   * skills only must hand over a directory holding skills only. MEASURED on the pin: a directory with
-   * no manifest is accepted and named after its basename, and its skills qualify as
-   * `<plugin name>:<skill directory name>`.
+   * EVERYTHING IN A PLUGIN ROOT IS CODE ON THIS RUNTIME — including a skill file. The pinned runtime
+   * loads `hooks/hooks.json`, skills, agents, commands, output styles, `.lsp.json` language servers
+   * (processes it spawns), a plugin `settings.json` (whose `agent` key can replace the main agent),
+   * and whatever else it reads from a plugin root. A "skills-only" directory narrows WHAT loads; it
+   * sanitises nothing. MEASURED on 0.3.250 (test 3c): a view holding only `skills/x/SKILL.md` with
+   * `allowed-tools: Bash(...)` and an inline `` !`cmd` `` ran the shell when the model invoked the skill,
+   * after the broker had approved only the `Skill` call — the broker never saw Bash, and PreToolUse
+   * hooks never saw it either; the skill's frontmatter `hooks` ran; its `allowed-tools` stayed granted
+   * for the model's later calls without the broker being asked; and a user-typed `/<plugin>:<skill>`
+   * ran the shell with no approval at all. So exposing a project's skills — or anyone's — is the SAME
+   * trust decision as exposing its hooks, and only the host can make it.
+   *
+   * WHAT THIS BRANCH CHECKS IS THE ENTRY, never the directory's contents (`assertOptionsInvariants`):
+   * `local` only; an absolute path with no `..` segment and no NUL byte; `skipMcpDiscovery: true` (§11,
+   * required by the type as well); and never the session's own working directory, its project
+   * directory or the vendor's project directory in it, however spelled. The checks are lexical — a
+   * symlink is not resolved.
+   *
+   * MEASURED NAMING: a directory with no `.claude-plugin/plugin.json` is accepted and named after its
+   * basename (a manifest's `name` wins when present); its skills qualify as
+   * `<plugin name>:<skill directory name>` — a SKILL.md frontmatter `name:` does not rename them.
+   *
+   * THE BUILDER COPIES the list and each entry, so a host mutating its own array later cannot change
+   * what launches. `launch()` given options a caller built BY HAND validates them but forwards the
+   * caller's own array — mutating it between the launch and the child's spawn is the caller's own act.
    *
    * Per-query policy REPLACES the deployment-wide list rather than merging with it (the door spreads
    * the two policies, the same precedence every other field here has).
    */
-  plugins?: readonly OfficialPluginConfig[];
+  plugins?: ReadonlyArray<OfficialPluginConfig & { skipMcpDiscovery: true }>;
   /** §10's bridge. Absent -> a fail-closed one is installed, because the invariants require one. */
   canUseTool?: OfficialApprovalBridge;
   /** The session's permission mode, for the fail-closed bridge the template installs. */
@@ -136,7 +153,10 @@ export interface OptionsTemplatePolicy {
   resume?: string;
   forkSession?: boolean;
   containment?: ContainmentPolicy;
-  /** §5.1: the ONLY documented `extraArgs` route. Anything else is refused. */
+  /**
+   * §5.1: the ONLY documented `extraArgs` route. Anything else is refused. ABSOLUTE (0.0.11): the
+   * runtime resolves a relative path against the session's working directory — the project.
+   */
   appendSystemPromptFile?: string;
   /** Extra tool names this deployment denies, merged with the containment floor's own list. */
   additionalDisallowedTools?: readonly string[];
@@ -257,7 +277,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     spawnClaudeCodeProcess: input.spawnProxy,
   };
 
-  assertOptionsInvariants(options, branchLabel);
+  assertOptionsInvariants(options, branchLabel, { projectDirName: input.brand.projectDirName });
   return options;
 }
 
@@ -300,7 +320,22 @@ export function assertPermissionModeAllowed(mode: unknown, branchLabel: string):
  * built (the seam's `OfficialLaunchPlan.options`), so the builder's care protects only the callers who
  * used it. These are the invariants that must hold for anything this adapter launches.
  */
-export function assertOptionsInvariants(options: OfficialOptions, branchLabel: string): void {
+export interface OptionsInvariantContext {
+  /**
+   * The brand's project directory name. `<cwd>/<projectDirName>` is then refused as a plugin root
+   * however it is spelled — the 0.0.10 bug path. Both of this package's own callers pass it; a direct
+   * caller that omits it still gets the working directory and the vendor's project directory refused.
+   */
+  projectDirName?: string;
+  /**
+   * The session's working directory as the LAUNCH names it, for options that carry no `cwd` of their
+   * own. Both are checked when both are present. With neither, a `plugins` list is refused outright:
+   * an entry that cannot be checked against the session's working directory is not forwarded.
+   */
+  cwd?: string;
+}
+
+export function assertOptionsInvariants(options: OfficialOptions, branchLabel: string, context: OptionsInvariantContext = {}): void {
   const refuse = (option: string, reason: string): never => {
     throw new OfficialConfigurationError({ option, reason, branchLabel });
   };
@@ -358,7 +393,8 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
 
   // 0.0.11 — A PLUGIN ENTRY IS VALIDATED HERE, not only by the builder, because `launch()` accepts
   // options a caller built by hand. The router adds no plugin of its own; these are the host's.
-  assertPluginsAllowed(options["plugins"], refuse);
+  const cwds = [options.cwd, context.cwd].filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+  assertPluginsAllowed(options["plugins"], refuse, { cwds, ...(context.projectDirName === undefined ? {} : { projectDirName: context.projectDirName }) });
 
   // REVIEW r3, NEW-13 — `bypassPermissions` IS REFUSED. ONE RULE, TWO DOORS since 0.0.10: the launch
   // path asserts it here and the LIVE setters (`OfficialSessionHandle.setPermissionMode`, and the door
@@ -375,11 +411,17 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
     if (stray.length > 0) {
       refuse("extraArgs", `${stray.join(", ")} is outside the pinned contract; only the documented append-system-prompt-file and thinking-display routes are available (WS-14 §5.1, WS-18 §6)`);
     }
+    // 0.0.11 (review): the runtime resolves a RELATIVE append file against the child's working
+    // directory — the project — so a relative value is a project-controlled prompt file.
+    const appendFile = (extraArgs as Record<string, unknown>)["append-system-prompt-file"];
+    if (keys.includes("append-system-prompt-file") && (typeof appendFile !== "string" || !isAbsolute(appendFile) || appendFile.includes("\u0000"))) {
+      refuse("extraArgs", "append-system-prompt-file must be an absolute path; the runtime resolves a relative one against the session's working directory, so it would name a file the project controls (WS-14 §5.1)");
+    }
   }
 }
 
 /** A copy of the host's plugin list — a new array of new entry objects, fields unchanged. */
-function copyPlugins(plugins: readonly OfficialPluginConfig[]): OfficialPluginConfig[] {
+function copyPlugins(plugins: ReadonlyArray<OfficialPluginConfig>): OfficialPluginConfig[] {
   // A non-array is left for `assertOptionsInvariants` to refuse with a sentence rather than a TypeError.
   if (!Array.isArray(plugins)) return plugins as unknown as OfficialPluginConfig[];
   return plugins.map((plugin) => (plugin !== null && typeof plugin === "object" ? { ...plugin } : plugin));
@@ -389,7 +431,9 @@ function copyPlugins(plugins: readonly OfficialPluginConfig[]): OfficialPluginCo
  * The shape rule for `Options.plugins` (0.0.11), applied to EVERY launch.
  *
  * WHAT IS CHECKED IS THE ENTRY, never the directory: this branch reads no ambient state, and what a
- * plugin root contains is the host's to decide (see `OptionsTemplatePolicy.plugins`).
+ * plugin root contains is the host's to decide — and the host must treat every file in it, skills
+ * included, as code (see `OptionsTemplatePolicy.plugins`). On the `launch()` path the entries are the
+ * caller's own objects: validated here, not copied.
  *
  *   - `type: "local"` only — the pinned runtime's SDK throws on any other, and a future type (a URL, a
  *     marketplace id) would be a fetch this branch never reviewed.
@@ -401,13 +445,31 @@ function copyPlugins(plugins: readonly OfficialPluginConfig[]): OfficialPluginCo
  *   - `skipMcpDiscovery: true` — §11: the host is the sole owner of every MCP server on this branch,
  *     and a plugin's own `.mcp.json` is a server nobody registered. `strictMcpConfig` is the same rule
  *     for the settings layers; this is it for the plugin door.
+ *   - not the session's working directory, nor its project directory, nor the vendor's project
+ *     directory in it — compared after normalizing the spelling (see `comparablePath`). A list that
+ *     cannot be checked because no working directory is known is refused.
  */
-function assertPluginsAllowed(plugins: unknown, refuse: (option: string, reason: string) => never): void {
+function assertPluginsAllowed(plugins: unknown, refuse: (option: string, reason: string) => never, where: { cwds: readonly string[]; projectDirName?: string }): void {
   if (plugins === undefined) return;
   if (!Array.isArray(plugins)) {
     refuse("plugins", "must be an array of plugin entries the host chose; this branch adds none of its own (0.0.11)");
     return;
   }
+  if (plugins.length > 0 && where.cwds.length === 0) {
+    refuse("plugins", "cannot be checked: neither the options nor the launch name the session's working directory, and an entry naming it (or its project directory) must never be forwarded");
+  }
+  // THE 0.0.10 BUG PATH, HOWEVER IT IS SPELLED (review). The rules below are lexical, so without this
+  // `<cwd>/<projectDirName>/`, `<cwd>/./<projectDirName>`, `<cwd>//<projectDirName>` or a case variant
+  // would pass them and load exactly what 0.0.11 removed. Refused: the working directory itself, the
+  // brand's project directory in it, and the vendor's project directory in it — nothing else under the
+  // working directory, because a session in `$HOME` legitimately names `~/<projectDirName>/cache/...`.
+  // STILL LEXICAL: a symlink is not resolved (this branch reads no ambient state); a host building a
+  // view must not build it out of links into a project.
+  const refusedRoots = where.cwds.flatMap((cwd) => [
+    { root: comparablePath(cwd), what: "the session's own working directory" },
+    { root: comparablePath(join(cwd, ".claude")), what: "the vendor's project directory in the session's working directory" },
+    ...(where.projectDirName === undefined || where.projectDirName.length === 0 ? [] : [{ root: comparablePath(join(cwd, where.projectDirName)), what: "the session's own project directory" }]),
+  ]);
   plugins.forEach((entry: unknown, index: number) => {
     const at = `plugins[${index}]`;
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
@@ -431,7 +493,30 @@ function assertPluginsAllowed(plugins: unknown, refuse: (option: string, reason:
     if (skipMcpDiscovery !== true) {
       refuse("plugins", `${at} must set skipMcpDiscovery: true — the host is the sole owner of every MCP server on this branch, and a plugin's own MCP configuration is a server nobody registered (WS-14 §11)`);
     }
+    const candidate = comparablePath(path);
+    const hit = refusedRoots.find(({ root }) => root === candidate);
+    if (hit !== undefined) {
+      refuse("plugins", `${at}.path is ${hit.what}; everything in a plugin root loads as code (hooks, skills, agents, commands), so a project's own directories are never a plugin — a host that trusts a project's skills builds a view of them elsewhere and names that (0.0.11)`);
+    }
   });
+}
+
+/**
+ * Whether the filesystem a path lives on folds case. macOS (APFS/HFS+ by default) and Windows do, so
+ * `<cwd>/.CLAUDE` IS `<cwd>/.claude` there; Linux does not. Read at call time, never at module load.
+ */
+const foldsCase = (): boolean => process.platform === "darwin" || process.platform === "win32";
+
+/**
+ * A path in the form two spellings of one directory share: separators collapsed, `.` segments removed,
+ * trailing separators dropped, and — where the filesystem folds case — case-folded and
+ * Unicode-normalized the way `containment.ts` folds its forbidden names. `..` never reaches here (the
+ * caller refuses it first), so `normalize` cannot resolve a parent into a different directory.
+ */
+function comparablePath(path: string): string {
+  let normal = normalize(path);
+  while (normal.length > 1 && (normal.endsWith("/") || normal.endsWith("\\"))) normal = normal.slice(0, -1);
+  return foldsCase() ? normal.normalize("NFKC").toLowerCase() : normal;
 }
 
 /**

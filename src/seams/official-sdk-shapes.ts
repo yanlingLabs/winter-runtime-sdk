@@ -145,7 +145,11 @@ export interface OfficialPluginConfig {
   type: "local";
   /** An ABSOLUTE path to the plugin directory (a relative one would resolve against the project). */
   path: string;
-  /** Required `true` by this branch (§11: the host owns every MCP server) — see `assertOptionsInvariants`. */
+  /**
+   * Optional HERE because this is the vendor's shape (the conformance test pins that direction), but
+   * required `true` by this branch: `OptionsTemplatePolicy.plugins` types it so, and
+   * `assertOptionsInvariants` refuses anything else (§11: the host owns every MCP server).
+   */
   skipMcpDiscovery?: boolean;
 }
 
@@ -171,10 +175,11 @@ export interface OfficialOptions {
    */
   settingSources?: Array<"user" | "project" | "local">;
   /**
-   * The HOST's plugins, and nothing else (0.0.11). The router names no plugin of its own: a local
-   * plugin directory is code to the runtime (its `hooks/hooks.json` runs by default), so which ones a
-   * session loads is a trust decision only the host can make. Narrowed to the pinned runtime's own
-   * `SdkPluginConfig` shape; `assertOptionsInvariants` refuses anything else at runtime.
+   * The HOST's plugins, and nothing else (0.0.11). The router names no plugin of its own: everything
+   * in a local plugin directory is code to the runtime — its `hooks/hooks.json` runs by default, and a
+   * skill file can run shell and register hooks too — so which ones a session loads is a trust
+   * decision only the host can make. Narrowed to the pinned runtime's own `SdkPluginConfig` shape;
+   * `assertOptionsInvariants` refuses anything else at runtime.
    */
   plugins?: OfficialPluginConfig[];
   /** WS-14 §2: `{ preset: "claude_code" }` — a Claude-mirroring literal, fixed (WS-01 §5 / D16). */
