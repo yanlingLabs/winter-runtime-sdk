@@ -134,6 +134,22 @@ export interface OfficialSpawnedProcess {
 export type OfficialSpawnClaudeCodeProcess = (options: OfficialSpawnOptions) => OfficialSpawnedProcess;
 
 /**
+ * One entry of the official runtime's `Options.plugins` — its `SdkPluginConfig`, structurally.
+ *
+ * `local` is the only type the pinned runtime has (its SDK throws `Unsupported plugin type` for any
+ * other, and passes `path` to the child as `--plugin-dir`, or `--plugin-dir-no-mcp` when
+ * `skipMcpDiscovery` is set). Independently authored — three ordinary field names — and pinned in both
+ * directions against the real declaration by `official-shapes-conformance.test.ts`.
+ */
+export interface OfficialPluginConfig {
+  type: "local";
+  /** An ABSOLUTE path to the plugin directory (a relative one would resolve against the project). */
+  path: string;
+  /** Required `true` by this branch (§11: the host owns every MCP server) — see `assertOptionsInvariants`. */
+  skipMcpDiscovery?: boolean;
+}
+
+/**
  * The official runtime's `Options`, carrying WS-14 §2's normative fields by name and everything else
  * through the index signature.
  *
@@ -154,8 +170,13 @@ export interface OfficialOptions {
    * `official-shapes-conformance.test.ts` now pins BOTH directions on it.
    */
   settingSources?: Array<"user" | "project" | "local">;
-  /** WS-14 §2: `{ type: "local", path: "<cwd>/<projectDir>", skipMcpDiscovery: true }`. */
-  plugins?: unknown;
+  /**
+   * The HOST's plugins, and nothing else (0.0.11). The router names no plugin of its own: a local
+   * plugin directory is code to the runtime (its `hooks/hooks.json` runs by default), so which ones a
+   * session loads is a trust decision only the host can make. Narrowed to the pinned runtime's own
+   * `SdkPluginConfig` shape; `assertOptionsInvariants` refuses anything else at runtime.
+   */
+  plugins?: OfficialPluginConfig[];
   /** WS-14 §2: `{ preset: "claude_code" }` — a Claude-mirroring literal, fixed (WS-01 §5 / D16). */
   systemPrompt?: unknown;
   plansDirectory?: string;

@@ -14,9 +14,9 @@
 // `bun test` sees the gate acknowledged rather than silently absent.
 import { describe, expect, test } from "bun:test";
 
-import type { Options as RealOptions, PermissionMode as RealPermissionMode, Query as RealQuery, SDKUserMessage as RealUserMessage, SpawnOptions as RealSpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import type { Options as RealOptions, PermissionMode as RealPermissionMode, Query as RealQuery, SDKUserMessage as RealUserMessage, SdkPluginConfig as RealPluginConfig, SpawnOptions as RealSpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 
-import type { OfficialOptions, OfficialPermissionMode, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions, OfficialUserMessage } from "../../src/seams/official-sdk-shapes.ts";
+import type { OfficialOptions, OfficialPermissionMode, OfficialPluginConfig, OfficialQuery, OfficialSdkModule, OfficialSpawnOptions, OfficialUserMessage } from "../../src/seams/official-sdk-shapes.ts";
 
 // --- the real declarations satisfy the structural ones --------------------------------------------
 //
@@ -89,6 +89,14 @@ const _autoIsNotOurs: Assignable<"auto", OfficialPermissionMode> extends false ?
 const _autoIsTheirs: Assignable<"auto", RealPermissionMode> = true;
 // The resolution is `void`, not `interrupt`'s response object — the seam says so rather than widening.
 const _setPermissionModeResolvesVoid: Assignable<Awaited<ReturnType<RealQuery["setPermissionMode"]>>, void> = true;
+// 0.0.11 — `plugins`, THE HOST'S LIST, in both directions. The seam's entry must be one the pinned
+// runtime accepts (every value the router forwards is spawnable), and the pinned entry must fit the
+// seam's (so a host holding the vendor's own `SdkPluginConfig[]` can hand it over unchanged).
+const _pluginsFit: Narrower<OfficialOptions["plugins"], RealOptions["plugins"]> = true;
+const _pluginEntryFits: Assignable<OfficialPluginConfig, RealPluginConfig> = true;
+const _realPluginEntryFits: Assignable<RealPluginConfig, OfficialPluginConfig> = true;
+// …and the type union stays the pin's ONE member: a second plugin type is a deliberate edit here.
+const _pluginTypeIsNarrow: Assignable<{ type: "url"; path: string }, OfficialPluginConfig> extends false ? true : false = true;
 
 // --- A MEASUREMENT THIS ROUND MADE, WORTH PINNING: three fields WS-14 §2 names are NOT on the
 // pinned runtime's `Options` at all. -----------------------------------------------------------------
@@ -139,6 +147,10 @@ void [
   _autoIsNotOurs,
   _autoIsTheirs,
   _setPermissionModeResolvesVoid,
+  _pluginsFit,
+  _pluginEntryFits,
+  _realPluginEntryFits,
+  _pluginTypeIsNarrow,
   _plansDirectoryIsNotAnOption,
   _autoMemoryEnabledIsNotAnOption,
   _autoMemoryDirectoryIsNotAnOption,
