@@ -666,7 +666,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     const home = shared.identity.winterHome;
     const cwd = request.options.cwd;
     if (cwd === undefined || cwd.length === 0) {
-      throw new RuntimeLaunchInputError({ field: "options.cwd", reason: "the official branch's containment floor, its plugin root and its post-hoc sweep are all anchored on this session's working directory (WS-14 §8)" });
+      throw new RuntimeLaunchInputError({ field: "options.cwd", reason: "the official branch's containment floor and its post-hoc sweep are both anchored on this session's working directory (WS-14 §8)" });
     }
     // R-7b-13: the WINTER leg's own key for this cwd, computed HERE (not only at its later use site)
     // because the resume decision below needs it too — both branches must look the canonical store up
