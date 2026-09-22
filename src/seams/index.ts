@@ -44,6 +44,7 @@ export type {
   SerializedRuntimeAddress,
 } from "./messaging-contract.ts";
 export type {
+  OfficialPluginConfig,
   OfficialSdkModule,
   OfficialSpawnOptions,
   OfficialSpawnedProcess,
