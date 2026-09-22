@@ -33,6 +33,18 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
+**What `0.0.11` changes** (UNRELEASED — a security fix: the official leg no longer loads the session's
+own project directory as a plugin; no peer floor change, no devDependency change):
+
+| | |
+|---|---|
+| the router names no plugin of its own | `buildOfficialOptions` used to hard-code `plugins: [{ type: "local", path: "<cwd>/<projectDirName>", skipMcpDiscovery: true }]`, with no trust decision anywhere and no field a host could use to replace it. The pinned runtime loads a local plugin directory as code: its `hooks/hooks.json` runs by default, and its skills, agents and commands load with it. So a Code session opened on any cloned repository ran that repository's hook commands on the first prompt. Measured on 0.3.250: a `UserPromptSubmit`/`SessionStart` command hook in the project directory ran, and its skills loaded as `<projectDirName>:<name>`, which a bare `Skill(<name>)` deny rule does not match. The entry is gone. With no host policy, the built options carry no `plugins` key and the session loads no plugin at all. |
+| `OptionsTemplatePolicy.plugins` | The host's list, forwarded to `Options.plugins` in the same order with every field unchanged. The list and each entry are copied, so a later mutation of the host's array cannot change what launches. Absent stays absent, like `agents`. Per-query policy (`RouterOfficialInput.options`) replaces the deployment-wide list (`RouterOfficialPolicy.options`) and does not merge with it. This is the same precedence every other template field has. The directory's contents are the host's responsibility: the runtime loads everything a plugin root holds. A host that hands over skills only must pass a directory that holds only `skills/`. |
+| what the runtime names a host's plugin (measured) | A directory with no `.claude-plugin/plugin.json` is accepted and named after its basename. With a manifest, its `name` is used. Skills qualify as `<plugin name>:<skill directory name>`: a SKILL.md frontmatter `name:` that differs does not rename the skill. They appear in `init.skills` and `init.slash_commands` under those names. |
+| `assertOptionsInvariants` validates every entry | Every entry is checked on every launch, including hand-built options passed to `launch()`. The rules: `type: "local"` only (the pin's one type); `path` absolute (a relative root resolves against the project); no `..` segment; no NUL byte; `skipMcpDiscovery: true` required. The last one keeps WS-14 §11: the host owns every MCP server, and a plugin's own MCP configuration is a server nobody registered. A refusal is an `OfficialConfigurationError` with `option: "plugins"`. |
+| `OfficialPluginConfig` | A new seam type exported from the root: the pin's `SdkPluginConfig`, structurally. `OfficialOptions.plugins` is narrowed from `unknown` to `OfficialPluginConfig[]`, and `official-shapes-conformance.test.ts` pins both directions and the one-member `type` union. |
+| the other project-controlled surfaces, re-measured | These stay shut, measured against a hostile project in `test/official/runtime-plugins.test.ts`: `CLAUDE.md`, `.claude/settings.json` hooks, `.claude/{skills,agents,commands}` and a `.mcp.json` stdio server. `settingSources: []` and `strictMcpConfig: true` already refused them. The plugin entry was the only project-controlled input left. |
+
 **What `0.0.10` changes** (a LIVE permission-mode change reaches the official child; no peer floor
 change, no devDependency change):
 
