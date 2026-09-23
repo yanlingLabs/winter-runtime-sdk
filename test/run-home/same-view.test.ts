@@ -1223,6 +1223,51 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
   });
 
+  describe("review N-1: a workflow that spawns an agent — its run journal survives the run folder (official leg)", () => {
+    // MEASURED (claude 2.1.250): a workflow's `agent(...)` writes the run's journal at
+    // `<run folder>/projects/<key>/<sid>/subagents/workflows/<run>/journal.jsonl` — uuid-less lines
+    // (`{"type":"started",…}`, `{"type":"result",…}`) appended by the workflow runtime, never mirrored.
+    // Before the fix the exit said `safe` and the journal died with the folder.
+    let result: { outcome: string; local: Record<string, string>; store: Record<string, string>; record: string } | undefined;
+    beforeAll(async () => {
+      const script = 'export const meta = { name: "sv-journal", description: "journal probe", phases: [{ title: "Only" }] };\nphase("Only");\nconst r = await agent("SUBAGENT-PROMPT-7f do nothing");\n';
+      await withSameViewBed({ trusted: true, turns: () => [{ toolUses: [{ id: "toolu_journal", name: "Workflow", input: { script } }] }, { text: "done" }] }, async (bed) => {
+        const allow: CanUseToolLike = async (_tool, input) => ({ behavior: "allow", updatedInput: input });
+        const runHome = await bed.build("official");
+        await bed.runClaude(runHome, "s_sv_journal", { canUseTool: allow });
+        const journals = (projects: string): Record<string, string> => {
+          const out: Record<string, string> = {};
+          const found = Bun.spawnSync(["/bin/sh", "-c", `cd '${projects}' 2>/dev/null && find . -type f -name 'journal.jsonl' | sort`]).stdout.toString().split("\n").filter((line) => line.length > 0);
+          for (const path of found) out[path] = readFileSync(join(projects, path), "utf8");
+          return out;
+        };
+        let record = "";
+        for (let attempt = 0; attempt < 40 && !record.includes('"status"'); attempt += 1) {
+          await Bun.sleep(250);
+          record = Bun.spawnSync(["/bin/sh", "-c", `find '${runHome.dir}/projects' -name 'wf_*.json' -exec cat {} + 2>/dev/null`]).stdout.toString();
+        }
+        let outcome = bed.sdk.runHomeOutcome(runHome.runId);
+        for (let attempt = 0; attempt < 40 && outcome === "pending"; attempt += 1) {
+          await Bun.sleep(250);
+          outcome = bed.sdk.runHomeOutcome(runHome.runId);
+        }
+        const local = journals(join(runHome.dir, "projects"));
+        await runHome.dispose();
+        result = { outcome, local, store: journals(join(bed.session.brandHome, "sdk", "projects")), record };
+        verbose("N-1 journal", result);
+      });
+    }, TIMEOUT);
+    test("N-1: the run home is SAFE, and after dispose the run's journal is in sdk/projects/<key>/<sid>/subagents/workflows/<run>/journal.jsonl, byte for byte", () => {
+      expect(result?.record).toContain('"status"');
+      expect(result?.outcome).toBe("safe");
+      const paths = Object.keys(result?.local ?? {});
+      expect(paths).toHaveLength(1);
+      expect(paths[0]).toMatch(/^\.\/[^/]+\/[^/]+\/subagents\/workflows\/[^/]+\/journal\.jsonl$/);
+      expect(result?.local[paths[0]!]).toContain('"sub done"');
+      expect(result?.store).toEqual(result?.local);
+    });
+  });
+
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;
