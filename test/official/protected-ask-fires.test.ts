@@ -7,11 +7,11 @@
 // `<root>/.winter/skills/x/SKILL.md` would be approved the same way. With it, the request reaches
 // `canUseTool` — which is the proof that the spelling matches what the runtime compares.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
 
-import { cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback } from "./support.ts";
+import { cleanupHermetic, hermeticEnvPolicy, hermeticSession, officialRuntimeBed, scriptedLoopback, type HermeticSession } from "./support.ts";
 import { createInMemoryRuntimeDirectoryStore, createOfficialInputStream, protectedPathRules } from "../../src/index.ts";
 import { createOfficialAdapter } from "../../src/official/index.ts";
 import type { SeamContextWithDirectory } from "../../src/seams/context.ts";
@@ -25,8 +25,74 @@ const describeRuntime = officialRuntimeBed() === undefined ? describe.skip : des
 
 const bed = officialRuntimeBed();
 
+const specialRoots: string[] = [];
+/**
+ * `hermeticSession`'s shape with a working directory NAMED `dirName`, on the real `/tmp` — a glob
+ * metacharacter in the root makes the path longer, and the pin caps the transcript key at 64
+ * characters, so the long `$TMPDIR` base cannot carry it.
+ */
+function sessionNamed(dirName: string): HermeticSession {
+  const root = mkdtempSync(join(realpathSync("/tmp"), "w-"));
+  specialRoots.push(root);
+  const home = join(root, "home");
+  const brandHome = join(home, ".winter");
+  const spool = join(brandHome, "runtimes", "official-agent-spool");
+  const cwd = join(root, dirName);
+  const decoyVendorHome = join(home, ".claude");
+  for (const dir of [home, brandHome, spool, cwd, decoyVendorHome]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(decoyVendorHome, "decoy.json"), '{"planted":"by the test bed"}\n');
+  return { home, spool, cwd, brandHome, decoyVendorHome };
+}
+
 describeRuntime("WS-21 §7.2 — the protected-path ask rule fires on the pinned runtime", () => {
-  afterAll(cleanupHermetic);
+  afterAll(() => {
+    cleanupHermetic();
+    for (const root of specialRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  test(
+    "minors round, item 2: a trusted root NAMED `[wip] app` (a glob character class, unescaped) is still protected — a Write to its .winter/skills reaches canUseTool under acceptEdits",
+    async () => {
+      const session = sessionNamed("[wip] app");
+      const root = session.cwd;
+      mkdirSync(join(root, "p"), { recursive: true });
+      const control = join(root, "p", "notes.txt");
+      const protectedFile = join(root, "p", ".winter", "skills", "x", "SKILL.md");
+      const asked: Array<{ tool: string; path: unknown }> = [];
+      await withWs21Bed(
+        {
+          reuse: session,
+          turns: [
+            { toolUses: [{ id: "toolu_control", name: "Write", input: { file_path: control, content: "control\n" } }] },
+            { toolUses: [{ id: "toolu_protected", name: "Write", input: { file_path: protectedFile, content: "---\nname: x\ndescription: x\n---\n" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const runHome = await bed.runHome({ cwd: root, trustedProjectRoot: root, gitRoot: root });
+          const options = bed.options(runHome, {
+            canUseTool: async (toolName: string, input: Record<string, unknown>) => {
+              asked.push({ tool: toolName, path: input["file_path"] });
+              return { behavior: "deny", message: "the test broker records and denies" };
+            },
+          });
+          const input = createOfficialInputStream();
+          const handle = bed.sdk.query({ prompt: input, options }) as unknown as OfficialQuery & AsyncIterable<Record<string, unknown>>;
+          await handle.setPermissionMode("acceptEdits");
+          const done = (async () => {
+            for await (const message of handle) if (message["type"] === "result") input.close();
+          })();
+          await input.push("write the two files");
+          await done;
+        },
+      );
+      expect(existsSync(control)).toBe(true);
+      expect(asked.some((entry) => entry.path === control)).toBe(false);
+      expect(asked.some((entry) => entry.tool === "Write" && entry.path === protectedFile)).toBe(true);
+      expect(existsSync(protectedFile)).toBe(false);
+    },
+    WS21_TIMEOUT,
+  );
 
   test(
     "C1: cwd AT the root, a Write to a DEEPER directory's .winter/skills reaches canUseTool under acceptEdits (the any-depth rule); an unprotected sibling does not",

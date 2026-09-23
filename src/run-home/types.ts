@@ -138,6 +138,21 @@ export function fsRootAnchored(absPath: string): string {
   return `/${absPath}`;
 }
 
+/**
+ * A PATH, spelled for a permission rule's gitignore-style pattern: `[`, `]`, `*` and `\` are
+ * backslash-escaped, so a directory named `[wip] app` is that directory rather than a character class.
+ *
+ * MEASURED on the pinned runtime (minors round, item 2 — a Write under a root of each name, the rule in
+ * the flag layer, `acceptEdits`): unescaped `[w]` never matched and `\[w\]` did; `\*` matched exactly
+ * (a raw `*` matches too, and more); `?` must stay RAW — an escaped `\?` never matched, while a raw
+ * `?` matches the character (and any one other); `{}`, `!`, `(`, `)`, `#` and spaces matched as
+ * written, escaped or not. The backslash itself is escaped as gitignore's own escape character
+ * (not measured: this bed could not create a directory with one in its name).
+ */
+export function escapeRulePath(path: string): string {
+  return path.replace(/[[\]*\\]/g, (character) => `\\${character}`);
+}
+
 /** The item directories whose writes are protected (spec §7.2). */
 export const PROTECTED_ITEM_DIRS = ["skills", "commands", "rules", "output-styles"] as const;
 
@@ -155,21 +170,27 @@ export const PROTECTED_ITEM_DIRS = ["skills", "commands", "rules", "output-style
  * levels down both reach `canUseTool`, under `acceptEdits` and under `bypassPermissions` alike, and an
  * unprotected sibling does not (`test/official/protected-ask-fires.test.ts`).
  *
- * `walk` is accepted for source compatibility and adds nothing: every walk directory is under the root.
+ * Every PATH part is spelled with `escapeRulePath` (the glob parts — `**`, `/**` — are the rule's own).
  * A root at or above `$HOME` is protected as given (more asks, never fewer).
+ *
+ * @param walk DEPRECATED (minors round, item 1) and IGNORED: every walk directory is under the root,
+ * which the any-depth rule already covers. Kept optional only so existing callers still compile.
  */
 export function protectedPathRules(
   sdkHome: string,
   trustedProjectRoot: string | null,
   brand: Pick<RunHomeBrand, "projectDirName" | "instructionsFile"> = WINTER_BRAND,
+  /** @deprecated Ignored — the any-depth rule covers every walk directory. */
   walk?: { cwd: string; userHome?: string },
 ): string[] {
   void walk;
+  const sdk = escapeRulePath(sdkHome);
   const targets: string[] = [];
-  for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(sdkHome, kind))}/**`);
-  targets.push(fsRootAnchored(join(sdkHome, brand.instructionsFile)));
+  for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(sdk, kind))}/**`);
+  targets.push(fsRootAnchored(join(sdk, brand.instructionsFile)));
   if (trustedProjectRoot !== null) {
-    for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(trustedProjectRoot, "**", brand.projectDirName, kind))}/**`);
+    const root = escapeRulePath(trustedProjectRoot);
+    for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(root, "**", brand.projectDirName, kind))}/**`);
   }
   return ["Edit", "Write"].flatMap((tool) => targets.map((target) => `${tool}(${target})`));
 }
