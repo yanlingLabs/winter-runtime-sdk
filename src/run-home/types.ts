@@ -30,7 +30,7 @@ export type RunMode = "code" | "dispatch" | "chat";
 export type RunLeg = "winter" | "official";
 
 /** The brand fields the builder spells names from. Absent = the Winter SDK's own profile. */
-export type RunHomeBrand = Pick<BrandProfile, "homeDirName" | "projectDirName" | "instructionsFile" | "envPrefix">;
+export type RunHomeBrand = Pick<BrandProfile, "homeDirName" | "projectDirName" | "instructionsFile" | "envPrefix" | "mcpServerName">;
 
 export interface RunHomeInput {
   /** The daemon's home (`WINTER_HOME`). The shared runtime home is `sdkHomeOf(home)`. */
@@ -157,5 +157,5 @@ export function protectedPathRules(sdkHome: string, trustedProjectRoot: string |
 /** The brand a run home was built with, filled in. */
 export function runHomeBrandOf(input: Pick<RunHomeInput, "brand">): RunHomeBrand {
   const brand = input.brand ?? WINTER_BRAND;
-  return { homeDirName: brand.homeDirName, projectDirName: brand.projectDirName, instructionsFile: brand.instructionsFile, envPrefix: brand.envPrefix };
+  return { homeDirName: brand.homeDirName, projectDirName: brand.projectDirName, instructionsFile: brand.instructionsFile, envPrefix: brand.envPrefix, mcpServerName: brand.mcpServerName };
 }
