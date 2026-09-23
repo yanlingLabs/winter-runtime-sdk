@@ -15,7 +15,7 @@
 //     working directory;
 //   * brand — the folder's names (instructions file, project dir, global config) are the brand's;
 //   * store — the child's durable paths must be the store the router reconciles and hands off through.
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { envName, type BrandProfile, type Options } from "@yanlinglabs/winter-agent-sdk";
 
@@ -35,6 +35,15 @@ export interface RunHomeApplyTarget {
    * without `requireRunHome`, i.e. on the pre-WS-21 layout, where no run home can be applied.
    */
   storeHome: string | undefined;
+}
+
+/** A path's canonical form: its real path when it exists, else the resolved string. */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 /** The refusals, in the order a host would want to hear them. Throws `RunHomeError`. */
@@ -60,7 +69,11 @@ export function assertRunHomeApplicable(runHome: unknown, target: RunHomeApplyTa
       `this run home was built for the ${runHome.input.leg} leg and the generation runs on the ${target.leg} leg; the two legs' \`projects/\` differ (a link to the canonical store on the Winter leg, a mirrored working copy on the official leg), so it cannot be reused across them`,
     );
   }
-  if (target.cwd === undefined || resolve(target.cwd) !== resolve(runHome.input.cwd)) {
+  // CANONICAL FORMS ON BOTH SIDES (L3 round 4): a directory spelled through a link, or `/var/…` against
+  // its `/private/var/…` real path, is the SAME working directory — the daemon's cold resume builds the
+  // run home for the realpath while a directory row may carry another spelling. Two genuinely different
+  // directories still differ after canonicalisation, so the check is not loosened.
+  if (target.cwd === undefined || canonicalPath(target.cwd) !== canonicalPath(runHome.input.cwd)) {
     throw new RunHomeError(
       "run_home_cwd_mismatch",
       `this run home was built for ${runHome.input.cwd} and the generation's cwd is ${target.cwd === undefined ? "unset" : target.cwd}; its project walk, trust and path anchors belong to one working directory`,
