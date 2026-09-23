@@ -54,7 +54,7 @@ import { createDispatchingAdapter, type RouterMessagingAdapter } from "./dispatc
 import { createInboundPolicy, type InboundPolicy, type InboundPolicyHooks } from "./inbound.ts";
 import { createOfficialMessagingAdapter, type OfficialMessagingAdapter, type OfficialMessagingAdapterDeps } from "./official-adapter.ts";
 import { createAttachedSessionRegistry, type AttachedOfficialSession, type AttachedSessionRegistry, type AttachedWinterSession } from "./sessions.ts";
-import { createWinterMessagingAdapter, type WinterMessagingAdapter, type WinterMessagingAdapterDeps } from "./winter-adapter.ts";
+import { createWinterMessagingAdapter, type WinterColdResumeRunHomes, type WinterMessagingAdapter, type WinterMessagingAdapterDeps } from "./winter-adapter.ts";
 
 /** The context this factory needs: the seam's, with the directory as the concrete handle. */
 export interface GlobalMessagingContext extends SeamContext {
@@ -64,7 +64,7 @@ export interface GlobalMessagingContext extends SeamContext {
 export interface GlobalMessagingOptions extends InboundPolicyHooks {
   now?: () => number;
   /** Passed to the Winter adapter this factory builds (cold-resume options, child resume context). */
-  winter?: Omit<WinterMessagingAdapterDeps, "peers" | "directory" | "sessions">;
+  winter?: Omit<WinterMessagingAdapterDeps, "peers" | "directory" | "sessions" | "runHomes">;
   /** Passed to the official adapter this factory builds (the resume collaborator, the class hook). */
   official?: Omit<OfficialMessagingAdapterDeps, "directory" | "sessions">;
   /**
@@ -133,7 +133,7 @@ export function deriveMessageId(senderSessionId: string, toolUseId: string): str
 
 const MAX_TRACKED_NOTICES = 1_000;
 
-export function createGlobalMessaging(context: GlobalMessagingContext, options: GlobalMessagingOptions = {}): GlobalMessagingHandle {
+export function createGlobalMessaging(context: GlobalMessagingContext, options: GlobalMessagingOptions = {}, internal: { winterRunHomes?: WinterColdResumeRunHomes } = {}): GlobalMessagingHandle {
   const store = context.directoryStore;
   const directory = context.directory;
   const now = options.now ?? (() => Date.now());
@@ -141,7 +141,9 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
   const winterSessions: AttachedSessionRegistry<AttachedWinterSession> = createAttachedSessionRegistry<AttachedWinterSession>();
   const officialSessions: AttachedSessionRegistry<AttachedOfficialSession> = createAttachedSessionRegistry<AttachedOfficialSession>();
 
-  const winterAdapter = createWinterMessagingAdapter({ peers: context.peers, directory, sessions: winterSessions, ...(options.winter ?? {}) });
+  // WS-21: the cold resume's run-home door is the ROUTER's own (`internal`), laid over whatever a host
+  // passed — the public options type does not even name it.
+  const winterAdapter = createWinterMessagingAdapter({ peers: context.peers, directory, sessions: winterSessions, ...(options.winter ?? {}), ...(internal.winterRunHomes === undefined ? {} : { runHomes: internal.winterRunHomes }) });
   const officialAdapter = createOfficialMessagingAdapter({ directory, sessions: officialSessions, ...(options.official ?? {}) });
   const adapters = new Map<RuntimeKind, RouterMessagingAdapter>([
     ["winter-agent", winterAdapter],

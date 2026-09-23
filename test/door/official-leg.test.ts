@@ -245,41 +245,37 @@ describeRuntime("the door's official leg, against the pinned runtime", () => {
   );
 
   test(
-    "0.0.11: the door loads only the plugins the host names, and a per-query list replaces the deployment-wide one",
+    "WS-21: no policy can name a plugin — a smuggled `plugins` list loads nothing, and the project's own dir never loads",
     async () => {
       await withDoorBed({ turns: [{ text: "ok" }], sessionId: "door-plugins" }, async (bed) => {
-        const view = (name: string, skill: string): string => {
-          const dir = join(bed.session.brandHome, "runtimes", "plugin-views", name);
-          mkdirSync(join(dir, "skills", skill), { recursive: true });
-          writeFileSync(join(dir, "skills", skill, "SKILL.md"), `---\nname: ${skill}\ndescription: a door-bed skill\n---\n\nok\n`);
-          return dir;
-        };
+        const view = join(bed.session.brandHome, "runtimes", "plugin-views", "smuggled");
+        mkdirSync(join(view, "skills", "smuggled-skill"), { recursive: true });
+        writeFileSync(join(view, "skills", "smuggled-skill", "SKILL.md"), "---\nname: smuggled-skill\ndescription: a door-bed skill\n---\n\nok\n");
         // The session's own project directory holds a skill too: the pre-0.0.11 template loaded it as
         // `<projectDirName>:project-skill` with no host decision. It must never appear below.
         const projectSkill = join(bed.session.cwd, WINTER_BRAND.projectDirName, "skills", "project-skill");
         mkdirSync(projectSkill, { recursive: true });
         writeFileSync(join(projectSkill, "SKILL.md"), "---\nname: project-skill\ndescription: planted in the project\n---\n\nok\n");
-        const deploymentView = view("deployment-view", "deployment-skill");
-        const queryView = view("query-view", "query-skill");
         const initOf = async (sdk: typeof bed.sdk, sessionId: string, perQuery?: Record<string, unknown>): Promise<{ plugins: Array<{ name: string }>; skills: string[] }> => {
           const options = bed.officialOptions({ sessionId }) as Record<string, unknown>;
           if (perQuery !== undefined) (options["runtime"] as { official: Record<string, unknown> }).official["options"] = perQuery;
           const messages = await drain(sdk.query({ prompt: "hi", options }));
           return messages.find((message) => message.type === "system" && message.subtype === "init") as unknown as { plugins: Array<{ name: string }>; skills: string[] };
         };
-        const deployment = bed.sdkWith({ official: { options: { plugins: [{ type: "local", path: deploymentView, skipMcpDiscovery: true }] } } });
+        const smuggled = [{ type: "local", path: view, skipMcpDiscovery: true }];
+        const deployment = bed.sdkWith({ official: { options: { plugins: smuggled } as never } });
 
         const none = await initOf(bed.sdk, "door-plugins-none");
         expect(none.plugins).toEqual([]);
         expect(none.skills.filter((skill) => skill.includes(":"))).toEqual([]);
 
-        const deploymentOnly = await initOf(deployment, "door-plugins-deployment");
-        expect(deploymentOnly.plugins.map((plugin) => plugin.name)).toEqual(["deployment-view"]);
-        expect(deploymentOnly.skills.filter((skill) => skill.includes(":"))).toEqual(["deployment-view:deployment-skill"]);
+        const viaDeployment = await initOf(deployment, "door-plugins-deployment");
+        expect(viaDeployment.plugins).toEqual([]);
+        expect(viaDeployment.skills.filter((skill) => skill.includes(":"))).toEqual([]);
 
-        const perQuery = await initOf(deployment, "door-plugins-query", { plugins: [{ type: "local", path: queryView, skipMcpDiscovery: true }] });
-        expect(perQuery.plugins.map((plugin) => plugin.name)).toEqual(["query-view"]);
-        expect(perQuery.skills.filter((skill) => skill.includes(":"))).toEqual(["query-view:query-skill"]);
+        const viaQuery = await initOf(bed.sdk, "door-plugins-query", { plugins: smuggled });
+        expect(viaQuery.plugins).toEqual([]);
+        expect(viaQuery.skills.filter((skill) => skill.includes(":"))).toEqual([]);
       });
     },
     DOOR_TIMEOUT,

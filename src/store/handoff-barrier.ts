@@ -207,6 +207,8 @@ export interface HandoffBarrierDeps {
   shared?: SharedSessionStore;
   /** Defaults to the peer's own `resolveWinterHome()` — the production answer, resolved at first use. */
   winterHome?: string;
+  /** WS-21: the store's root when it is not `winterHome` (the shared runtime home). Defaults to the context's. */
+  storeHome?: string;
   /**
    * A decorator to use instead of the barrier's own.
    *
@@ -302,8 +304,17 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
   // then the host's constructor value on the context, then the peer's own `resolveWinterHome()` under
   // the resolved brand, which is the production answer.
   const winterHome = deps.winterHome ?? context.winterHome;
-  const sharedOf = deps.shared === undefined ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(winterHome === undefined ? {} : { winterHome }) }) : () => deps.shared!;
+  // WS-21: the canonical store's ROOT, which is the shared runtime home once the router is on the
+  // WS-21 layout. The leases stay under the daemon's own home (`homeOf()`); every canonical path — the
+  // transcript step 5 validates, the file step 8 decorates, the sidecar — goes through the store's
+  // identity (`storeHomeOf()`), so the two can never be read from two different roots.
+  const storeHome = deps.storeHome ?? context.storeHome;
+  const sharedOf =
+    deps.shared === undefined
+      ? lazySharedSessionStore({ peers: context.peers, brand: context.brand, ...(winterHome === undefined ? {} : { winterHome }), ...(storeHome === undefined ? {} : { storeHome }) })
+      : () => deps.shared!;
   const homeOf = (): string => winterHome ?? sharedOf().identity.winterHome;
+  const storeHomeOf = (): string => sharedOf().identity.storeHome ?? homeOf();
   let decorator: MaterializedResumeDecoratorHandle | undefined = deps.decorator as MaterializedResumeDecoratorHandle | undefined;
   /**
    * ONE store for the barrier AND the decorator (review r1, F2).
@@ -747,10 +758,10 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     // WIRED expression, `createHandoffBarrier(context)` with no deps, is exactly such a peer in every
     // spine test. So `execute()` really did have a fourth arm: a raw throw instead of an outcome.
     let shared: SharedSessionStore;
-    let winterHome: string;
+    let storeRoot: string;
     try {
       shared = sharedOf();
-      winterHome = homeOf();
+      storeRoot = storeHomeOf();
     } catch (error) {
       // Nothing has been touched — no lease, no marker, no copy — so this is a plain step-1 refusal.
       return lossy(1, `the shared session store could not be resolved, so nothing about this session can be read or written: ${error instanceof Error ? error.message : String(error)}`);
@@ -946,7 +957,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
 
       // ---- step 5: validate the JSONL -----------------------------------------------------------------
       at = 5;
-      const validation = await validateSessionTranscript(shared, session, winterHome);
+      const validation = await validateSessionTranscript(shared, session, storeRoot);
       if (!validation.ok) return lossy(5, validation.reason);
       record(5, true, validation.detail);
 
@@ -1049,7 +1060,7 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
       const decorated = await decoratorOf().decorate({
         session,
         to: plan.to,
-        materializedPath: stagingRoot === undefined ? canonicalTranscriptPath(winterHome, session) : materializedTranscriptPath(stagingRoot, session),
+        materializedPath: stagingRoot === undefined ? canonicalTranscriptPath(storeRoot, session) : materializedTranscriptPath(stagingRoot, session),
         decoration: {
           kind: "handoff",
           from: plan.from,

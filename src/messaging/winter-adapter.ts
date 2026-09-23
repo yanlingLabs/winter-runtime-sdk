@@ -31,6 +31,20 @@ import type { ChildSelectionInput } from "../selection/runtime-selection.ts";
 import { resumeChildSelection } from "../selection/child-runtime.ts";
 import { renderAttributedTurn, unattributableReason } from "./attribution.ts";
 import type { AttachedSessionRegistry, AttachedWinterSession } from "./sessions.ts";
+import type { RunHome, RunHomeFor, RunHomeOutcome, RunMode } from "../run-home/types.ts";
+
+/**
+ * WS-21 §3.1: what the cold resume needs to run on a run home. The ROUTER supplies it (never a host
+ * through `GlobalMessagingOptions`): `apply` is the router's own check-and-apply, bound to its brand and
+ * store, so this path and `query()` cannot apply a run home two different ways.
+ */
+export interface WinterColdResumeRunHomes {
+  /** The router was created with `requireRunHome`: no cold resume without a run home. */
+  require: boolean;
+  runHomeFor?: RunHomeFor;
+  apply(options: Options, runHome: RunHome): Options;
+  record(runId: string, outcome: RunHomeOutcome): void;
+}
 
 export interface WinterMessagingAdapterDeps {
   peers: RuntimeSdkPeers;
@@ -65,6 +79,8 @@ export interface WinterMessagingAdapterDeps {
    * to say what it launched the session with.
    */
   permissionClass?: (entry: RuntimeDirectoryEntry) => Promise<PermissionClassLabel> | PermissionClassLabel;
+  /** WS-21: the router's run-home door for the cold resume. Set by `createRuntimeSdk`, never by a host. */
+  runHomes?: WinterColdResumeRunHomes;
 }
 
 /** The adapter plus the one thing the router attaches to it: the live-session registry. */
@@ -173,7 +189,29 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
       return unavailable(message.messageId, false, `${entry.address} has no backend session id, so there is no transcript to resume; a cold resume needs the persisted runtime's own id (WS-15 §6.2)`);
     }
     const base = (await deps.resumeOptions?.(entry)) ?? ({} as Options);
-    const options: Options = { ...base, resume: entry.backendSessionId };
+    let options: Options = { ...base, resume: entry.backendSessionId };
+    // WS-21 §3.1: A COLD RESUME RUNS ON A RUN HOME TOO. This is the one path where the ROUTER opens a
+    // Winter query no host call site is awaiting, so the host's `runHomeFor` builds the folder here and
+    // the router applies it exactly as `query()` does. With `requireRunHome` and no builder, the answer
+    // is a typed, non-retryable `unavailable` — never a resume on the user's real home.
+    let runHome: RunHome | undefined;
+    if (deps.runHomes?.require === true) {
+      const runHomeFor = deps.runHomes.runHomeFor;
+      if (runHomeFor === undefined) {
+        return unavailable(message.messageId, false, "run_home_for_missing: this router requires a run home for every generation and the host registered no `runHomeFor`, so an exited Winter session cannot be resumed from here (WS-21 §3.1)");
+      }
+      const cwd = base.cwd ?? entry.cwd;
+      if (cwd === undefined || cwd.length === 0) {
+        return unavailable(message.messageId, false, `${entry.address} has no recorded working directory, so no run home can be built to resume it on (WS-21 §3.1)`);
+      }
+      try {
+        runHome = await runHomeFor({ sessionId: entry.parsed.winterSessionId, leg: "winter", cwd, mode: entry.mode as RunMode });
+        options = deps.runHomes.apply({ ...options, cwd }, runHome);
+      } catch (error) {
+        await runHome?.dispose().catch(() => undefined);
+        return unavailable(message.messageId, false, `the resumed session's run home could not be built or applied: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     // Rendered BEFORE the `try`, for D1's reason: an unattributable sender must not become "the
     // resumed session could not be opened", which is a retryable answer about something that never
     // happened. `deliverIntoSession` has already refused that case; this is the belt.
@@ -188,6 +226,14 @@ export function createWinterMessagingAdapter(deps: WinterMessagingAdapterDeps): 
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       return seen === 0 ? unavailable(message.messageId, true, `the resumed session could not be opened: ${reason}`) : deliveryUncertain(message.messageId, `the resumed session failed after it had started producing output: ${reason}`);
+    } finally {
+      // THE ROUTER OPENED THIS INCARNATION, SO THE ROUTER ENDS ITS FOLDER. A Winter-leg run home has no
+      // working copy (spec §3.8), so it is safe the moment the stream is done, and nobody else observes
+      // this incarnation's end to dispose it.
+      if (runHome !== undefined) {
+        deps.runHomes?.record(runHome.runId, "safe");
+        await runHome.dispose().catch(() => undefined);
+      }
     }
     return deliveryUncertain(message.messageId, "the resumed session ended without producing a turn, so whether the message was delivered cannot be established");
   }

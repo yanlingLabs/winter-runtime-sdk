@@ -33,6 +33,11 @@ export interface SeamContext {
   vendoredOfficialRuntime?: string;
   /** Lane C: an explicit home for the shared store's lazy resolver (defaults to the peer's own resolution under `brand`). */
   winterHome?: string;
+  /**
+   * WS-21: the shared runtime home (`sdkHomeOf(winterHome)`) the canonical store is rooted at. Set only
+   * for a router created with `requireRunHome`; absent, the store is rooted at `winterHome` as before.
+   */
+  storeHome?: string;
 }
 
 /** What every OTHER seam needs: the same, plus the directory, which is built first. */

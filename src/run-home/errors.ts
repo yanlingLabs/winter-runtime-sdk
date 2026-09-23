@@ -8,6 +8,8 @@ import { RuntimeSdkError } from "../errors.ts";
 export type RunHomeErrorCode =
   /** A generation arrived without `runtime.runHome` on a router created with `requireRunHome: true`. */
   | "run_home_required"
+  /** The object passed as a run home was not built by `buildRunHome`, or has been disposed (spec §3.5). */
+  | "run_home_foreign"
   /** The run home was built for the other leg (a Winter-leg `projects` link on the official leg writes the store directly). */
   | "run_home_leg_mismatch"
   /** The run home was built for a different working directory than the generation runs in. */
