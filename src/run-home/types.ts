@@ -20,8 +20,11 @@
 // global config file and the product env variables are the brand's (`RunHomeInput.brand`, defaulting
 // to the Winter SDK's own profile). Claude's names — `CLAUDE.md`, `.claude.json`, `file-history`,
 // `CLAUDE_CODE_*` — are the official runtime's own and stay fixed (WS-01 §5).
+import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { WINTER_BRAND, type BrandProfile } from "@yanlinglabs/winter-agent-sdk";
+
+import { projectWalk } from "./walk.ts";
 
 /** The session modes a run home is built for (spec §3.2's columns). */
 export type RunMode = "code" | "dispatch" | "chat";
@@ -142,19 +145,30 @@ export const PROTECTED_ITEM_DIRS = ["skills", "commands", "rules", "output-style
 
 /**
  * Spec §7.2's protected paths, as flag-layer `permissions.ask` rules: `Edit(...)` and `Write(...)` over
- * `sdk/{skills,commands,rules,output-styles}/**`, `sdk/<instructions file>` and, for a trusted
- * project, `<root>/<project dir>/{skills,commands,rules,output-styles}/**`.
+ * `sdk/{skills,commands,rules,output-styles}/**`, `sdk/<instructions file>` and, for a trusted project,
+ * `<d>/<project dir>/{skills,commands,rules,output-styles}/**` for EVERY directory `d` whose items the
+ * run home loads (fix round 1, I2) — the project walk from the cwd up to the trusted root, stopping at
+ * `$HOME` (`walk`). Without `walk`, only the root's own project dir (the pre-fix reading, kept for a
+ * caller that has no cwd).
  *
  * claude checks its ask rules before its bypass step, which is what makes these fire where its own
  * sensitive-file check would swallow a hook's `ask` (F16). A test drives the real runtime to prove the
- * spelling matches (`test/official/protected-ask-fires.test.ts`).
+ * spelling matches, for the root's project dir and for a nested one (`test/official/protected-ask-fires.test.ts`).
  */
-export function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand: Pick<RunHomeBrand, "projectDirName" | "instructionsFile"> = WINTER_BRAND): string[] {
+export function protectedPathRules(
+  sdkHome: string,
+  trustedProjectRoot: string | null,
+  brand: Pick<RunHomeBrand, "projectDirName" | "instructionsFile"> = WINTER_BRAND,
+  walk?: { cwd: string; userHome?: string },
+): string[] {
   const targets: string[] = [];
   for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(sdkHome, kind))}/**`);
   targets.push(fsRootAnchored(join(sdkHome, brand.instructionsFile)));
   if (trustedProjectRoot !== null) {
-    for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(trustedProjectRoot, brand.projectDirName, kind))}/**`);
+    const projectDirs = walk === undefined ? [trustedProjectRoot] : projectWalk(walk.cwd, trustedProjectRoot, walk.userHome ?? homedir());
+    for (const dir of projectDirs) {
+      for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(dir, brand.projectDirName, kind))}/**`);
+    }
   }
   return ["Edit", "Write"].flatMap((tool) => targets.map((target) => `${tool}(${target})`));
 }

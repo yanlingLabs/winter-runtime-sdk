@@ -56,6 +56,19 @@ describe("WS-21 Contract A: helpers and constants", () => {
     expect(router.protectedPathRules("/h/sdk", null).some((rule) => rule.includes("//repo"))).toBe(false);
   });
 
+  test("protectedPathRules with the walk: EVERY directory from the cwd up to the root is protected, never $HOME (fix round 1, I2)", () => {
+    const rules = router.protectedPathRules("/h/sdk", "/repo", undefined, { cwd: "/repo/a/b", userHome: "/home/u" });
+    for (const dir of ["/repo", "/repo/a", "/repo/a/b"]) {
+      for (const kind of ["skills", "commands", "rules", "output-styles"]) {
+        expect(rules).toContain(`Edit(/${dir}/.winter/${kind}/**)`);
+        expect(rules).toContain(`Write(/${dir}/.winter/${kind}/**)`);
+      }
+    }
+    const underHome = router.protectedPathRules("/h/sdk", "/home", undefined, { cwd: "/home/u/p", userHome: "/home/u" });
+    expect(underHome.some((rule) => rule.includes("//home/u/p/.winter/skills/**"))).toBe(true);
+    expect(underHome.some((rule) => rule.includes("//home/u/.winter/") || rule.includes("//home/.winter/"))).toBe(false);
+  });
+
   test("reconcileLocalWriteRoot is exported from the package root (the one reconcile, spec §3.8)", () => {
     expect(typeof router.reconcileLocalWriteRoot).toBe("function");
   });

@@ -523,7 +523,9 @@ function protectedAskRulesFor(runHome: RunHome): string[] {
   };
   const brand = runHomeBrandOf(runHome.input);
   const root = runHome.input.trustedProjectRoot;
-  const rules = [...protectedPathRules(runHome.sdkHome, root, brand), ...protectedPathRules(real(runHome.sdkHome), root === null ? null : real(root), brand)];
+  const cwd = runHome.input.cwd;
+  // EVERY walk directory whose items the run home loads (fix round 1, I2), in both spellings.
+  const rules = [...protectedPathRules(runHome.sdkHome, root, brand, { cwd }), ...protectedPathRules(real(runHome.sdkHome), root === null ? null : real(root), brand, { cwd: real(cwd) })];
   return [...new Set(rules)];
 }
 

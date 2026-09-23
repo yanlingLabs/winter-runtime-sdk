@@ -44,31 +44,9 @@ interface Candidate {
 const PRIVATE_DIR = 0o700;
 const PRIVATE_FILE = 0o600;
 
-/** Spec §3.4.2: cwd → trusted root, nearest first, never `$HOME` or above it. */
-export function projectWalk(cwd: string, trustedProjectRoot: string | null, userHome: string): string[] {
-  if (trustedProjectRoot === null) return [];
-  const root = resolve(trustedProjectRoot);
-  const start = resolve(cwd);
-  if (!isWithin(start, root)) return [];
-  const home = resolve(userHome);
-  const walk: string[] = [];
-  let current = start;
-  for (;;) {
-    if (current === home) break;
-    walk.push(current);
-    if (current === root) break;
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return walk;
-}
-
-/** `path` is `root` or inside it — lexical, on already-resolved paths. */
-export function isWithin(path: string, root: string): boolean {
-  const rel = relative(root, path);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
+// The walk and the containment test live in `walk.ts` (the protected-path rules need them too).
+export { isWithin, projectWalk } from "./walk.ts";
+import { isWithin, projectWalk } from "./walk.ts";
 
 /** Real path, or `undefined` when the path (or a link on it) leads nowhere. */
 async function realOrMissing(path: string): Promise<string | undefined> {
