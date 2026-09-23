@@ -241,6 +241,8 @@ export async function buildItems(context: RunHomeBuildContext): Promise<void> {
 export interface ProjectRuleLink {
   /** The file name in `<run>/rules/`. */
   name: string;
+  /** The rule's path as found under the project's dot-dir (what a report names). */
+  path: string;
   /** The rule's own real path. */
   real: string;
   /** The walk directory whose dot-dir holds it — the anchor its `paths:` resolve from (F17). */
@@ -293,7 +295,7 @@ async function buildRules(context: RunHomeBuildContext, scope: ResolveScope, wal
       let name = base;
       for (let n = 2; await exists(join(rulesDir, name)); n += 1) name = `${base.slice(0, -3)}--${n}.md`;
       await symlink(target, join(rulesDir, name));
-      links.push({ name, real: target, anchor: walkDir });
+      links.push({ name, path, real: target, anchor: walkDir });
     }
   }
   projectRuleLinks.set(context, links);
