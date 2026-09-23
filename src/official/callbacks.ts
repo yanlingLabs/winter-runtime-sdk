@@ -268,6 +268,10 @@ export function createContainmentHooks(options: ContainmentHooksOptions): Record
   // messages: "Cannot create a worktree: not in a git repository and no WorktreeCreate hooks are
   // configured"; "WorktreeCreate hook failed: …"), so while worktrees are denied the hook refuses —
   // one decision for the tool, the agent option and the workflow agent alike.
+  // NOT A VETO (review N-1, minor): the runtime asks every configured `WorktreeCreate` hook, and a user,
+  // project or plugin COMMAND hook that returns a path wins over this refusal — the worktree is then
+  // created wherever that hook put it. This refusal closes the vendor's own writer only; which other
+  // hooks load is decided by settings sources, trust and the enabled plugins (see the README).
   if ((policy.worktrees ?? "deny") === "deny") {
     const paths = containmentPaths({ projectDirName: policy.projectDirName ?? "" });
     const refuseWorktree = async (raw: unknown): Promise<OfficialHookOutput> => {
