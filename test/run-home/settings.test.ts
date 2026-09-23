@@ -224,6 +224,20 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
     }
   });
 
+  test("review minor: an anchor containing `?` (a one-character wildcard, which stays raw) never re-anchors an ALLOW rule — dropped with a reported reason; ask and deny are re-anchored as before", async () => {
+    const bed = runHomeBed();
+    const root = join(bed.root, "a?b");
+    mkdirSync(root, { recursive: true });
+    put(join(root, ".winter", "settings.json"), json({ permissions: { allow: ["Edit(/src/**)", "Bash(ls:*)", "Read(//abs/x)"], ask: ["Edit(/q/**)"], deny: ["Read(/secrets)"] } }));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+    const permissions = runHome.effectiveSettings["permissions"] as { allow: string[]; ask: string[]; deny: string[] };
+    // Only the re-anchored allow is dropped: a non-path rule and an already-absolute one are untouched.
+    expect(permissions.allow).toEqual(["Bash(ls:*)", "Read(//abs/x)"]);
+    expect(permissions.ask).toEqual([`Edit(/${join(bed.root, "a?b", "q/**")})`]);
+    expect(permissions.deny).toEqual([`Read(/${join(bed.root, "a?b", "secrets")})`]);
+    expect(runHome.report.droppedRules).toEqual([{ rule: "Edit(/src/**)", tier: "project", reason: expect.stringContaining("?") }]);
+  });
+
   test("the project tier anchors at the project root even when the cwd is below it (a deny keeps its author's meaning)", async () => {
     const bed = runHomeBed();
     const { root } = repo(bed);
