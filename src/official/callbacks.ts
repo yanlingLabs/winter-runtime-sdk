@@ -26,7 +26,7 @@
 import type { BrandProfile, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
 
 import type { OfficialPermissionMode } from "../seams/official-sdk-shapes.ts";
-import { containmentDecisionFor, resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
+import { FORBIDDEN_TARGETS, containmentDecisionFor, containmentPaths, resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
 import { sessionOnlyPermissionUpdates } from "../run-home/permission-updates.ts";
 import { officialBranchLabel } from "./branding.ts";
 
@@ -260,6 +260,24 @@ export function createContainmentHooks(options: ContainmentHooksOptions): Record
   };
   (guard as unknown as Record<symbol, unknown>)[CONTAINMENT_FLOOR_MARK] = true;
   OUR_FLOORS.add(guard as unknown as object);
+  // REVIEW I-2 — EVERY ROUTE TO A WORKTREE, not only the tool calls the PreToolUse guard sees. A workflow
+  // script's `agent(prompt, { isolation: "worktree" })` is started by the workflow runtime, not by an
+  // `Agent` tool call, and MEASURED under a run home in a git repository it created
+  // `<repo>/<vendor dir>/worktrees/` (and a branch in the repository's `.git`). With a `WorktreeCreate`
+  // hook configured the runtime asks the hook INSTEAD of running `git worktree add` itself (its own
+  // messages: "Cannot create a worktree: not in a git repository and no WorktreeCreate hooks are
+  // configured"; "WorktreeCreate hook failed: …"), so while worktrees are denied the hook refuses —
+  // one decision for the tool, the agent option and the workflow agent alike.
+  if ((policy.worktrees ?? "deny") === "deny") {
+    const paths = containmentPaths({ projectDirName: policy.projectDirName ?? "" });
+    const refuseWorktree = async (raw: unknown): Promise<OfficialHookOutput> => {
+      const name = String(((raw ?? {}) as { name?: unknown }).name ?? "");
+      const reason = `worktree creation is refused on this branch: the vendor's own writer creates its worktree directory; worktrees belong under ${paths.worktrees || "the product's project directory"} and the host's replacement owns them (WS-14 §8)`;
+      options.onDecision?.({ tool: "WorktreeCreate", target: `${FORBIDDEN_TARGETS.projectDir}/worktrees/${name}`, reason });
+      throw new Error(reason);
+    };
+    return { PreToolUse: [{ hooks: [guard] }], WorktreeCreate: [{ hooks: [refuseWorktree] }] };
+  }
   return { PreToolUse: [{ hooks: [guard] }] };
 }
 

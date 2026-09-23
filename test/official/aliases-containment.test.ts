@@ -11,7 +11,7 @@ import { WINTER_BRAND, mcpToolName } from "@yanlinglabs/winter-agent-sdk";
 
 import { ALIASED_BUILTINS, CANONICAL_DUPLICATE_EXPOSURE, aliasTargetFor, officialToolAliases } from "../../src/official/aliases.ts";
 import { containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, resolveSavedApprovalDisposition, targetsForbiddenPath } from "../../src/official/containment.ts";
-import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
+import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createContainmentHooks, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
 
 const brand = WINTER_BRAND;
 
@@ -245,5 +245,18 @@ describe("WS-14 §10 — callback bridging", () => {
     expect(latch.claim("req-1")).toBe(false);
     expect(latch.claim("req-2")).toBe(true);
     expect(latch.claimed()).toEqual(["req-1", "req-2"]);
+  });
+});
+
+describe("review I-2: the WorktreeCreate hook", () => {
+  test("installed while worktrees are denied (the default), absent under host-replacement; it refuses with the floor's reason and reports the decision", async () => {
+    const decisions: Array<{ tool: string; target: string; reason: string }> = [];
+    const denied = createContainmentHooks({ brand: WINTER_BRAND, onDecision: (decision) => void decisions.push(decision) });
+    expect(Object.keys(denied).sort()).toEqual(["PreToolUse", "WorktreeCreate"]);
+    const hook = denied["WorktreeCreate"]![0]!.hooks[0]!;
+    await expect(hook({ hook_event_name: "WorktreeCreate", name: "agent-x" })).rejects.toThrow(/worktree creation is refused on this branch/);
+    expect(decisions).toEqual([expect.objectContaining({ tool: "WorktreeCreate", target: ".claude/worktrees/agent-x" })]);
+    const replaced = createContainmentHooks({ brand: WINTER_BRAND, containment: { worktrees: "host-replacement" } });
+    expect(Object.keys(replaced)).toEqual(["PreToolUse"]);
   });
 });

@@ -1185,6 +1185,44 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     );
   });
 
+  describe("review I-2: a workflow agent with isolation worktree, under a run home in a git repository (official leg)", () => {
+    // MEASURED before the fix: `agent(prompt, { isolation: "worktree" })` inside a workflow script is
+    // started by the workflow runtime (no `Agent` tool call for the PreToolUse floor to see) and created
+    // `<repo>/.claude/worktrees/` plus a branch in the repository's `.git`. The containment floor now
+    // installs a `WorktreeCreate` hook while worktrees are denied; the runtime asks it INSTEAD of running
+    // `git worktree add`, and the refusal fails that agent.
+    let result: { vendorDir: boolean; worktrees: string; record: string } | undefined;
+    beforeAll(async () => {
+      const script = 'export const meta = { name: "sv-wt", description: "worktree probe", phases: [{ title: "Only" }] };\nphase("Only");\nconst r = await agent("SUBAGENT-PROMPT-7f do nothing", { isolation: "worktree" });\n';
+      await withSameViewBed({ trusted: true, turns: () => [{ toolUses: [{ id: "toolu_wt", name: "Workflow", input: { script } }] }, { text: "done" }] }, async (bed) => {
+        const root = bed.fixture.root;
+        const git = (args: string[]): string =>
+          Bun.spawnSync(["git", ...args], { cwd: root, env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: bed.session.home, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } }).stdout.toString();
+        git(["init", "-q", "-b", "main"]);
+        git(["config", "user.email", "bed@example.invalid"]);
+        git(["config", "user.name", "the test bed"]);
+        git(["add", "-A"]);
+        git(["commit", "-qm", "seed"]);
+        const allow: CanUseToolLike = async (_tool, input) => ({ behavior: "allow", updatedInput: input });
+        const runHome = await bed.build("official");
+        await bed.runClaude(runHome, "s_sv_worktree", { canUseTool: allow });
+        // The workflow runs in the background; its run record lands under the run folder.
+        let record = "";
+        for (let attempt = 0; attempt < 40 && !record.includes('"status"'); attempt += 1) {
+          await Bun.sleep(250);
+          record = Bun.spawnSync(["/bin/sh", "-c", `find '${runHome.dir}/projects' -name 'wf_*.json' -exec cat {} + 2>/dev/null`]).stdout.toString();
+        }
+        result = { vendorDir: existsSync(join(root, ".claude")), worktrees: git(["worktree", "list", "--porcelain"]), record };
+        verbose("I-2 worktree", result);
+      });
+    }, TIMEOUT);
+    test("I-2: no vendor worktree directory in the repository, no extra git worktree, and the workflow's agent was refused by the WorktreeCreate hook", () => {
+      expect(result?.vendorDir).toBe(false);
+      expect((result?.worktrees ?? "").split("\n").filter((line) => line.startsWith("worktree "))).toHaveLength(1);
+      expect(result?.record).toContain("WorktreeCreate hook failed");
+    });
+  });
+
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;
