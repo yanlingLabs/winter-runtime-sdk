@@ -60,12 +60,13 @@ describe("WS-14 §8 — builtin-path containment", () => {
     expect(rows.map((row) => row.disposition)).toEqual(["redirect", "disable", "redirect", "disable", "owned-by-product", "deny"]);
     // review r1, M2: what the row SAYS and what this package DOES are two fields, because they were
     // two different things — three rows said "redirect" while nothing redirected.
-    expect(rows.map((row) => row.enforcement)).toEqual(["floor-deny", "deny-list", "floor-deny", "approval-stripped", "host-ui", "floor-deny"]);
+    // WS-21 §4.3: the saved-approval row's durable update is now rewritten to `session`, not dropped.
+    expect(rows.map((row) => row.enforcement)).toEqual(["floor-deny", "deny-list", "floor-deny", "approval-session-only", "host-ui", "floor-deny"]);
     expect(containmentDispositions(brand, { worktrees: "host-replacement", workflows: "host-replacement" }).map((row) => row.enforcement)).toEqual([
       "host-implementation",
       "deny-list",
       "host-implementation",
-      "approval-stripped",
+      "approval-session-only",
       "host-ui",
       "floor-deny",
     ]);
