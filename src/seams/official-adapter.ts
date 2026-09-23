@@ -155,6 +155,13 @@ export interface OfficialLaunchPlan {
    * is not this run folder (or a resume staging dir it has just linked the run folder into).
    */
   runHome?: OfficialRunHomeBinding;
+  /**
+   * WS-21 §3.8: THIS generation's exit reconcile, run by its spawn proxy inside the exit gate — before
+   * the exit is revealed, so before a resume's staging dir is deleted. Declared structurally (the
+   * proxy's own `TranscriptReconcile` is written in Node's types, which stay off this seam). Runs
+   * before the adapter's deployment-wide `reconcile`, if both are set.
+   */
+  reconcile?: (input: { observation: { root: { configDir: string } }; exit: { code: number | null; signal: string | null } }) => Promise<void> | void;
 }
 
 export interface OfficialResumePlan extends OfficialLaunchPlan {

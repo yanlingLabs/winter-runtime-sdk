@@ -272,19 +272,29 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     };
   };
 
-  const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string, sink: SpawnRecordSink, runHome?: OfficialRunHomeBinding): SupervisedSpawnProxy =>
-    createSupervisedSpawnProxy({
+  const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string, sink: SpawnRecordSink, runHome?: OfficialRunHomeBinding, planReconcile?: OfficialLaunchPlan["reconcile"]): SupervisedSpawnProxy => {
+    // WS-21 §3.8: the generation's own reconcile FIRST (the run home's exit reconcile), then the
+    // deployment-wide one — both inside the proxy's exit gate.
+    const reconcile: TranscriptReconcile | undefined =
+      planReconcile === undefined
+        ? policy.reconcile
+        : async (input) => {
+            await planReconcile(input);
+            await policy.reconcile?.(input);
+          };
+    return createSupervisedSpawnProxy({
       brand,
       profile,
       configuredConfigDir,
       sink,
       ...(runHome === undefined ? {} : { runHome: { dir: runHome.dir } }),
-      ...(policy.reconcile === undefined ? {} : { reconcile: policy.reconcile }),
+      ...(reconcile === undefined ? {} : { reconcile }),
       ...(policy.verifyCleanup === undefined ? {} : { verifyCleanup: policy.verifyCleanup }),
       ...(policy.spawnChild === undefined ? {} : { spawnChild: policy.spawnChild }),
       ...(policy.onCrash === undefined ? {} : { onCrash: policy.onCrash }),
       ...(policy.now === undefined ? {} : { now: policy.now }),
     });
+  };
 
   /**
    * The seam's single `spawnProxy`.
@@ -415,7 +425,7 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     // ONE SUPERVISOR PER GENERATION, bound into the options this generation is started with. A copy,
     // because the caller's plan is theirs — and the ONLY field changed is the spawn hook.
     const launchSink = sinkFor(plan);
-    const supervisor = makeProxy(plan.profile, plan.configDir, launchSink, plan.runHome);
+    const supervisor = makeProxy(plan.profile, plan.configDir, launchSink, plan.runHome, plan.reconcile);
     // The pair this launch knows and the dispatcher does not: the CONFIGURED root and, once the
     // wrapper hands the child a different one (§1 profile 2), the OBSERVED root — each registered only
     // when it names ONE generation (M-1), which a `claude-resume-<uuid>` staging root does and the

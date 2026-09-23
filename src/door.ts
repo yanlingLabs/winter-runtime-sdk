@@ -64,7 +64,8 @@ import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { hasConversationalEntry, readProviderStateSidecar } from "./store/materialized-resume.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
-import type { RunHome } from "./run-home/types.ts";
+import type { RunHome, RunHomeOutcome } from "./run-home/types.ts";
+import { runHomeExitReconciler } from "./run-home/exit.ts";
 import { runHomeAutoMemoryEnabled } from "./run-home/apply.ts";
 import type { OfficialRunHomeBinding } from "./seams/official-adapter.ts";
 
@@ -315,6 +316,12 @@ export interface OfficialLegDeps {
    * truth it just read rather than keeping a guess.
    */
   onOpened?: (runtimeKind: RuntimeKind) => void;
+  /**
+   * WS-21 §3.8: where this handle's `runHomeOutcome` reads from. The leg records `pending` at launch,
+   * then `safe`/`quarantined` from the generation's exit reconcile — or `safe` for a generation that
+   * ended without a child ever having been spawned (nothing was written, nothing can be lost).
+   */
+  recordRunHomeOutcome?: (runId: string, outcome: RunHomeOutcome) => void;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -596,6 +603,8 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
   const stream = typeof request.prompt === "string" ? undefined : createOfficialInputStream();
   let detach: (() => void) | undefined;
+  /** The launched generation, once `launch()`/`resume()` returned it (WS-21: its proxy knows whether a child ever spawned). */
+  let launched: OfficialSession | undefined;
   let sawInit = false;
   let live = false;
   let ended = false;
@@ -634,6 +643,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   const markEnded = async (status: "exited" | "unavailable"): Promise<void> => {
     if (ended) return;
     ended = true;
+    // WS-21 §3.8: a run-home generation whose child was never spawned has no working copy and no exit
+    // reconcile will ever run for it — so it is safe, now. One that did spawn is recorded by its
+    // reconcile, inside the proxy's gate, before this end was revealed.
+    const neverSpawned = launched === undefined || (launched as { supervisor?: { observation?: unknown } }).supervisor?.observation === undefined;
+    if (request.runHome !== undefined && neverSpawned) deps.recordRunHomeOutcome?.(request.runHome.runId, "safe");
     live = false;
     detach?.();
     detach = undefined;
@@ -842,11 +856,25 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // could ever be loading for.
     const resolveEndpoint = deps.resolveEndpoint ?? defaultEndpointResolver();
     const target = resolveEndpoint({ providerId: request.selection.providerId, modelKey: request.selection.modelRef, family: request.selection.family });
-    const readyStore = claudeReadyStore(shared.store, {
+    const claudeReady = claudeReadyStore(shared.store, {
       readSidecar: (key) => readProviderStateSidecar(storeHome, key),
       resolveEndpoint,
       target,
     });
+    // WS-21 §3.8: how many transcript entries THIS generation mirrored — the exit reconcile's evidence
+    // that "no working copy found" is a loss (unknown → quarantine) rather than a generation that never
+    // wrote. Counted at the one door the wrapper's mirror writes through.
+    let mirroredEntries = 0;
+    const readyStore: typeof claudeReady =
+      runHome === undefined
+        ? claudeReady
+        : {
+            ...claudeReady,
+            append: (key, entries) => {
+              mirroredEntries += entries.length;
+              return claudeReady.append(key, entries);
+            },
+          };
     const officialOptions: OfficialOptions = buildOfficialOptions(
       {
         // D4/D28: the official runtime serves CODE only — every other mode is refused by the selector
@@ -878,6 +906,18 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       cwd,
       remoteConfig,
       ...(runHomeBinding === undefined ? {} : { runHome: runHomeBinding }),
+      // WS-21 §3.8: the run home's exit reconcile, inside the proxy's gate, with the ROUTER'S OWN store.
+      ...(runHome === undefined
+        ? {}
+        : {
+            reconcile: runHomeExitReconciler({
+              shared,
+              runId: runHome.runId,
+              home: runHome.input.home,
+              mirrored: () => mirroredEntries,
+              record: (runId, outcome) => deps.recordRunHomeOutcome?.(runId, outcome),
+            }),
+          }),
     };
 
     // THE ROW EXISTS BEFORE THE CHILD DOES. The record sink writes `configDir`/`processIdentity` at the
@@ -905,9 +945,13 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // takes its own message shape), but not one element earlier than the session that consumes it.
     if (stream !== undefined) pumpCallerPrompt(request.prompt as AsyncIterable<string>, stream, () => void markEnded("unavailable").catch(() => undefined));
     let session: OfficialSession;
+    if (runHome !== undefined) deps.recordRunHomeOutcome?.(runHome.runId, "pending");
     try {
       session = resume === undefined ? deps.official.launch(plan) : deps.official.resume({ ...plan, resume, ...(request.options.forkSession === undefined ? {} : { forkSession: request.options.forkSession }) });
+      launched = session;
     } catch (error) {
+      // A GENERATION THAT NEVER LAUNCHED WROTE NOTHING: its run home is safe to dispose.
+      if (runHome !== undefined) deps.recordRunHomeOutcome?.(runHome.runId, "safe");
       // A GENERATION THAT NEVER EXISTED LEAVES NO ROW (I-3c). The row is written before the launch on
       // purpose — a host asking `listReachable()` between the launch and the first message must not be
       // told the session does not exist — but a launch that refuses synchronously (no official peer

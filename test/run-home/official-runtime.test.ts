@@ -27,6 +27,8 @@ describeRuntime("WS-21 on the pinned runtime", () => {
         const init = messages.find((message) => message["type"] === "system" && message["subtype"] === "init") as { skills?: string[] } | undefined;
         expect(init?.skills).toContain("user-skill");
         expect(JSON.stringify(bed.record.requests)).toContain("USER-INSTRUCTIONS-TOKEN-9d1e");
+        // The exit reconcile ran inside the proxy's gate, before the stream ended: the run home is safe.
+        expect(bed.sdk.runHomeOutcome(runHome.runId)).toBe("safe");
         expect(decoyUntouched(bed.session)).toBe(true);
       });
     },
@@ -46,6 +48,7 @@ describeRuntime("WS-21 on the pinned runtime", () => {
         const canonical = join(bed.sdkHome, "projects", bed.projectKey, `${backend}.jsonl`);
         expect(existsSync(canonical)).toBe(true);
         expect(readFileSync(canonical, "utf8")).toContain("FIRST-PROMPT-7a2c");
+        expect(bed.sdk.runHomeOutcome(first.runId)).toBe("safe");
 
         const second = await bed.runHome();
         await drainAll(bed.sdk.query({ prompt: "SECOND-PROMPT-51f0", options: bed.options(second, { sessionId: backend, winterSessionId: "s_resume_2" }) }));
@@ -56,6 +59,10 @@ describeRuntime("WS-21 on the pinned runtime", () => {
         expect(last).toContain("SECOND-PROMPT-51f0");
         // The placeholder was never created, and the mirror reached the canonical file.
         expect(existsSync(join(second.dir, ".absent"))).toBe(false);
+        expect(bed.sdk.runHomeOutcome(second.runId)).toBe("safe");
+        // No record was doubled by the reconcile racing the wrapper's own mirror.
+        const uuids = readFileSync(canonical, "utf8").trimEnd().split("\n").map((line) => (JSON.parse(line) as { uuid?: string }).uuid).filter((uuid) => uuid !== undefined);
+        expect(new Set(uuids).size).toBe(uuids.length);
         expect(readFileSync(canonical, "utf8")).toContain("SECOND-PROMPT-51f0");
         // A fresh home has no compatibility links: nothing was written to <home>/projects.
         expect(existsSync(join(bed.home, "projects"))).toBe(false);

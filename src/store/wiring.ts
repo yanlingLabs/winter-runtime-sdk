@@ -135,6 +135,9 @@ export const DEFAULT_MIRROR_POLICY: MirrorPolicy = Object.freeze({
 
 export type TranscriptHealth = "ok" | "repair-required";
 
+/** How many recent uuids per key the append idempotence guard remembers (WS-21 §3.8). */
+export const RECENT_UUIDS_PER_KEY = 4096;
+
 /** What a failed mirror records. COUNTS AND A CAUSE — never entry content (WS-05 §13). */
 export interface MirrorErrorRecord {
   projectKey: string;
@@ -432,6 +435,35 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
 
   const decorations = input.decorations ?? createDecorationRegistry();
   const batches = new Map<string, PendingBatch>();
+  /**
+   * The most recent uuids appended through this facade, per exact key (subpath included) — the
+   * idempotence guard above. BOUNDED, because a late duplicate is always a recent record: the last
+   * `RECENT_UUIDS_PER_KEY` are enough to catch a wrapper's final batch, and a daemon's lifetime of
+   * sessions must not grow this without limit.
+   */
+  const recentUuids = new Map<string, { set: Set<string>; order: string[] }>();
+  const dropAlreadyAppended = (key: SessionKey, entries: SessionStoreEntry[]): SessionStoreEntry[] => {
+    const id = keyOf(key);
+    let recent = recentUuids.get(id);
+    if (recent === undefined) {
+      recent = { set: new Set(), order: [] };
+      recentUuids.set(id, recent);
+    }
+    const out: SessionStoreEntry[] = [];
+    for (const entry of entries) {
+      const uuid = entry["uuid"];
+      if (typeof uuid !== "string") {
+        out.push(entry);
+        continue;
+      }
+      if (recent.set.has(uuid)) continue;
+      recent.set.add(uuid);
+      recent.order.push(uuid);
+      if (recent.order.length > RECENT_UUIDS_PER_KEY) recent.set.delete(recent.order.shift() as string);
+      out.push(entry);
+    }
+    return out;
+  };
   const sessions = new Map<string, SessionState>();
 
   const stateFor = (key: SessionKey): SessionState => {
@@ -596,8 +628,16 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
       // write to the canonical store passes through — the destination runtime's mirrored turns AND
       // the reconciler's suffix appends — so "the canonical file stays byte-pure" is enforced once.
       const stripped = stripDecorations(key, entries, decorations);
-      if (stripped.entries.length === 0) return;
-      enqueue(key, stripped.entries);
+      // WS-21 §3.8: A RECORD IS APPENDED ONCE. The exit reconcile runs inside the spawn proxy's gate,
+      // BEFORE the wrapper observes the exit — and the wrapper may still hold a final mirror batch it
+      // flushes on close. Without this, a tail the reconciler appended from the working copy would be
+      // appended again by that flush: the same uuid twice in an append-only file, which the next
+      // handoff's step 5 refuses and a resumed model reads as a repeated turn. The uuid IS the record's
+      // identity (WS-05 §5.2), so a second append of one this facade already took is dropped, whichever
+      // writer came second.
+      const fresh = dropAlreadyAppended(key, stripped.entries);
+      if (fresh.length === 0) return;
+      enqueue(key, fresh);
     },
     async load(key) {
       await settle(key);

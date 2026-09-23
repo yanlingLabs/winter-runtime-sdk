@@ -52,6 +52,8 @@ import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefuse
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
 import { RunHomeError } from "./run-home/errors.ts";
 import { applyWinterRunHome, assertRunHomeApplicable } from "./run-home/apply.ts";
+import { reconcileRootForRecovery } from "./run-home/exit.ts";
+import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { sdkHomeOf, type RunHome, type RunHomeFor, type RunHomeOutcome } from "./run-home/types.ts";
 
 /**
@@ -678,6 +680,9 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
             ...(opts.peers.claude === undefined ? {} : { mcpModule: opts.peers.claude as OfficialMcpModule }),
             ...(opts.advisor === undefined ? {} : { advisor: opts.advisor }),
             onOpened: noteOpened,
+            recordRunHomeOutcome: (runId, outcome) => {
+              runHomeOutcomes.set(runId, outcome);
+            },
           },
           // THE OFFICIAL LEG TAKES NO CAPABILITY RECORD HERE: its `mcpServers` are materialized by the
           // leg itself (`officialCapabilityServers`) and merged into the options TEMPLATE, because the
@@ -737,7 +742,18 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     },
     async reconcileRootForRecovery(root) {
       assertLive("reconcileRootForRecovery");
-      throw new RuntimeSdkError(`winter-runtime-sdk: reconcileRootForRecovery(${JSON.stringify(root)}) is declared by Contract A and implemented in L2.7b`);
+      // THE ROUTER'S OWN STORE, and the daemon's home for the quarantine (spec §3.8). A router on the
+      // pre-WS-21 layout has no shared runtime home to recover into, so it refuses rather than guess.
+      const home = opts.handoff?.winterHome;
+      if (storeHome === undefined || home === undefined) {
+        throw new RuntimeSdkError("winter-runtime-sdk: reconcileRootForRecovery needs a router created with `requireRunHome` and an explicit `handoff.winterHome` — the recovered transcript belongs in the shared runtime home under it (WS-21 §3.8)");
+      }
+      return reconcileRootForRecovery(root, {
+        shared: barrier.shared,
+        home,
+        storeHome,
+        resolveEndpoint: opts.handoff?.resolveEndpoint ?? defaultEndpointResolver(),
+      });
     },
     async dispose() {
       // IDEMPOTENT. A host that disposes twice (a shutdown path plus a signal handler) must not get
