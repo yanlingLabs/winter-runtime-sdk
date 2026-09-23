@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { buildRunHome } from "../../src/index.ts";
 import { projectWalk } from "../../src/run-home/items.ts";
+import { parseClaudeFrontmatter } from "../../src/run-home/claude-frontmatter.ts";
 import type { RunMode } from "../../src/run-home/types.ts";
 import { cleanupRunHomeBeds, inputFor, put, runHomeBed, type RunHomeBed } from "./support.ts";
 
@@ -144,10 +145,74 @@ describe("agents (copied; permissionMode removed; memory project|local → user;
       expect(lstatSync(join(agents, name)).isSymbolicLink()).toBe(false);
       expect(statSync(join(agents, name)).mode & 0o777).toBe(0o600);
     }
-    const reviewer = readFileSync(join(agents, "reviewer.md"), "utf8");
-    expect(reviewer).toBe("---\nname: reviewer\ndescription: project reviewer\nmemory: user\ntools:\n  - Read\n  - Grep\n---\n\nproject body\n");
-    const helper = readFileSync(join(agents, "helper.md"), "utf8");
-    expect(helper).toBe("---\nname: helper\ndescription: user helper\nmemory: user\n---\n\nhelper body\n");
+    // Read back the way the runtime reads it (its own split and parse).
+    const reviewer = parseClaudeFrontmatter(readFileSync(join(agents, "reviewer.md"), "utf8"))!;
+    expect(reviewer.frontmatter).toEqual({ name: "reviewer", description: "project reviewer", memory: "user", tools: ["Read", "Grep"] });
+    expect(reviewer.body).toBe("project body\n");
+    const helper = parseClaudeFrontmatter(readFileSync(join(agents, "helper.md"), "utf8"))!;
+    expect(helper.frontmatter).toEqual({ name: "helper", description: "user helper", memory: "user" });
+  });
+});
+
+// FIX ROUND 1, I1: the rewrite is made from the RUNTIME'S OWN PARSE, so no YAML spelling of
+// `permissionMode` or of a project/local `memory` reaches either runtime. Each variant below reads, by
+// the pin's own parse, as `permissionMode` set and/or `memory: project` — the copy must read as neither.
+describe("agents: every YAML spelling of permissionMode / memory is caught (I1)", () => {
+  const BOM = String.fromCharCode(0xfeff);
+  const variants: Array<[string, string]> = [
+    ["a quoted key", '---\nname: v\ndescription: d\n"permissionMode": bypassPermissions\n\'memory\': project\n---\nbody\n'],
+    ["a duplicate key (YAML keeps the last)", "---\nname: v\ndescription: d\nmemory: user\nmemory: project\n---\nbody\n"],
+    ["a flow mapping", "---\n{name: v, description: d, permissionMode: bypassPermissions, memory: project}\n---\nbody\n"],
+    ["a `<<:` merge", "---\nbase: &b {permissionMode: bypassPermissions, memory: local}\n<<: *b\nname: v\ndescription: d\n---\nbody\n"],
+    ["a leading BOM", `${BOM}---\nname: v\ndescription: d\npermissionMode: bypassPermissions\nmemory: project\n---\nbody\n`],
+    ["mixed CRLF", "---\r\nname: v\r\ndescription: d\npermissionMode: bypassPermissions\r\nmemory: project\n---\r\nbody\r\n"],
+    ["a `!!str` tag", "---\nname: v\ndescription: d\npermissionMode: !!str bypassPermissions\nmemory: !!str project\n---\nbody\n"],
+    ["a `>-` block scalar", "---\nname: v\ndescription: d\npermissionMode: >-\n  bypassPermissions\nmemory: >-\n  project\n---\nbody\n"],
+    ["an anchor and alias", "---\nm: &scope project\nname: v\ndescription: d\nmemory: *scope\npermissionMode: &pm bypassPermissions\n---\nbody\n"],
+    ["a value on the next line", "---\nname: v\ndescription: d\npermissionMode:\n  bypassPermissions\nmemory:\n  project\n---\nbody\n"],
+  ];
+  for (const [label, text] of variants) {
+    test(label, async () => {
+      // The variant IS a bypass of a line editor: the runtime's own parse sees the keys.
+      const before = parseClaudeFrontmatter(text)!;
+      expect(before.frontmatter["permissionMode"] !== undefined || before.frontmatter["memory"] === "project" || before.frontmatter["memory"] === "local").toBe(true);
+      const bed = runHomeBed();
+      const p = project(bed);
+      put(join(p.rootDot, "agents", "v.md"), text);
+      const runHome = await buildRunHome(inputFor(bed, { cwd: p.cwd, trustedProjectRoot: p.root, gitRoot: p.root }));
+      const copied = join(runHome.dir, "agents", "v.md");
+      expect(existsSync(copied)).toBe(true);
+      const after = parseClaudeFrontmatter(readFileSync(copied, "utf8"))!;
+      expect(after.error).toBeUndefined();
+      expect("permissionMode" in after.frontmatter).toBe(false);
+      expect(after.frontmatter["memory"] === undefined || after.frontmatter["memory"] === "user").toBe(true);
+      expect(after.frontmatter["name"]).toBe("v");
+      expect(runHome.report.skippedAgents).toEqual([]);
+    });
+  }
+
+  test("a frontmatter the runtime cannot parse is skipped and reported, never copied", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    put(join(p.rootDot, "agents", "broken.md"), "---\nname: broken\n  bad: [unclosed\n\t- x: {\n---\nbody\n");
+    expect(parseClaudeFrontmatter(readFileSync(join(p.rootDot, "agents", "broken.md"), "utf8"))!.error).toBeDefined();
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.cwd, trustedProjectRoot: p.root, gitRoot: p.root }));
+    expect(readdirSync(join(runHome.dir, "agents"))).toEqual([]);
+    expect(runHome.report.skippedAgents).toEqual([{ path: join(p.rootDot, "agents", "broken.md"), reason: "unparseable" }]);
+  });
+
+  test("identity comes from the same parse: a quoted `name` key names the agent", async () => {
+    const bed = runHomeBed();
+    put(join(bed.sdk, "agents", "file-stem.md"), '---\n"name": parsed-name\ndescription: d\n---\nbody\n');
+    const runHome = await buildRunHome(inputFor(bed));
+    expect(readdirSync(join(runHome.dir, "agents"))).toEqual(["parsed-name.md"]);
+  });
+
+  test("a file with no frontmatter block is copied as-is (the runtime reads no keys from it)", async () => {
+    const bed = runHomeBed();
+    put(join(bed.sdk, "agents", "plain.md"), "permissionMode: bypassPermissions\nno frontmatter here\n");
+    const runHome = await buildRunHome(inputFor(bed));
+    expect(readFileSync(join(runHome.dir, "agents", "plain.md"), "utf8")).toBe("permissionMode: bypassPermissions\nno frontmatter here\n");
   });
 });
 

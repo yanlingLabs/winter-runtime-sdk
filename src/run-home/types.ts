@@ -71,6 +71,11 @@ export interface RunHomeReport {
   unconditionalRules: string[];
   /** `@imports` a project or local instructions file named outside the project root. */
   droppedImports: string[];
+  /**
+   * Agent definitions not copied (fix round 1, I1): the runtime's own parse of the frontmatter failed,
+   * the rewrite could not be proved to read back as intended, or this process has no `Bun.YAML`.
+   */
+  skippedAgents: { path: string; reason: "unparseable" | "no-yaml-parser" }[];
 }
 
 export interface RunHome {

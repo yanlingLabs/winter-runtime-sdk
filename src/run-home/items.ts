@@ -25,7 +25,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { RunHomeBuildContext } from "./build.ts";
-import { joinFrontmatter, removeKey, replaceKey, scalarOf, splitFrontmatter } from "./frontmatter.ts";
+import { parseClaudeFrontmatter, serializeClaudeFrontmatter } from "./claude-frontmatter.ts";
 
 type Tier = "user" | "self" | "project";
 
@@ -313,49 +313,79 @@ async function exists(path: string): Promise<boolean> {
 /** A file-system-safe agent file name from its identity. */
 const agentFileName = (identity: string): string => `${identity.replace(/[^A-Za-z0-9._-]/g, "-")}.md`;
 
-async function agentCandidates(scope: ResolveScope, dir: string, tier: Tier, from?: string): Promise<Candidate[]> {
-  const out: Candidate[] = [];
+/** One agent candidate, already rewritten (or refused) from the runtime's own parse of it. */
+interface AgentCandidate extends Candidate {
+  /** The rewritten definition, or the reason it is skipped. */
+  rewritten: { ok: true; text: string } | { ok: false; reason: "unparseable" | "no-yaml-parser" };
+}
+
+async function agentCandidates(scope: ResolveScope, dir: string, tier: Tier, from?: string): Promise<AgentCandidate[]> {
+  const out: AgentCandidate[] = [];
   for (const rel of await markdownTree(dir)) {
     const path = join(dir, rel);
     const target = await resolveCandidate(scope, tier, path, "markdown");
     if (target === undefined) continue;
     const text = await readFile(target, "utf8");
-    const doc = splitFrontmatter(text);
-    const declared = doc === undefined ? undefined : scalarOf(doc.lines, "name");
-    const name = declared !== undefined && declared.length > 0 ? declared : basename(rel, ".md");
-    out.push({ name, path, target, tier, ...(from === undefined ? {} : { from }) });
+    const parsed = parseClaudeFrontmatter(text);
+    // IDENTITY FROM THE SAME PARSE THE RUNTIME USES: `name` when set (stringified, as the pin does),
+    // else the file stem.
+    const declared = parsed === undefined || parsed.frontmatter["name"] == null ? "" : String(parsed.frontmatter["name"]);
+    const name = declared.length > 0 ? declared : basename(rel, ".md");
+    out.push({ name, path, target, tier, rewritten: rewriteAgentDefinition(text), ...(from === undefined ? {} : { from }) });
   }
   return out;
 }
 
 /**
- * F19c: an agent's definition, rewritten for the run folder.
+ * F19c: an agent's definition, rewritten for the run folder FROM THE RUNTIME'S OWN PARSE of it
+ * (`claude-frontmatter.ts` — the pin's split, BOM strip, YAML parse and fallback, step for step).
  *
  * `permissionMode` is removed (the daemon has always stripped it — an agent must not pick its own
- * approval policy), and a `memory: project|local` scope becomes `memory: user`: the project scopes
- * write `<projectRoot>/.claude/agent-memory[-local]/`, i.e. into the repository, while `user` writes the
- * config dir's `agent-memory/` — the persistent set, linked into `sdk/agent-memory`.
+ * approval policy), and a `memory` scope other than `user` is rewritten: `project`/`local` become
+ * `user` (they would write `<projectRoot>/.claude/agent-memory[-local]/`, i.e. into the repository;
+ * `user` writes the config dir's `agent-memory/`, the persistent set linked into `sdk/agent-memory`),
+ * and any other value — which the runtime ignores — is dropped.
+ *
+ * A file WITH a frontmatter block is always re-serialised from the parsed object (so both runtimes read
+ * one unambiguous block, whatever spelling the author used), and the result is proved to read back as
+ * that object by the runtime's split, the strict split and the runtime's parse. A block the runtime
+ * cannot parse, a result that does not prove out, or a process with no `Bun.YAML` is SKIPPED (reported):
+ * a definition whose reading cannot be promised is not handed to either runtime. A file with no
+ * frontmatter block is copied as-is — the runtime reads no keys from it.
  */
-export function rewriteAgentDefinition(text: string): string {
-  const doc = splitFrontmatter(text);
-  if (doc === undefined) return text;
-  removeKey(doc.lines, "permissionMode");
-  const memory = scalarOf(doc.lines, "memory");
-  if (memory === "project" || memory === "local") replaceKey(doc.lines, "memory", ["memory: user"]);
-  return joinFrontmatter(doc);
+export function rewriteAgentDefinition(text: string): { ok: true; text: string } | { ok: false; reason: "unparseable" | "no-yaml-parser" } {
+  const parsed = parseClaudeFrontmatter(text);
+  if (parsed === undefined) return { ok: false, reason: "no-yaml-parser" };
+  if (!parsed.matched) return { ok: true, text };
+  if (parsed.error !== undefined) return { ok: false, reason: "unparseable" };
+  const cleaned: Record<string, unknown> = { ...parsed.frontmatter };
+  delete cleaned["permissionMode"];
+  const memory = cleaned["memory"];
+  if (memory === "project" || memory === "local") cleaned["memory"] = "user";
+  else if (memory !== undefined && memory !== "user") delete cleaned["memory"];
+  const serialized = serializeClaudeFrontmatter(cleaned, parsed.body);
+  return serialized === undefined ? { ok: false, reason: "unparseable" } : { ok: true, text: serialized };
 }
 
 async function buildAgents(context: RunHomeBuildContext, scope: ResolveScope, walk: readonly string[]): Promise<void> {
   const { sdkHome, dir, brand } = context;
-  const ordered: Candidate[] = [...(await agentCandidates(scope, join(sdkHome, "agents"), "user"))];
+  const ordered: AgentCandidate[] = [...(await agentCandidates(scope, join(sdkHome, "agents"), "user"))];
   // Project beats user; among project dirs the NEAREST is listed last so it wins (claude's own
   // precedence gives no rule between two project dirs — a nested dir's definition is the more specific).
   for (const walkDir of [...walk].reverse()) ordered.push(...(await agentCandidates(scope, join(walkDir, brand.projectDirName, "agents"), "project", walkDir)));
-  const winners = lastWins(ordered);
+  // A definition that cannot be rewritten is skipped BEFORE the clash is settled, so it can neither win
+  // nor shadow a lower tier's valid definition of the same name.
+  const usable: AgentCandidate[] = [];
+  for (const candidate of ordered) {
+    if (candidate.rewritten.ok) usable.push(candidate);
+    else context.report.skippedAgents.push({ path: candidate.path, reason: candidate.rewritten.reason });
+  }
+  const winners = lastWins(usable) as Map<string, AgentCandidate>;
   const agentsDir = join(dir, "agents");
   await mkdir(agentsDir, { mode: PRIVATE_DIR });
   for (const candidate of [...winners.values()].sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (!candidate.rewritten.ok) continue;
     const destination = join(agentsDir, agentFileName(candidate.name));
-    await writeFile(destination, rewriteAgentDefinition(await readFile(candidate.target, "utf8")), { mode: PRIVATE_FILE, flag: "wx" });
+    await writeFile(destination, candidate.rewritten.text, { mode: PRIVATE_FILE, flag: "wx" });
   }
 }
