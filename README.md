@@ -33,6 +33,56 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
+## Run home (WS-21)
+
+**Unreleased (0.0.12).** Both agent runtimes read ONE shared home, `<home>/sdk`, in the official
+runtime's config-dir formats with the brand's names. Neither reads it directly: before every
+generation a per-run folder is built, `<home>/cache/runs/<runId>`, and the child is pointed at it.
+This section is the contract a host builds against (Contract A); `src/run-home/types.ts` is its source.
+
+**The exports** (package root):
+
+```ts
+type RunMode = "code" | "dispatch" | "chat";
+type RunLeg = "winter" | "official";
+interface RunHomeInput {
+  home: string;                          // the daemon's home; the shared home is sdkHomeOf(home)
+  mode: RunMode;
+  dispatchChild: boolean;                // a code-mode dispatch child: output style skipped
+  leg: RunLeg;
+  cwd: string;
+  trustedProjectRoot: string | null;     // repoRootFor(cwd) when trusted, else null
+  gitRoot: string | null;                // the canonical git root (the local settings tier)
+  mcpDisabled: readonly string[];
+  reservedMcpServerNames: readonly string[];
+  memoryDir: string;                     // the auto-memory directory for this incarnation
+  brand?: RunHomeBrand;                  // optional; absent = the Winter SDK's own profile
+}
+interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules; droppedImports }
+interface RunHome { runId; dir; sdkHome; input; effectiveSettings; report; dispose(): Promise<void> }
+const RUN_HOME_CONTRACT_VERSION = 1;
+const RUN_HOME_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"];
+function sdkHomeOf(home: string): string;                                  // join(home, "sdk")
+function buildRunHome(input: RunHomeInput): Promise<RunHome>;
+function fsRootAnchored(absPath: string): string;                          // "/" + absPath ("//Users/x")
+function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?): string[];
+type RunHomeOutcome = "safe" | "quarantined" | "pending";
+type RunHomeFor = (ctx: { sessionId: string; leg: RunLeg; cwd: string; mode: RunMode }) => Promise<RunHome>;
+class RunHomeError extends RuntimeSdkError { code: RunHomeErrorCode }    // forwarded as data.code
+function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; // the one reconcile (read-only for hosts)
+```
+
+**The attach points.**
+
+| | |
+|---|---|
+| `createRuntimeSdk({ requireRunHome: true })` | Opt-in, and that is the feature detection: without it an existing host is served unchanged. With it, a generation with no `runtime.runHome` is refused `run_home_required` on BOTH overloads, synchronously, before either leg is touched. |
+| `createRuntimeSdk({ runHomeFor })` | The host's builder for the router's OWN cold-resume path (messaging delivery to an exited Winter session). Absent with `requireRunHome`, that path answers a typed non-retryable `unavailable`. |
+| `query({ prompt, options: { ...options, runtime: { runHome } } })` | The Winter overload (still typed `Query`). The host awaits `buildRunHome` in `optionsFor` and passes the result. |
+| `query({ prompt, options: { ...options, runtime: { selection, official, runHome } } })` | The official overload. The host awaits `buildRunHome` in the official session's `open()`. |
+| `sdk.runHomeOutcome(runId)` | `safe` → the host may `runHome.dispose()`; `quarantined` → its working copy was copied to `<home>/cache/quarantine/`; `pending` → still running (or unknown). |
+| `sdk.reconcileRootForRecovery(root)` | The crash-recovery door for a recorded root: `clean` / `appended` / `quarantined`. The host never calls `reconcileLocalWriteRoot` itself. |
+
 **What `0.0.11` changes** (a security fix: the official leg no longer loads the session's
 own project directory as a plugin; no peer floor change, no devDependency change):
 
