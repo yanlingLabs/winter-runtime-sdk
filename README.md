@@ -69,7 +69,9 @@ function sdkHomeOf(home: string): string;                                  // jo
 function buildRunHome(input: RunHomeInput): Promise<RunHome>;
 function fsRootAnchored(absPath: string): string;                          // "/" + absPath ("//Users/x")
 function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
-  walk?: { cwd: string; userHome?: string }): string[];   // project item dirs at ANY depth: //<root>/**/.winter/<kind>/** (`walk` adds nothing)
+  /** @deprecated ignored */ walk?: { cwd: string; userHome?: string }): string[];
+                                         // project item dirs at ANY depth: //<root>/**/.winter/<kind>/**, every path part escaped
+function escapeRulePath(path: string): string;                             // `[` `]` `*` `\` backslash-escaped for a rule pattern ("[wip]" → "\[wip\]"); `?` stays raw (measured)
 type RunHomeOutcome = "safe" | "quarantined" | "pending";
 interface RecoveryTranscriptOutcome {
   projectKey: string; sessionId: string; subpath?: string;             // subpath: "subagents/agent-<id>"

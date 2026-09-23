@@ -1,5 +1,6 @@
-// WS-21 §3.4.2: THE PROJECT WALK — shared by the item merge and the protected-path rules, so the set of
-// directories whose items are LOADED and the set whose items are PROTECTED can never differ.
+// WS-21 §3.4.2: THE PROJECT WALK — the directories whose items the run home LOADS (items, rules,
+// instructions). The protected-path rules no longer derive from it: they cover the trusted project's
+// item dirs at ANY depth under the root (C1), a superset of every walk this root can produce.
 import { realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 

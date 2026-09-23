@@ -59,6 +59,20 @@ describe("WS-21 Contract A: helpers and constants", () => {
     expect(router.protectedPathRules("/h/sdk", null).some((rule) => rule.includes("//repo"))).toBe(false);
   });
 
+  test("protectedPathRules: glob metacharacters in a path are escaped the way the pinned matcher reads them (minors round, item 2)", () => {
+    // MEASURED on the pin: `[`/`]` open a character class unless backslash-escaped, `*` matches itself
+    // either way but only exactly when escaped; `?` must stay RAW (an escaped `\?` never matches);
+    // `{}`, `!`, `(`, `)`, `#` and spaces are literal as written.
+    const rules = router.protectedPathRules("/h/[s]dk", "/x/[wip] a*b?c{d}!(e)#f");
+    expect(rules).toContain("Write(//x/\\[wip\\] a\\*b?c{d}!(e)#f/**/.winter/skills/**)");
+    expect(rules).toContain("Edit(//h/\\[s\\]dk/skills/**)");
+    expect(rules).toContain("Edit(//h/\\[s\\]dk/WINTER.md)");
+    // A backslash in a path is escaped too (gitignore's own escape character).
+    expect(router.protectedPathRules("/h/sdk", "/x/a\\b")).toContain("Write(//x/a\\\\b/**/.winter/skills/**)");
+    // The helper itself, exported for a host that spells rules over the same paths.
+    expect(router.escapeRulePath("/x/[a]*b?\\c")).toBe("/x/\\[a\\]\\*b?\\\\c");
+  });
+
   test("protectedPathRules: the walk adds nothing any more — every walk dir is under the root, which the any-depth rule already covers (C1)", () => {
     const withWalk = router.protectedPathRules("/h/sdk", "/repo", undefined, { cwd: "/repo/a/b", userHome: "/home/u" });
     expect(withWalk).toEqual(router.protectedPathRules("/h/sdk", "/repo"));

@@ -523,9 +523,8 @@ function protectedAskRulesFor(runHome: RunHome): string[] {
   };
   const brand = runHomeBrandOf(runHome.input);
   const root = runHome.input.trustedProjectRoot;
-  const cwd = runHome.input.cwd;
   // The trusted project's item dirs at ANY depth under the root (C1), in both spellings.
-  const rules = [...protectedPathRules(runHome.sdkHome, root, brand, { cwd }), ...protectedPathRules(real(runHome.sdkHome), root === null ? null : real(root), brand, { cwd: real(cwd) })];
+  const rules = [...protectedPathRules(runHome.sdkHome, root, brand), ...protectedPathRules(real(runHome.sdkHome), root === null ? null : real(root), brand)];
   return [...new Set(rules)];
 }
 

@@ -43,7 +43,7 @@ interface Candidate {
 const PRIVATE_DIR = 0o700;
 const PRIVATE_FILE = 0o600;
 
-// The walk and the containment test live in `walk.ts` (the protected-path rules need them too).
+// The walk and the containment test live in `walk.ts` (shared with the instructions and settings builders).
 export { isWithin, projectWalk } from "./walk.ts";
 import { isWithin, projectWalk } from "./walk.ts";
 
