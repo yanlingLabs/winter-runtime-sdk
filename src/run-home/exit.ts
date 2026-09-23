@@ -14,19 +14,26 @@
 // A quarantined root's `projects/` is COPIED to `<home>/cache/quarantine/<ts>-<label>/projects` before
 // the exit is revealed: the evidence outlives the staging dir the wrapper is about to delete.
 //
-// RECOVERY (after a crash). The in-memory decorations and the mirror's pending state died with the
-// process, so the prefix proof is rebuilt: the claude-ready copy the root was staged from is
-// RECOMPUTED (`toClaudeReady` over the canonical file plus its provider-state sidecar) and the working
-// copy is compared against it. A root whose canonical file cannot be proven a prefix is quarantined —
-// the documented outcome, never a guess.
+// RECOVERY (after a crash, or Migration C over a pre-WS-21 spool). The in-memory decorations and the
+// mirror's pending state died with the process, so the prefix proof is rebuilt PER TRANSCRIPT: the
+// claude-ready copy the root was staged from is RECOMPUTED (`toClaudeReady` over the canonical file plus
+// its provider-state sidecar) and the working copy is compared against it. Each transcript gets its own
+// outcome (I6) — one unprovable transcript never quarantines the rest of the root:
+//
+//   match                                          → clean
+//   canonical behind, the tail provably appendable → appended
+//   canonical ahead, the working copy a PREFIX     → canonical-ahead (nothing to append, nothing lost:
+//                                                    the history moved on — a resume through staging,
+//                                                    a continuation on the other leg)
+//   anything unprovable                            → quarantined (that transcript's file is copied out)
 import { cpSync, existsSync, lstatSync, mkdirSync } from "node:fs";
-import { basename, join } from "node:path";
-import type { SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
+import { basename, dirname, join, relative } from "node:path";
+import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 import { toClaudeReady, type ContinuityEndpoint, type MessageOrigin } from "@yanlinglabs/winter-provider-runtime";
 
 import { RunHomeError } from "./errors.ts";
 import type { RunHomeOutcome } from "./types.ts";
-import { compareTranscriptTail, reconcileLocalWriteRoot, scanLocalWriteRoot } from "../store/reconcile.ts";
+import { compareTranscriptTail, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge } from "../store/reconcile.ts";
 import { HANDOFF_ENTRY_LABEL, readProviderStateSidecar } from "../store/materialized-resume.ts";
 import type { SharedSessionStore } from "../store/wiring.ts";
 
@@ -90,6 +97,49 @@ export function runHomeExitReconciler(input: RunHomeExitReconcilerInput): (args:
   };
 }
 
+/** One transcript's recovery outcome (I6). */
+export interface RecoveryTranscriptOutcome {
+  projectKey: string;
+  sessionId: string;
+  /** `subagents/agent-<id>` for a subagent transcript; absent for the session's own. */
+  subpath?: string;
+  outcome: "clean" | "appended" | "canonical-ahead" | "quarantined";
+  /** Entries appended to the canonical file (0 unless `appended`). */
+  appended: number;
+  /** Why a transcript was quarantined. */
+  reason?: string;
+}
+
+/** `reconcileRootForRecovery`'s answer: the root outcome, and every transcript's own (I6). */
+export interface RecoveryReport {
+  /** `quarantined` if any transcript was; else `appended` if any tail was appended; else `clean`. */
+  outcome: "clean" | "appended" | "quarantined";
+  transcripts: RecoveryTranscriptOutcome[];
+  /** The quarantine dir holding the quarantined transcripts' copies, when any were. */
+  quarantine?: string;
+}
+
+/**
+ * Copies the named transcripts (paths under `root`) to `<home>/cache/quarantine/<ts>-<label>/`, keeping
+ * their path relative to the root. The same link refusals as `quarantineRoot`.
+ */
+export function quarantineTranscripts(root: string, home: string, label: string, paths: readonly string[], now: Date = new Date()): string {
+  const cache = join(home, "cache");
+  const quarantine = join(cache, "quarantine");
+  for (const path of [cache, quarantine]) {
+    if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new RunHomeError("run_home_link_refused", `${path} is a symbolic link; a quarantined working copy is never written through one`);
+    if (!existsSync(path)) mkdirSync(path, { mode: PRIVATE_DIR });
+  }
+  const destination = join(quarantine, `${stamp(now)}-${label}`);
+  mkdirSync(destination, { mode: PRIVATE_DIR });
+  for (const path of paths) {
+    const target = join(destination, relative(root, path));
+    mkdirSync(dirname(target), { recursive: true, mode: PRIVATE_DIR });
+    cpSync(path, target, { dereference: false });
+  }
+  return destination;
+}
+
 /** What `reconcileRootForRecovery` needs from the handle. */
 export interface RecoveryInput {
   shared: SharedSessionStore;
@@ -129,33 +179,72 @@ function isHandoffNote(entry: SessionStoreEntry): boolean {
   return typeof content === "string" && content.startsWith(`[${HANDOFF_ENTRY_LABEL}`);
 }
 
-/** Spec §3.8's recovery door. */
-export async function reconcileRootForRecovery(root: string, input: RecoveryInput): Promise<"clean" | "appended" | "quarantined"> {
+/**
+ * Spec §3.8's recovery door, PER TRANSCRIPT (I6). The proof is the judge `reconcileLocalWriteRoot`
+ * asks before it appends anything; the append, the re-read and the per-session repair flag are that
+ * one function's, as everywhere else. A session's flag is cleared only when every one of its
+ * transcripts came back level; the quarantined transcripts' files are copied out and nothing of
+ * theirs is ever appended.
+ */
+export async function reconcileRootForRecovery(root: string, input: RecoveryInput): Promise<RecoveryReport> {
   const now = input.now ?? (() => new Date());
-  const quarantined = (): "quarantined" => {
-    quarantineRoot(root, input.home, basename(root), now());
-    return "quarantined";
-  };
-  try {
-    for (const transcript of scanLocalWriteRoot(root)) {
-      await input.shared.settle(transcript.key);
-      const canonical = ((await input.shared.store.load(transcript.key)) ?? []).filter((entry) => entry["type"] !== "agent_metadata");
-      const sidecar = transcript.key.subpath === undefined ? await readProviderStateSidecar(input.storeHome, transcript.key) : [];
-      const expected = recomputedClaudeReadyLines(canonical, sidecar, input.resolveEndpoint);
-      if (expected === undefined) return quarantined();
-      const comparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: expected, isDecoration: (uuid) => input.shared.decorations.has(transcript.key, uuid) });
-      if (comparison.kind === "diverged" || comparison.kind === "canonical-ahead") return quarantined();
-      // A HANDOFF NOTE IN THE TAIL IS NOT THE SESSION'S OWN LINE. The barrier's step 8 stages its note as
-      // a separate trailing entry of the copy, registered as a copy-only decoration — and that registry
-      // died with the process. Appending it now would wash a decoration into the byte-pure canonical
-      // file, so a tail that carries one cannot be proved the session's and is quarantined instead.
-      if (comparison.kind === "canonical-behind" && comparison.missing.some(isHandoffNote)) return quarantined();
+  const judge: TranscriptJudge = async (transcript) => {
+    const canonical = ((await input.shared.store.load(transcript.key)) ?? []).filter((entry) => entry["type"] !== "agent_metadata");
+    const sidecar = transcript.key.subpath === undefined ? await readProviderStateSidecar(input.storeHome, transcript.key) : [];
+    const expected = recomputedClaudeReadyLines(canonical, sidecar, input.resolveEndpoint);
+    if (expected === undefined) return { exclude: "the claude-ready copy cannot be recomputed record-for-record from the canonical file, so no prefix can be proved" };
+    const isDecoration = (uuid: string): boolean => input.shared.decorations.has(transcript.key, uuid);
+    const comparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: expected, isDecoration });
+    if (comparison.kind === "diverged") return { exclude: comparison.reason };
+    if (comparison.kind === "canonical-ahead") {
+      // NOTHING TO APPEND ONLY WHEN NOTHING IS LOST: the working copy must be a prefix of the canonical
+      // history. A copy with a line the canonical history moved past cannot be appended provably.
+      return localIsCanonicalPrefix({ localPath: transcript.path, canonicalLines: expected, isDecoration })
+        ? "level"
+        : { exclude: "the canonical file moved on past a line only the working copy has, so that line cannot be appended provably" };
     }
-    const report = await reconcileLocalWriteRoot(root, { shared: input.shared });
-    if (report.status === "diverged") return quarantined();
-    return report.appended > 0 ? "appended" : "clean";
+    // A HANDOFF NOTE IN THE TAIL IS NOT THE SESSION'S OWN LINE. The barrier's step 8 stages its note as
+    // a separate trailing entry of the copy, registered as a copy-only decoration — and that registry
+    // died with the process. Appending it now would wash a decoration into the byte-pure canonical
+    // file, so a tail that carries one cannot be proved the session's and is quarantined instead.
+    if (comparison.kind === "canonical-behind" && comparison.missing.some(isHandoffNote)) return { exclude: "the tail carries the barrier's staged handoff note, which is never washed back into the canonical file" };
+    return "reconcile";
+  };
+
+  let transcripts: RecoveryTranscriptOutcome[];
+  const toQuarantine: string[] = [];
+  const outcomeOf = (key: SessionKey, rest: Omit<RecoveryTranscriptOutcome, "projectKey" | "sessionId" | "subpath">): RecoveryTranscriptOutcome => ({
+    projectKey: key.projectKey,
+    sessionId: key.sessionId,
+    ...(key.subpath === undefined ? {} : { subpath: key.subpath }),
+    ...rest,
+  });
+  try {
+    const report = await reconcileLocalWriteRoot(root, { shared: input.shared, judge });
+    transcripts = report.transcripts.map((transcript) => {
+      if (transcript.verdict === "excluded") {
+        toQuarantine.push(transcript.localPath);
+        return outcomeOf(transcript.key, { outcome: "quarantined", appended: 0, reason: transcript.reason ?? "unprovable" });
+      }
+      if (transcript.verdict === "level") return outcomeOf(transcript.key, { outcome: "canonical-ahead", appended: 0 });
+      if (transcript.appended > 0) return outcomeOf(transcript.key, { outcome: "appended", appended: transcript.appended });
+      if (transcript.comparison.kind === "match") return outcomeOf(transcript.key, { outcome: "clean", appended: 0 });
+      // The ordinary path came back not level (the re-read after the append disagreed).
+      toQuarantine.push(transcript.localPath);
+      return outcomeOf(transcript.key, { outcome: "quarantined", appended: 0, reason: `the canonical file is not level with the working copy after the append (${transcript.comparison.kind})` });
+    });
   } catch (error) {
     if (error instanceof RunHomeError) throw error;
-    return quarantined();
+    // THE RECONCILE ITSELF FAILED: nothing about any transcript is proven, so every one is quarantined.
+    const reason = `the reconcile could not complete: ${error instanceof Error ? error.message : String(error)}`;
+    transcripts = scanLocalWriteRoot(root).map((transcript) => {
+      toQuarantine.push(transcript.path);
+      return outcomeOf(transcript.key, { outcome: "quarantined", appended: 0, reason });
+    });
   }
+
+  let quarantine: string | undefined;
+  if (toQuarantine.length > 0) quarantine = quarantineTranscripts(root, input.home, basename(root), toQuarantine, now());
+  const outcome = transcripts.some((transcript) => transcript.outcome === "quarantined") ? "quarantined" : transcripts.some((transcript) => transcript.outcome === "appended") ? "appended" : "clean";
+  return { outcome, transcripts, ...(quarantine === undefined ? {} : { quarantine }) };
 }

@@ -196,6 +196,20 @@ export function compareTranscriptTail(args: { localPath: string; canonicalLines:
   return { kind: "canonical-behind", lines: canonical.length, missing };
 }
 
+/**
+ * I6: is the local copy a record-for-record PREFIX of the canonical lines? The one question
+ * `canonical-ahead` leaves open (`compareTranscriptTail` answers it before comparing a single line):
+ * a local copy that is a prefix holds nothing the canonical file lacks — the canonical history simply
+ * moved on after it (a resume through staging, a continuation on the other leg) — while one that is
+ * not holds a line no append can place.
+ */
+export function localIsCanonicalPrefix(args: { localPath: string; canonicalLines: readonly string[]; isDecoration?: (uuid: string) => boolean }): boolean {
+  const local = withoutDecorations(completeLines(args.localPath), args.isDecoration);
+  if (local.length > args.canonicalLines.length) return false;
+  for (let i = 0; i < local.length; i++) if (!sameRecord(args.canonicalLines[i]!, local[i]!)) return false;
+  return true;
+}
+
 // --- reconciliation --------------------------------------------------------------------------------
 
 export interface TranscriptReconcileOutcome {
@@ -203,6 +217,10 @@ export interface TranscriptReconcileOutcome {
   localPath: string;
   comparison: TailComparison;
   appended: number;
+  /** Set when a `judge` decided this transcript's fate instead of the comparison (I6). */
+  verdict?: "level" | "excluded";
+  /** Why a judged transcript was excluded. */
+  reason?: string;
 }
 
 export interface ReconcileReport {
@@ -224,10 +242,20 @@ export class TranscriptReconcileError extends RuntimeSdkError {
   }
 }
 
+/**
+ * I6: a per-transcript verdict, asked BEFORE anything is appended. `reconcile` — the ordinary path
+ * (append a behind tail; a match is level); `level` — nothing to append and nothing lost (a proven
+ * canonical-ahead prefix); `{ exclude }` — unprovable: never appended, never level, the session's flag
+ * stays. A judge that throws excludes that transcript.
+ */
+export type TranscriptJudge = (transcript: LocalTranscript, comparison: TailComparison) => Promise<"reconcile" | "level" | { exclude: string }>;
+
 export interface TranscriptReconcilerInput {
   shared: SharedSessionStore;
   /** Restricts reconciliation to one session; omitted = every transcript under the root. */
   only?: { projectKey: string; sessionId: string };
+  /** Recovery's per-transcript proof (WS-21 §3.8, I6). Absent = every transcript takes the ordinary path. */
+  judge?: TranscriptJudge;
 }
 
 /**
@@ -259,17 +287,38 @@ export async function reconcileLocalWriteRoot(root: string, input: TranscriptRec
   const cleared: SessionKey[] = [];
   let appended = 0;
   let diverged = false;
+  /** The sessions (by `sessionKeyString`) with at least one transcript that did not come back level. */
+  const unlevel = new Set<string>();
 
   for (const transcript of transcripts) {
     await shared.settle(transcript.key);
     const isDecoration = (uuid: string): boolean => shared.decorations.has(transcript.key, uuid);
     const comparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: await canonicalLines(shared, transcript.key), isDecoration });
+    if (input.judge !== undefined) {
+      let verdict: Awaited<ReturnType<TranscriptJudge>>;
+      try {
+        verdict = await input.judge(transcript, comparison);
+      } catch (error) {
+        verdict = { exclude: `the proof itself failed: ${error instanceof Error ? error.message : String(error)}` };
+      }
+      if (verdict === "level") {
+        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: 0, verdict: "level" });
+        continue;
+      }
+      if (verdict !== "reconcile") {
+        diverged = true;
+        unlevel.add(sessionKeyString(transcript.key));
+        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: 0, verdict: "excluded", reason: verdict.exclude });
+        continue;
+      }
+    }
     if (comparison.kind === "canonical-behind" && comparison.missing.length > 0) {
       await shared.store.append(transcript.key, comparison.missing);
       await shared.settle(transcript.key);
       const after = compareTranscriptTail({ localPath: transcript.path, canonicalLines: await canonicalLines(shared, transcript.key), isDecoration });
       if (after.kind !== "match") {
         diverged = true;
+        unlevel.add(sessionKeyString(transcript.key));
         outcomes.push({ key: transcript.key, localPath: transcript.path, comparison: after, appended: 0 });
         continue;
       }
@@ -277,18 +326,21 @@ export async function reconcileLocalWriteRoot(root: string, input: TranscriptRec
       outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: comparison.missing.length });
       continue;
     }
-    if (comparison.kind === "diverged" || comparison.kind === "canonical-ahead") diverged = true;
+    if (comparison.kind === "diverged" || comparison.kind === "canonical-ahead") {
+      diverged = true;
+      unlevel.add(sessionKeyString(transcript.key));
+    }
     outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: 0 });
   }
 
-  if (!diverged) {
-    // The flag exists to block a handoff until the canonical store is reconciled (WS-14 §5). It is
-    // cleared per SESSION, and only when every one of that session's transcripts — its own and its
-    // subagents' — came back level.
-    for (const key of uniqueSessions(transcripts.map((t) => t.key))) {
-      shared.markReconciled(key, `reconciled against ${root}`);
-      cleared.push(key);
-    }
+  // The flag exists to block a handoff until the canonical store is reconciled (WS-14 §5). It is
+  // cleared per SESSION, and only when every one of that session's transcripts — its own and its
+  // subagents' — came back level (I6: another session's divergence in the same root no longer holds a
+  // level session's flag).
+  for (const key of uniqueSessions(transcripts.map((t) => t.key))) {
+    if (unlevel.has(sessionKeyString(key))) continue;
+    shared.markReconciled(key, `reconciled against ${root}`);
+    cleared.push(key);
   }
 
   return {
@@ -316,9 +368,12 @@ async function canonicalLines(shared: SharedSessionStore, key: SessionKey): Prom
   return entries.filter((entry) => entry["type"] !== "agent_metadata").map((entry) => JSON.stringify(entry));
 }
 
+/** A SESSION's identity (a subagent transcript belongs to its session). */
+const sessionKeyString = (key: SessionKey): string => `${key.projectKey}/${key.sessionId}`;
+
 function uniqueSessions(keys: SessionKey[]): SessionKey[] {
   const seen = new Map<string, SessionKey>();
-  for (const key of keys) seen.set(`${key.projectKey}/${key.sessionId}`, { projectKey: key.projectKey, sessionId: key.sessionId });
+  for (const key of keys) seen.set(sessionKeyString(key), { projectKey: key.projectKey, sessionId: key.sessionId });
   return [...seen.values()];
 }
 
