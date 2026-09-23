@@ -222,7 +222,7 @@ export const ROUTER_ROWS: RouterRow[] = [
       { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "arbitrary file and shell paths: an approving broker does not lift the floor" },
       { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r2, NEW-3: a command that BUILDS the name is caught post-hoc — swept, reported, and the call blocked" },
       { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r3, NEW-9: a command whose side effect precedes a FAILURE is swept too" },
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r3, NEW-11: the saved-approval path, for real — the durable update is stripped and no vendor settings file appears" },
+      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r3, NEW-11 / WS-21 §4.3: the saved-approval path, for real — the durable update is kept for the session only and no vendor settings file appears" },
       { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r4, NEW-18 (a): a host hook stamped with the exported floor mark does not REPLACE the floor — the floor is recognised by identity" },
       { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "the whole session's writes stay inside the spool, the cwd and the product home" },
     ],
