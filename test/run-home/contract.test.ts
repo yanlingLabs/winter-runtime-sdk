@@ -43,30 +43,27 @@ describe("WS-21 Contract A: helpers and constants", () => {
     expect([...router.RUN_HOME_PERSISTENT_ENTRIES]).toEqual(["file-history", "tasks", "teams", "agent-memory", "workflows"]);
   });
 
-  test("protectedPathRules: Edit and Write ask rules over the sdk home's item dirs, WINTER.md, and the trusted project's item dirs", () => {
+  test("protectedPathRules: Edit and Write ask rules over the sdk home's item dirs, WINTER.md, and the trusted project's item dirs AT ANY DEPTH under the root (C1)", () => {
     const rules = router.protectedPathRules("/h/sdk", "/repo");
     for (const tool of ["Edit", "Write"]) {
       for (const kind of ["skills", "commands", "rules", "output-styles"]) {
         expect(rules).toContain(`${tool}(//h/sdk/${kind}/**)`);
-        expect(rules).toContain(`${tool}(//repo/.winter/${kind}/**)`);
+        // `**` matches zero or more directories (measured on the pin): the root's own `.winter/` and every
+        // nested one — `packages/app/.winter/skills/**` included — are one rule.
+        expect(rules).toContain(`${tool}(//repo/**/.winter/${kind}/**)`);
       }
       expect(rules).toContain(`${tool}(//h/sdk/WINTER.md)`);
     }
+    expect(rules).toHaveLength(2 * (4 + 1 + 4));
     // No project, no project rules.
     expect(router.protectedPathRules("/h/sdk", null).some((rule) => rule.includes("//repo"))).toBe(false);
   });
 
-  test("protectedPathRules with the walk: EVERY directory from the cwd up to the root is protected, never $HOME (fix round 1, I2)", () => {
-    const rules = router.protectedPathRules("/h/sdk", "/repo", undefined, { cwd: "/repo/a/b", userHome: "/home/u" });
-    for (const dir of ["/repo", "/repo/a", "/repo/a/b"]) {
-      for (const kind of ["skills", "commands", "rules", "output-styles"]) {
-        expect(rules).toContain(`Edit(/${dir}/.winter/${kind}/**)`);
-        expect(rules).toContain(`Write(/${dir}/.winter/${kind}/**)`);
-      }
-    }
-    const underHome = router.protectedPathRules("/h/sdk", "/home", undefined, { cwd: "/home/u/p", userHome: "/home/u" });
-    expect(underHome.some((rule) => rule.includes("//home/u/p/.winter/skills/**"))).toBe(true);
-    expect(underHome.some((rule) => rule.includes("//home/u/.winter/") || rule.includes("//home/.winter/"))).toBe(false);
+  test("protectedPathRules: the walk adds nothing any more — every walk dir is under the root, which the any-depth rule already covers (C1)", () => {
+    const withWalk = router.protectedPathRules("/h/sdk", "/repo", undefined, { cwd: "/repo/a/b", userHome: "/home/u" });
+    expect(withWalk).toEqual(router.protectedPathRules("/h/sdk", "/repo"));
+    // A write the old walk-only rules missed: the root's cwd writing a DEEPER directory's items.
+    expect(withWalk).toContain("Write(//repo/**/.winter/skills/**)");
   });
 
   test("reconcileLocalWriteRoot is exported from the package root (the one reconcile, spec §3.8)", () => {

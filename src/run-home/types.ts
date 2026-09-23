@@ -20,11 +20,9 @@
 // global config file and the product env variables are the brand's (`RunHomeInput.brand`, defaulting
 // to the Winter SDK's own profile). Claude's names — `CLAUDE.md`, `.claude.json`, `file-history`,
 // `CLAUDE_CODE_*` — are the official runtime's own and stay fixed (WS-01 §5).
-import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { WINTER_BRAND, type BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
-import { projectWalk } from "./walk.ts";
 
 /** The session modes a run home is built for (spec §3.2's columns). */
 export type RunMode = "code" | "dispatch" | "chat";
@@ -146,14 +144,19 @@ export const PROTECTED_ITEM_DIRS = ["skills", "commands", "rules", "output-style
 /**
  * Spec §7.2's protected paths, as flag-layer `permissions.ask` rules: `Edit(...)` and `Write(...)` over
  * `sdk/{skills,commands,rules,output-styles}/**`, `sdk/<instructions file>` and, for a trusted project,
- * `<d>/<project dir>/{skills,commands,rules,output-styles}/**` for EVERY directory `d` whose items the
- * run home loads (fix round 1, I2) — the project walk from the cwd up to the trusted root, stopping at
- * `$HOME` (`walk`). Without `walk`, only the root's own project dir (the pre-fix reading, kept for a
- * caller that has no cwd).
+ * `<root>/**\/<project dir>/{skills,commands,rules,output-styles}/**` — the project's item dirs AT ANY
+ * DEPTH under the root (C1).
  *
- * claude checks its ask rules before its bypass step, which is what makes these fire where its own
- * sensitive-file check would swallow a hook's `ask` (F16). A test drives the real runtime to prove the
- * spelling matches, for the root's project dir and for a nested one (`test/official/protected-ask-fires.test.ts`).
+ * WHY ANY DEPTH, not the walk: a later session whose cwd is deeper loads that deeper directory's items
+ * (the walk runs from ITS cwd), so a write from the root's session into `packages/app/<project dir>/
+ * skills/` must ask now — the walk-only rules (fix round 1, I2) covered only the dirs between THIS
+ * session's cwd and the root. MEASURED on the pinned runtime (scripted loopback): a mid-path `**` in an
+ * `//`-anchored rule matches zero or more directories — the root's own `<project dir>/` and one two
+ * levels down both reach `canUseTool`, under `acceptEdits` and under `bypassPermissions` alike, and an
+ * unprotected sibling does not (`test/official/protected-ask-fires.test.ts`).
+ *
+ * `walk` is accepted for source compatibility and adds nothing: every walk directory is under the root.
+ * A root at or above `$HOME` is protected as given (more asks, never fewer).
  */
 export function protectedPathRules(
   sdkHome: string,
@@ -161,14 +164,12 @@ export function protectedPathRules(
   brand: Pick<RunHomeBrand, "projectDirName" | "instructionsFile"> = WINTER_BRAND,
   walk?: { cwd: string; userHome?: string },
 ): string[] {
+  void walk;
   const targets: string[] = [];
   for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(sdkHome, kind))}/**`);
   targets.push(fsRootAnchored(join(sdkHome, brand.instructionsFile)));
   if (trustedProjectRoot !== null) {
-    const projectDirs = walk === undefined ? [trustedProjectRoot] : projectWalk(walk.cwd, trustedProjectRoot, walk.userHome ?? homedir());
-    for (const dir of projectDirs) {
-      for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(dir, brand.projectDirName, kind))}/**`);
-    }
+    for (const kind of PROTECTED_ITEM_DIRS) targets.push(`${fsRootAnchored(join(trustedProjectRoot, "**", brand.projectDirName, kind))}/**`);
   }
   return ["Edit", "Write"].flatMap((tool) => targets.map((target) => `${tool}(${target})`));
 }

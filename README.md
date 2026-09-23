@@ -69,7 +69,7 @@ function sdkHomeOf(home: string): string;                                  // jo
 function buildRunHome(input: RunHomeInput): Promise<RunHome>;
 function fsRootAnchored(absPath: string): string;                          // "/" + absPath ("//Users/x")
 function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
-  walk?: { cwd: string; userHome?: string }): string[];                  // with `walk`: every project dir cwd → root
+  walk?: { cwd: string; userHome?: string }): string[];   // project item dirs at ANY depth: //<root>/**/.winter/<kind>/** (`walk` adds nothing)
 type RunHomeOutcome = "safe" | "quarantined" | "pending";
 type RunHomeFor = (ctx: { sessionId: string; leg: RunLeg; cwd: string; mode: RunMode }) => Promise<RunHome>;
 class RunHomeError extends RuntimeSdkError { code: RunHomeErrorCode }    // forwarded as data.code
@@ -98,7 +98,7 @@ function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; //
 | setting sources | `["user"]`; a caller's `project`/`local` is refused (`setting_sources_refused`) | `["user"]`; the invariants refuse anything else, and `["user"]` without a run home; the spawn proxy re-checks the final argv |
 | MCP | the run folder's `.winter.json` | `strictMcpConfig: false` (and `true` is refused on a run home) |
 | memory | `autoMemory: { directory: memoryDir, enabled }` | flag layer: `autoMemoryDirectory = memoryDir`, `autoMemoryEnabled` from the effective settings |
-| flag layer | — | `plansDirectory`, and `permissions.ask` = `protectedPathRules(..., { cwd })` (every project dir the walk loads items from, both spellings) appended to the host's own (a host `permissions.deny` survives) |
+| flag layer | — | `plansDirectory`, and `permissions.ask` = `protectedPathRules(...)` (the sdk home's item dirs and instructions file, and the trusted project's item dirs at any depth under the root — `//<root>/**/.winter/<kind>/**`, measured to fire on the pin — in both spellings) appended to the host's own (a host `permissions.deny` survives) |
 | plugins | from the run home's `enabledPlugins` | the same; `Options.plugins` and `OptionsTemplatePolicy.plugins` are gone, and a `plugins` key is refused on every launch |
 | outcome | `pending` while the returned `Query` runs; `safe` once it settles (done, `return()`/`throw()`, a rejection, or disposal) — no working copy, but the child reads the run folder while it runs | `pending` until the exit reconcile |
 
