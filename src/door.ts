@@ -66,6 +66,7 @@ import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
 import type { RunHome, RunHomeOutcome } from "./run-home/types.ts";
 import { runHomeExitReconciler } from "./run-home/exit.ts";
+import { RunHomeError } from "./run-home/errors.ts";
 import { runHomeAutoMemoryEnabled } from "./run-home/apply.ts";
 import type { OfficialRunHomeBinding } from "./seams/official-adapter.ts";
 
@@ -347,6 +348,19 @@ export interface OfficialInputStream extends AsyncIterable<string> {
  * throw into `delivery_uncertain`, and "the session's input ended" is at least an answer the sender's
  * ledger can record.
  */
+/**
+ * WS-21 §7.3 (d): `/loop` IS NOT A WINTER SURFACE. The pinned runtime's `/loop` reads the repository's
+ * own `.claude/loop.md` whatever the setting sources are (F19d), so the official prompt path refuses the
+ * command — TYPED (`loop_refused`), never by dropping the turn in silence.
+ */
+export function isLoopCommand(text: string): boolean {
+  return /^\s*\/loop(?:\s|$)/.test(text);
+}
+
+function loopRefused(): RunHomeError {
+  return new RunHomeError("loop_refused", "`/loop` is not available on the official leg: the runtime would read the repository's own `.claude/loop.md`, which this branch never reads (WS-21 §7.3)");
+}
+
 export function createOfficialInputStream(): OfficialInputStream {
   const waiting: Array<(result: IteratorResult<string>) => void> = [];
   const pending: Array<{ text: string; taken: () => void }> = [];
@@ -357,6 +371,8 @@ export function createOfficialInputStream(): OfficialInputStream {
     },
     push(text) {
       if (closed) return Promise.reject(new RuntimeLaunchInputError({ field: "push", reason: "this session's input stream has ended, so there is nothing to push into" }));
+      // Refused BEFORE it is queued: the session goes on, and the host renders the typed refusal.
+      if (isLoopCommand(text)) return Promise.reject(loopRefused());
       const consumer = waiting.shift();
       if (consumer !== undefined) {
         consumer({ value: text, done: false });
@@ -557,6 +573,9 @@ function officialCapabilityServers(
  */
 export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegRequest): OfficialQuery {
   const branchLabel = officialBranchLabel(deps.brand);
+  // WS-21 §7.3 (d): a one-shot `/loop` prompt is refused synchronously, before anything exists. A
+  // streamed one is refused by the input stream's `push` (see `createOfficialInputStream`).
+  if (typeof request.prompt === "string" && isLoopCommand(request.prompt)) throw loopRefused();
   // BEFORE ANYTHING ELSE HAPPENS. This is an input refusal, and an input refusal that arrived after a
   // directory row, a credential read or a child process would be a refusal the host pays for.
   // THE CALLER IS THE ADDRESS THE ROW WAS RECORDED UNDER (interim review C-1). A door-opened CHILD is
