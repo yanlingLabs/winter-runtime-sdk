@@ -190,6 +190,17 @@ export async function reconcileRootForRecovery(root: string, input: RecoveryInpu
   const now = input.now ?? (() => new Date());
   const judge: TranscriptJudge = async (transcript) => {
     const canonical = ((await input.shared.store.load(transcript.key)) ?? []).filter((entry) => entry["type"] !== "agent_metadata");
+    const isLocalDecoration = (uuid: string): boolean => input.shared.decorations.has(transcript.key, uuid);
+    // A WORKING COPY THAT IS A RECORD-FOR-RECORD PREFIX OF THE CANONICAL FILE HOLDS NOTHING TO APPEND AND
+    // NOTHING TO LOSE — whatever the claude-ready fold of the canonical file looks like. Proved against
+    // the canonical records themselves first, because the fold is not always record-for-record (it
+    // inserts decorations for foreign turns with a summary, and translates legacy compaction), and a
+    // session continued on the Winter leg after its spool copy was written is exactly such a file.
+    const raw = canonical.map((entry) => JSON.stringify(entry));
+    if (localIsCanonicalPrefix({ localPath: transcript.path, canonicalLines: raw, isDecoration: isLocalDecoration })) {
+      const rawComparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: raw, isDecoration: isLocalDecoration });
+      return rawComparison.kind === "canonical-ahead" ? "level" : "reconcile";
+    }
     const sidecar = transcript.key.subpath === undefined ? await readProviderStateSidecar(input.storeHome, transcript.key) : [];
     const expected = recomputedClaudeReadyLines(canonical, sidecar, input.resolveEndpoint);
     if (expected === undefined) return { exclude: "the claude-ready copy cannot be recomputed record-for-record from the canonical file, so no prefix can be proved" };
