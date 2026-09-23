@@ -446,3 +446,59 @@ describe("review I-1: the carry-back never writes a file the STORE owns, and nes
     expect(readFileSync(inStore(bed.sdk, "subagents/workflows/wf_1/agent-w1.jsonl"), "utf8")).not.toContain('{ "');
   });
 });
+
+describe("review minor: the exit hook never throws", () => {
+  test("a diverged working copy whose quarantine cannot be written (a linked cache) leaves the outcome PENDING — the folder is the only copy — logs why, and the hook resolves", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const entries = chain(2);
+    await shared.store.append(KEY, entries);
+    await shared.settle(KEY);
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, [entries[0]!, ...chain(1, String(entries[0]!["uuid"]))]); // diverged at line 2
+    // `<home>/cache` becomes a LINK after the run folder exists: the quarantine refuses to write through it.
+    const realCache = join(bed.root, "real-cache");
+    Bun.spawnSync(["mv", join(bed.home, "cache"), realCache]);
+    symlinkSync(realCache, join(bed.home, "cache"));
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+    const outcomes = new Map<string, RunHomeOutcome>();
+    try {
+      await expect(hook({ shared, home: bed.home, mirrored: 2, outcomes })({ observation: { root: { configDir: runFolder } }, exit })).resolves.toBeUndefined();
+    } finally {
+      console.warn = original;
+    }
+    expect(outcomes.has("run-1")).toBe(false);
+    expect(warnings.some((line) => line.includes("run-1") && line.includes("pending"))).toBe(true);
+  });
+
+  test("an artifact conflict whose quarantine cannot be written leaves the outcome pending too", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const entries = chain(1);
+    await shared.store.append(KEY, entries);
+    await shared.settle(KEY);
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, entries);
+    const local = join(runFolder, "projects", KEY.projectKey, KEY.sessionId, "tool-results", "r.txt");
+    mkdirSync(join(local, ".."), { recursive: true });
+    writeFileSync(local, "working\n");
+    const store = join(bed.sdk, "projects", KEY.projectKey, KEY.sessionId, "tool-results", "r.txt");
+    mkdirSync(join(store, ".."), { recursive: true });
+    writeFileSync(store, "store\n");
+    const realCache = join(bed.root, "real-cache");
+    Bun.spawnSync(["mv", join(bed.home, "cache"), realCache]);
+    symlinkSync(realCache, join(bed.home, "cache"));
+    const original = console.warn;
+    console.warn = () => undefined;
+    const outcomes = new Map<string, RunHomeOutcome>();
+    try {
+      await expect(hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit })).resolves.toBeUndefined();
+    } finally {
+      console.warn = original;
+    }
+    expect(outcomes.has("run-1")).toBe(false);
+    expect(readFileSync(store, "utf8")).toBe("store\n");
+  });
+});

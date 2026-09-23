@@ -78,35 +78,38 @@ export interface RunHomeExitReconcilerInput {
   now?: () => Date;
 }
 
-/** The proxy's `reconcile` hook for one run-home generation. Never throws: a failure is quarantine. */
+/** The proxy's `reconcile` hook for one run-home generation. Never throws: a failure is quarantine, or `pending` when even the quarantine copy cannot be made. */
 export function runHomeExitReconciler(input: RunHomeExitReconcilerInput): (args: { observation: { root: { configDir: string } }; exit: { code: number | null; signal: string | null } }) => Promise<void> {
   const now = input.now ?? (() => new Date());
   return async ({ observation }) => {
     const root = observation.root.configDir;
-    const quarantine = (): void => {
+    /**
+     * NEVER THROWS (review minor). `quarantined` is recorded only once the evidence is actually copied:
+     * if the copy cannot be made (a linked `cache`, a full disk), the working copy is the ONLY copy, so
+     * the outcome is left `pending` — the host never disposes it, and the recovery door reconciles it
+     * later — and the reason is logged.
+     */
+    const quarantine = (paths?: readonly string[]): void => {
       try {
-        quarantineRoot(root, input.home, input.runId, now());
-      } finally {
-        // QUARANTINED EVEN IF THE COPY FAILED: the outcome that matters is "not safe to dispose".
+        if (paths === undefined) quarantineRoot(root, input.home, input.runId, now());
+        else quarantineTranscripts(root, input.home, input.runId, paths, now());
         input.record(input.runId, "quarantined");
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `winter-runtime-sdk: run home ${input.runId}: its working copy could not be quarantined (${error instanceof Error ? error.message : String(error)}); the outcome stays pending, so the folder is kept for the recovery door`,
+        );
       }
     };
     try {
       const report = await reconcileLocalWriteRoot(root, { shared: input.shared });
-      // THE SESSION'S OTHER FILES (tool results, workflow scripts and run records, subagent metadata):
-      // carried into the shared store before the folder can be disposed — never overwriting (see
-      // `artifacts.ts`). A destination that differs quarantines that file, and the outcome says so.
+      // THE SESSION'S OTHER FILES (tool results, workflow scripts and run records): carried into the
+      // shared store before the folder can be disposed — never overwriting (see `artifacts.ts`). A
+      // destination that differs quarantines that file, and the outcome says so.
       const artifacts = carryBackSessionArtifacts(root, input.shared.identity.storeHome);
       if (report.status === "diverged") return quarantine();
       if (report.transcripts.length === 0 && input.mirrored() > 0) return quarantine();
-      if (artifacts.conflicts.length > 0) {
-        try {
-          quarantineTranscripts(root, input.home, input.runId, artifacts.conflicts.map((conflict) => conflict.source), now());
-        } finally {
-          input.record(input.runId, "quarantined");
-        }
-        return;
-      }
+      if (artifacts.conflicts.length > 0) return quarantine(artifacts.conflicts.map((conflict) => conflict.source));
       input.record(input.runId, "safe");
     } catch {
       quarantine();
