@@ -210,18 +210,18 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
     expect(settings.ask).toEqual([`Write(${fsRootAnchored(join(root, "local-only"))})`]);
   });
 
-  test("minors round (item 2's twin): the anchor a rule is re-anchored to is spelled for the LEG's matcher — escaped for claude, raw for the Winter runtime", async () => {
-    // claude's rules are gitignore-style (`[w]` is a character class unless escaped — measured); the
-    // Winter runtime's path matcher treats every character but `*` literally (a backslash would be a
-    // literal backslash there). The run home is built per leg, so each gets the spelling that matches.
+  test("the anchor a rule is re-anchored to is escaped for the rule grammar, on BOTH legs (minors round, item 2's twin; round 4)", async () => {
+    // Both runtimes read claude's gitignore-style grammar (the Winter runtime since ws21/sdk@57e7fef,
+    // SV-6): `[w]` is a character class unless escaped, on either leg.
     const bed = runHomeBed();
     const root = join(bed.root, "[w] a*b");
     mkdirSync(root, { recursive: true });
     put(join(root, ".winter", "settings.json"), json({ permissions: { deny: ["Read(/secrets)", "Edit(/src/**)"] } }));
-    const official = (await effective(bed, root, { leg: "official" }))["permissions"] as { deny: string[] };
-    expect(official.deny).toEqual([`Read(/${join(bed.root, "\\[w\\] a\\*b", "secrets")})`, `Edit(/${join(bed.root, "\\[w\\] a\\*b", "src/**")})`]);
-    const winter = (await effective(bed, root, { leg: "winter" }))["permissions"] as { deny: string[] };
-    expect(winter.deny).toEqual([`Read(${fsRootAnchored(join(root, "secrets"))})`, `Edit(${fsRootAnchored(join(root, "src/**"))})`]);
+    const escaped = [`Read(/${join(bed.root, "\\[w\\] a\\*b", "secrets")})`, `Edit(/${join(bed.root, "\\[w\\] a\\*b", "src/**")})`];
+    for (const leg of ["official", "winter"] as const) {
+      const permissions = (await effective(bed, root, { leg }))["permissions"] as { deny: string[] };
+      expect([leg, permissions.deny]).toEqual([leg, escaped]);
+    }
   });
 
   test("the project tier anchors at the project root even when the cwd is below it (a deny keeps its author's meaning)", async () => {

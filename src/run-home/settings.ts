@@ -34,7 +34,7 @@ import { envName } from "@yanlinglabs/winter-agent-sdk";
 import { ALL_AUTH_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES } from "../official/auth.ts";
 import { isExecutionIndirectionVariable, OFFICIAL_RUNTIME_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../official/env-allowlist.ts";
 import type { RunHomeBuildContext } from "./build.ts";
-import { escapeRulePath, fsRootAnchored, type RunHomeBrand, type RunLeg } from "./types.ts";
+import { escapeRulePath, fsRootAnchored, type RunHomeBrand } from "./types.ts";
 import { isHomeOrAbove } from "./walk.ts";
 
 const PRIVATE_FILE = 0o600;
@@ -236,22 +236,20 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => valu
 /**
  * `Tool(/x)` → `Tool(//<anchor>/x)` for a path tool; every other form is returned as written.
  *
- * THE ANCHOR IS SPELLED FOR THE LEG'S MATCHER (minors round, item 2's twin). The router writes the
- * anchor part, so the router must spell it in the grammar the reading runtime uses:
- *   * claude (`official`) reads rules gitignore-style — a root named `[wip] app` is a character class
- *     unless escaped, MEASURED (a re-anchored project `ask` rule under such a root never fired) — so
- *     the anchor goes through `escapeRulePath`;
- *   * the Winter runtime's path matcher treats every character but `*` literally (its `paths.ts`
- *     regex-escapes the rest), so an escape there would be a literal backslash: its anchor stays raw.
- * The author's own part of the pattern (after the anchor) is passed through as written, on both legs.
+ * THE ANCHOR IS ESCAPED (`escapeRulePath`) ON BOTH LEGS. The router writes the anchor part, so it must
+ * spell it in the rule grammar, and both runtimes now read claude's gitignore-style grammar: claude
+ * always has (a root named `[wip] app` is a character class unless escaped — MEASURED, a re-anchored
+ * project `ask` rule under such a root never fired), and the Winter runtime since `ws21/sdk`@57e7fef
+ * (SV-6 — measured the same way on the Winter leg: unescaped, its re-anchored ask and deny rules under a
+ * `[wip] app` root never matched). The author's own part of the pattern is passed through as written.
  */
-export function anchorRule(rule: string, anchor: string, leg: RunLeg = "winter"): string {
+export function anchorRule(rule: string, anchor: string): string {
   const match = /^([A-Za-z]+)\((.*)\)$/s.exec(rule);
   if (match === null) return rule;
   const [, tool, specifier] = match as unknown as [string, string, string];
   if (!PATH_RULE_TOOLS.has(tool)) return rule;
   if (!specifier.startsWith("/") || specifier.startsWith("//")) return rule;
-  return `${tool}(${fsRootAnchored(join(leg === "official" ? escapeRulePath(anchor) : anchor, specifier))})`;
+  return `${tool}(${fsRootAnchored(join(escapeRulePath(anchor), specifier))})`;
 }
 
 /** A relative sandbox/additional-directory path, made absolute against the tier's root. */
@@ -261,14 +259,14 @@ function anchorPath(path: unknown, anchor: string): unknown {
   return resolve(anchor, path);
 }
 
-function anchorTier(settings: Record<string, unknown>, anchor: string, leg: RunLeg): Record<string, unknown> {
+function anchorTier(settings: Record<string, unknown>, anchor: string): Record<string, unknown> {
   const out: Record<string, unknown> = { ...settings };
   const permissions = out["permissions"];
   if (isPlainObject(permissions)) {
     const next: Record<string, unknown> = { ...permissions };
     for (const list of ["allow", "ask", "deny"]) {
       const rules = next[list];
-      if (Array.isArray(rules)) next[list] = rules.map((rule) => (typeof rule === "string" ? anchorRule(rule, anchor, leg) : rule));
+      if (Array.isArray(rules)) next[list] = rules.map((rule) => (typeof rule === "string" ? anchorRule(rule, anchor) : rule));
     }
     if (Array.isArray(next["additionalDirectories"])) next["additionalDirectories"] = (next["additionalDirectories"] as unknown[]).map((path) => anchorPath(path, anchor));
     out["permissions"] = next;
@@ -378,7 +376,7 @@ export async function buildEffectiveSettings(context: RunHomeBuildContext): Prom
   for (const { tier, path, anchor } of tiers) {
     const raw = await readTier(path);
     if (raw === undefined) continue;
-    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor, input.leg));
+    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor));
   }
   const settings = stripForMode(merged, input.mode, input.dispatchChild);
   const effective: Record<string, unknown> = {};
