@@ -24,6 +24,7 @@ import { isAbsolute, join } from "node:path";
 import { RunHomeError } from "./errors.ts";
 import { buildInstructions } from "./instructions.ts";
 import { buildItems } from "./items.ts";
+import { buildMcpConfig } from "./mcp.ts";
 import { buildEffectiveSettings } from "./settings.ts";
 import { RUN_HOME_PERSISTENT_ENTRIES, runHomeBrandOf, sdkHomeOf, type RunHome, type RunHomeBrand, type RunHomeInput, type RunHomeReport } from "./types.ts";
 
@@ -58,6 +59,7 @@ export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
     await buildItems(context);
     await buildInstructions(context);
     effectiveSettings = await buildEffectiveSettings(context);
+    await buildMcpConfig(context);
   } catch (error) {
     // A HALF-BUILT FOLDER IS NEVER HANDED OUT — and never left behind for a sweep to wonder about.
     await rm(dir, { recursive: true, force: true });
