@@ -73,6 +73,8 @@ interface SameView {
   instructions: string[];
   /** How many times the plugin's SessionStart hook ran during this generation. */
   hookRuns: number;
+  /** The fixture MCP servers whose process this generation STARTED (a start marker, not the init report). */
+  mcpStarted: string[];
 }
 
 interface Run {
@@ -80,6 +82,7 @@ interface Run {
   requests: Array<Record<string, unknown>>;
   stderr: string;
   hookRuns: number;
+  mcpStarted: string[];
 }
 
 /** `SAME_VIEW_VERBOSE=1` prints every measured view (the same aid `PLUGIN_PROBE_VERBOSE` is in the plugin suite). */
@@ -151,6 +154,7 @@ function viewOf(run: Run): SameView {
       .filter((token) => context.includes(token))
       .sort((a, b) => context.indexOf(a) - context.indexOf(b)),
     hookRuns: run.hookRuns,
+    mcpStarted: run.mcpStarted,
   };
 }
 
@@ -158,7 +162,26 @@ interface Fixture {
   root: string;
   marker: string;
   market: string;
+  /** How many times each fixture MCP server's process has started so far (by server name). */
+  mcpStarts(): Record<string, number>;
 }
+
+/**
+ * The fixture's MCP servers, by the name they are CONFIGURED under → the marker label. Every one is a
+ * stdio server that records its own start and exits, so "did this leg start it" is measured on the
+ * process, not read off an init report. `winter` is the brand's standing-server name, which the router
+ * reserves for itself: a user server under it must never start on either leg (SV-2's guard), exactly
+ * like the host-reserved `sv-reserved-mcp` and the user-disabled `sv-disabled-mcp`.
+ */
+const MCP_SERVERS = {
+  user: "sv-user-mcp",
+  local: "sv-local-mcp",
+  project: "sv-project-mcp",
+  disabled: "sv-disabled-mcp",
+  reserved: "sv-reserved-mcp",
+  standingName: winterSdk.WINTER_BRAND.mcpServerName,
+} as const;
+const markerLabel = (name: string): string => (name === MCP_SERVERS.standingName ? "sv-standing-name-mcp" : name);
 
 /**
  * The fixture home and project (brief L2.10): user/project/clashing skills, user/project agents plus a
@@ -170,6 +193,9 @@ interface Fixture {
 function plantFixture(session: HermeticSession, options: { installRecord: boolean }): Fixture {
   const sdkHome = join(session.brandHome, "sdk");
   const root = session.cwd;
+  const mcpMarkers = join(session.home, "markers", "mcp");
+  mkdirSync(mcpMarkers, { recursive: true });
+  const server = (name: string): Record<string, unknown> => ({ type: "stdio", command: "/bin/sh", args: ["-c", `echo started >> '${join(mcpMarkers, markerLabel(name))}'; exit 1`] });
   put(join(sdkHome, "WINTER.md"), `${TOKENS.userInstructions}\n`);
   put(join(root, "WINTER.md"), `${TOKENS.projectInstructions}\n`);
   put(join(sdkHome, "rules", "user-rule.md"), `${TOKENS.userRule}\n`);
@@ -208,13 +234,20 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
   put(
     join(sdkHome, ".winter.json"),
     `${JSON.stringify({
-      mcpServers: { "sv-user-mcp": { type: "stdio", command: "/usr/bin/false" }, "sv-disabled-mcp": { type: "stdio", command: "/usr/bin/false" }, "sv-reserved-mcp": { type: "stdio", command: "/usr/bin/false" } },
+      mcpServers: { [MCP_SERVERS.user]: server(MCP_SERVERS.user), [MCP_SERVERS.disabled]: server(MCP_SERVERS.disabled), [MCP_SERVERS.reserved]: server(MCP_SERVERS.reserved), [MCP_SERVERS.standingName]: server(MCP_SERVERS.standingName) },
       // The LOCAL scope for this checkout (`winter mcp add --scope local`), keyed by the project root.
-      projects: { [root]: { mcpServers: { "sv-local-mcp": { type: "stdio", command: "/usr/bin/false" } } } },
+      projects: { [root]: { mcpServers: { [MCP_SERVERS.local]: server(MCP_SERVERS.local) } } },
     })}\n`,
   );
-  put(join(root, ".winter", "mcp.json"), `${JSON.stringify({ mcpServers: { "sv-project-mcp": { type: "stdio", command: "/usr/bin/false" } } })}\n`);
-  return { root, marker, market };
+  put(join(root, ".winter", "mcp.json"), `${JSON.stringify({ mcpServers: { [MCP_SERVERS.project]: server(MCP_SERVERS.project) } })}\n`);
+  const mcpStarts = (): Record<string, number> =>
+    Object.fromEntries(
+      Object.values(MCP_SERVERS).map((name) => {
+        const path = join(mcpMarkers, markerLabel(name));
+        return [name, existsSync(path) ? readFileSync(path, "utf8").split("\n").filter((line) => line === "started").length : 0];
+      }),
+    );
+  return { root, marker, market, mcpStarts };
 }
 
 /** The view claude must show for the fixture (and the Winter runtime must equal). */
@@ -228,6 +261,7 @@ function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyl
     plugins: ["sv-plugin"],
     // The local scope is not trust-gated (it is the user's own entry in the shared file).
     mcpServers: trusted ? ["sv-local-mcp", "sv-project-mcp", "sv-user-mcp"] : ["sv-local-mcp", "sv-user-mcp"],
+    mcpStarted: trusted ? ["sv-local-mcp", "sv-project-mcp", "sv-user-mcp"] : ["sv-local-mcp", "sv-user-mcp"],
     instructions: trusted ? [TOKENS.userInstructions, TOKENS.projectInstructions, TOKENS.projectRule, TOKENS.userRule] : [TOKENS.userInstructions, TOKENS.userRule],
   };
 }
@@ -315,6 +349,20 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
         },
         messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
       });
+      /**
+       * The servers this generation started. A stdio server is spawned asynchronously (the Winter
+       * runtime reports it `pending` at init), so the snapshot waits until the always-expected user
+       * server has recorded its start — proof this leg's spawns have happened — then a little longer.
+       */
+      const startedSince = async (before: Record<string, number>): Promise<string[]> => {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline && fixture.mcpStarts()[MCP_SERVERS.user]! <= before[MCP_SERVERS.user]!) await Bun.sleep(50);
+        await Bun.sleep(400);
+        const after = fixture.mcpStarts();
+        return Object.keys(after)
+          .filter((name) => after[name]! > before[name]!)
+          .sort();
+      };
       const hookRuns = (): number => (existsSync(fixture.marker) ? readFileSync(fixture.marker, "utf8").split("\n").filter((line) => line === "ran").length : 0);
       const drain = async (query: unknown): Promise<Array<Record<string, unknown>>> => {
         const out: Array<Record<string, unknown>> = [];
@@ -346,6 +394,7 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
         async runWinter(runHome, over = {}) {
           requests.length = 0;
           const before = hookRuns();
+          const startsBefore = fixture.mcpStarts();
           const stderr: string[] = [];
           const messages = await drain(
             sdk.query({
@@ -364,11 +413,12 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
               } as never,
             }),
           );
-          return { messages, requests: [...requests], stderr: stderr.join(""), hookRuns: hookRuns() - before };
+          return { messages, requests: [...requests], stderr: stderr.join(""), hookRuns: hookRuns() - before, mcpStarted: await startedSince(startsBefore) };
         },
         async runClaude(runHome, winterSessionId, over = {}) {
           requests.length = 0;
           const before = hookRuns();
+          const startsBefore = fixture.mcpStarts();
           const messages = await drain(
             sdk.query({
               prompt: over.prompt ?? "hello",
@@ -384,7 +434,7 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
               } as never,
             }),
           );
-          return { messages, requests: [...requests], stderr: "", hookRuns: hookRuns() - before };
+          return { messages, requests: [...requests], stderr: "", hookRuns: hookRuns() - before, mcpStarted: await startedSince(startsBefore) };
         },
       };
       return fn(bed);
@@ -393,7 +443,7 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
 }
 
 /** The per-item assertions, shared by every scenario. */
-const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "outputStyle", "styleText", "instructions", "hookRuns"] as const;
+const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcpStarted", "outputStyle", "styleText", "instructions", "hookRuns"] as const;
 type Item = (typeof ITEMS)[number];
 
 /**
@@ -425,12 +475,26 @@ function claudeReferenceTests(label: string, trusted: boolean, view: () => SameV
   test(`${label}: claude (the reference) shows exactly the fixture's view`, () => {
     const claude = view();
     const expected = expectedView(trusted);
-    expect({ skills: claude.skills, skillListing: claude.skillListing, agents: claude.agents, plugins: claude.plugins, mcpServers: claude.mcpServers, instructions: claude.instructions }).toEqual(expected);
+    expect({ skills: claude.skills, skillListing: claude.skillListing, agents: claude.agents, plugins: claude.plugins, mcpServers: claude.mcpServers, mcpStarted: claude.mcpStarted, instructions: claude.instructions }).toEqual(expected);
     expect(claude.outputStyle).toBe("sv-style");
     expect(claude.styleText).toBe(true);
     expect(claude.hookRuns).toBe(1);
     // The double-BOM agent: claude reads no keys from it, so it has no name and is not listed.
     expect(claude.agents).not.toContain("sv-bom-agent");
+  });
+}
+
+/**
+ * SV-2'S REGRESSION GUARD: over a whole scenario (every generation on both legs), the server the user
+ * disabled, the host-reserved server and a user server under the standing server's own name NEVER
+ * start — while the user server (the control) does, on every leg.
+ */
+function forbiddenServerTests(label: string, measured: () => { starts: Record<string, number>; perRun: Array<{ leg: string; started: string[] }> }): void {
+  test(`${label}: a disabled server, a host-reserved one and one named like the standing server never start on either leg (SV-2 guard)`, () => {
+    const { starts, perRun } = measured();
+    expect(perRun.length).toBeGreaterThan(0);
+    for (const run of perRun) expect([run.leg, run.started.includes(MCP_SERVERS.user)]).toEqual([run.leg, true]);
+    expect({ disabled: starts[MCP_SERVERS.disabled], reserved: starts[MCP_SERVERS.reserved], standingName: starts[MCP_SERVERS.standingName] }).toEqual({ disabled: 0, reserved: 0, standingName: 0 });
   });
 }
 
@@ -441,18 +505,28 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     let claude: SameView;
     let winter: SameView;
     let winterStderr = "";
+    let starts: Record<string, number> = {};
     beforeAll(async () => {
       await withSameViewBed({ trusted: true }, async (bed) => {
         const w = await bed.runWinter(await bed.build("winter"));
         winterStderr = w.stderr;
         winter = viewOf(w);
         claude = viewOf(await bed.runClaude(await bed.build("official"), "s_sv_fresh"));
-        verbose("fresh", { claude, winter });
+        starts = bed.fixture.mcpStarts();
+        verbose("fresh", { claude, winter, starts });
         expect(decoyUntouched(bed.session)).toBe(true);
       });
     }, TIMEOUT);
     claudeReferenceTests("fresh", true, () => claude);
     itemTests("fresh", true, () => ({ claude, winter }));
+    forbiddenServerTests("fresh", () => ({ starts, perRun: [{ leg: "winter", started: winter.mcpStarted }, { leg: "claude", started: claude.mcpStarted }] }));
+    test("fresh: the local-scope and the project-scope servers reach both legs identically — listed and started", () => {
+      for (const view of [claude, winter]) {
+        expect(view.mcpServers).toEqual(expect.arrayContaining([MCP_SERVERS.local, MCP_SERVERS.project]));
+        expect(view.mcpStarted).toEqual(expect.arrayContaining([MCP_SERVERS.local, MCP_SERVERS.project]));
+      }
+      expect({ listed: winter.mcpServers, started: winter.mcpStarted }).toEqual({ listed: claude.mcpServers, started: claude.mcpStarted });
+    });
     test("fresh: the double-BOM agent is read the same way — no keys, no agent — on both", () => {
       expect(claude.agents).not.toContain("sv-bom-agent");
       expect(winter.agents).not.toContain("sv-bom-agent");
@@ -465,15 +539,20 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     let claude: SameView;
     let winter: SameView;
     let resumedPrompt = false;
+    let starts: Record<string, number> = {};
+    const perRun: Array<{ leg: string; started: string[] }> = [];
     beforeAll(async () => {
       await withSameViewBed({ trusted: true }, async (bed) => {
         winter = viewOf(await bed.runWinter(await bed.build("winter")));
+        perRun.push({ leg: "winter", started: winter.mcpStarted });
         const first = await bed.runClaude(await bed.build("official"), "s_sv_resume", { prompt: "RESUME-FIRST-PROMPT-71c" });
         const backend = String(initOf(first)?.["session_id"]);
         const resumed = await bed.runClaude(await bed.build("official"), "s_sv_resume", { prompt: "RESUME-SECOND-PROMPT-2de", sessionId: backend });
         resumedPrompt = JSON.stringify(resumed.requests).includes("RESUME-FIRST-PROMPT-71c");
         claude = viewOf(resumed);
-        verbose("resume", { claude, winter });
+        perRun.push({ leg: "claude (first)", started: first.mcpStarted }, { leg: "claude (resumed)", started: claude.mcpStarted });
+        starts = bed.fixture.mcpStarts();
+        verbose("resume", { claude, winter, starts });
       });
     }, TIMEOUT);
     test("resume: the claude generation really resumed the first one (its transcript reached the model)", () => {
@@ -481,6 +560,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     claudeReferenceTests("resume", true, () => claude);
     itemTests("resume", true, () => ({ claude, winter }));
+    forbiddenServerTests("resume", () => ({ starts, perRun }));
   });
 
   describe("after a Winter → claude → Winter switch (sdk.handoff)", () => {
@@ -489,6 +569,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     let winterAfter: SameView | undefined;
     const outcomes: string[] = [];
     const reached: string[] = [];
+    let starts: Record<string, number> = {};
     beforeAll(async () => {
       await withSameViewBed({ trusted: true }, async (bed) => {
         const first = await bed.runWinter(await bed.build("winter"), { prompt: "SWITCH-FIRST-PROMPT-5b8" });
@@ -538,7 +619,8 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         outcomes.push(`${toClaude.kind}: ${String((toClaude as { detail?: string }).detail ?? "")}`);
         const toWinter = await bed.sdk.handoff(key, "winter-agent");
         outcomes.push(`${toWinter.kind}: ${String((toWinter as { detail?: string }).detail ?? "")}`);
-        verbose("switch", { outcomes, reached, claude, winterBefore, winterAfter });
+        starts = bed.fixture.mcpStarts();
+        verbose("switch", { outcomes, reached, claude, winterBefore, winterAfter, starts });
       });
     }, TIMEOUT);
     test("switch: both handoffs resumed, and each destination's model saw the first turn", () => {
@@ -548,6 +630,14 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     claudeReferenceTests("switch (claude leg)", true, () => claude as SameView);
     itemTests("switch (Winter before the switch vs claude)", true, () => ({ claude: claude as SameView, winter: winterBefore }));
     itemTests("switch (Winter after the switch back vs claude)", true, () => ({ claude: claude as SameView, winter: winterAfter as SameView }));
+    forbiddenServerTests("switch", () => ({
+      starts,
+      perRun: [
+        { leg: "winter (before)", started: winterBefore.mcpStarted },
+        { leg: "claude (switched)", started: (claude as SameView).mcpStarted },
+        { leg: "winter (switched back)", started: (winterAfter as SameView).mcpStarted },
+      ],
+    }));
   });
 
   describe("a plugin enabled only in settings (no install record)", () => {
@@ -576,15 +666,26 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;
+    let starts: Record<string, number> = {};
     beforeAll(async () => {
       await withSameViewBed({ trusted: false }, async (bed) => {
         winter = viewOf(await bed.runWinter(await bed.build("winter")));
         claude = viewOf(await bed.runClaude(await bed.build("official"), "s_sv_untrusted"));
-        verbose("untrusted", { claude, winter });
+        starts = bed.fixture.mcpStarts();
+        verbose("untrusted", { claude, winter, starts });
       });
     }, TIMEOUT);
     claudeReferenceTests("untrusted", false, () => claude);
     itemTests("untrusted", false, () => ({ claude, winter }));
+    forbiddenServerTests("untrusted", () => ({ starts, perRun: [{ leg: "winter", started: winter.mcpStarted }, { leg: "claude", started: claude.mcpStarted }] }));
+    test("untrusted: the local-scope server still reaches both legs (it is the user's own entry, not the repository's); the project-scope one reaches neither", () => {
+      for (const view of [claude, winter]) {
+        expect(view.mcpStarted).toContain(MCP_SERVERS.local);
+        expect(view.mcpStarted).not.toContain(MCP_SERVERS.project);
+        expect(view.mcpServers).not.toContain(MCP_SERVERS.project);
+      }
+      expect(winter.mcpStarted).toEqual(claude.mcpStarted);
+    });
     test("untrusted: no project item, instruction or server reaches the Winter runtime either", () => {
       const all = [...winter.skills, ...winter.agents, ...winter.mcpServers, ...winter.instructions];
       expect(all.filter((name) => /project|PROJECT/.test(name))).toEqual([]);
