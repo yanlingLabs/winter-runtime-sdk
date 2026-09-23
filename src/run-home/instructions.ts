@@ -193,7 +193,7 @@ async function textOf(path: string): Promise<string | undefined> {
   }
 }
 
-/** `WINTER.md` → `WINTER.local.md`. */
+/** The instructions file's local variant: `<stem>.md` → `<stem>.local.md`. */
 function localVariantOf(instructionsFile: string): string {
   return instructionsFile.endsWith(".md") ? `${instructionsFile.slice(0, -3)}.local.md` : `${instructionsFile}.local`;
 }
@@ -216,7 +216,7 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
   const blocks: string[] = [];
   for (const source of sources) {
     // A project file is read by its REAL path, and only when that stays inside the root — the same
-    // boundary the items obey (a `WINTER.md` that is a link out of the repository is not the project's).
+    // boundary the items obey (an instructions file that is a link out of the repository is not the project's).
     if (source.tier !== "user") {
       const real = realOrUndefined(source.path);
       if (real === undefined) continue;
