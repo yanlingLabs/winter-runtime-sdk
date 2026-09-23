@@ -95,6 +95,54 @@ describeRuntime("WS-21 §7.2 — the protected-path ask rule fires on the pinned
   );
 
   test(
+    "minors round (item 2's twin): a trusted project's own `ask` rule, re-anchored under a root NAMED `[wip] app`, still fires on claude",
+    async () => {
+      const session = sessionNamed("[wip] app");
+      const root = session.cwd;
+      mkdirSync(join(root, ".winter"), { recursive: true });
+      // The project's own rule, relative to its root (`/x` = the tier's root, F17). `Edit(...)`, because
+      // claude matches a Write against `Edit` rules — a `Write(...)` rule in a settings file never fired
+      // on the pin (measured, plain root and `[wip]` root alike).
+      writeFileSync(join(root, ".winter", "settings.json"), `${JSON.stringify({ permissions: { ask: ["Edit(/guarded.txt)"] } })}\n`);
+      const control = join(root, "free.txt");
+      const guarded = join(root, "guarded.txt");
+      const asked: Array<{ tool: string; path: unknown }> = [];
+      await withWs21Bed(
+        {
+          reuse: session,
+          turns: [
+            { toolUses: [{ id: "toolu_control", name: "Write", input: { file_path: control, content: "free\n" } }] },
+            { toolUses: [{ id: "toolu_guarded", name: "Write", input: { file_path: guarded, content: "guarded\n" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const runHome = await bed.runHome({ cwd: root, trustedProjectRoot: root, gitRoot: root });
+          const options = bed.options(runHome, {
+            canUseTool: async (toolName: string, input: Record<string, unknown>) => {
+              asked.push({ tool: toolName, path: input["file_path"] });
+              return { behavior: "deny", message: "the test broker records and denies" };
+            },
+          });
+          const input = createOfficialInputStream();
+          const handle = bed.sdk.query({ prompt: input, options }) as unknown as OfficialQuery & AsyncIterable<Record<string, unknown>>;
+          await handle.setPermissionMode("acceptEdits");
+          const done = (async () => {
+            for await (const message of handle) if (message["type"] === "result") input.close();
+          })();
+          await input.push("write the two files");
+          await done;
+        },
+      );
+      expect(existsSync(control)).toBe(true);
+      expect(asked.some((entry) => entry.path === control)).toBe(false);
+      expect(asked.some((entry) => entry.tool === "Write" && entry.path === guarded)).toBe(true);
+      expect(existsSync(guarded)).toBe(false);
+    },
+    WS21_TIMEOUT,
+  );
+
+  test(
     "C1: cwd AT the root, a Write to a DEEPER directory's .winter/skills reaches canUseTool under acceptEdits (the any-depth rule); an unprotected sibling does not",
     async () => {
       const session = hermeticSession("protected-deep", { compact: true });
