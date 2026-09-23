@@ -428,6 +428,17 @@ background write that lands later is caught opportunistically by the next swept 
 floor runs first and any deny wins, so containment is unaffected — but your broker will not see that
 call, which matters if you were counting on it for audit.
 
+**The worktree refusal is not a veto.** While `containment.worktrees` is `"deny"` the floor also
+installs a `WorktreeCreate` hook that refuses, because a workflow script's `agent(…, { isolation:
+"worktree" })` is started by the workflow runtime with no tool call for the `PreToolUse` floor to
+see; with a `WorktreeCreate` hook configured, the runtime asks the hooks instead of running
+`git worktree add` itself. It asks EVERY configured hook, and a user, project or plugin
+`WorktreeCreate` **command** hook that returns a path wins over this refusal — the worktree is then
+created wherever that hook put it, by that hook. The refusal closes the vendor's OWN writer
+(`<repo>/.claude/worktrees/` and its branch); it does not police a worktree hook someone else
+configured. If that matters to you, control which hooks load (settings sources, trust, the plugins
+you enable) rather than relying on this one.
+
 **The extras door is a positive allowlist with two closed escape hatches.** `configuredExtras` admits
 only names the pinned artifact's own environment registry declares AND that an independent rule
 classifies as non-credential; anything auth-shaped is refused with a sentence naming why, and a

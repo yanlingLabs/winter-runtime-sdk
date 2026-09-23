@@ -158,7 +158,7 @@ export function containmentDispositions(brand: Pick<BrandProfile, "projectDirNam
       disposition: "redirect",
       target: paths.worktrees,
       enforcement: (policy.worktrees ?? "deny") === "deny" ? "floor-deny" : "host-implementation",
-      note: "the router implements no tools, so until the host installs the schema-compatible replacement the vendor's own writer is denied at the floor",
+      note: "the router implements no tools, so until the host installs the schema-compatible replacement the vendor's own writer is denied at the floor — the tool calls by the PreToolUse guard, a workflow agent's `isolation: \"worktree\"` by a refusing `WorktreeCreate` hook. That hook is NOT A VETO: the runtime asks every configured `WorktreeCreate` hook, and a user, project or plugin command hook that returns a path wins (the worktree is then that hook's)",
     },
     {
       writer: "CronCreate with durable: true",
