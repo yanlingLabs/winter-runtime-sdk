@@ -71,7 +71,7 @@ function fsRootAnchored(absPath: string): string;                          // "/
 function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
   /** @deprecated ignored */ walk?: { cwd: string; userHome?: string }): string[];
                                          // project item dirs at ANY depth: //<root>/**/.winter/<kind>/**, every path part escaped
-function escapeRulePath(path: string): string;                             // `[` `]` `*` `\` backslash-escaped for a rule pattern ("[wip]" → "\[wip\]"); `?` stays raw (measured)
+function escapeRulePath(path: string): string;                             // `[` `]` `*` `\` backslash-escaped for a rule pattern ("[wip]" → "\[wip\]"); `?` stays raw (measured). Both legs read this grammar (the Winter runtime since SV-6); the router escapes every path it writes into a rule, on both legs
 type RunHomeOutcome = "safe" | "quarantined" | "pending";
 interface RecoveryTranscriptOutcome {
   projectKey: string; sessionId: string; subpath?: string;             // subpath: "subagents/agent-<id>"
