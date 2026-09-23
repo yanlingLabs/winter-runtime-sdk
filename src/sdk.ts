@@ -52,7 +52,7 @@ import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefuse
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
 import { RunHomeError } from "./run-home/errors.ts";
 import { applyWinterRunHome, assertNoRunHomeDecidedOptions, assertRunHomeApplicable, observeQueryEnd } from "./run-home/apply.ts";
-import { reconcileRootForRecovery } from "./run-home/exit.ts";
+import { reconcileRootForRecovery, type RecoveryReport } from "./run-home/exit.ts";
 import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { sdkHomeOf, type RunHome, type RunHomeFor, type RunHomeOutcome } from "./run-home/types.ts";
 
@@ -308,12 +308,17 @@ export interface RuntimeSdk {
    */
   runHomeOutcome(runId: string): RunHomeOutcome;
   /**
-   * WS-21 §3.8's recovery door: reconciles a recorded local-write root left behind by a crash, through
-   * THIS handle's own store, after recomputing the claude-ready copy the root was staged from.
-   * `clean` — nothing was missing; `appended` — the canonical file was behind and is now level;
-   * `quarantined` — the canonical file could not be proven a prefix of the working copy.
+   * WS-21 §3.8's recovery door: reconciles a recorded local-write root left behind by a crash (or a
+   * pre-WS-21 spool root, Migration C), through THIS handle's own store, after recomputing the
+   * claude-ready copy the root was staged from — PER TRANSCRIPT (I6). Each transcript is `clean`
+   * (level), `appended` (the canonical file was behind and is now level), `canonical-ahead` (the
+   * working copy is a prefix of a canonical history that moved on: nothing to append, nothing lost) or
+   * `quarantined` (unprovable: its file is copied to `<home>/cache/quarantine/`, nothing of it is
+   * appended, its session keeps its repair flag). The root `outcome` is `quarantined` if any transcript
+   * was, else `appended` if any was, else `clean`. A session's repair flag is cleared when every one of
+   * its transcripts came back level.
    */
-  reconcileRootForRecovery(root: string): Promise<"clean" | "appended" | "quarantined">;
+  reconcileRootForRecovery(root: string): Promise<RecoveryReport>;
   dispose(): Promise<void>;
 }
 

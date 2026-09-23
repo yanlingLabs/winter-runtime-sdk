@@ -71,6 +71,16 @@ function fsRootAnchored(absPath: string): string;                          // "/
 function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
   walk?: { cwd: string; userHome?: string }): string[];   // project item dirs at ANY depth: //<root>/**/.winter/<kind>/** (`walk` adds nothing)
 type RunHomeOutcome = "safe" | "quarantined" | "pending";
+interface RecoveryTranscriptOutcome {
+  projectKey: string; sessionId: string; subpath?: string;             // subpath: "subagents/agent-<id>"
+  outcome: "clean" | "appended" | "canonical-ahead" | "quarantined";
+  appended: number; reason?: string;                                   // reason: why it was quarantined
+}
+interface RecoveryReport {
+  outcome: "clean" | "appended" | "quarantined";                       // quarantined > appended > clean
+  transcripts: RecoveryTranscriptOutcome[];
+  quarantine?: string;                                                 // <home>/cache/quarantine/<ts>-<root name>
+}
 type RunHomeFor = (ctx: { sessionId: string; leg: RunLeg; cwd: string; mode: RunMode }) => Promise<RunHome>;
 class RunHomeError extends RuntimeSdkError { code: RunHomeErrorCode }    // forwarded as data.code
 function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; // the one reconcile (read-only for hosts)
@@ -85,7 +95,7 @@ function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; //
 | `query({ prompt, options: { ...options, runtime: { runHome } } })` | The Winter overload (still typed `Query`). The host awaits `buildRunHome` in `optionsFor` and passes the result. |
 | `query({ prompt, options: { ...options, runtime: { selection, official, runHome } } })` | The official overload. The host awaits `buildRunHome` in the official session's `open()`. |
 | `sdk.runHomeOutcome(runId)` | `safe` → the host may `runHome.dispose()`; `quarantined` → its working copy was copied to `<home>/cache/quarantine/`; `pending` → still running (or unknown). Dispose only on `safe`. A `query()` that THROWS synchronously (every run-home refusal does) opened no incarnation and records nothing — the host disposes that run home on the throw, not on the outcome. |
-| `sdk.reconcileRootForRecovery(root)` | The crash-recovery door for a recorded root: `clean` / `appended` / `quarantined`. The host never calls `reconcileLocalWriteRoot` itself. |
+| `sdk.reconcileRootForRecovery(root): Promise<RecoveryReport>` | The recovery door for a recorded root (a crashed run folder or staging root) or a pre-WS-21 spool root (Migration C's `runtimes/claude-config`), judged PER TRANSCRIPT: `clean` (level); `appended` (the canonical file was behind; the tail is appended); `canonical-ahead` (the working copy is a prefix of a canonical history that moved on — a resume through staging, a continuation on the other leg — so nothing is appended and nothing is lost); `quarantined` (unprovable: that transcript's file alone is copied to `report.quarantine`, nothing of it is appended). A session's repair flag is cleared when every one of its transcripts came back level. The host never calls `reconcileLocalWriteRoot` itself. |
 
 **What applying a run home does** (the router, synchronously, before the pass-through / the launch):
 
