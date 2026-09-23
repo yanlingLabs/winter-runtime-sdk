@@ -44,7 +44,7 @@ import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "./errors.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
 import { transcriptSourceForSessionKey, type ReviewerResolver, type TranscriptEntry, type TranscriptSource, type WinterToolCaller } from "@yanlinglabs/winter-agent-sdk/tools";
-import type { ContainmentPolicy } from "./official/containment.ts";
+import { effectiveContainmentPolicy, type ContainmentPolicy } from "./official/containment.ts";
 import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
 import { buildOfficialChildEnv, type OfficialEnvPolicy } from "./official/env-allowlist.ts";
@@ -857,6 +857,8 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // WS-14 §10: a host's own broker becomes the BROKER BEHIND our bridge, never the bridge itself —
     // the containment floor decides first, and their answer decides everything the floor allows.
     const hostBroker = request.options.canUseTool;
+    // R-1: the same run-home-aware floor the template and the adapter apply (`effectiveContainmentPolicy`).
+    const bridgeContainment = effectiveContainmentPolicy(deps.policy?.containment, runHome !== undefined);
     const bridge: OfficialApprovalBridge | undefined =
       hostBroker === undefined
         ? undefined
@@ -864,7 +866,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
             brand: deps.brand,
             // READ PER DECISION, never captured (see `currentMode`): a live `setPermissionMode` moved it.
             mode: () => currentMode,
-            ...(deps.policy?.containment === undefined ? {} : { containment: deps.policy.containment }),
+            ...(bridgeContainment === undefined ? {} : { containment: bridgeContainment }),
             broker: async (approval) => {
               const answer = await hostBroker(approval.toolName, approval.input, approval as never);
               return answer ?? { behavior: "deny", message: "the host callback returned no decision; this bridge never uses the `null` transport escape (WS-14 §10)", toolUseID: approval.toolUseID };

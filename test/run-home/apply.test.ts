@@ -296,6 +296,39 @@ describe("the official template on a run home", () => {
     expect((buildOfficialOptions(templateInput(runHome)).settings as Record<string, unknown>)["autoMemoryEnabled"]).toBe(false);
   });
 
+  test("R-1 ruling: under a run home the containment floor lets a NAMED or INLINE Workflow through (hook and bridge); a scriptPath or resume is still refused; without a run home every Workflow call is refused as before", async () => {
+    const bed = runHomeBed();
+    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
+    const hookVerdict = async (options: ReturnType<typeof buildOfficialOptions>, input: Record<string, unknown>): Promise<string> => {
+      const matchers = ((options.hooks as Record<string, Array<{ hooks: Array<(raw: unknown) => Promise<Record<string, unknown>>> }>>)["PreToolUse"] ?? []);
+      for (const matcher of matchers) {
+        for (const hook of matcher.hooks) {
+          const out = await hook({ tool_name: "Workflow", tool_input: input });
+          const decision = (out["hookSpecificOutput"] as { permissionDecision?: string; permissionDecisionReason?: string } | undefined);
+          if (decision?.permissionDecision === "deny") return `deny: ${decision.permissionDecisionReason ?? ""}`;
+        }
+      }
+      return "allow";
+    };
+    const bridgeVerdict = async (options: ReturnType<typeof buildOfficialOptions>, input: Record<string, unknown>): Promise<string> => {
+      const result = (await (options.canUseTool as unknown as (tool: string, input: Record<string, unknown>, rest: Record<string, unknown>) => Promise<{ behavior: string; message?: string }>)("Workflow", input, { signal: new AbortController().signal, toolUseID: "t1" })) as { behavior: string; message?: string };
+      // No broker is configured, so the fail-closed one denies — but only the FLOOR names workflow resolution.
+      return result.behavior === "deny" && (result.message ?? "").includes("workflow") ? `deny: ${result.message}` : result.behavior;
+    };
+    const onRunHome = buildOfficialOptions(templateInput(runHome));
+    const pre = buildOfficialOptions(templateInput(undefined));
+    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow" })).toBe("allow");
+    expect(await hookVerdict(onRunHome, { script: 'export const meta = { name: "x", description: "x" };\n' })).toBe("allow");
+    expect(await hookVerdict(onRunHome, { scriptPath: "/repo/.claude/workflows/x.js" })).toMatch(/^deny: .*scriptPath/);
+    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", resumeFromRunId: "wf_1" })).toMatch(/^deny: .*resume/);
+    expect(await hookVerdict(pre, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
+    expect(await bridgeVerdict(pre, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
+    expect(await bridgeVerdict(onRunHome, { name: "sv-plugin:sv-flow" })).not.toMatch(/named workflow resolution/);
+    // A host that CHOSE the floor keeps it, run home or not.
+    const hostDeny = buildOfficialOptions(templateInput(runHome), { containment: { workflows: "deny" } });
+    expect(await hookVerdict(hostDeny, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
+  });
+
   test("without a run home the pre-WS-21 profile is unchanged", () => {
     const options = buildOfficialOptions(templateInput(undefined));
     expect(options.settingSources).toEqual([]);

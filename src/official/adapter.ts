@@ -24,7 +24,7 @@ import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
 
 import { officialBranchLabel } from "./branding.ts";
 import { createApprovalBridge, createContainmentHooks, isOurApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./callbacks.ts";
-import { resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
+import { effectiveContainmentPolicy, resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
 import { createContainmentSweep, type ContainmentBreach, type ContainmentSweep } from "./sweep.ts";
 import { mergeHooks } from "./options-template.ts";
 import { buildOfficialChildEnv, type OfficialEnvInput, type OfficialEnvPolicy } from "./env-allowlist.ts";
@@ -333,7 +333,8 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
    * therefore per-launch rather than per-adapter.
    */
   const installFloor = (plan: OfficialLaunchPlan): OfficialOptions => {
-    const containment: ContainmentPolicy = { projectDirName: brand.projectDirName, ...(policy.containment ?? {}) };
+    // R-1: under a run home the workflow floor's default is `"run-home"` (see `effectiveContainmentPolicy`).
+    const containment: ContainmentPolicy = { projectDirName: brand.projectDirName, ...(effectiveContainmentPolicy(policy.containment, plan.runHome !== undefined) ?? {}) };
     // THE ADAPTER'S OWN POLICY IS VALIDATED ON EVERY LAUNCH, whichever bridge the caller brought (review
     // r4, NEW-19). `redirect` was a typed refusal only on the route where this adapter happened to
     // construct the bridge, and a silent `disable` when the caller's bridge was one this package made.
