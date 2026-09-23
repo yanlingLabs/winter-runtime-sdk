@@ -13,6 +13,7 @@ import {
   localTranscriptPath,
   reconcileLocalWriteRoot,
   scanLocalWriteRoot,
+  isJournalKey,
 } from "../../src/store/index.ts";
 import { sidecarPathFor, withStoreBed } from "./support.ts";
 import { WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
@@ -50,6 +51,31 @@ describe("scanning a local-write root", () => {
       expect(found.map((t) => t.key.subpath ?? "<main>").sort()).toEqual(["<main>", "subagents/agent-a1"]);
       expect(found.map((t) => t.key.sessionId)).toEqual([bed.key.sessionId, bed.key.sessionId]);
       expect(scanLocalWriteRoot(join(bed.home, "does-not-exist"))).toEqual([]);
+    });
+  });
+
+  test("review N-1: claude's two journals are scanned under claude's own keys — a run journal only below a non-empty `subagents/<rel>`, the session journal only by its name — and still nothing else", async () => {
+    await withStoreBed(async (bed) => {
+      const root = join(bed.home, "spool");
+      writeLocal(root, bed.key, [bed.entry()]);
+      const session = join(root, "projects", bed.key.projectKey, bed.key.sessionId);
+      const put = (relative: string): void => {
+        mkdirSync(dirname(join(session, relative)), { recursive: true });
+        writeFileSync(join(session, relative), '{"type":"started"}\n');
+      };
+      put("subagents/workflows/wf_1/journal.jsonl");
+      put("world.jsonl");
+      put("subagents/journal.jsonl"); // `<rel>` empty: not claude's journal key
+      put("subagents/workflows/wf_1/journal.provider-state.jsonl");
+      put("notes.jsonl");
+      put("workflows/wf_1/journal.jsonl"); // outside `subagents/`
+      put("subagents/a/b/c/d/e/f/agent-deep.jsonl"); // any depth
+      expect(scanLocalWriteRoot(root).map((t) => t.key.subpath ?? "<main>").sort()).toEqual(["<main>", "subagents/a/b/c/d/e/f/agent-deep", "subagents/workflows/wf_1/journal", "world"]);
+      expect(isJournalKey({ ...bed.key, subpath: "subagents/workflows/wf_1/journal" })).toBe(true);
+      expect(isJournalKey({ ...bed.key, subpath: "world" })).toBe(true);
+      expect(isJournalKey({ ...bed.key, subpath: "subagents/journal" })).toBe(false);
+      expect(isJournalKey({ ...bed.key, subpath: "subagents/agent-a1" })).toBe(false);
+      expect(isJournalKey(bed.key)).toBe(false);
     });
   });
 

@@ -393,3 +393,71 @@ describe("session artifacts on the recovery door", () => {
     expect(readFileSync(join(report.quarantine!, "projects", KEY.projectKey, KEY.sessionId, "tool-results", "r2.txt"), "utf8")).toBe("the working copy's\n");
   });
 });
+
+describe("review N-1 on the recovery door: journals are proved byte for byte, never through the fold", () => {
+  test("a behind run journal is appended, a prefix one is canonical-ahead, a departed session journal is quarantined, and an unrecognised .jsonl is reported skipped", async () => {
+    const bed = runHomeBed();
+    const { sdk, shared } = router(bed);
+    const first = user("q1", null);
+    const line = (n: number): SessionStoreEntry => ({ type: "started", key: `v2:${n}`, agentId: `a${n}` });
+    const behind: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_1/journal" };
+    const ahead: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_2/journal" };
+    const world: SessionKey = { ...KEY, subpath: "world" };
+    // The world journal's lines carry no `type` (measured in the pinned binary: `{k:"put"|"settled"|"retracted",addr,…}`).
+    const worldLine = (topic: string): SessionStoreEntry => ({ k: "put", addr: 0, fact: { topic } }) as unknown as SessionStoreEntry;
+    await shared.store.append(KEY, [first]);
+    await shared.store.append(behind, [line(1)]);
+    await shared.store.append(ahead, [line(1), line(2)]);
+    await shared.store.append(world, [worldLine("canonical")]);
+    await shared.settle();
+    const root = stagingWith(bed, [JSON.stringify(first)]);
+    const session = join(root, "projects", KEY.projectKey, KEY.sessionId);
+    const put = (path: string, lines: unknown[]): void => {
+      mkdirSync(join(session, path, ".."), { recursive: true });
+      writeFileSync(join(session, path), lines.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+    };
+    put("subagents/workflows/wf_1/journal.jsonl", [line(1), line(2)]);
+    put("subagents/workflows/wf_2/journal.jsonl", [line(1)]);
+    put("world.jsonl", [worldLine("working copy")]);
+    put("odd.jsonl", [{ a: 1 }]);
+    const report = await sdk.reconcileRootForRecovery(root);
+    const bySubpath = new Map(report.transcripts.map((transcript) => [transcript.subpath ?? "", transcript]));
+    expect(bySubpath.get("")?.outcome).toBe("clean");
+    expect(bySubpath.get(behind.subpath!)).toMatchObject({ outcome: "appended", appended: 1 });
+    expect(bySubpath.get(ahead.subpath!)?.outcome).toBe("canonical-ahead");
+    expect(bySubpath.get("world")?.outcome).toBe("quarantined");
+    expect(report.outcome).toBe("quarantined");
+    expect(await shared.store.load(behind)).toEqual([line(1), line(2)]);
+    expect(await shared.store.load(world)).toEqual([worldLine("canonical")]);
+    expect(report.artifacts?.skipped).toEqual([`${KEY.projectKey}/${KEY.sessionId}/odd.jsonl`]);
+  });
+
+  test("a journal needs no fold: with the claude target unresolvable, a behind run journal is still appended (a transcript's tail is quarantined there)", async () => {
+    const bed = runHomeBed();
+    const { peer } = createFakeWinterPeer();
+    const peers = { winter: { ...peer, WinterCompatibilitySessionStore } as unknown as RuntimeSdkPeers["winter"] };
+    const shared = createSharedSessionStore({ peers, winterHome: bed.home, storeHome: bed.sdk, policy: { batchWindowMs: 1 } });
+    const input = {
+      shared,
+      home: bed.home,
+      storeHome: bed.sdk,
+      resolveEndpoint: () => {
+        throw new Error("no endpoint for the claude target");
+      },
+    };
+    const first = user("q1", null);
+    const journalKey: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_1/journal" };
+    const lines: SessionStoreEntry[] = [{ type: "started", key: "v2:1", agentId: "a1" }, { type: "result", key: "v2:1", agentId: "a1", result: "sub done" }];
+    await shared.store.append(KEY, [first]);
+    await shared.store.append(journalKey, lines.slice(0, 1));
+    await shared.settle();
+    const root = stagingWith(bed, [JSON.stringify(first)]);
+    const journal = join(root, "projects", KEY.projectKey, KEY.sessionId, "subagents", "workflows", "wf_1", "journal.jsonl");
+    mkdirSync(join(journal, ".."), { recursive: true });
+    writeFileSync(journal, lines.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+    const report = await reconcileRootForRecovery(root, input);
+    expect(report.transcripts.find((transcript) => transcript.subpath === journalKey.subpath)).toMatchObject({ outcome: "appended", appended: 1 });
+    expect(report.outcome).toBe("appended");
+    expect(await shared.store.load(journalKey)).toEqual(lines);
+  });
+});
