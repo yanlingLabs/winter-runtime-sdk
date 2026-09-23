@@ -281,8 +281,6 @@ describe("session artifacts: every non-transcript file under projects/<key>/ is 
       [`${KEY.sessionId}/tool-results/b1.txt`]: "a large tool output\n",
       [`${KEY.sessionId}/workflows/scripts/sv-flow-wf_1.js`]: "export const meta = { name: \"sv-flow\", description: \"d\" };\n",
       [`${KEY.sessionId}/workflows/wf_1.json`]: "{\"runId\":\"wf_1\"}\n",
-      [`${KEY.sessionId}/subagents/agent-a1.meta.json`]: "{\"agentType\":\"general-purpose\"}\n",
-      [`${KEY.sessionId}/subagents/workflows/wf_1/agent-w1.jsonl`]: "{\"type\":\"user\"}\n",
       "notes-beside-the-sessions.md": "a per-project file\n",
     };
     for (const [path, content] of Object.entries(files)) {
@@ -291,12 +289,13 @@ describe("session artifacts: every non-transcript file under projects/<key>/ is 
       writeFileSync(full, content);
     }
     // A subagent TRANSCRIPT is the reconcile's, not an artifact.
+    mkdirSync(join(session, "subagents"), { recursive: true });
     writeFileSync(join(session, "subagents", "agent-a1.jsonl"), "");
     return files;
   }
   const inStore = (sdk: string, path: string): string => join(sdk, "projects", KEY.projectKey, path);
 
-  test("the exit reconcile carries tool results, workflow scripts and run records, subagent metadata and per-project files; the outcome is safe", async () => {
+  test("the exit reconcile carries tool results, workflow scripts and run records and per-project files; the outcome is safe", async () => {
     const bed = runHomeBed();
     const shared = sharedFor(bed.sdk);
     const entries = chain(2);
@@ -371,5 +370,79 @@ describe("session artifacts: every non-transcript file under projects/<key>/ is 
     await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: staging } }, exit });
     expect(outcomes.get("run-1")).toBe("safe");
     for (const path of Object.keys(files)) expect([path, existsSync(inStore(bed.sdk, path))]).toEqual([path, true]);
+  });
+});
+
+describe("review I-1: the carry-back never writes a file the STORE owns, and nested subagent transcripts are reconciled", () => {
+  const subKey: SessionKey = { ...KEY, subpath: "subagents/agent-a1" };
+  const nestedKey: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_1/agent-w1" };
+  const subEntries = (key: SessionKey, count: number): SessionStoreEntry[] => chain(count).map((entry) => ({ ...entry, sessionId: key.sessionId, isSidechain: true, agentId: "a1" }));
+  const meta = (withType: boolean): Record<string, unknown> => ({ ...(withType ? { type: "agent_metadata" } : {}), agentType: "general-purpose", description: "a sub" });
+  const writeLocal = (root: string, relative: string, content: string): void => {
+    const full = join(root, "projects", KEY.projectKey, KEY.sessionId, relative);
+    mkdirSync(join(full, ".."), { recursive: true });
+    writeFileSync(full, content);
+  };
+  const inStore = (sdk: string, relative: string): string => join(sdk, "projects", KEY.projectKey, KEY.sessionId, relative);
+
+  test("the mirror already wrote the subagent's .meta.json (WITH `type`); claude's local copy (without it) never conflicts — the exit ends safe and the store's file is untouched", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    const sub = subEntries(subKey, 2);
+    await shared.store.append(KEY, main);
+    await shared.store.append(subKey, [...sub, meta(true) as SessionStoreEntry]);
+    await shared.settle();
+    const storeMeta = readFileSync(inStore(bed.sdk, "subagents/agent-a1.meta.json"), "utf8");
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    writeLocal(runFolder, "subagents/agent-a1.jsonl", sub.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+    writeLocal(runFolder, "subagents/agent-a1.meta.json", `${JSON.stringify(meta(false))}\n`);
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 3, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    expect(readFileSync(inStore(bed.sdk, "subagents/agent-a1.meta.json"), "utf8")).toBe(storeMeta);
+  });
+
+  test("with NO .meta.json in the store, claude's is still never copied into that slot (load() would read it back as a record); nor any other store-owned name", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    await shared.store.append(KEY, main);
+    await shared.settle();
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    writeLocal(runFolder, "subagents/agent-a1.meta.json", `${JSON.stringify(meta(false))}\n`);
+    const planted = [`../${KEY.sessionId}.summary.json`, `../${KEY.sessionId}.lock`, `../${KEY.sessionId}.jsonl.tail-quarantine`, "subagents/agent-a1.jsonl.tmp-1-2-x", "x.provider-state.jsonl"];
+    for (const relative of planted) writeLocal(runFolder, relative, "planted\n");
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    expect(existsSync(inStore(bed.sdk, "subagents/agent-a1.meta.json"))).toBe(false);
+    // The store keeps its OWN summary and lock beside the transcript; what matters is that none of them is the planted copy.
+    for (const relative of planted) {
+      const target = inStore(bed.sdk, relative);
+      expect([relative, existsSync(target) && readFileSync(target, "utf8") === "planted\n"]).toEqual([relative, false]);
+    }
+    expect((await shared.store.load(KEY))?.filter((entry) => entry["type"] !== "agent_metadata")).toHaveLength(1);
+  });
+
+  test("a NESTED workflow-subagent transcript (subagents/workflows/<run>/agent-*.jsonl) is reconciled through the store, never copied as a file", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    await shared.store.append(KEY, main);
+    await shared.settle();
+    const nested = subEntries(nestedKey, 2);
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    // Spelled with a space after each `{`: a RAW copy would keep it, an append through the store re-serializes.
+    writeLocal(runFolder, "subagents/workflows/wf_1/agent-w1.jsonl", nested.map((entry) => `${JSON.stringify(entry).replace(/^\{/, "{ ")}\n`).join(""));
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    const loaded = ((await shared.store.load(nestedKey)) ?? []).filter((entry) => entry["type"] !== "agent_metadata");
+    expect(loaded.map((entry) => entry["uuid"])).toEqual(nested.map((entry) => entry["uuid"]));
+    expect(readFileSync(inStore(bed.sdk, "subagents/workflows/wf_1/agent-w1.jsonl"), "utf8")).not.toContain('{ "');
   });
 });

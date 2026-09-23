@@ -13,8 +13,11 @@
 //
 // THE MIRROR CARRIES TRANSCRIPTS ONLY (the SDK's `SessionStore` has no artifact surface), so without this
 // every one of those files died with the run folder. The rules, in order:
-//   * a TRANSCRIPT is never touched here — `<key>/*.jsonl` and `<sid>/subagents/agent-*.jsonl` are the
-//     reconcile's (and a stray `.jsonl` at the key level is a transcript or a sidecar, never an artifact);
+//   * a file the STORE owns is never touched here (review I-1): every `*.jsonl` at any depth (a transcript
+//     — the reconcile's, nested workflow subagents included — or a sidecar), every `*.meta.json` (the
+//     store writes `agent_metadata` there WITH its `type`; claude's local copy has none, and a copied one
+//     would be read back by `load()` as an extra record), and the store's `*.summary.json`, `*.lock`,
+//     `*.tail-quarantine` and `*.tmp-*` files;
 //   * a LINK in the working copy is never followed and never copied — it is reported and skipped;
 //   * the destination is `<store>/projects/<same relative path>`, confined there: a destination whose
 //     path passes through a link, or whose place is taken by something that is not a file, is a conflict;
@@ -25,7 +28,10 @@ import { dirname, join, relative, sep } from "node:path";
 
 const PRIVATE_DIR = 0o700;
 const PROJECTS_DIR = "projects";
-const SUBAGENT_TRANSCRIPT_RE = /^agent-[^/]+\.jsonl$/;
+/** File names the canonical store owns (review I-1): never an artifact, whatever the working copy holds. */
+function isStoreOwnedName(name: string): boolean {
+  return name.endsWith(".jsonl") || name.endsWith(".meta.json") || name.endsWith(".summary.json") || name.endsWith(".lock") || name.endsWith(".tail-quarantine") || name.includes(".tmp-");
+}
 
 export interface CarriedArtifact {
   /** The file's path relative to the working copy's `projects/` (`<key>/<sid>/tool-results/x.txt`). */
@@ -52,14 +58,6 @@ function lstatOrUndefined(path: string): Stats | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** Is `relativePath` (under a key dir) a transcript the reconcile owns? */
-function isTranscript(segments: readonly string[]): boolean {
-  // `<key>/<anything>.jsonl` — a session transcript (or a sidecar, which is never the working copy's).
-  if (segments.length === 2) return segments[1]!.endsWith(".jsonl");
-  // `<key>/<sid>/subagents/agent-<id>.jsonl` — a subagent transcript.
-  return segments.length === 4 && segments[2] === "subagents" && SUBAGENT_TRANSCRIPT_RE.test(segments[3]!);
 }
 
 /**
@@ -132,7 +130,7 @@ export function carryBackSessionArtifacts(root: string, storeHome: string): Arti
         report.skipped.push({ ...artifact, reason: "not a regular file" });
         continue;
       }
-      if (path.length < 2 || isTranscript(path)) continue;
+      if (path.length < 2 || isStoreOwnedName(name)) continue;
       const destination = join(storeProjects, ...path);
       const offender = linkOnTheWay(storeProjects, dirname(destination));
       if (offender !== undefined) {
