@@ -24,6 +24,7 @@ import { isAbsolute, join } from "node:path";
 import { RunHomeError } from "./errors.ts";
 import { buildInstructions } from "./instructions.ts";
 import { buildItems } from "./items.ts";
+import { buildEffectiveSettings } from "./settings.ts";
 import { RUN_HOME_PERSISTENT_ENTRIES, runHomeBrandOf, sdkHomeOf, type RunHome, type RunHomeBrand, type RunHomeInput, type RunHomeReport } from "./types.ts";
 
 /** What every build step is handed. */
@@ -51,10 +52,12 @@ export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
   await chmod(dir, PRIVATE_DIR); // the umask may have narrowed `mode`; never widened, but be exact
   const report: RunHomeReport = { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] };
   const context: RunHomeBuildContext = { input, brand, sdkHome, dir, report };
+  let effectiveSettings: Record<string, unknown>;
   try {
     await buildCore(context);
     await buildItems(context);
     await buildInstructions(context);
+    effectiveSettings = await buildEffectiveSettings(context);
   } catch (error) {
     // A HALF-BUILT FOLDER IS NEVER HANDED OUT — and never left behind for a sweep to wonder about.
     await rm(dir, { recursive: true, force: true });
@@ -65,7 +68,7 @@ export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
     dir,
     sdkHome,
     input,
-    effectiveSettings: {},
+    effectiveSettings,
     report,
     dispose: () => rm(dir, { recursive: true, force: true }),
   };
