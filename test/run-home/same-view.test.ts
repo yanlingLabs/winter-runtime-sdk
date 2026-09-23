@@ -1037,6 +1037,82 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     }
   });
 
+  describe("round 5: invoking the plugin workflow — Skill(), the slash command, and the Workflow tool", () => {
+    // MEASURED: on both legs neither `Skill("sv-plugin:sv-flow")` nor `/sv-plugin:sv-flow` runs the
+    // workflow itself — each expands to an instruction to call `Workflow({ name: "sv-plugin:sv-flow" })`
+    // with the workflow's description (claude in an injected text block after "Launching skill: …", the
+    // Winter runtime in the tool result / the expanded prompt; the wording differs). The run is the
+    // Workflow tool's. A repository's vendor-dir workflow (`.claude/workflows/`) is neither listed nor
+    // resolvable by name on either leg under a run home.
+    const INSTRUCTION = `Workflow({ name: \\"${PLUGIN_WORKFLOW}\\" })`;
+    const seen: Record<string, { afterSkill: string; slashPrompt: string; workflow: string; vendorListed: boolean }> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          turns: () => [
+            { toolUses: [{ id: "toolu_skill_flow", name: "Skill", input: { skill: PLUGIN_WORKFLOW } }] },
+            { toolUses: [{ id: "toolu_workflow_flow", name: "Workflow", input: { name: PLUGIN_WORKFLOW } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          put(join(bed.fixture.root, ".claude", "workflows", "vendor-flow.js"), 'export const meta = { name: "sv-vendor-flow", description: "a repository vendor-dir workflow" };\n');
+          const allowAll: CanUseToolLike = async (_tool, input) => ({ behavior: "allow", updatedInput: input });
+          /** Everything the model was sent after the Skill call (the tool result and whatever rode with it). */
+          const afterTool = (run: Run, id: string): string => {
+            for (const request of run.requests) {
+              const messages = (request["messages"] ?? []) as Array<{ content?: unknown }>;
+              const index = messages.findIndex((message) => Array.isArray(message.content) && (message.content as Array<Record<string, unknown>>).some((block) => block["type"] === "tool_result" && block["tool_use_id"] === id));
+              if (index >= 0) return JSON.stringify(messages.slice(index));
+            }
+            return "";
+          };
+          const resultOf = (run: Run, id: string): string => {
+            for (const request of run.requests) {
+              for (const message of (request["messages"] ?? []) as Array<{ content?: unknown }>) {
+                if (!Array.isArray(message.content)) continue;
+                for (const block of message.content as Array<Record<string, unknown>>) if (block["type"] === "tool_result" && block["tool_use_id"] === id) return JSON.stringify(block["content"]);
+              }
+            }
+            return "";
+          };
+          const firstPrompt = (run: Run): string => JSON.stringify((run.requests[0]?.["messages"] ?? []) as unknown[]);
+          const w = await bed.runWinter(await bed.build("winter"), { canUseTool: allowAll });
+          const wSlash = await bed.runWinter(await bed.build("winter"), { canUseTool: allowAll, prompt: `/${PLUGIN_WORKFLOW}` });
+          seen["winter"] = { afterSkill: afterTool(w, "toolu_skill_flow"), slashPrompt: firstPrompt(wSlash), workflow: resultOf(w, "toolu_workflow_flow"), vendorListed: JSON.stringify(initOf(w)).includes("sv-vendor-flow") };
+          const c = await bed.runClaude(await bed.build("official"), "s_sv_skill_flow", { canUseTool: allowAll });
+          const cSlash = await bed.runClaude(await bed.build("official"), "s_sv_slash_flow", { canUseTool: allowAll, prompt: `/${PLUGIN_WORKFLOW}` });
+          seen["claude"] = { afterSkill: afterTool(c, "toolu_skill_flow"), slashPrompt: firstPrompt(cSlash), workflow: resultOf(c, "toolu_workflow_flow"), vendorListed: JSON.stringify(initOf(c)).includes("sv-vendor-flow") };
+          verbose("workflow invocation", { winterWorkflow: seen["winter"]?.workflow.slice(0, 300), claudeWorkflow: seen["claude"]?.workflow.slice(0, 300) });
+        },
+      );
+    }, TIMEOUT);
+    for (const leg of ["claude", "winter"]) {
+      test(`round 5, ${leg}: Skill("${PLUGIN_WORKFLOW}") directs the model to ${INSTRUCTION.replace(/\\\\/g, "")}, with the workflow's description`, () => {
+        expect(seen[leg]?.afterSkill).toContain(INSTRUCTION);
+        expect(seen[leg]?.afterSkill).toContain("the fixture workflow");
+      });
+      test(`round 5, ${leg}: the slash command /${PLUGIN_WORKFLOW} expands to the same instruction`, () => {
+        expect(seen[leg]?.slashPrompt).toContain(INSTRUCTION);
+        expect(seen[leg]?.slashPrompt).toContain("the fixture workflow");
+      });
+      test(`round 5, ${leg}: a repository's vendor-dir workflow is not listed`, () => {
+        expect(seen[leg]?.vendorListed).toBe(false);
+      });
+    }
+    test("round 5, winter: the Workflow tool launches the plugin workflow by its qualified name", () => {
+      expect(seen["winter"]?.workflow).toContain("async_launched");
+      expect(seen["winter"]?.workflow).toContain("sv-flow");
+    });
+    test.todo(
+      "round 5, claude: the Workflow tool launches it too — R-1 (ROUTER, ruling needed: the official leg's containment floor refuses every Workflow call by default, `src/official/containment.ts:390-396`, 'named workflow resolution reads the vendor's own workflows directory'. Measured with the floor lifted (`containment.workflows: \"host-replacement\"`): claude launches `sv-plugin:sv-flow`, and a repository `.claude/workflows/` name is NOT resolvable under a run home ('not found. Available: deep-research, sv-plugin:sv-flow, sv-user-flow'))",
+      () => {
+        expect(seen["claude"]?.workflow).toContain("Workflow launched");
+      },
+    );
+  });
+
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;
