@@ -163,7 +163,8 @@ interface Fixture {
 /**
  * The fixture home and project (brief L2.10): user/project/clashing skills, user/project agents plus a
  * DOUBLE-BOM agent, user/project rules, user/project instructions, an output style, a user MCP server
- * and a project `.winter/mcp.json` one (plus a disabled and a reserved-name one the router must drop),
+ * a local-scope one and a project `.winter/mcp.json` one (plus a disabled and a reserved-name one the
+ * router must drop),
  * and an enabled directory-marketplace plugin with a skill and a SessionStart hook.
  */
 function plantFixture(session: HermeticSession, options: { installRecord: boolean }): Fixture {
@@ -206,7 +207,11 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
   }
   put(
     join(sdkHome, ".winter.json"),
-    `${JSON.stringify({ mcpServers: { "sv-user-mcp": { type: "stdio", command: "/usr/bin/false" }, "sv-disabled-mcp": { type: "stdio", command: "/usr/bin/false" }, "sv-reserved-mcp": { type: "stdio", command: "/usr/bin/false" } } })}\n`,
+    `${JSON.stringify({
+      mcpServers: { "sv-user-mcp": { type: "stdio", command: "/usr/bin/false" }, "sv-disabled-mcp": { type: "stdio", command: "/usr/bin/false" }, "sv-reserved-mcp": { type: "stdio", command: "/usr/bin/false" } },
+      // The LOCAL scope for this checkout (`winter mcp add --scope local`), keyed by the project root.
+      projects: { [root]: { mcpServers: { "sv-local-mcp": { type: "stdio", command: "/usr/bin/false" } } } },
+    })}\n`,
   );
   put(join(root, ".winter", "mcp.json"), `${JSON.stringify({ mcpServers: { "sv-project-mcp": { type: "stdio", command: "/usr/bin/false" } } })}\n`);
   return { root, marker, market };
@@ -221,7 +226,8 @@ function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyl
       : ["- sv-clash-skill: the USER clash", "- sv-plugin:sv-plug-skill: the plugin skill", "- sv-user-skill: the user skill"],
     agents: trusted ? ["sv-project-agent", "sv-user-agent"] : ["sv-user-agent"],
     plugins: ["sv-plugin"],
-    mcpServers: trusted ? ["sv-project-mcp", "sv-user-mcp"] : ["sv-user-mcp"],
+    // The local scope is not trust-gated (it is the user's own entry in the shared file).
+    mcpServers: trusted ? ["sv-local-mcp", "sv-project-mcp", "sv-user-mcp"] : ["sv-local-mcp", "sv-user-mcp"],
     instructions: trusted ? [TOKENS.userInstructions, TOKENS.projectInstructions, TOKENS.projectRule, TOKENS.userRule] : [TOKENS.userInstructions, TOKENS.userRule],
   };
 }
@@ -397,7 +403,7 @@ type Item = (typeof ITEMS)[number];
  */
 const LEDGER: Partial<Record<Item, { id: string; trustedOnly?: boolean }>> = {
   instructions: { id: "SV-1 (the Winter runtime reads rules from the store home, not the run folder: the trusted project's rules are lost)", trustedOnly: true },
-  mcpServers: { id: "SV-2 (the Winter runtime reads the global config from the store home, not the run folder: the trusted project's servers are lost; disabled and reserved-name servers start)" },
+  mcpServers: { id: "SV-2 (the Winter runtime reads the global config from the store home, not the run folder: the local and trusted-project servers are lost; disabled and reserved-name servers start)" },
   hookRuns: { id: "SV-3 (the Winter runtime does not unwrap claude's `hooks/hooks.json` `{ hooks: … }` document: a plugin's hooks never run)" },
 };
 
