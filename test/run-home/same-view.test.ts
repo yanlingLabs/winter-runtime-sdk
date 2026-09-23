@@ -17,8 +17,8 @@
 // A DIFFERENCE THE ROUTER CANNOT FIX (the Winter runtime's own reading) is kept as a `test.todo` whose
 // name carries its same-view ledger id (SV-n, lane-L2 report): the assertion is the real one, not a
 // weakened one, and `bun test --todo` fails the moment the SDK is fixed and the todo can be removed.
-// SV-1..SV-4 were fixed in `ws21/sdk`@267ea34, SV-5 in `ws21/sdk`@57e7fef; all are plain assertions
-// now, named as regression guards.
+// SV-1..SV-4 were fixed in `ws21/sdk`@267ea34, SV-5 and SV-6 in `ws21/sdk`@57e7fef, SV-7 and SV-8 in
+// `ws21/sdk`@20b623e; all are plain assertions now, named as regression guards.
 //
 // PLUGIN OUTPUT STYLES AND WORKFLOWS (round 3). The style LIST is observable on claude only
 // (`initializationResult().available_output_styles`, names without descriptions); the Winter Query has
@@ -98,8 +98,10 @@ interface SameView {
   mcpStarted: string[];
   /** The plugin output style's text reached the model (it is the active style). */
   pluginStyleText: boolean;
-  /** Where the plugin workflow is listed: `skills:`, `slash:` and `listing:` entries, under whatever name. */
+  /** Where the fixture workflows are listed: `skills:`, `slash:` and `listing:` entries (each once), under whatever name. */
   workflows: string[];
+  /** Fixture names listed MORE THAN ONCE in init `slash_commands`. */
+  slashDuplicates: string[];
 }
 
 interface Run {
@@ -197,11 +199,12 @@ function viewOf(run: Run): SameView {
     hookRuns: run.hookRuns,
     mcpStarted: run.mcpStarted,
     pluginStyleText: text.includes(PLUGIN_STYLE_TOKEN),
-    workflows: [
+    slashDuplicates: [...new Set(((init["slash_commands"] as string[] | undefined) ?? []).filter((name, index, all) => ours(name) && all.indexOf(name) !== index))].sort(),
+    workflows: [...new Set([
       ...((init["skills"] as string[] | undefined) ?? []).filter(isWorkflowName).map((name) => `skills:${name}`),
       ...((init["slash_commands"] as string[] | undefined) ?? []).filter(isWorkflowName).map((name) => `slash:${name}`),
       ...new Set([...text.matchAll(/\\n- (sv-[\w:-]*): ([^"\\]*)/g)].filter((match) => isWorkflowName(match[1]!)).map((match) => `listing:- ${match[1]}: ${match[2]}`)),
-    ].sort(),
+    ])].sort(),
   };
 }
 
@@ -303,7 +306,7 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
 }
 
 /** The view claude must show for the fixture (and the Winter runtime must equal). */
-function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyle" | "styleText" | "pluginStyleText"> {
+function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyle" | "styleText" | "pluginStyleText" | "slashDuplicates"> {
   return {
     skills: trusted ? ["sv-clash-skill", "sv-plugin:sv-plug-skill", "sv-project-skill", "sv-user-skill"] : ["sv-clash-skill", "sv-plugin:sv-plug-skill", "sv-user-skill"],
     skillListing: trusted
@@ -546,7 +549,7 @@ async function withSameViewBed<T>(
 }
 
 /** The per-item assertions, shared by every scenario. */
-const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcpStarted", "outputStyle", "styleText", "pluginStyleText", "instructions", "hookRuns", "workflows"] as const;
+const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcpStarted", "outputStyle", "styleText", "pluginStyleText", "instructions", "hookRuns", "workflows", "slashDuplicates"] as const;
 type Item = (typeof ITEMS)[number];
 
 /**
@@ -566,7 +569,10 @@ const GUARDS: Partial<Record<Item, { id: string; trustedOnly?: boolean }>> = {
  * SV-n STILL OPEN: a measured difference in the Winter runtime's own reading, kept as a `test.todo`
  * (the real assertion; `bun test --todo` fails it the moment the SDK is fixed).
  */
-const LEDGER: Partial<Record<Item, string>> = {};
+const LEDGER: Partial<Record<Item, string>> = {
+  slashDuplicates:
+    "SV-9 (regression at ws21/sdk@20b623e: the Winter runtime lists every workflow TWICE in init `slash_commands` — once through the synthetic workflow skills, once through the explicit append)",
+};
 
 function itemTests(label: string, trusted: boolean, views: () => { claude: SameView; winter: SameView }): void {
   for (const item of ITEMS) {
@@ -590,6 +596,7 @@ function claudeReferenceTests(label: string, trusted: boolean, view: () => SameV
     expect(claude.outputStyle).toBe("sv-style");
     expect(claude.styleText).toBe(true);
     expect(claude.pluginStyleText).toBe(false);
+    expect(claude.slashDuplicates).toEqual([]);
     expect(claude.hookRuns).toBe(1);
     // The double-BOM agent: claude reads no keys from it, so it has no name and is not listed.
     expect(claude.agents).not.toContain("sv-bom-agent");
@@ -905,7 +912,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
       expect(reasons[paths!.protectedFile]).toContain("protected path");
       expect(written["protectedFile"]).toBe(false);
     });
-    test.todo("[wip] app, Winter leg: an ordinary in-cwd write under acceptEdits is not asked (claude: not asked, measured) — SV-8 (the Winter runtime's acceptEdits bound anchors `**` at the cwd unescaped, so under a `[wip]` cwd nothing is inside it)", () => {
+    test("[wip] app, Winter leg: an ordinary in-cwd write under acceptEdits is not asked, as on claude (SV-8 guard: the acceptEdits bound is a plain prefix test)", () => {
       expect(asked).not.toContain(paths!.free);
       expect(written["free"]).toBe(true);
     });
@@ -953,7 +960,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     test("SV-7 deny: the Winter runtime's `Edit(...)` deny stops a Write too", () => {
       expect(results["winter"]?.denyStopsWrite).toBe(results["claude"]?.denyStopsWrite);
     });
-    test.todo("SV-7 ask: the Winter runtime's `Edit(...)` ask asks for a Write too — SV-7 (the Winter runtime applies an `Edit(...)` ASK rule to the Edit tool only: under acceptEdits the Write is auto-approved and written; its `Write(...)` ask does fire, which claude's never does)", () => {
+    test("SV-7 ask guard: the Winter runtime's `Edit(...)` ask asks for a Write too (claude's tool-to-rule-kind map)", () => {
       expect({ askAskedForWrite: results["winter"]?.askAskedForWrite, askedTargetWritten: results["winter"]?.askedTargetWritten }).toEqual({ askAskedForWrite: results["claude"]?.askAskedForWrite, askedTargetWritten: results["claude"]?.askedTargetWritten });
     });
   });
