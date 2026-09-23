@@ -498,3 +498,14 @@ describe("WS-14 §6 — the supervised spawn proxy", () => {
     expect(() => proxy.spawn(spawnOptions())).toThrow(/pid/);
   });
 });
+
+// WS-21: the recorded root's KIND, per profile — a run folder is recognised by identity, never by shape.
+describe("WS-21 root kinds", () => {
+  test("a fresh generation on a run home records `run-folder`; a resume records `sdk-resume-staging`; the spool stays `official-spool`", async () => {
+    const { classifyLocalWriteRoot } = await import("../../src/official/spool.ts");
+    expect(classifyLocalWriteRoot("/h/cache/runs/r1", "/h/cache/runs/r1").kind).toBe("run-folder");
+    expect(classifyLocalWriteRoot("/h/cache/runs/r2", "/h/cache/runs/r1").kind).toBe("official-spool");
+    expect(classifyLocalWriteRoot("/tmp/claude-resume-00000000-0000-4000-8000-000000000001", "/h/cache/runs/r1").kind).toBe("sdk-resume-staging");
+    expect(classifyLocalWriteRoot(SPOOL).kind).toBe("official-spool");
+  });
+});

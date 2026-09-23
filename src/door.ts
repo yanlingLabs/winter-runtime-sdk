@@ -36,6 +36,7 @@
 //      own variables, because only the host knows them.
 //   5. NOTHING HERE CACHES A CREDENTIAL. `fetchAuthCredentials` returns material to one caller, this
 //      module puts it in the child environment, and the object is dropped when the launch returns.
+import { join } from "node:path";
 import type { BrandProfile, CredentialRef, Options, ProviderSelection, Query } from "@yanlinglabs/winter-agent-sdk";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 
@@ -47,7 +48,7 @@ import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
 import { buildOfficialChildEnv, type OfficialEnvPolicy } from "./official/env-allowlist.ts";
 import { fetchAuthCredentials, authVariableSetKey, type AuthCredentialPlan } from "./official/auth.ts";
-import { assertPermissionModeAllowed, buildOfficialOptions, type OptionsTemplatePolicy } from "./official/options-template.ts";
+import { assertPermissionModeAllowed, buildOfficialOptions, RUN_HOME_ABSENT_SEGMENT, type OptionsTemplatePolicy } from "./official/options-template.ts";
 import { capabilityNameCollisionError, officialMcpServers, winterMcpServerDescriptor, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import { officialSpoolRoot } from "./official/spool.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
@@ -690,6 +691,13 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     const storeHome = shared.identity.storeHome ?? home;
     const runHome = request.runHome;
     const runHomeBinding = runHome === undefined ? undefined : officialRunHomeBinding(runHome);
+    if (runHome !== undefined && request.input.stagingRoot !== undefined) {
+      throw new RuntimeLaunchInputError({
+        leg: "official",
+        field: "runtime.official.stagingRoot",
+        reason: "a run home replaces the configured staging placeholder: a resume is configured on `<run folder>/.absent`, which is unpredictable and never created, so the wrapper stages nothing but the transcript (WS-21 §3.6)",
+      });
+    }
     if (runHome !== undefined && request.input.spool !== undefined) {
       throw new RuntimeLaunchInputError({
         leg: "official",
@@ -723,13 +731,19 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // request naming NEITHER field still means "let the vendor allocate one", which stays `undefined`.
     const freshSessionId = resume === undefined ? requestedBackendId : undefined;
     const profile: OfficialLaunchProfile = resume === undefined ? "fresh-spool" : "store-backed-resume";
-    // WS-21: a fresh generation on a run home runs IN its run folder; the pre-WS-21 profile keeps the spool.
+    // WS-21: a fresh generation on a run home runs IN its run folder, and a resume is CONFIGURED on the
+    // unpredictable placeholder inside it (§3.6: never created, under the daemon's write-fenced cache,
+    // so the wrapper's staging step finds nothing to copy — the predictable `<tmp>/claude-resume-<id>`
+    // placeholder this replaces could be planted, F11). The pre-WS-21 profile keeps the spool and that
+    // placeholder.
     const configDir =
       resume === undefined
         ? runHome !== undefined
           ? runHome.dir
           : (request.input.spool ?? officialSpoolRoot(home))
-        : (request.input.stagingRoot ?? resumeStagingRoot(resume));
+        : runHome !== undefined
+          ? join(runHome.dir, RUN_HOME_ABSENT_SEGMENT)
+          : (request.input.stagingRoot ?? resumeStagingRoot(resume));
     // §3's child env is a REPLACEMENT, and a replacement without `HOME` is not one (review r1's nit).
     // The runtime derives paths from `os.homedir()`, whose OS-level fallback is the user database —
     // invisible to `CLAUDE_CONFIG_DIR` scoping, and on a developer machine it is the real vendor home
