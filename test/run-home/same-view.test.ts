@@ -17,7 +17,8 @@
 // A DIFFERENCE THE ROUTER CANNOT FIX (the Winter runtime's own reading) is kept as a `test.todo` whose
 // name carries its same-view ledger id (SV-n, lane-L2 report): the assertion is the real one, not a
 // weakened one, and `bun test --todo` fails the moment the SDK is fixed and the todo can be removed.
-// SV-1..SV-4 were fixed in `ws21/sdk`@267ea34 and are plain assertions now, named as regression guards.
+// SV-1..SV-4 were fixed in `ws21/sdk`@267ea34, SV-5 in `ws21/sdk`@57e7fef; all are plain assertions
+// now, named as regression guards.
 //
 // PLUGIN OUTPUT STYLES AND WORKFLOWS (round 3). The style LIST is observable on claude only
 // (`initializationResult().available_output_styles`, names without descriptions); the Winter Query has
@@ -502,16 +503,14 @@ const GUARDS: Partial<Record<Item, { id: string; trustedOnly?: boolean }>> = {
   mcpServers: { id: "SV-2 guard: the global config is the run folder's, folded and filtered by the router" },
   mcpStarted: { id: "SV-2 guard" },
   hookRuns: { id: "SV-3 guard: claude's `hooks/hooks.json` `{ hooks: … }` document is unwrapped" },
+  workflows: { id: "SV-5 guard: a workflow is listed under `meta.name` in init `skills`, `slash_commands` and the Skill listing" },
 };
 
 /**
  * SV-n STILL OPEN: a measured difference in the Winter runtime's own reading, kept as a `test.todo`
  * (the real assertion; `bun test --todo` fails it the moment the SDK is fixed).
  */
-const LEDGER: Partial<Record<Item, string>> = {
-  workflows:
-    "SV-5 (the Winter runtime lists a plugin workflow nowhere — not in init `skills`, `slash_commands` or the Skill listing; claude lists `sv-plugin:sv-flow` in all three)",
-};
+const LEDGER: Partial<Record<Item, string>> = {};
 
 function itemTests(label: string, trusted: boolean, views: () => { claude: SameView; winter: SameView }): void {
   for (const item of ITEMS) {
