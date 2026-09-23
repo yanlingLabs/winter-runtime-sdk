@@ -965,6 +965,78 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
   });
 
+  describe("round 5: the rule grammar under acceptEdits, on both legs", () => {
+    // User-tier rules (the shared home's own settings), each measured on claude (the reference) and
+    // compared on the Winter runtime (claude's full file-rule pipeline since ws21/sdk@20b623e). The
+    // broker records every ask and ALLOWS it, so an ask is visible and a denied write never lands.
+    const TARGETS = {
+      nestedSecret: ["pkg", "secrets", "a"],
+      rootSecret: ["secrets", "b"],
+      nestedEnv: ["pkg", ".env"],
+      literalWip: ["[wip]", "x.txt"],
+      classSibling: ["w", "x.txt"],
+      askTarget: ["q", "z.txt"],
+      free: ["free.txt"],
+    } as const;
+    type Target = keyof typeof TARGETS;
+    const results: Record<string, Record<Target, { asked: boolean; written: boolean }>> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          userPermissions: (root) => ({
+            deny: ["Edit(./secrets/**)", "Edit(.env)", `Edit(/${escapeRulePath(root)}/\\[wip\\]/**)`],
+            ask: [`Edit(/${escapeRulePath(root)}/q/**)`],
+          }),
+          turns: (root) => [
+            ...Object.entries(TARGETS).map(([name, parts]) => ({ toolUses: [{ id: `toolu_${name}`, name: "Write", input: { file_path: join(root, ...parts), content: `${name}\n` } }] })),
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const pathOf = (name: Target): string => join(bed.fixture.root, ...TARGETS[name]);
+          for (const name of Object.keys(TARGETS) as Target[]) mkdirSync(dirname(pathOf(name)), { recursive: true });
+          const measure = async (leg: string, run: (canUseTool: CanUseToolLike) => Promise<Run>): Promise<void> => {
+            for (const name of Object.keys(TARGETS) as Target[]) rmSync(pathOf(name), { force: true });
+            const asked: string[] = [];
+            await run(async (_tool, input) => {
+              asked.push(String(input["file_path"]));
+              return { behavior: "allow", updatedInput: input };
+            });
+            results[leg] = Object.fromEntries((Object.keys(TARGETS) as Target[]).map((name) => [name, { asked: asked.includes(pathOf(name)), written: existsSync(pathOf(name)) }])) as Record<Target, { asked: boolean; written: boolean }>;
+          };
+          await measure("winter", async (canUseTool) => bed.runWinter(await bed.build("winter"), { canUseTool, permissionMode: "acceptEdits" }));
+          await measure("claude", async (canUseTool) => bed.runClaude(await bed.build("official"), "s_sv_grammar", { canUseTool, permissionMode: "acceptEdits" }));
+          verbose("round 5 grammar", results);
+        },
+      );
+    }, TIMEOUT);
+    const CASES: Array<{ label: string; targets: Target[]; claude: Record<string, { asked: boolean; written: boolean }> }> = [
+      {
+        label: "a relative deny `Edit(./secrets/**)` blocks a NESTED `pkg/secrets/a` (and the top-level `secrets/b`)",
+        targets: ["nestedSecret", "rootSecret"],
+        claude: { nestedSecret: { asked: false, written: false }, rootSecret: { asked: false, written: false } },
+      },
+      { label: "a bare `Edit(.env)` deny blocks a nested `pkg/.env`", targets: ["nestedEnv"], claude: { nestedEnv: { asked: false, written: false } } },
+      {
+        label: "an escaped `Edit(//<root>/\\[wip\\]/**)` deny matches the literal `[wip]` dir — and not `w/`, which the unescaped class would",
+        targets: ["literalWip", "classSibling"],
+        claude: { literalWip: { asked: false, written: false }, classSibling: { asked: false, written: true } },
+      },
+      { label: "an `Edit(...)` ask rule makes the leg ask before a Write (the broker allows it)", targets: ["askTarget"], claude: { askTarget: { asked: true, written: true } } },
+      { label: "an unruled in-cwd write is neither asked nor refused (control)", targets: ["free"], claude: { free: { asked: false, written: true } } },
+    ];
+    for (const entry of CASES) {
+      const pick = (leg: string): Record<string, unknown> => Object.fromEntries(entry.targets.map((name) => [name, results[leg]?.[name]]));
+      test(`round 5, claude (the reference): ${entry.label}`, () => {
+        expect(pick("claude")).toEqual(entry.claude);
+      });
+      test(`round 5, the Winter runtime the same: ${entry.label}`, () => {
+        expect(pick("winter")).toEqual(pick("claude"));
+      });
+    }
+  });
+
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;
