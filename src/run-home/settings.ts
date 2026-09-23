@@ -259,14 +259,26 @@ function anchorPath(path: unknown, anchor: string): unknown {
   return resolve(anchor, path);
 }
 
-function anchorTier(settings: Record<string, unknown>, anchor: string): Record<string, unknown> {
+function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: (rule: string) => void = () => undefined): Record<string, unknown> {
   const out: Record<string, unknown> = { ...settings };
   const permissions = out["permissions"];
   if (isPlainObject(permissions)) {
     const next: Record<string, unknown> = { ...permissions };
     for (const list of ["allow", "ask", "deny"]) {
       const rules = next[list];
-      if (Array.isArray(rules)) next[list] = rules.map((rule) => (typeof rule === "string" ? anchorRule(rule, anchor) : rule));
+      if (!Array.isArray(rules)) continue;
+      next[list] = rules.flatMap((rule) => {
+        if (typeof rule !== "string") return [rule];
+        const anchored = anchorRule(rule, anchor);
+        // REVIEW MINOR: `?` stays RAW in an anchor (an escaped `\?` never matches — measured), and a raw
+        // `?` matches any one character, so an anchor holding one would WIDEN an allow rule to sibling
+        // directories. An ask or deny that widens is stricter, never looser; an allow is dropped.
+        if (list === "allow" && anchored !== rule && anchor.includes("?")) {
+          dropped(rule);
+          return [];
+        }
+        return [anchored];
+      });
     }
     if (Array.isArray(next["additionalDirectories"])) next["additionalDirectories"] = (next["additionalDirectories"] as unknown[]).map((path) => anchorPath(path, anchor));
     out["permissions"] = next;
@@ -376,7 +388,10 @@ export async function buildEffectiveSettings(context: RunHomeBuildContext): Prom
   for (const { tier, path, anchor } of tiers) {
     const raw = await readTier(path);
     if (raw === undefined) continue;
-    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor));
+    const dropped = (rule: string): void => {
+      context.report.droppedRules.push({ rule, tier, reason: `its re-anchored form would carry the anchor's \`?\` (${anchor}), a one-character wildcard that stays raw, and so allow sibling directories too` });
+    };
+    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor, dropped));
   }
   const settings = stripForMode(merged, input.mode, input.dispatchChild);
   const effective: Record<string, unknown> = {};

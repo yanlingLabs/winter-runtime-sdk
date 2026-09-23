@@ -61,7 +61,8 @@ interface RunHomeInput {
   brand?: RunHomeBrand;                  // optional; absent = the Winter SDK's own profile
 }
 interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules; droppedImports;
-  skippedAgents }                        // an agent the runtime's own YAML parse cannot read (or no Bun.YAML): never copied
+  skippedAgents;                         // an agent the runtime's own YAML parse cannot read (or no Bun.YAML): never copied
+  droppedRules }                         // { rule, tier, reason }: an ALLOW re-anchored under an anchor holding `?` (it would widen)
 interface RunHome { runId; dir; sdkHome; input; effectiveSettings; report; dispose(): Promise<void> }
 const RUN_HOME_CONTRACT_VERSION = 1;
 const RUN_HOME_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"];

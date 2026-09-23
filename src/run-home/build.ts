@@ -74,7 +74,7 @@ export async function buildRunHome(input: RunHomeInput, internals: RunHomeBuildI
   // NON-RECURSIVE, on purpose: a folder that already exists under a fresh UUID is not ours.
   await mkdir(dir, { mode: PRIVATE_DIR });
   await chmod(dir, PRIVATE_DIR); // the umask may have narrowed `mode`; never widened, but be exact
-  const report: RunHomeReport = { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] };
+  const report: RunHomeReport = { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [], droppedRules: [] };
   const context: RunHomeBuildContext = { input, brand, sdkHome, dir, report, userHome: internals.userHome ?? homedir() };
   let effectiveSettings: Record<string, unknown>;
   try {
