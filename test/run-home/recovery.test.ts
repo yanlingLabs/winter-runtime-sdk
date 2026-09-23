@@ -363,3 +363,33 @@ describe("minors round: the recovery door's own branches", () => {
     expect(shared.health(KEY).transcriptHealth).toBe("repair-required");
   });
 });
+
+describe("session artifacts on the recovery door", () => {
+  test("a crashed root's tool results and workflow files are carried back and reported per transcript; a conflicting one is quarantined, never overwritten", async () => {
+    const bed = runHomeBed();
+    const { sdk, shared } = router(bed);
+    const first = user("q1", null);
+    await shared.store.append(KEY, [first]);
+    await shared.settle(KEY);
+    const root = stagingWith(bed, [JSON.stringify(first)]);
+    const session = join(root, "projects", KEY.projectKey, KEY.sessionId);
+    const put = (path: string, content: string): void => {
+      mkdirSync(join(session, path, ".."), { recursive: true });
+      writeFileSync(join(session, path), content);
+    };
+    put("tool-results/r1.txt", "a large output\n");
+    put("workflows/wf_9.json", "{\"runId\":\"wf_9\"}\n");
+    put("tool-results/r2.txt", "the working copy's\n");
+    const storeSession = join(bed.sdk, "projects", KEY.projectKey, KEY.sessionId);
+    mkdirSync(join(storeSession, "tool-results"), { recursive: true });
+    writeFileSync(join(storeSession, "tool-results", "r2.txt"), "the store's own\n");
+    const report = await sdk.reconcileRootForRecovery(root);
+    expect(report.transcripts).toHaveLength(1);
+    expect(report.transcripts[0]).toMatchObject({ outcome: "clean", artifacts: { copied: 2, identical: 0, quarantined: [`${KEY.projectKey}/${KEY.sessionId}/tool-results/r2.txt`] } });
+    expect(report.outcome).toBe("quarantined");
+    expect(readFileSync(join(storeSession, "tool-results", "r1.txt"), "utf8")).toBe("a large output\n");
+    expect(readFileSync(join(storeSession, "workflows", "wf_9.json"), "utf8")).toBe("{\"runId\":\"wf_9\"}\n");
+    expect(readFileSync(join(storeSession, "tool-results", "r2.txt"), "utf8")).toBe("the store's own\n");
+    expect(readFileSync(join(report.quarantine!, "projects", KEY.projectKey, KEY.sessionId, "tool-results", "r2.txt"), "utf8")).toBe("the working copy's\n");
+  });
+});

@@ -10,6 +10,10 @@
 //   clean, or appended through the store   → `safe`
 //   no working copy found, but this generation mirrored frames → UNKNOWN, never clean → quarantined
 //   diverged (or the reconcile itself failed)                 → quarantined
+//   a session artifact whose store copy differs (never overwritten, see `artifacts.ts`) → quarantined
+//
+// Either way the session's OTHER files (tool results, workflow scripts and run records, subagent
+// metadata) are carried into the shared store first, so a disposed folder takes none of them with it.
 //
 // A quarantined root's `projects/` is COPIED to `<home>/cache/quarantine/<ts>-<label>/projects` before
 // the exit is revealed: the evidence outlives the staging dir the wrapper is about to delete.
@@ -31,6 +35,7 @@ import { basename, dirname, join, relative } from "node:path";
 import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 import { toClaudeReady, type ContinuityEndpoint, type MessageOrigin } from "@yanlinglabs/winter-provider-runtime";
 
+import { carryBackSessionArtifacts, type ArtifactCarryReport } from "./artifacts.ts";
 import { RunHomeError } from "./errors.ts";
 import type { RunHomeOutcome } from "./types.ts";
 import { compareTranscriptTail, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge, type TranscriptReconcileOutcome } from "../store/reconcile.ts";
@@ -88,8 +93,20 @@ export function runHomeExitReconciler(input: RunHomeExitReconcilerInput): (args:
     };
     try {
       const report = await reconcileLocalWriteRoot(root, { shared: input.shared });
+      // THE SESSION'S OTHER FILES (tool results, workflow scripts and run records, subagent metadata):
+      // carried into the shared store before the folder can be disposed — never overwriting (see
+      // `artifacts.ts`). A destination that differs quarantines that file, and the outcome says so.
+      const artifacts = carryBackSessionArtifacts(root, input.shared.identity.storeHome);
       if (report.status === "diverged") return quarantine();
       if (report.transcripts.length === 0 && input.mirrored() > 0) return quarantine();
+      if (artifacts.conflicts.length > 0) {
+        try {
+          quarantineTranscripts(root, input.home, input.runId, artifacts.conflicts.map((conflict) => conflict.source), now());
+        } finally {
+          input.record(input.runId, "quarantined");
+        }
+        return;
+      }
       input.record(input.runId, "safe");
     } catch {
       quarantine();
@@ -108,6 +125,13 @@ export interface RecoveryTranscriptOutcome {
   appended: number;
   /** Why a transcript was quarantined. */
   reason?: string;
+  /**
+   * On a session's OWN transcript: its session dir's other files (tool results, workflow scripts and
+   * run records, subagent metadata), carried into `<sdk>/projects/<key>/<sid>/` — `copied`, already
+   * `identical`, or `quarantined` (paths relative to `projects/`; a differing destination is never
+   * overwritten).
+   */
+  artifacts?: { copied: number; identical: number; quarantined: string[] };
 }
 
 /** `reconcileRootForRecovery`'s answer: the root outcome, and every transcript's own (I6). */
@@ -115,8 +139,14 @@ export interface RecoveryReport {
   /** `quarantined` if any transcript was; else `appended` if any tail was appended; else `clean`. */
   outcome: "clean" | "appended" | "quarantined";
   transcripts: RecoveryTranscriptOutcome[];
-  /** The quarantine dir holding the quarantined transcripts' copies, when any were. */
+  /** The quarantine dir holding the quarantined transcripts' and artifacts' copies, when any were. */
   quarantine?: string;
+  /**
+   * Every carried artifact, totalled — including per-project files beside the session dirs and a
+   * session dir with no transcript in this root, which no transcript entry can carry. `skipped` are
+   * links (never followed) and special files.
+   */
+  artifacts?: { copied: number; identical: number; quarantined: string[]; skipped: string[] };
 }
 
 /**
@@ -273,8 +303,35 @@ export async function reconcileRootForRecovery(root: string, input: RecoveryInpu
     });
   }
 
+  // THE SESSIONS' OTHER FILES, carried after the transcripts (see `artifacts.ts`): reported on each
+  // session's own transcript entry, and totalled on the report.
+  const carried = carryBackSessionArtifacts(root, input.storeHome);
+  for (const conflict of carried.conflicts) toQuarantine.push(conflict.source);
+  attachArtifacts(transcripts, carried);
+
   let quarantine: string | undefined;
   if (toQuarantine.length > 0) quarantine = quarantineTranscripts(root, input.home, basename(root), toQuarantine, now());
-  const outcome = transcripts.some((transcript) => transcript.outcome === "quarantined") ? "quarantined" : transcripts.some((transcript) => transcript.outcome === "appended") ? "appended" : "clean";
-  return { outcome, transcripts, ...(quarantine === undefined ? {} : { quarantine }) };
+  const anyQuarantined = transcripts.some((transcript) => transcript.outcome === "quarantined") || carried.conflicts.length > 0;
+  const outcome = anyQuarantined ? "quarantined" : transcripts.some((transcript) => transcript.outcome === "appended") ? "appended" : "clean";
+  const touched = carried.copied.length + carried.identical.length + carried.conflicts.length + carried.skipped.length;
+  return {
+    outcome,
+    transcripts,
+    ...(quarantine === undefined ? {} : { quarantine }),
+    ...(touched === 0
+      ? {}
+      : { artifacts: { copied: carried.copied.length, identical: carried.identical.length, quarantined: carried.conflicts.map((conflict) => conflict.path), skipped: carried.skipped.map((entry) => entry.path) } }),
+  };
+}
+
+/** Puts each session's carried artifacts on that session's own transcript entry (not a subagent's). */
+function attachArtifacts(transcripts: RecoveryTranscriptOutcome[], carried: ArtifactCarryReport): void {
+  for (const transcript of transcripts) {
+    if (transcript.subpath !== undefined) continue;
+    const mine = (entry: { projectKey: string; sessionId?: string }): boolean => entry.projectKey === transcript.projectKey && entry.sessionId === transcript.sessionId;
+    const copied = carried.copied.filter(mine).length;
+    const identical = carried.identical.filter(mine).length;
+    const quarantined = carried.conflicts.filter(mine).map((conflict) => conflict.path);
+    if (copied + identical + quarantined.length > 0) transcript.artifacts = { copied, identical, quarantined };
+  }
 }

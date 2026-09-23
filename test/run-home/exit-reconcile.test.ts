@@ -2,7 +2,7 @@
 // config-dir ROOT; clean/appended is safe, "nothing found" after mirrored frames is quarantined, a
 // diverged copy is quarantined with its files kept; and a late mirror flush never doubles a record.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { PassThrough } from "node:stream";
@@ -269,5 +269,107 @@ describe("minors round, item 6: the exit reconcile (no judge) clears repair flag
     expect(outcomes.get("run-1")).toBe("quarantined");
     expect(shared.health(level).transcriptHealth).toBe("ok");
     expect(shared.health(diverged).transcriptHealth).toBe("repair-required");
+  });
+});
+
+describe("session artifacts: every non-transcript file under projects/<key>/ is carried back into the shared store", () => {
+  /** A working copy with the transcript level and the artifact set claude 2.1.250 was measured writing. */
+  function workingCopyWithArtifacts(root: string, entries: SessionStoreEntry[]): Record<string, string> {
+    workingCopy(root, entries);
+    const session = join(root, "projects", KEY.projectKey, KEY.sessionId);
+    const files: Record<string, string> = {
+      [`${KEY.sessionId}/tool-results/b1.txt`]: "a large tool output\n",
+      [`${KEY.sessionId}/workflows/scripts/sv-flow-wf_1.js`]: "export const meta = { name: \"sv-flow\", description: \"d\" };\n",
+      [`${KEY.sessionId}/workflows/wf_1.json`]: "{\"runId\":\"wf_1\"}\n",
+      [`${KEY.sessionId}/subagents/agent-a1.meta.json`]: "{\"agentType\":\"general-purpose\"}\n",
+      [`${KEY.sessionId}/subagents/workflows/wf_1/agent-w1.jsonl`]: "{\"type\":\"user\"}\n",
+      "notes-beside-the-sessions.md": "a per-project file\n",
+    };
+    for (const [path, content] of Object.entries(files)) {
+      const full = join(root, "projects", KEY.projectKey, path);
+      mkdirSync(join(full, ".."), { recursive: true });
+      writeFileSync(full, content);
+    }
+    // A subagent TRANSCRIPT is the reconcile's, not an artifact.
+    writeFileSync(join(session, "subagents", "agent-a1.jsonl"), "");
+    return files;
+  }
+  const inStore = (sdk: string, path: string): string => join(sdk, "projects", KEY.projectKey, path);
+
+  test("the exit reconcile carries tool results, workflow scripts and run records, subagent metadata and per-project files; the outcome is safe", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const entries = chain(2);
+    await shared.store.append(KEY, entries);
+    await shared.settle(KEY);
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    const files = workingCopyWithArtifacts(runFolder, entries);
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 2, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    for (const [path, content] of Object.entries(files)) expect([path, readFileSync(inStore(bed.sdk, path), "utf8")]).toEqual([path, content]);
+    // The transcripts were NOT copied as files: the canonical transcript is the store's own.
+    expect(existsSync(inStore(bed.sdk, `${KEY.sessionId}/subagents/agent-a1.jsonl`))).toBe(false);
+  });
+
+  test("a DIFFERENT destination is never overwritten — the working copy's file is quarantined and the outcome says so; an identical one is fine", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const entries = chain(1);
+    await shared.store.append(KEY, entries);
+    await shared.settle(KEY);
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopyWithArtifacts(runFolder, entries);
+    mkdirSync(inStore(bed.sdk, `${KEY.sessionId}/tool-results`), { recursive: true });
+    writeFileSync(inStore(bed.sdk, `${KEY.sessionId}/tool-results/b1.txt`), "the store's own, different\n");
+    mkdirSync(inStore(bed.sdk, `${KEY.sessionId}/workflows`), { recursive: true });
+    writeFileSync(inStore(bed.sdk, `${KEY.sessionId}/workflows/wf_1.json`), "{\"runId\":\"wf_1\"}\n"); // identical
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("quarantined");
+    expect(readFileSync(inStore(bed.sdk, `${KEY.sessionId}/tool-results/b1.txt`), "utf8")).toBe("the store's own, different\n");
+    const quarantine = join(bed.home, "cache", "quarantine");
+    const [dir] = readdirSync(quarantine);
+    expect(readFileSync(join(quarantine, dir!, "projects", KEY.projectKey, KEY.sessionId, "tool-results", "b1.txt"), "utf8")).toBe("a large tool output\n");
+    // Everything else still landed.
+    expect(existsSync(inStore(bed.sdk, `${KEY.sessionId}/workflows/scripts/sv-flow-wf_1.js`))).toBe(true);
+  });
+
+  test("a link in the working copy is never followed, and nothing is written through a link in the store", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const entries = chain(1);
+    await shared.store.append(KEY, entries);
+    await shared.settle(KEY);
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopyWithArtifacts(runFolder, entries);
+    const secret = join(bed.root, "outside-secret.txt");
+    writeFileSync(secret, "never copied\n");
+    symlinkSync(secret, join(runFolder, "projects", KEY.projectKey, KEY.sessionId, "tool-results", "evil.txt"));
+    // The STORE side: the session's `workflows/` is a link to somewhere else.
+    const elsewhere = join(bed.root, "elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    mkdirSync(inStore(bed.sdk, KEY.sessionId), { recursive: true });
+    symlinkSync(elsewhere, inStore(bed.sdk, `${KEY.sessionId}/workflows`));
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(existsSync(inStore(bed.sdk, `${KEY.sessionId}/tool-results/evil.txt`))).toBe(false);
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(outcomes.get("run-1")).toBe("quarantined");
+    expect(existsSync(inStore(bed.sdk, `${KEY.sessionId}/tool-results/b1.txt`))).toBe(true);
+  });
+
+  test("the staged-resume root (claude-resume-*) is carried back the same way", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const entries = chain(1);
+    await shared.store.append(KEY, entries);
+    await shared.settle(KEY);
+    const staging = join(bed.root, `${RESUME_STAGING_PREFIX}${KEY.sessionId}`);
+    const files = workingCopyWithArtifacts(staging, entries);
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: staging } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    for (const path of Object.keys(files)) expect([path, existsSync(inStore(bed.sdk, path))]).toEqual([path, true]);
   });
 });
