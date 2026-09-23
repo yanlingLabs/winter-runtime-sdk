@@ -121,7 +121,7 @@ router-owned row is unproven.** Rows 6, 9, 10, 16 and 18 are excluded by WS-17 �
 - `test/official/runtime-containment.test.ts` — `arbitrary file and shell paths: an approving broker does not lift the floor`
 - `test/official/runtime-containment.test.ts` — `review r2, NEW-3: a command that BUILDS the name is caught post-hoc — swept, reported, and the call blocked`
 - `test/official/runtime-containment.test.ts` — `review r3, NEW-9: a command whose side effect precedes a FAILURE is swept too`
-- `test/official/runtime-containment.test.ts` — `review r3, NEW-11: the saved-approval path, for real — the durable update is stripped and no vendor settings file appears`
+- `test/official/runtime-containment.test.ts` — `review r3, NEW-11 / WS-21 §4.3: the saved-approval path, for real — the durable update is kept for the session only and no vendor settings file appears`
 - `test/official/runtime-containment.test.ts` — `review r4, NEW-18 (a): a host hook stamped with the exported floor mark does not REPLACE the floor — the floor is recognised by identity`
 - `test/official/runtime-containment.test.ts` — `the whole session's writes stay inside the spool, the cwd and the product home`
 
