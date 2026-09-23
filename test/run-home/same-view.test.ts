@@ -17,6 +17,7 @@
 // A DIFFERENCE THE ROUTER CANNOT FIX (the Winter runtime's own reading) is kept as a `test.todo` whose
 // name carries its same-view ledger id (SV-n, lane-L2 report): the assertion is the real one, not a
 // weakened one, and `bun test --todo` fails the moment the SDK is fixed and the todo can be removed.
+// SV-1..SV-4 were fixed in `ws21/sdk`@267ea34 and are plain assertions now, named as regression guards.
 //
 // HERMETIC: `HOME` is an `mkdtemp` root with a decoy vendor home; the daemon home is `<HOME>/.winter`;
 // the keychain is the in-memory seam (claude) and an inline loopback key (Winter), and the Winter child
@@ -447,27 +448,25 @@ const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcp
 type Item = (typeof ITEMS)[number];
 
 /**
- * SV-n: a measured difference in the Winter runtime's own reading (lane-L2 report, "L2.10 same-view"),
- * with the scenarios it shows in. SV-1 needs a trusted project's rule to lose, so an untrusted project
- * (no project rule at all) is a plain assertion — which `bun test --todo` confirmed passes there.
+ * SV-n: the differences the first measurement found in the Winter runtime's own reading (lane-L2
+ * report, "L2.10 same-view"), fixed in the SDK (`ws21/sdk`@267ea34) and kept here as named regression
+ * guards. SV-1 needs a trusted project's rule to lose, so it names only the trusted comparisons.
  */
-const LEDGER: Partial<Record<Item, { id: string; trustedOnly?: boolean }>> = {
-  instructions: { id: "SV-1 (the Winter runtime reads rules from the store home, not the run folder: the trusted project's rules are lost)", trustedOnly: true },
-  mcpServers: { id: "SV-2 (the Winter runtime reads the global config from the store home, not the run folder: the local and trusted-project servers are lost; disabled and reserved-name servers start)" },
-  hookRuns: { id: "SV-3 (the Winter runtime does not unwrap claude's `hooks/hooks.json` `{ hooks: … }` document: a plugin's hooks never run)" },
+const GUARDS: Partial<Record<Item, { id: string; trustedOnly?: boolean }>> = {
+  instructions: { id: "SV-1 guard: rules are read from the run folder, so the trusted project's rules are there", trustedOnly: true },
+  mcpServers: { id: "SV-2 guard: the global config is the run folder's, folded and filtered by the router" },
+  mcpStarted: { id: "SV-2 guard" },
+  hookRuns: { id: "SV-3 guard: claude's `hooks/hooks.json` `{ hooks: … }` document is unwrapped" },
 };
 
 function itemTests(label: string, trusted: boolean, views: () => { claude: SameView; winter: SameView }): void {
   for (const item of ITEMS) {
-    const entry = LEDGER[item];
-    const ledger = entry === undefined || (entry.trustedOnly === true && !trusted) ? undefined : entry.id;
-    const name = `${label}: the Winter runtime's ${item} equal claude's${ledger === undefined ? "" : ` — ${ledger}`}`;
-    const body = (): void => {
+    const entry = GUARDS[item];
+    const guard = entry === undefined || (entry.trustedOnly === true && !trusted) ? "" : ` (${entry.id})`;
+    test(`${label}: the Winter runtime's ${item} equal claude's${guard}`, () => {
       const { claude, winter } = views();
       expect(winter[item]).toEqual(claude[item]);
-    };
-    if (ledger === undefined) test(name, body);
-    else test.todo(name, body);
+    });
   }
 }
 
@@ -658,8 +657,8 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
       expect(claude.skills).toContain("sv-plugin:sv-plug-skill");
       expect(claude.hookRuns).toBe(1);
     });
-    test.todo("settings-only plugin: the Winter runtime loads it too — SV-4 (the Winter runtime loads only plugins with an `installed_plugins.json` record, never an enabled directory-marketplace plugin read in place)", () => {
-      expect({ plugins: winter.plugins, skills: winter.skills }).toEqual({ plugins: claude.plugins, skills: claude.skills });
+    test("settings-only plugin: the Winter runtime loads it too, skill and hook alike (SV-4 guard: an enabled directory-marketplace plugin is read in place, no install record needed)", () => {
+      expect({ plugins: winter.plugins, skills: winter.skills, hookRuns: winter.hookRuns }).toEqual({ plugins: claude.plugins, skills: claude.skills, hookRuns: claude.hookRuns });
     });
   });
 
