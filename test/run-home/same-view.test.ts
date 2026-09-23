@@ -19,6 +19,12 @@
 // weakened one, and `bun test --todo` fails the moment the SDK is fixed and the todo can be removed.
 // SV-1..SV-4 were fixed in `ws21/sdk`@267ea34 and are plain assertions now, named as regression guards.
 //
+// PLUGIN OUTPUT STYLES AND WORKFLOWS (round 3). The style LIST is observable on claude only
+// (`initializationResult().available_output_styles`, names without descriptions); the Winter Query has
+// no such surface, so the list is asserted on claude as the reference and the comparison is the ACTIVE
+// style: selected in settings, both legs must report it and send its text. A plugin workflow is listed
+// by claude as `<plugin>:<meta.name>` in init `skills`, `slash_commands` and the Skill listing.
+//
 // HERMETIC: `HOME` is an `mkdtemp` root with a decoy vendor home; the daemon home is `<HOME>/.winter`;
 // the keychain is the in-memory seam (claude) and an inline loopback key (Winter), and the Winter child
 // is pointed at a throwaway keychain service. Nothing reads or writes `~/.winter*`, `~/.claude*` or a
@@ -60,6 +66,17 @@ const TOKENS = {
   userRule: "USER-RULE-TOKEN-c3",
 } as const;
 const STYLE_TOKEN = "STYLE-TOKEN-e5";
+const PLUGIN_STYLE_TOKEN = "PLUGIN-STYLE-TOKEN-f6";
+/** claude's name for the plugin's output style (`initializationResult().available_output_styles`, measured). */
+const PLUGIN_STYLE = "sv-plugin:sv-plug-style";
+/**
+ * claude's name for the plugin's workflow: `<plugin>:<meta.name>` — the file is `flow-file.js`, its
+ * declared `meta.name` is `sv-flow` (measured: claude lists `sv-plugin:sv-flow` in init `skills`, in
+ * `slash_commands` and in the Skill listing, with the meta's description).
+ */
+const PLUGIN_WORKFLOW = "sv-plugin:sv-flow";
+/** Any listed name that could be the fixture workflow, under either naming (meta name or file name). */
+const isWorkflowName = (name: string): boolean => name.includes("sv-flow") || name.includes("flow-file");
 
 interface SameView {
   skills: string[];
@@ -76,6 +93,10 @@ interface SameView {
   hookRuns: number;
   /** The fixture MCP servers whose process this generation STARTED (a start marker, not the init report). */
   mcpStarted: string[];
+  /** The plugin output style's text reached the model (it is the active style). */
+  pluginStyleText: boolean;
+  /** Where the plugin workflow is listed: `skills:`, `slash:` and `listing:` entries, under whatever name. */
+  workflows: string[];
 }
 
 interface Run {
@@ -84,6 +105,8 @@ interface Run {
   stderr: string;
   hookRuns: number;
   mcpStarted: string[];
+  /** claude only: `initializationResult().available_output_styles` — the Winter runtime's Query has no such surface. */
+  availableOutputStyles?: string[];
 }
 
 /** `SAME_VIEW_VERBOSE=1` prints every measured view (the same aid `PLUGIN_PROBE_VERBOSE` is in the plugin suite). */
@@ -140,7 +163,8 @@ function viewOf(run: Run): SameView {
   const start = text.indexOf("# claudeMd");
   const context = start < 0 ? "" : text.slice(start, Math.max(start, text.indexOf("# currentDate", start)));
   return {
-    skills: ((init["skills"] as string[] | undefined) ?? []).filter(ours).sort(),
+    // The fixture's SKILLS — the plugin workflow, which claude also lists here, is its own item below.
+    skills: ((init["skills"] as string[] | undefined) ?? []).filter((name) => ours(name) && !isWorkflowName(name)).sort(),
     // EVERY listing line the model was sent for a fixture skill — on a resumed generation that is the
     // listing replayed from the transcript (whichever runtime wrote it) plus the runtime's own delta.
     skillListing: [...new Set([...text.matchAll(/\\n- (sv-[\w:-]*skill): ([^"\\]*)/g)].map((match) => `- ${match[1]}: ${match[2]}`))].sort(),
@@ -156,6 +180,12 @@ function viewOf(run: Run): SameView {
       .sort((a, b) => context.indexOf(a) - context.indexOf(b)),
     hookRuns: run.hookRuns,
     mcpStarted: run.mcpStarted,
+    pluginStyleText: text.includes(PLUGIN_STYLE_TOKEN),
+    workflows: [
+      ...((init["skills"] as string[] | undefined) ?? []).filter(isWorkflowName).map((name) => `skills:${name}`),
+      ...((init["slash_commands"] as string[] | undefined) ?? []).filter(isWorkflowName).map((name) => `slash:${name}`),
+      ...new Set([...text.matchAll(/\\n- (sv-[\w:-]*): ([^"\\]*)/g)].filter((match) => isWorkflowName(match[1]!)).map((match) => `listing:- ${match[1]}: ${match[2]}`)),
+    ].sort(),
   };
 }
 
@@ -191,7 +221,7 @@ const markerLabel = (name: string): string => (name === MCP_SERVERS.standingName
  * router must drop),
  * and an enabled directory-marketplace plugin with a skill and a SessionStart hook.
  */
-function plantFixture(session: HermeticSession, options: { installRecord: boolean }): Fixture {
+function plantFixture(session: HermeticSession, options: { installRecord: boolean; outputStyle?: string }): Fixture {
   const sdkHome = join(session.brandHome, "sdk");
   const root = session.cwd;
   const mcpMarkers = join(session.home, "markers", "mcp");
@@ -218,11 +248,14 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
   put(join(market, ".claude-plugin", "marketplace.json"), `${JSON.stringify({ name: "sv", owner: { name: "user" }, plugins: [{ name: "sv-plugin", source: "./sv-plugin", description: "the fixture plugin" }] })}\n`);
   put(join(market, "sv-plugin", ".claude-plugin", "plugin.json"), `${JSON.stringify({ name: "sv-plugin", version: "1.0.0" })}\n`);
   put(join(market, "sv-plugin", "skills", "sv-plug-skill", "SKILL.md"), skill("sv-plug-skill", "the plugin skill"));
+  // A plugin OUTPUT STYLE, and a plugin WORKFLOW whose declared `meta.name` differs from its file name.
+  put(join(market, "sv-plugin", "output-styles", "sv-plug-style.md"), `---\nname: sv-plug-style\ndescription: the plugin style\n---\n${PLUGIN_STYLE_TOKEN}\n`);
+  put(join(market, "sv-plugin", "workflows", "flow-file.js"), 'export const meta = { name: "sv-flow", description: "the fixture workflow" };\n');
   const marker = join(session.home, "markers", "sv-plugin-session-start");
   mkdirSync(dirname(marker), { recursive: true });
   // claude's own plugin hooks file shape: `{ "hooks": { <Event>: [...] } }`.
   put(join(market, "sv-plugin", "hooks", "hooks.json"), `${JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `echo ran >> '${marker}'` }] }] } })}\n`);
-  put(join(sdkHome, "settings.json"), `${JSON.stringify({ outputStyle: "sv-style", extraKnownMarketplaces: { sv: { source: { source: "directory", path: market } } }, enabledPlugins: { "sv-plugin@sv": true } })}\n`);
+  put(join(sdkHome, "settings.json"), `${JSON.stringify({ outputStyle: options.outputStyle ?? "sv-style", extraKnownMarketplaces: { sv: { source: { source: "directory", path: market } } }, enabledPlugins: { "sv-plugin@sv": true } })}\n`);
   if (options.installRecord) {
     // What `winter plugin marketplace add` + `winter plugin install sv-plugin@sv` write for a directory
     // marketplace, under the shared plugin root: the marketplace record, and an install record whose
@@ -252,7 +285,7 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
 }
 
 /** The view claude must show for the fixture (and the Winter runtime must equal). */
-function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyle" | "styleText"> {
+function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyle" | "styleText" | "pluginStyleText"> {
   return {
     skills: trusted ? ["sv-clash-skill", "sv-plugin:sv-plug-skill", "sv-project-skill", "sv-user-skill"] : ["sv-clash-skill", "sv-plugin:sv-plug-skill", "sv-user-skill"],
     skillListing: trusted
@@ -263,6 +296,7 @@ function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyl
     // The local scope is not trust-gated (it is the user's own entry in the shared file).
     mcpServers: trusted ? ["sv-local-mcp", "sv-project-mcp", "sv-user-mcp"] : ["sv-local-mcp", "sv-user-mcp"],
     mcpStarted: trusted ? ["sv-local-mcp", "sv-project-mcp", "sv-user-mcp"] : ["sv-local-mcp", "sv-user-mcp"],
+    workflows: [`listing:- ${PLUGIN_WORKFLOW}: the fixture workflow`, `skills:${PLUGIN_WORKFLOW}`, `slash:${PLUGIN_WORKFLOW}`],
     instructions: trusted ? [TOKENS.userInstructions, TOKENS.projectInstructions, TOKENS.projectRule, TOKENS.userRule] : [TOKENS.userInstructions, TOKENS.userRule],
   };
 }
@@ -280,11 +314,11 @@ interface SameViewBed {
   destinations: Map<string, (runKind: "claude-agent" | "winter-agent") => Promise<HandoffStepReport>>;
 }
 
-async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: boolean }, fn: (bed: SameViewBed) => Promise<T>): Promise<T> {
+async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: boolean; outputStyle?: string }, fn: (bed: SameViewBed) => Promise<T>): Promise<T> {
   /* c8 ignore next */
   if (runtime === undefined || WINTER_EXE === undefined) throw new Error("unreachable: the same-view suite is skipped without both runtimes");
   const session = realPathSession();
-  const fixture = plantFixture(session, { installRecord: options.installRecord ?? true });
+  const fixture = plantFixture(session, { installRecord: options.installRecord ?? true, ...(options.outputStyle === undefined ? {} : { outputStyle: options.outputStyle }) });
   const home = session.brandHome;
   const sdkHome = join(home, "sdk");
   const projectKey = winterSdk.transcriptProjectKey(fixture.root);
@@ -415,27 +449,38 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
             }),
           );
           return { messages, requests: [...requests], stderr: stderr.join(""), hookRuns: hookRuns() - before, mcpStarted: await startedSince(startsBefore) };
+          // (the Winter runtime's Query offers no `initializationResult`, so no style list is read here)
         },
         async runClaude(runHome, winterSessionId, over = {}) {
           requests.length = 0;
           const before = hookRuns();
           const startsBefore = fixture.mcpStarts();
-          const messages = await drain(
-            sdk.query({
-              prompt: over.prompt ?? "hello",
-              options: {
-                cwd: fixture.root,
-                canUseTool: allow,
-                ...(over.sessionId === undefined ? {} : { sessionId: over.sessionId }),
-                runtime: {
-                  runHome,
-                  selection: ws21Selection,
-                  official: { sessionId: winterSessionId, credentials: [{ variable: "ANTHROPIC_API_KEY", ref: CREDENTIAL }], connectionEnv: { ANTHROPIC_BASE_URL: baseUrl }, base: childEnv },
-                },
-              } as never,
-            }),
-          );
-          return { messages, requests: [...requests], stderr: "", hookRuns: hookRuns() - before, mcpStarted: await startedSince(startsBefore) };
+          const handle = sdk.query({
+            prompt: over.prompt ?? "hello",
+            options: {
+              cwd: fixture.root,
+              canUseTool: allow,
+              ...(over.sessionId === undefined ? {} : { sessionId: over.sessionId }),
+              runtime: {
+                runHome,
+                selection: ws21Selection,
+                official: { sessionId: winterSessionId, credentials: [{ variable: "ANTHROPIC_API_KEY", ref: CREDENTIAL }], connectionEnv: { ANTHROPIC_BASE_URL: baseUrl }, base: childEnv },
+              },
+            } as never,
+          }) as unknown as AsyncIterable<unknown> & { initializationResult?: () => Promise<Record<string, unknown>> };
+          const draining = drain(handle);
+          // THE STYLE LIST: claude answers it on its initialize response (`available_output_styles`).
+          const initialization = typeof handle.initializationResult === "function" ? await handle.initializationResult().catch(() => undefined) : undefined;
+          const messages = await draining;
+          const availableOutputStyles = initialization?.["available_output_styles"];
+          return {
+            messages,
+            requests: [...requests],
+            stderr: "",
+            hookRuns: hookRuns() - before,
+            mcpStarted: await startedSince(startsBefore),
+            ...(Array.isArray(availableOutputStyles) ? { availableOutputStyles: (availableOutputStyles as string[]).slice().sort() } : {}),
+          };
         },
       };
       return fn(bed);
@@ -444,7 +489,7 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
 }
 
 /** The per-item assertions, shared by every scenario. */
-const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcpStarted", "outputStyle", "styleText", "instructions", "hookRuns"] as const;
+const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcpStarted", "outputStyle", "styleText", "pluginStyleText", "instructions", "hookRuns", "workflows"] as const;
 type Item = (typeof ITEMS)[number];
 
 /**
@@ -459,14 +504,26 @@ const GUARDS: Partial<Record<Item, { id: string; trustedOnly?: boolean }>> = {
   hookRuns: { id: "SV-3 guard: claude's `hooks/hooks.json` `{ hooks: … }` document is unwrapped" },
 };
 
+/**
+ * SV-n STILL OPEN: a measured difference in the Winter runtime's own reading, kept as a `test.todo`
+ * (the real assertion; `bun test --todo` fails it the moment the SDK is fixed).
+ */
+const LEDGER: Partial<Record<Item, string>> = {
+  workflows:
+    "SV-5 (the Winter runtime lists a plugin workflow nowhere — not in init `skills`, `slash_commands` or the Skill listing; claude lists `sv-plugin:sv-flow` in all three)",
+};
+
 function itemTests(label: string, trusted: boolean, views: () => { claude: SameView; winter: SameView }): void {
   for (const item of ITEMS) {
     const entry = GUARDS[item];
     const guard = entry === undefined || (entry.trustedOnly === true && !trusted) ? "" : ` (${entry.id})`;
-    test(`${label}: the Winter runtime's ${item} equal claude's${guard}`, () => {
+    const ledger = LEDGER[item];
+    const body = (): void => {
       const { claude, winter } = views();
       expect(winter[item]).toEqual(claude[item]);
-    });
+    };
+    if (ledger === undefined) test(`${label}: the Winter runtime's ${item} equal claude's${guard}`, body);
+    else test.todo(`${label}: the Winter runtime's ${item} equal claude's — ${ledger}`, body);
   }
 }
 
@@ -474,9 +531,10 @@ function claudeReferenceTests(label: string, trusted: boolean, view: () => SameV
   test(`${label}: claude (the reference) shows exactly the fixture's view`, () => {
     const claude = view();
     const expected = expectedView(trusted);
-    expect({ skills: claude.skills, skillListing: claude.skillListing, agents: claude.agents, plugins: claude.plugins, mcpServers: claude.mcpServers, mcpStarted: claude.mcpStarted, instructions: claude.instructions }).toEqual(expected);
+    expect({ skills: claude.skills, skillListing: claude.skillListing, agents: claude.agents, plugins: claude.plugins, mcpServers: claude.mcpServers, mcpStarted: claude.mcpStarted, workflows: claude.workflows, instructions: claude.instructions }).toEqual(expected);
     expect(claude.outputStyle).toBe("sv-style");
     expect(claude.styleText).toBe(true);
+    expect(claude.pluginStyleText).toBe(false);
     expect(claude.hookRuns).toBe(1);
     // The double-BOM agent: claude reads no keys from it, so it has no name and is not listed.
     expect(claude.agents).not.toContain("sv-bom-agent");
@@ -510,9 +568,10 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         const w = await bed.runWinter(await bed.build("winter"));
         winterStderr = w.stderr;
         winter = viewOf(w);
-        claude = viewOf(await bed.runClaude(await bed.build("official"), "s_sv_fresh"));
+        const claudeRun = await bed.runClaude(await bed.build("official"), "s_sv_fresh");
+        claude = viewOf(claudeRun);
         starts = bed.fixture.mcpStarts();
-        verbose("fresh", { claude, winter, starts });
+        verbose("fresh", { claude, winter, starts, claudeStyles: claudeRun.availableOutputStyles, claudeSkills: initOf(claudeRun)?.["skills"], claudeSlash: ((initOf(claudeRun)?.["slash_commands"] as string[]) ?? []).filter(ours) });
         expect(decoyUntouched(bed.session)).toBe(true);
       });
     }, TIMEOUT);
@@ -659,6 +718,30 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     test("settings-only plugin: the Winter runtime loads it too, skill and hook alike (SV-4 guard: an enabled directory-marketplace plugin is read in place, no install record needed)", () => {
       expect({ plugins: winter.plugins, skills: winter.skills, hookRuns: winter.hookRuns }).toEqual({ plugins: claude.plugins, skills: claude.skills, hookRuns: claude.hookRuns });
+    });
+  });
+
+  describe("the plugin's output style, selected in settings (`outputStyle: \"sv-plugin:sv-plug-style\"`)", () => {
+    let claude: SameView;
+    let winter: SameView;
+    let claudeStyles: string[] | undefined;
+    beforeAll(async () => {
+      await withSameViewBed({ trusted: true, outputStyle: PLUGIN_STYLE }, async (bed) => {
+        winter = viewOf(await bed.runWinter(await bed.build("winter")));
+        const claudeRun = await bed.runClaude(await bed.build("official"), "s_sv_plugin_style");
+        claude = viewOf(claudeRun);
+        claudeStyles = claudeRun.availableOutputStyles;
+        verbose("plugin style", { claude, winter, claudeStyles });
+      });
+    }, TIMEOUT);
+    test("plugin style: claude (the reference) lists it as `sv-plugin:sv-plug-style` beside the user's style, and makes it the active one", () => {
+      expect(claudeStyles).toEqual(expect.arrayContaining([PLUGIN_STYLE, "sv-style"]));
+      expect(claude.outputStyle).toBe(PLUGIN_STYLE);
+      expect(claude.pluginStyleText).toBe(true);
+      expect(claude.styleText).toBe(false);
+    });
+    test("plugin style: the Winter runtime reports the same active style and sends the same style text", () => {
+      expect({ outputStyle: winter.outputStyle, pluginStyleText: winter.pluginStyleText, styleText: winter.styleText }).toEqual({ outputStyle: claude.outputStyle, pluginStyleText: claude.pluginStyleText, styleText: claude.styleText });
     });
   });
 
