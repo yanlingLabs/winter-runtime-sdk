@@ -10,7 +10,8 @@ import { toClaudeReady } from "@yanlinglabs/winter-provider-runtime";
 
 import { createRuntimeSdk, runtimeSdkInternals, type RuntimeSdkPeers } from "../../src/index.ts";
 import { defaultEndpointResolver } from "../../src/default-endpoint-resolver.ts";
-import type { SharedSessionStore } from "../../src/store/wiring.ts";
+import { createSharedSessionStore, type SharedSessionStore } from "../../src/store/wiring.ts";
+import { reconcileRootForRecovery, recoveryOutcomeOf } from "../../src/run-home/exit.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { RESUME_STAGING_PREFIX } from "../../src/vendor-paths.ts";
 import { cleanupRunHomeBeds, runHomeBed, type RunHomeBed } from "./support.ts";
@@ -244,5 +245,121 @@ describe("per-transcript outcomes (I6): one unprovable transcript never quaranti
     mkdirSync(join(root, "projects"), { recursive: true });
     expect(await sdk.reconcileRootForRecovery(root)).toEqual({ outcome: "clean", transcripts: [] });
     expect(existsSync(join(bed.home, "cache", "quarantine"))).toBe(false);
+  });
+});
+
+describe("minors round: the recovery door's own branches", () => {
+  /** A router-less recovery input over a fresh shared store, with a resolver that can be made to fail. */
+  function recoveryBed(resolverThrows: boolean) {
+    const bed = runHomeBed();
+    const { peer } = createFakeWinterPeer();
+    const peers = { winter: { ...peer, WinterCompatibilitySessionStore } as unknown as RuntimeSdkPeers["winter"] };
+    const shared = createSharedSessionStore({ peers, winterHome: bed.home, storeHome: bed.sdk, policy: { batchWindowMs: 1 } });
+    const resolver = defaultEndpointResolver();
+    const input = {
+      shared,
+      home: bed.home,
+      storeHome: bed.sdk,
+      resolveEndpoint: resolverThrows
+        ? () => {
+            throw new Error("no endpoint for the claude target");
+          }
+        : resolver,
+    };
+    return { bed, shared, input };
+  }
+
+  test("item 3: with NO fold at all (the claude target cannot be resolved), a raw-prefix copy is still canonical-ahead and an equal copy clean — the raw branch needs no fold; an appendable tail, which does, is quarantined", async () => {
+    const { bed, shared, input } = recoveryBed(true);
+    const keyOf = (n: number): SessionKey => ({ projectKey: KEY.projectKey, sessionId: `${n}${n}${n}${n}${n}${n}${n}${n}-0000-4000-8000-00000000000${n}` });
+    const [ahead, equal, tail] = [keyOf(1), keyOf(2), keyOf(3)];
+    const turns = (key: SessionKey, count: number): SessionStoreEntry[] => {
+      const out: SessionStoreEntry[] = [];
+      for (let i = 0; i < count; i += 1) out.push({ ...user(`turn ${i}`, i === 0 ? null : String(out[i - 1]!["uuid"])), sessionId: key.sessionId });
+      return out;
+    };
+    const entries = { ahead: turns(ahead, 3), equal: turns(equal, 2), tail: turns(tail, 2) };
+    await shared.store.append(ahead, entries.ahead);
+    await shared.store.append(equal, entries.equal);
+    await shared.store.append(tail, entries.tail.slice(0, 1));
+    await shared.settle();
+    const root = join(bed.root, "crashed-root");
+    const write = (key: SessionKey, lines: SessionStoreEntry[]): void => {
+      const dir = join(root, "projects", key.projectKey);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${key.sessionId}.jsonl`), lines.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+    };
+    write(ahead, entries.ahead.slice(0, 2));
+    write(equal, entries.equal);
+    write(tail, entries.tail);
+    const report = await reconcileRootForRecovery(root, input);
+    const byId = new Map(report.transcripts.map((transcript) => [transcript.sessionId, transcript]));
+    expect(byId.get(ahead.sessionId)?.outcome).toBe("canonical-ahead");
+    expect(byId.get(equal.sessionId)?.outcome).toBe("clean");
+    expect(byId.get(tail.sessionId)).toMatchObject({ outcome: "quarantined", appended: 0 });
+    expect(byId.get(tail.sessionId)?.reason).toContain("cannot be recomputed");
+  });
+
+  test("item 4: the quarantine reason says 'after appending' only when an append happened — a store that accepts the append and writes nothing", async () => {
+    const bed = runHomeBed();
+    const swallowing = { on: false };
+    class SwallowingStore extends WinterCompatibilitySessionStore {
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        if (swallowing.on) return; // "succeeds", lands nothing
+        return super.append(key, entries);
+      }
+    }
+    const { sdk, shared } = router(bed, true, SwallowingStore);
+    const first = user("q1", null);
+    await shared.store.append(KEY, [first]);
+    await shared.settle(KEY);
+    swallowing.on = true;
+    const tail = user("q2 the store swallows", String(first["uuid"]));
+    const report = await sdk.reconcileRootForRecovery(stagingWith(bed, [JSON.stringify(first), JSON.stringify(tail)]));
+    expect(report.transcripts).toHaveLength(1);
+    expect(report.transcripts[0]).toMatchObject({ outcome: "quarantined", appended: 0 });
+    expect(report.transcripts[0]!.reason).toContain("after appending 1");
+  });
+
+  test("item 4: the mapping names the comparison's own reason when no append was attempted", () => {
+    const key: SessionKey = { projectKey: KEY.projectKey, sessionId: KEY.sessionId };
+    const diverged = recoveryOutcomeOf({ key, localPath: "/x", comparison: { kind: "diverged", atLine: 2, reason: "line 2 of the canonical transcript is not the record the local-write root has at that position" }, appended: 0 });
+    expect(diverged).toMatchObject({ outcome: "quarantined", appended: 0, reason: "line 2 of the canonical transcript is not the record the local-write root has at that position" });
+    const attempted = recoveryOutcomeOf({ key, localPath: "/x", comparison: { kind: "canonical-behind", lines: 1, missing: [] }, appended: 0, attempted: 3 });
+    expect(attempted.reason).toContain("after appending 3");
+  });
+
+  test("item 6: a quarantined SUBAGENT transcript keeps its session's repair flag while the session's own transcript is level", async () => {
+    const bed = runHomeBed();
+    const failing = { on: false };
+    class FlakyStore extends WinterCompatibilitySessionStore {
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        if (failing.on) throw new Error("the disk said no");
+        return super.append(key, entries);
+      }
+    }
+    const { sdk, shared } = router(bed, true, FlakyStore);
+    const main = [user("main q1", null)];
+    const subKey: SessionKey = { ...KEY, subpath: "subagents/agent-a1b2c3" };
+    const sub = [user("sub q1", null)];
+    await shared.store.append(KEY, main);
+    await shared.store.append(subKey, sub);
+    await shared.settle();
+    failing.on = true;
+    await shared.store.append(KEY, [user("a batch that never lands", null)]);
+    await shared.settle(KEY);
+    expect(shared.health(KEY).transcriptHealth).toBe("repair-required");
+    failing.on = false;
+    const root = stagingWith(bed, main.map((entry) => JSON.stringify(entry)));
+    const subDir = join(root, "projects", KEY.projectKey, KEY.sessionId, "subagents");
+    mkdirSync(subDir, { recursive: true });
+    const orphan = user("a line only the crashed subagent copy has", null);
+    writeFileSync(join(subDir, "agent-a1b2c3.jsonl"), `${JSON.stringify(orphan)}\n`);
+    const report = await sdk.reconcileRootForRecovery(root);
+    const main_ = report.transcripts.find((transcript) => transcript.subpath === undefined);
+    const sub_ = report.transcripts.find((transcript) => transcript.subpath === subKey.subpath);
+    expect(main_?.outcome).toBe("clean");
+    expect(sub_).toMatchObject({ outcome: "quarantined", subpath: "subagents/agent-a1b2c3" });
+    expect(shared.health(KEY).transcriptHealth).toBe("repair-required");
   });
 });

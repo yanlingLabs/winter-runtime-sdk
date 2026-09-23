@@ -221,6 +221,8 @@ export interface TranscriptReconcileOutcome {
   verdict?: "level" | "excluded";
   /** Why a judged transcript was excluded. */
   reason?: string;
+  /** Set when a tail WAS appended and the re-read still disagreed: how many entries the append carried. */
+  attempted?: number;
 }
 
 export interface ReconcileReport {
@@ -319,7 +321,7 @@ export async function reconcileLocalWriteRoot(root: string, input: TranscriptRec
       if (after.kind !== "match") {
         diverged = true;
         unlevel.add(sessionKeyString(transcript.key));
-        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison: after, appended: 0 });
+        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison: after, appended: 0, attempted: comparison.missing.length });
         continue;
       }
       appended += comparison.missing.length;
