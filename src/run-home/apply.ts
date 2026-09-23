@@ -159,3 +159,53 @@ export function applyWinterRunHome<T extends Options>(options: T, runHome: RunHo
       : { canUseTool: (async (...args: Parameters<NonNullable<Options["canUseTool"]>>) => sessionOnlyPermissionUpdates(await hostCanUseTool(...args))) as NonNullable<Options["canUseTool"]> }),
   };
 }
+
+/**
+ * FIX ROUND 1, M6: the Winter leg's Query, observed for its END. `onEnd` runs once, when the query
+ * settles — its stream done, a `return()`/`throw()` that finished it, a rejection (the runtime's own
+ * failure), or `Symbol.asyncDispose` — and never before: `runHomeOutcome` answers `pending` while the
+ * incarnation runs, and a host disposes only on `safe` (spec §3.8).
+ *
+ * WHAT "ENDS" CAN MEAN HERE: the Winter `Query` exposes no process-exit signal, so the observable end
+ * is the stream's settlement, after which the SDK has closed the child's stdin. That is the same
+ * point the host itself can observe; nothing later is visible through the peer.
+ *
+ * Every other member (`interrupt`, `setModel`, `messaging`, …) is the peer's own, bound to it, so the
+ * observed query is a drop-in for the peer's.
+ */
+export function observeQueryEnd<Q extends AsyncGenerator<unknown, unknown, unknown>>(query: Q, onEnd: () => void): Q {
+  let ended = false;
+  const end = (): void => {
+    if (ended) return;
+    ended = true;
+    onEnd();
+  };
+  const settle = async <R>(step: () => Promise<IteratorResult<R>>): Promise<IteratorResult<R>> => {
+    let result: IteratorResult<R>;
+    try {
+      result = await step();
+    } catch (error) {
+      end();
+      throw error;
+    }
+    if (result.done === true) end();
+    return result;
+  };
+  const target = query as unknown as Record<PropertyKey, unknown> & AsyncGenerator<unknown, unknown, unknown>;
+  const observed: Q = new Proxy(query, {
+    get(_target, property) {
+      if (property === "next") return (...args: [] | [unknown]) => settle(() => target.next(...args));
+      if (property === "return") return (value: unknown) => settle(() => target.return(value));
+      if (property === "throw") return (error: unknown) => settle(() => target.throw(error));
+      if (property === Symbol.asyncIterator) return () => observed;
+      if (property === Symbol.asyncDispose) {
+        return async () => {
+          await settle(() => target.return(undefined));
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  return observed;
+}

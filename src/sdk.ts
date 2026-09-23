@@ -51,7 +51,7 @@ import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
 import { RunHomeError } from "./run-home/errors.ts";
-import { applyWinterRunHome, assertNoRunHomeDecidedOptions, assertRunHomeApplicable } from "./run-home/apply.ts";
+import { applyWinterRunHome, assertNoRunHomeDecidedOptions, assertRunHomeApplicable, observeQueryEnd } from "./run-home/apply.ts";
 import { reconcileRootForRecovery } from "./run-home/exit.ts";
 import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { sdkHomeOf, type RunHome, type RunHomeFor, type RunHomeOutcome } from "./run-home/types.ts";
@@ -700,12 +700,16 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(winterOptions, opts.brand === undefined ? undefined : brand, capabilityServers) });
       // AFTER the peer returned, because that is when the Winter leg actually opened (I-1).
       noteOpened("winter-agent");
-      // WS-21 §3.8 DECISION: a Winter-leg run home is SAFE from the moment it is applied — the Winter
-      // child writes the canonical store directly (its `projects/` is a link to it), so there is no
-      // working copy that could ever need reconciling. The host still disposes only after it observes
-      // the incarnation's end; "safe" says nothing would be lost if it did.
-      if (runHome !== undefined) runHomeOutcomes.set(runHome.runId, "safe");
-      return winterQuery;
+      if (runHome === undefined) return winterQuery;
+      // WS-21 §3.8 (fix round 1, M6): `pending` while the incarnation runs, `safe` only when it ENDS.
+      // The Winter child writes the canonical store directly (its `projects/` is a link to it), so there
+      // is no working copy to reconcile — but it reads the run folder for as long as it runs, and a
+      // host disposes on `safe`, so `safe` must wait for the query to settle.
+      const runId = runHome.runId;
+      runHomeOutcomes.set(runId, "pending");
+      return observeQueryEnd(winterQuery, () => {
+        runHomeOutcomes.set(runId, "safe");
+      });
   };
 
   const sdk: RuntimeSdk & { [INTERNALS]: RuntimeSdkInternals } = {

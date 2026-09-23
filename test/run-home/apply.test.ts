@@ -78,7 +78,78 @@ describe("the Winter leg", () => {
       WINTER_DISABLE_CRON: "1",
     });
     expect(forwarded["autoMemory"]).toEqual({ directory: runHome.input.memoryDir, enabled: true });
-    expect(sdk.runHomeOutcome(runHome.runId)).toBe("safe");
+  });
+
+  test("fix round 1, M6: a Winter run home is `pending` while its incarnation runs, `safe` only once the query ends", async () => {
+    const bed = runHomeBed();
+    // Drained to its end.
+    {
+      const runHome = await buildRunHome(inputFor(bed));
+      const { sdk } = winterRouter(bed);
+      const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome } } });
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("pending");
+      const first = await query.next();
+      expect(first.done).toBe(false);
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("pending");
+      for await (const _ of query) void _;
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("safe");
+    }
+    // Ended early by its consumer (a `break` is a `return()`).
+    {
+      const runHome = await buildRunHome(inputFor(bed));
+      const { sdk } = winterRouter(bed);
+      const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome } } });
+      for await (const _ of query) break;
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("safe");
+    }
+    // Ended by the runtime's failure.
+    {
+      const runHome = await buildRunHome(inputFor(bed));
+      const { peer } = createFakeWinterPeer({
+        query: () => {
+          const failing = (async function* () {
+            yield* [];
+            throw new Error("unexpected process death");
+          })();
+          return Object.assign(failing, { interrupt: async () => undefined }) as unknown as ReturnType<RuntimeSdkPeers["winter"]["query"]>;
+        },
+      });
+      const sdk = createRuntimeSdk({ peers: { winter: { ...peer, WinterCompatibilitySessionStore } as unknown as RuntimeSdkPeers["winter"] }, keychain, requireRunHome: true, handoff: { winterHome: bed.home } });
+      const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome } } });
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("pending");
+      await expect(query.next()).rejects.toThrow("unexpected process death");
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("safe");
+    }
+    // Disposed (`await using`).
+    {
+      const runHome = await buildRunHome(inputFor(bed));
+      const { sdk } = winterRouter(bed);
+      const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome } } });
+      await query[Symbol.asyncDispose]();
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("safe");
+    }
+    // Never iterated: still running as far as anyone can tell, so still `pending` — the host must not dispose.
+    {
+      const runHome = await buildRunHome(inputFor(bed));
+      const { sdk } = winterRouter(bed);
+      const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome } } });
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("pending");
+      // The observed query is still the peer's Query: its own members reach the peer's.
+      await expect(query.interrupt()).rejects.toThrow("Query.interrupt() is not scripted");
+      expect(typeof query.messaging.deliver).toBe("function");
+      expect(query[Symbol.asyncIterator]()).toBe(query);
+      expect(sdk.runHomeOutcome(runHome.runId)).toBe("pending");
+    }
+  });
+
+  test("without a run home the peer's own Query object is returned untouched", () => {
+    const bed = runHomeBed();
+    const { peer } = createFakeWinterPeer();
+    let returned: unknown;
+    const wrapped = { ...peer, WinterCompatibilitySessionStore, query: (args: Parameters<RuntimeSdkPeers["winter"]["query"]>[0]) => (returned = peer.query(args)) } as unknown as RuntimeSdkPeers["winter"];
+    const sdk = createRuntimeSdk({ peers: { winter: wrapped }, keychain });
+    const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd } });
+    expect(query).toBe(returned as typeof query);
   });
 
   test("chat and dispatch: native auto-memory is off (the daemon keeps its `_assistant` injection)", async () => {
