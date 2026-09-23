@@ -38,7 +38,7 @@ import { toClaudeReady, type ContinuityEndpoint, type MessageOrigin } from "@yan
 import { carryBackSessionArtifacts, type ArtifactCarryReport } from "./artifacts.ts";
 import { RunHomeError } from "./errors.ts";
 import type { RunHomeOutcome } from "./types.ts";
-import { compareTranscriptTail, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge, type TranscriptReconcileOutcome } from "../store/reconcile.ts";
+import { compareTranscriptTail, isJournalKey, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge, type TranscriptReconcileOutcome } from "../store/reconcile.ts";
 import { HANDOFF_ENTRY_LABEL, readProviderStateSidecar } from "../store/materialized-resume.ts";
 import type { SharedSessionStore } from "../store/wiring.ts";
 
@@ -107,6 +107,14 @@ export function runHomeExitReconciler(input: RunHomeExitReconcilerInput): (args:
       // shared store before the folder can be disposed — never overwriting (see `artifacts.ts`). A
       // destination that differs quarantines that file, and the outcome says so.
       const artifacts = carryBackSessionArtifacts(root, input.shared.identity.storeHome);
+      // NEVER DROPPED SILENTLY (review N-1): what the carry-back could not carry — a link, a special file,
+      // a `.jsonl` the reconcile does not recognise — goes with the folder, so it is named here.
+      if (artifacts.skipped.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `winter-runtime-sdk: run home ${input.runId}: ${artifacts.skipped.length} file(s) in its working copy were not carried into the shared store: ${artifacts.skipped.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`,
+        );
+      }
       if (report.status === "diverged") return quarantine();
       if (report.transcripts.length === 0 && input.mirrored() > 0) return quarantine();
       if (artifacts.conflicts.length > 0) return quarantine(artifacts.conflicts.map((conflict) => conflict.source));
@@ -259,6 +267,14 @@ export async function reconcileRootForRecovery(root: string, input: RecoveryInpu
     if (localIsCanonicalPrefix({ localPath: transcript.path, canonicalLines: raw, isDecoration: isLocalDecoration })) {
       const rawComparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: raw, isDecoration: isLocalDecoration });
       return rawComparison.kind === "canonical-ahead" ? "level" : "reconcile";
+    }
+    // A JOURNAL (review N-1) is written verbatim, never through the claude-ready fold, so it is proved
+    // against the canonical lines themselves: a behind tail is appended, anything else is excluded.
+    if (isJournalKey(transcript.key)) {
+      const comparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: raw, isDecoration: isLocalDecoration });
+      if (comparison.kind === "diverged") return { exclude: comparison.reason };
+      if (comparison.kind === "canonical-ahead") return { exclude: "the canonical journal moved on past a line only the working copy has, so that line cannot be appended provably" };
+      return "reconcile";
     }
     const sidecar = transcript.key.subpath === undefined ? await readProviderStateSidecar(input.storeHome, transcript.key) : [];
     const expected = recomputedClaudeReadyLines(canonical, sidecar, input.resolveEndpoint);

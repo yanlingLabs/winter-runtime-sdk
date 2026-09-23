@@ -10,6 +10,7 @@ import { WINTER_BRAND, WinterCompatibilitySessionStore, type SessionKey, type Se
 
 import type { RunHomeOutcome } from "../../src/index.ts";
 import { runHomeExitReconciler } from "../../src/run-home/exit.ts";
+import { carryBackSessionArtifacts } from "../../src/run-home/artifacts.ts";
 import { createSupervisedSpawnProxy } from "../../src/official/spawn-proxy.ts";
 import { createSharedSessionStore, type SharedSessionStore } from "../../src/store/wiring.ts";
 import { createFakeWinterPeer } from "../../src/testing/index.ts";
@@ -500,5 +501,95 @@ describe("review minor: the exit hook never throws", () => {
     }
     expect(outcomes.has("run-1")).toBe(false);
     expect(readFileSync(store, "utf8")).toBe("store\n");
+  });
+});
+
+describe("review N-1: a workflow's run journal and the session journal are reconciled; no .jsonl is dropped silently", () => {
+  const writeLocal = (root: string, relative: string, lines: string[]): string => {
+    const full = join(root, "projects", KEY.projectKey, KEY.sessionId, relative);
+    mkdirSync(join(full, ".."), { recursive: true });
+    writeFileSync(full, lines.map((line) => `${line}\n`).join(""));
+    return full;
+  };
+  const inStore = (sdk: string, relative: string): string => join(sdk, "projects", KEY.projectKey, KEY.sessionId, relative);
+  // The shape claude 2.1.250 writes (measured): no uuid, one JSON object per line.
+  const journal = [
+    JSON.stringify({ type: "started", key: "v2:dd64254091df177917076237093188ece2c2ce5999acea23c8959a822e007dcd", agentId: "aeb259e7eb6647165" }),
+    JSON.stringify({ type: "result", key: "v2:dd64254091df177917076237093188ece2c2ce5999acea23c8959a822e007dcd", agentId: "aeb259e7eb6647165", result: "sub done" }),
+  ];
+
+  test("the run journal (subagents/workflows/<run>/journal.jsonl) and the session journal (<sid>/world.jsonl) land in the store, byte for byte; the exit is safe", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    await shared.store.append(KEY, main);
+    await shared.settle();
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    const runJournal = writeLocal(runFolder, "subagents/workflows/wf_1/journal.jsonl", journal);
+    const world = writeLocal(runFolder, "world.jsonl", [JSON.stringify({ seq: 1, topic: "script", fact: { runId: "wf_1" } })]);
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    expect(readFileSync(inStore(bed.sdk, "subagents/workflows/wf_1/journal.jsonl"), "utf8")).toBe(readFileSync(runJournal, "utf8"));
+    expect(readFileSync(inStore(bed.sdk, "world.jsonl"), "utf8")).toBe(readFileSync(world, "utf8"));
+  });
+
+  test("a journal the store already holds differently is never overwritten: the exit is quarantined", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    await shared.store.append(KEY, main);
+    await shared.store.append({ ...KEY, subpath: "subagents/workflows/wf_1/journal" }, [JSON.parse(journal[0]!.replace("started", "STARTED-ELSEWHERE")) as SessionStoreEntry]);
+    await shared.settle();
+    const before = readFileSync(inStore(bed.sdk, "subagents/workflows/wf_1/journal.jsonl"), "utf8");
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    writeLocal(runFolder, "subagents/workflows/wf_1/journal.jsonl", journal);
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("quarantined");
+    expect(readFileSync(inStore(bed.sdk, "subagents/workflows/wf_1/journal.jsonl"), "utf8")).toBe(before);
+  });
+
+  test("a subagent transcript at any depth is reconciled (no depth limit — the walk never follows a link)", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    await shared.store.append(KEY, main);
+    await shared.settle();
+    const deepKey: SessionKey = { ...KEY, subpath: "subagents/a/b/c/d/e/agent-deep" };
+    const deep = chain(2).map((entry) => ({ ...entry, isSidechain: true }));
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    writeLocal(runFolder, "subagents/a/b/c/d/e/agent-deep.jsonl", deep.map((entry) => JSON.stringify(entry)));
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    expect(((await shared.store.load(deepKey)) ?? []).filter((entry) => entry["type"] !== "agent_metadata").map((entry) => entry["uuid"])).toEqual(deep.map((entry) => entry["uuid"]));
+  });
+
+  test("a .jsonl the reconcile does not recognise is never copied — and never dropped silently: the carry-back reports it skipped and the exit logs it", async () => {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    await shared.store.append(KEY, main);
+    await shared.settle();
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    writeLocal(runFolder, "odd/unknown.jsonl", ["{\"a\":1}"]);
+    expect(carryBackSessionArtifacts(runFolder, bed.sdk).skipped.map((entry) => entry.path)).toEqual([`${KEY.projectKey}/${KEY.sessionId}/odd/unknown.jsonl`]);
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+    const outcomes = new Map<string, RunHomeOutcome>();
+    try {
+      await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    } finally {
+      console.warn = original;
+    }
+    expect(outcomes.get("run-1")).toBe("safe");
+    expect(existsSync(inStore(bed.sdk, "odd/unknown.jsonl"))).toBe(false);
+    expect(warnings.some((line) => line.includes("odd/unknown.jsonl"))).toBe(true);
   });
 });

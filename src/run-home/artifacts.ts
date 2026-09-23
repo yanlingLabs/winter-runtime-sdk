@@ -14,10 +14,12 @@
 // THE MIRROR CARRIES TRANSCRIPTS ONLY (the SDK's `SessionStore` has no artifact surface), so without this
 // every one of those files died with the run folder. The rules, in order:
 //   * a file the STORE owns is never touched here (review I-1): every `*.jsonl` at any depth (a transcript
-//     — the reconcile's, nested workflow subagents included — or a sidecar), every `*.meta.json` (the
+//     or a journal — the reconcile's, see `scanLocalWriteRoot` — or a sidecar), every `*.meta.json` (the
 //     store writes `agent_metadata` there WITH its `type`; claude's local copy has none, and a copied one
 //     would be read back by `load()` as an extra record), and the store's `*.summary.json`, `*.lock`,
 //     `*.tail-quarantine` and `*.tmp-*` files;
+//   * a `*.jsonl` the reconcile does NOT pick up (review N-1) is never copied as a file either — the store
+//     owns every `.jsonl` name — and never dropped silently: it is reported under `skipped`, with why;
 //   * a LINK in the working copy is never followed and never copied — it is reported and skipped;
 //   * the destination is `<store>/projects/<same relative path>`, confined there: a destination whose
 //     path passes through a link, or whose place is taken by something that is not a file, is a conflict;
@@ -25,6 +27,8 @@
 //     overwritten — the working copy's file is reported as a conflict for the caller to quarantine.
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, type Stats } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+
+import { scanLocalWriteRoot } from "../store/reconcile.ts";
 
 const PRIVATE_DIR = 0o700;
 const PROJECTS_DIR = "projects";
@@ -48,7 +52,7 @@ export interface ArtifactCarryReport {
   identical: CarriedArtifact[];
   /** Never overwritten: the destination differs, or cannot be written without passing a link. */
   conflicts: Array<CarriedArtifact & { reason: string }>;
-  /** Never followed: a link (or a special file) in the working copy. */
+  /** Never carried: a link (or a special file) in the working copy, or a `*.jsonl` the reconcile does not pick up. */
   skipped: Array<CarriedArtifact & { reason: string }>;
 }
 
@@ -99,6 +103,15 @@ export function carryBackSessionArtifacts(root: string, storeHome: string): Arti
   // is no working copy to carry, and following it would copy the store onto itself.
   if (rootStat === undefined || !rootStat.isDirectory()) return report;
   const storeProjects = join(storeHome, PROJECTS_DIR);
+  // THE ONE PREDICATE for "the reconcile carries this `.jsonl`" is the reconcile's own scan: a second list
+  // here would drift from it, and a file both halves skip is exactly the loss N-1 found. A scan that
+  // cannot complete leaves the set empty, so every `.jsonl` is reported rather than assumed carried.
+  let reconciled: ReadonlySet<string>;
+  try {
+    reconciled = new Set(scanLocalWriteRoot(root).map((transcript) => transcript.path));
+  } catch {
+    reconciled = new Set();
+  }
 
   const visit = (dir: string, segments: string[]): void => {
     let names: string[];
@@ -128,6 +141,10 @@ export function carryBackSessionArtifacts(root: string, storeHome: string): Arti
       }
       if (!stat.isFile()) {
         report.skipped.push({ ...artifact, reason: "not a regular file" });
+        continue;
+      }
+      if (name.endsWith(".jsonl")) {
+        if (!reconciled.has(source)) report.skipped.push({ ...artifact, reason: "a .jsonl the transcript reconcile does not recognise: the store owns every .jsonl name, so it is never copied as a file" });
         continue;
       }
       if (path.length < 2 || isStoreOwnedName(name)) continue;

@@ -34,8 +34,10 @@ import type { SharedSessionStore } from "./wiring.ts";
 const PROJECTS_DIR = "projects";
 const SUBAGENTS_DIR = "subagents";
 const JSONL = ".jsonl";
-/** How deep below `subagents/` a transcript is looked for (claude's workflow agents sit two levels down). */
-const MAX_SUBAGENT_DEPTH = 4;
+/** A workflow run's journal, under `subagents/<rel>/` (claude's `journal` key: `subagents/<rel>/journal`). */
+const RUN_JOURNAL_STEM = "journal";
+/** The session's own journals, directly under `<sessionId>/` (claude's `sessionJournal` names). */
+const SESSION_JOURNAL_STEMS: readonly string[] = ["world"];
 
 /** One transcript found under a local-write root, with the store key it mirrors to. */
 export interface LocalTranscript {
@@ -46,9 +48,16 @@ export interface LocalTranscript {
 /**
  * Every transcript under a recorded local-write root.
  *
- * NOT A GLOB AND NOT A RECURSIVE WALK: exactly two shapes are transcripts (the session's own file and
- * its `subagents/` children), and everything else in that tree — the vendor's settings, its caches,
- * its lock files — is out of scope by construction rather than by a filter someone has to maintain.
+ * NOT A GLOB: exactly these shapes are reconciled, each under the store key claude's own import gives it
+ * (`importSessionToStore`; the resume materialization writes every subkey back to the same path), and
+ * everything else in that tree — the vendor's settings, its caches, its lock files — is out of scope by
+ * construction rather than by a filter someone has to maintain:
+ *   * `<key>/<uuid>.jsonl` — the session's own transcript;
+ *   * `<key>/<sid>/subagents/<any depth>/agent-<id>.jsonl` — a subagent's (nested for a workflow's agents);
+ *   * `<key>/<sid>/subagents/<rel>/journal.jsonl`, `<rel>` non-empty — a workflow run's journal (review
+ *     N-1; claude's `journal` key, subpath `subagents/<rel>/journal`);
+ *   * `<key>/<sid>/world.jsonl` — the session's own journal (claude's `sessionJournal` key, name `world`).
+ * The two journals are plain appends of uuid-less lines, so they are compared byte for byte (`sameRecord`).
  * A missing root is an empty list, not an error: a session that never spawned has nothing to mirror.
  */
 export function scanLocalWriteRoot(root: string): LocalTranscript[] {
@@ -68,19 +77,26 @@ export function scanLocalWriteRoot(root: string): LocalTranscript[] {
     }
     // `<sessionId>/subagents/**/agent-*.jsonl` — WS-05 §6's subkey shape, and (review I-1) claude's
     // NESTED one: a workflow's agents write `subagents/workflows/<run>/agent-*.jsonl`, which claude
-    // mirrors as the subkey `subagents/workflows/<run>/agent-<id>`. Reconciled through the store like
-    // any transcript — never copied as a file. Directories only (`readDirNames` never follows a link),
-    // to a bounded depth.
+    // mirrors as the subkey `subagents/workflows/<run>/agent-<id>`. Beside them (review N-1), the run's
+    // own `journal.jsonl`. Reconciled through the store like any transcript — never copied as a file.
+    // Directories only, at ANY depth (review N-1's minor: a depth limit silently dropped a deeper
+    // transcript): `readDirNames` never follows a link, so the walk is bounded by the real tree.
     for (const sessionId of readDirNames(projectDir, "dir")) {
-      const walk = (dir: string, subpath: string, depth: number): void => {
+      const sessionDir = join(projectDir, sessionId);
+      for (const name of readDirNames(sessionDir, "file")) {
+        if (!isSessionJournalName(name)) continue;
+        found.push({ path: join(sessionDir, name), key: { projectKey, sessionId, subpath: name.slice(0, -JSONL.length) } });
+      }
+      const walk = (dir: string, subpath: string): void => {
         for (const name of readDirNames(dir, "file")) {
-          if (!isTranscriptPath(join(dir, name), "subagent")) continue; // a child has its own sidecar too
+          // A child has its own sidecar too: the stem is matched positively, never by extension.
+          const isRunJournal = subpath !== SUBAGENTS_DIR && name === `${RUN_JOURNAL_STEM}${JSONL}`;
+          if (!isRunJournal && !isTranscriptPath(join(dir, name), "subagent")) continue;
           found.push({ path: join(dir, name), key: { projectKey, sessionId, subpath: `${subpath}/${name.slice(0, -JSONL.length)}` } });
         }
-        if (depth >= MAX_SUBAGENT_DEPTH) return;
-        for (const child of readDirNames(dir, "dir")) walk(join(dir, child), `${subpath}/${child}`, depth + 1);
+        for (const child of readDirNames(dir, "dir")) walk(join(dir, child), `${subpath}/${child}`);
       };
-      walk(join(projectDir, sessionId, SUBAGENTS_DIR), SUBAGENTS_DIR, 0);
+      walk(join(sessionDir, SUBAGENTS_DIR), SUBAGENTS_DIR);
     }
   }
   return found;
@@ -505,6 +521,22 @@ const BACKEND_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 // NO DOT in the stem: `agent-a1.provider-state` would otherwise match, and the child's own sidecar is
 // exactly the file this predicate exists to keep out (review r1, F6 — caught by its own test).
 const SUBAGENT_STEM_RE = /^agent-[A-Za-z0-9_-]+$/;
+
+function isSessionJournalName(name: string): boolean {
+  return name.endsWith(JSONL) && SESSION_JOURNAL_STEMS.includes(name.slice(0, -JSONL.length));
+}
+
+/**
+ * Is this key one of claude's JOURNALS (a workflow run's `subagents/<rel>/journal`, or the session's own
+ * `world`) rather than a transcript? A journal is written verbatim — never through the claude-ready fold
+ * — so it is proved against the canonical lines themselves, byte for byte.
+ */
+export function isJournalKey(key: SessionKey): boolean {
+  if (key.subpath === undefined) return false;
+  if (SESSION_JOURNAL_STEMS.includes(key.subpath)) return true;
+  const segments = key.subpath.split("/");
+  return segments.length >= 3 && segments[0] === SUBAGENTS_DIR && segments[segments.length - 1] === RUN_JOURNAL_STEM;
+}
 
 export function isTranscriptPath(path: string, kind: "session" | "subagent" = "session"): boolean {
   if (!path.endsWith(JSONL)) return false;
