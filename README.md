@@ -51,8 +51,9 @@ interface RunHomeInput {
   dispatchChild: boolean;                // a code-mode dispatch child: output style skipped
   leg: RunLeg;
   cwd: string;
-  trustedProjectRoot: string | null;     // repoRootFor(cwd) when trusted, else null; at $HOME or above it,
-                                         // no project/local tier (items, instructions, settings, MCP) is read
+  trustedProjectRoot: string | null;     // repoRootFor(cwd) when trusted, else null; at $HOME or above it, no
+                                         // project item, instruction, settings tier or project MCP file is read
+                                         // (the local MCP scope in <home>/sdk/.winter.json still applies)
   gitRoot: string | null;                // the canonical git root (the local settings tier)
   mcpDisabled: readonly string[];
   reservedMcpServerNames: readonly string[];

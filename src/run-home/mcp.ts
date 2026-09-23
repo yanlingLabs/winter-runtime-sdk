@@ -5,8 +5,9 @@
 //   1. the LOCAL-scope servers for this project (`projects[<git root ?? cwd>].mcpServers`) and, for a
 //      trusted project, `<root>/<project dir>/mcp.json`'s servers are folded into the top-level
 //      `mcpServers`, local over project over user — the runtime loads the local scope only with the
-//      `localSettings` source, which neither child is given (F9, spec §3.4.5). Neither is read when its
-//      anchor is `$HOME` or above it (the project walk's own stop);
+//      `localSettings` source, which neither child is given (F9, spec §3.4.5). The trusted project file is
+//      not read when the root is `$HOME` or above it (the project walk's own stop); the local scope,
+//      an entry in the shared file itself, is;
 //   2. `mcp.disabled` servers and any server named like a reserved capability server (the daemon's,
 //      and the brand's own standing server, which the official leg registers the messaging tools
 //      under) are dropped and reported — this is the guard that used to live in the daemon;
@@ -60,9 +61,10 @@ export async function buildMcpConfig(context: RunHomeBuildContext): Promise<void
     if (file !== undefined && isPlainObject(file["mcpServers"])) project = file["mcpServers"];
   }
   const projects = isPlainObject(shared["projects"]) ? shared["projects"] : {};
-  // FIX ROUND 1, M2: nor a LOCAL scope keyed at `$HOME` or above — the same stop as the project walk.
-  const localKey = input.gitRoot ?? input.cwd;
-  const localEntry = isHomeOrAbove(localKey, context.userHome) ? undefined : projects[localKey];
+  // The LOCAL scope is NOT stopped at `$HOME` (controller ruling on M2): it is an entry in the shared
+  // home's own config file, nothing under `$HOME/<project dir>` is read for it, and claude itself loads
+  // local servers keyed at `$HOME`.
+  const localEntry = projects[input.gitRoot ?? input.cwd];
   const local = isPlainObject(localEntry) && isPlainObject(localEntry["mcpServers"]) ? localEntry["mcpServers"] : {};
 
   const merged: Record<string, unknown> = { ...user, ...project, ...local };
