@@ -5,7 +5,7 @@
 // leg, another cwd, another brand or another store. Official leg: the template's run-home profile, the
 // env builder's three variables, the invariants and the spawn proxy's setting-source check.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { WINTER_BRAND, WinterCompatibilitySessionStore, resolveBrand, type SessionStore } from "@yanlinglabs/winter-agent-sdk";
@@ -559,5 +559,70 @@ describe("the cold resume runs on a run home too", () => {
     expect((forwarded["env"] as Record<string, string>)["WINTER_HOME"]).toBe(built[0]!.dir);
     expect(existsSync(built[0]!.dir)).toBe(false);
     expect(sdk.runHomeOutcome(built[0]!.runId)).toBe("safe");
+  });
+});
+
+describe("the cwd check compares CANONICAL forms (L3 round 4: the daemon's cold resume passes a realpath'd cwd)", () => {
+  const world = (bed: RunHomeBed, runHomeFor: NonNullable<Parameters<typeof createRuntimeSdk>[0]["runHomeFor"]>) => {
+    const { peer, calls } = storePeer();
+    const declared = declaredClasses();
+    const sdk = createRuntimeSdk({
+      peers: { winter: peer },
+      keychain,
+      requireRunHome: true,
+      handoff: { winterHome: bed.home },
+      runHomeFor,
+      messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
+    });
+    return { sdk, calls };
+  };
+
+  test("a row recorded under a SYMLINKED spelling resumes on a run home built for the canonical cwd", async () => {
+    const bed = runHomeBed();
+    const link = join(bed.root, "linked-work");
+    symlinkSync(bed.cwd, link);
+    const { sdk, calls } = world(bed, async (ctx) => buildRunHome(inputFor(bed, { cwd: realpathSync(ctx.cwd), leg: ctx.leg, mode: ctx.mode })));
+    await sdk.directory.record(sessionEntry("sender"));
+    await sdk.directory.record({ ...sessionEntry("gone", { status: "exited", backendSessionId: "backend-9" }), cwd: link });
+    const outcome = await sdk.messaging.send({ from: sessionAddress("sender"), to: "session:gone", body: "wake up", originToolCallId: "t1" });
+    expect(outcome.status).toBe("resumed_and_delivered");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a row recorded under the `/var` spelling of a `/private/var` directory resumes too (macOS)", async () => {
+    const bed = runHomeBed();
+    if (!bed.cwd.startsWith("/private/var/")) {
+      // eslint-disable-next-line no-console
+      console.warn("[apply] the /var spelling case needs a /private/var temp root (macOS); skipped here");
+      return;
+    }
+    const varSpelling = bed.cwd.slice("/private".length);
+    expect(realpathSync(varSpelling)).toBe(bed.cwd);
+    const { sdk, calls } = world(bed, async (ctx) => buildRunHome(inputFor(bed, { cwd: realpathSync(ctx.cwd), leg: ctx.leg, mode: ctx.mode })));
+    await sdk.directory.record(sessionEntry("sender"));
+    await sdk.directory.record({ ...sessionEntry("gone", { status: "exited", backendSessionId: "backend-9" }), cwd: varSpelling });
+    const outcome = await sdk.messaging.send({ from: sessionAddress("sender"), to: "session:gone", body: "wake up", originToolCallId: "t1" });
+    expect(outcome.status).toBe("resumed_and_delivered");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a GENUINELY different directory still refuses `run_home_cwd_mismatch` — on the cold resume and on `query()`", async () => {
+    const bed = runHomeBed();
+    const other = join(bed.root, "other-work");
+    mkdirSync(other, { recursive: true });
+    const { sdk, calls } = world(bed, async (ctx) => buildRunHome(inputFor(bed, { cwd: other, leg: ctx.leg, mode: ctx.mode })));
+    await sdk.directory.record(sessionEntry("sender"));
+    await sdk.directory.record({ ...sessionEntry("gone", { status: "exited", backendSessionId: "backend-9" }), cwd: bed.cwd });
+    const outcome = await sdk.messaging.send({ from: sessionAddress("sender"), to: "session:gone", body: "wake up", originToolCallId: "t1" });
+    expect(outcome.status).toBe("unavailable");
+    expect(JSON.stringify(outcome)).toContain("run_home_cwd_mismatch");
+    expect(calls).toHaveLength(0);
+    // `query()`: the symlinked spelling of the SAME directory is accepted; another directory is not.
+    const link = join(bed.root, "linked-work");
+    symlinkSync(bed.cwd, link);
+    const runHome = await buildRunHome(inputFor(bed));
+    expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: link, runtime: { runHome } } }))).toBe("accepted");
+    const second = await buildRunHome(inputFor(bed));
+    expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: other, runtime: { runHome: second } } }))).toBe("run_home_cwd_mismatch");
   });
 });
