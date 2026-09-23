@@ -34,6 +34,8 @@ import type { SharedSessionStore } from "./wiring.ts";
 const PROJECTS_DIR = "projects";
 const SUBAGENTS_DIR = "subagents";
 const JSONL = ".jsonl";
+/** How deep below `subagents/` a transcript is looked for (claude's workflow agents sit two levels down). */
+const MAX_SUBAGENT_DEPTH = 4;
 
 /** One transcript found under a local-write root, with the store key it mirrors to. */
 export interface LocalTranscript {
@@ -64,17 +66,21 @@ export function scanLocalWriteRoot(root: string): LocalTranscript[] {
       const sessionId = name.slice(0, -JSONL.length);
       found.push({ path: join(projectDir, name), key: { projectKey, sessionId } });
     }
-    // `<sessionId>/subagents/agent-*.jsonl` — WS-05 §6's subkey shape, and the only nested level
-    // this scan recognises.
+    // `<sessionId>/subagents/**/agent-*.jsonl` — WS-05 §6's subkey shape, and (review I-1) claude's
+    // NESTED one: a workflow's agents write `subagents/workflows/<run>/agent-*.jsonl`, which claude
+    // mirrors as the subkey `subagents/workflows/<run>/agent-<id>`. Reconciled through the store like
+    // any transcript — never copied as a file. Directories only (`readDirNames` never follows a link),
+    // to a bounded depth.
     for (const sessionId of readDirNames(projectDir, "dir")) {
-      const subagents = join(projectDir, sessionId, SUBAGENTS_DIR);
-      for (const name of readDirNames(subagents, "file")) {
-        if (!isTranscriptPath(join(subagents, name), "subagent")) continue; // a child has its own sidecar too
-        found.push({
-          path: join(subagents, name),
-          key: { projectKey, sessionId, subpath: `${SUBAGENTS_DIR}/${name.slice(0, -JSONL.length)}` },
-        });
-      }
+      const walk = (dir: string, subpath: string, depth: number): void => {
+        for (const name of readDirNames(dir, "file")) {
+          if (!isTranscriptPath(join(dir, name), "subagent")) continue; // a child has its own sidecar too
+          found.push({ path: join(dir, name), key: { projectKey, sessionId, subpath: `${subpath}/${name.slice(0, -JSONL.length)}` } });
+        }
+        if (depth >= MAX_SUBAGENT_DEPTH) return;
+        for (const child of readDirNames(dir, "dir")) walk(join(dir, child), `${subpath}/${child}`, depth + 1);
+      };
+      walk(join(projectDir, sessionId, SUBAGENTS_DIR), SUBAGENTS_DIR, 0);
     }
   }
   return found;

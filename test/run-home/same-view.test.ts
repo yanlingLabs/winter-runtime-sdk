@@ -1119,7 +1119,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     // tool-results/<id>.txt` and the transcript names that ABSOLUTE path; a launched workflow saves
     // `workflows/scripts/<name>-<run>.js` and `workflows/<run>.json`; a subagent adds
     // `subagents/agent-<id>.meta.json` beside its transcript.
-    const seen: Record<string, { persisted: boolean; references: string[]; existsAfterDispose: boolean[]; storeHas: boolean[]; storeFiles: string[] }> = {};
+    const seen: Record<string, { outcomeBeforeDispose: string; persisted: boolean; references: string[]; existsAfterDispose: boolean[]; storeHas: boolean[]; storeFiles: string[] }> = {};
     beforeAll(async () => {
       await withSameViewBed(
         {
@@ -1140,10 +1140,12 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
             const text = JSON.stringify(result.requests.at(-1)?.["messages"] ?? []);
             const persisted = text.includes("<persisted-output>");
             const references = [...new Set([...text.matchAll(/(\/[^"\\ ]*?\/projects\/[^"\\ ]*?\/tool-results\/[^"\\ ]+?\.txt)/g)].map((match) => match[1]!))];
+            const outcomeBeforeDispose = bed.sdk.runHomeOutcome(runHome.runId);
             await runHome.dispose();
             const relativeToProjects = (path: string): string => path.slice(path.indexOf("/projects/") + "/projects/".length);
             const files = Bun.spawnSync(["/bin/sh", "-c", `cd '${storeProjects}' && find . -type f | sort`]).stdout.toString().split("\n").filter((line) => line.length > 0);
             seen[leg] = {
+              outcomeBeforeDispose,
               persisted,
               references,
               existsAfterDispose: references.map((path) => existsSync(path)),
@@ -1159,7 +1161,8 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         },
       );
     }, TIMEOUT);
-    test("official leg: after the run folder is disposed, the large tool result, the workflow's script and run record, and the subagent metadata are in sdk/projects/<key>/<sid>/", () => {
+    test("official leg: the run home is SAFE when disposed (review I-1: a subagent's metadata never conflicts); afterwards the large tool result, the workflow's script and run record, and the subagent's transcript and metadata (the mirror's) are in sdk/projects/<key>/<sid>/", () => {
+      expect(seen["claude"]!.outcomeBeforeDispose).toBe("safe");
       const files = seen["claude"]!.storeFiles;
       for (const pattern of [/\/tool-results\/[^/]+\.txt$/, /\/workflows\/scripts\/sv-flow-[^/]+\.js$/, /\/workflows\/wf_[^/]+\.json$/, /\/subagents\/agent-[^/]+\.meta\.json$/]) {
         expect([String(pattern), files.some((file) => pattern.test(file))]).toEqual([String(pattern), true]);
