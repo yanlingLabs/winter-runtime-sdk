@@ -63,10 +63,11 @@ export interface ContainmentDisposition {
    * The distinction is the finding: a row can say `redirect` while the router — which implements no
    * tools — has nothing to redirect to, and a reader of the table alone would believe the writer was
    * handled. `floor-deny` means the permission floor refuses the call; `deny-list` means the name is
-   * in `disallowedTools`; `approval-stripped` means the durable permission update is dropped at the
+   * in `disallowedTools`; `approval-session-only` means the durable permission update is rewritten to
+   * `session` at the bridge (WS-21 §4.3; `approval-stripped` was the pre-WS-21 drop, kept in the union); the
    * bridge; `host-implementation` means the host installed the replacement and owns it from there.
    */
-  enforcement: "floor-deny" | "deny-list" | "approval-stripped" | "host-implementation" | "host-ui";
+  enforcement: "floor-deny" | "deny-list" | "approval-stripped" | "approval-session-only" | "host-implementation" | "host-ui";
   note: string;
 }
 
@@ -170,7 +171,7 @@ export function containmentDispositions(brand: Pick<BrandProfile, "projectDirNam
       claudeNamedTarget: `${FORBIDDEN_TARGETS.projectDir}/settings.local.json`,
       disposition: savedApprovals,
       ...(savedApprovals === "redirect" ? { target: paths.localSettings } : {}),
-      enforcement: savedApprovals === "disable" ? "approval-stripped" : "host-implementation",
+      enforcement: savedApprovals === "disable" ? "approval-session-only" : "host-implementation",
       note:
         savedApprovals === "disable"
           ? "saving is disabled on this branch: the approval still applies for the session, and WS-07 keeps its open question (WS-14 §16 q2)"

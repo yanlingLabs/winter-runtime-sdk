@@ -22,6 +22,7 @@ import { envName, type BrandProfile, type Options } from "@yanlinglabs/winter-ag
 import { isRouterBuiltRunHome } from "./build.ts";
 import { RunHomeError } from "./errors.ts";
 import { runHomeBrandOf, type RunHome, type RunLeg } from "./types.ts";
+import { sessionOnlyPermissionUpdates } from "./permission-updates.ts";
 
 export interface RunHomeApplyTarget {
   leg: RunLeg;
@@ -114,10 +115,16 @@ export function applyWinterRunHome<T extends Options>(options: T, runHome: RunHo
       `the Winter leg was asked for setting sources ${JSON.stringify(requested)}; under a run home the child reads the user tier only — the router merged the trusted project's tiers into it (WS-21 §3.5)`,
     );
   }
+  const hostCanUseTool = options.canUseTool;
   return {
     ...options,
     env: { ...(options.env ?? {}), ...winterRunHomeEnv(runHome, brand) },
     settingSources: ["user"],
     autoMemory: { directory: runHome.input.memoryDir, enabled: runHomeAutoMemoryEnabled(runHome) },
+    // WS-21 §4.3: the host's broker answer, with every durable permission-update destination rewritten
+    // to `session` — the Winter child would otherwise write the repository's local settings file.
+    ...(hostCanUseTool === undefined
+      ? {}
+      : { canUseTool: (async (...args: Parameters<NonNullable<Options["canUseTool"]>>) => sessionOnlyPermissionUpdates(await hostCanUseTool(...args))) as NonNullable<Options["canUseTool"]> }),
   };
 }

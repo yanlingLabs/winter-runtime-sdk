@@ -27,6 +27,7 @@ import type { BrandProfile, PermissionResult, PermissionUpdate } from "@yanlingl
 
 import type { OfficialPermissionMode } from "../seams/official-sdk-shapes.ts";
 import { containmentDecisionFor, resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
+import { sessionOnlyPermissionUpdates } from "../run-home/permission-updates.ts";
 import { officialBranchLabel } from "./branding.ts";
 
 // THE MODE UNION MOVED TO THE SEAM (0.0.10) and is RE-EXPORTED here, so that every import site and
@@ -81,16 +82,13 @@ export interface ApprovalBridgeOptions {
   onDecision?: (decision: { request: ApprovalRequest; result: PermissionResult; source: DecisionSource }) => void;
 }
 
-/** Where a decision came from — what a row-14 tally is built out of. */
-export type DecisionSource = "containment-floor" | "broker" | "dont-ask" | "broker-approval-stripped";
-
 /**
- * The destinations a DURABLE approval would be written to (§8's saved-`WebFetch` row).
- *
- * `session` and `cliArg` are not durable — they live and die with this generation — so they are the
- * two a stripped result keeps.
+ * Where a decision came from — what a row-14 tally is built out of. `broker-destination-rewritten`
+ * (WS-21 §4.3) is the broker's own answer with every durable update destination rewritten to
+ * `session`; `broker-approval-stripped` is no longer emitted (it was the pre-WS-21 strip) and stays in
+ * the union only so a host's exhaustive switch still compiles.
  */
-const DURABLE_APPROVAL_DESTINATIONS: readonly string[] = ["userSettings", "projectSettings", "localSettings"];
+export type DecisionSource = "containment-floor" | "broker" | "dont-ask" | "broker-approval-stripped" | "broker-destination-rewritten";
 
 /**
  * Builds `Options.canUseTool` for the official branch.
@@ -127,18 +125,18 @@ export function createApprovalBridge(options: ApprovalBridgeOptions): OfficialAp
     //    updates) — with ONE exception, below.
     const result = await options.broker(request);
 
-    // 4. §8's SAVED-APPROVAL ROW, enforced where the write is actually requested (review r1, M2).
-    //    A durable `updatedPermissions` entry is exactly how a saved approval reaches the vendor's own
-    //    settings file, and it is the only §8 writer with no tool call of its own — so it has to be
-    //    contained here or nowhere. Under the `disable` disposition the durable entries are STRIPPED
-    //    and the session-scoped ones survive: the approval still applies for this generation, and
-    //    WS-07 keeps its open question (WS-14 §16 q2).
-    if (savedApprovals === "disable" && result.behavior === "allow" && result.updatedPermissions !== undefined) {
-      const kept = result.updatedPermissions.filter((update) => !DURABLE_APPROVAL_DESTINATIONS.includes(update.destination));
-      if (kept.length !== result.updatedPermissions.length) {
-        const stripped: PermissionResult = { ...result, updatedPermissions: kept };
-        options.onDecision?.({ request, result: stripped, source: "broker-approval-stripped" });
-        return stripped;
+    // 4. §8's SAVED-APPROVAL ROW, enforced where the write is actually requested (review r1, M2) —
+    //    and, since WS-21, for EVERY durable update (§4.3, F21). A durable `updatedPermissions` entry
+    //    is how an approval reaches a settings file the runtime writes itself (`localSettings` is the
+    //    repository's own), and it is the one writer with no tool call of its own — so it is contained
+    //    here or nowhere. Every destination other than `session` is REWRITTEN to `session`: the approval
+    //    still applies for this generation, and the durable copy is the host's to write (the daemon
+    //    writes `sdk/settings.json` or the local tier itself). The pre-WS-21 bridge stripped them.
+    if (savedApprovals === "disable") {
+      const scoped = sessionOnlyPermissionUpdates(result);
+      if (scoped !== result) {
+        options.onDecision?.({ request, result: scoped, source: "broker-destination-rewritten" });
+        return scoped;
       }
     }
     options.onDecision?.({ request, result, source: "broker" });
