@@ -207,7 +207,7 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
   const { input, brand, sdkHome, dir, report } = context;
   const sources: Array<{ path: string; tier: "user" | "project" | "local" }> = [{ path: join(sdkHome, brand.instructionsFile), tier: "user" }];
   if (input.trustedProjectRoot !== null) {
-    for (const walkDir of [...projectWalk(input.cwd, input.trustedProjectRoot, homedir())].reverse()) {
+    for (const walkDir of [...projectWalk(input.cwd, input.trustedProjectRoot, context.userHome)].reverse()) {
       sources.push({ path: join(walkDir, brand.instructionsFile), tier: "project" });
       sources.push({ path: join(walkDir, brand.projectDirName, brand.instructionsFile), tier: "project" });
       sources.push({ path: join(walkDir, localVariantOf(brand.instructionsFile)), tier: "local" });

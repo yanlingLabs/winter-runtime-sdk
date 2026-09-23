@@ -1,7 +1,7 @@
 // WS-21 §3.4.4: the effective settings — three tiers merged by claude's rules (F17), each tier
 // filtered first, every relative path re-anchored, then stripped per mode and cut to claude's schema.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -64,6 +64,55 @@ describe("the tiers and claude's merge (F17)", () => {
     put(join(bed.sdk, "settings.json"), json({ model: "user-model" }));
     put(join(root, ".winter", "settings.json"), "{ not json");
     expect((await effective(bed, root))["model"]).toBe("user-model");
+  });
+});
+
+describe("the walk's `$HOME` stop (fix round 1, M2): a root at `$HOME` or above is not a project", () => {
+  // A daemon home laid out as it is for real: `$HOME/.winter`, its sdk home inside it. A project tier
+  // rooted at `$HOME` would read `$HOME/.winter/settings.json` — the DAEMON's own settings, which still
+  // hold Winter-grammar keys kept for downgrade — and `$HOME/.winter/settings.local.json`.
+  function homeBed(): { bed: RunHomeBed; userHome: string } {
+    const bed = runHomeBed("hs");
+    const userHome = join(bed.root, "u");
+    const daemonHome = join(userHome, ".winter");
+    mkdirSync(join(userHome, "p"), { recursive: true });
+    const moved: RunHomeBed = { ...bed, home: daemonHome, sdk: join(daemonHome, "sdk"), cwd: join(userHome, "p") };
+    put(join(moved.sdk, "settings.json"), json({ model: "user-model" }));
+    put(join(daemonHome, "settings.json"), json({ model: "daemon-model", provider: { model: "codex-oauth/x" }, permissions: { allow: ["Bash(rm:*)"] } }));
+    put(join(daemonHome, "settings.local.json"), json({ env: { FROM_DAEMON_HOME: "1" }, permissions: { allow: ["Bash(curl:*)"] } }));
+    return { bed: moved, userHome };
+  }
+
+  test("root = `$HOME`: the project and local tiers contribute nothing", async () => {
+    const { bed, userHome } = homeBed();
+    const runHome = await buildRunHome(inputFor(bed, { trustedProjectRoot: userHome, gitRoot: userHome }), { userHome });
+    expect(runHome.effectiveSettings).toEqual({ model: "user-model" });
+  });
+
+  test("root ABOVE `$HOME` (and a local anchor at `$HOME`): still nothing", async () => {
+    const { bed, userHome } = homeBed();
+    put(join(bed.root, ".winter", "settings.json"), json({ model: "above-model" }));
+    const runHome = await buildRunHome(inputFor(bed, { trustedProjectRoot: bed.root, gitRoot: userHome }), { userHome });
+    expect(runHome.effectiveSettings).toEqual({ model: "user-model" });
+  });
+
+  test("root = `$HOME` spelled through a link: still nothing (the stop compares real paths too)", async () => {
+    const { bed, userHome } = homeBed();
+    const link = join(bed.root, "home-link");
+    symlinkSync(userHome, link);
+    const runHome = await buildRunHome(inputFor(bed, { trustedProjectRoot: link, gitRoot: link }), { userHome });
+    expect(runHome.effectiveSettings).toEqual({ model: "user-model" });
+  });
+
+  test("a project BELOW `$HOME` still contributes both tiers; a local anchor at `$HOME` alone contributes nothing", async () => {
+    const { bed, userHome } = homeBed();
+    const root = join(userHome, "p");
+    put(join(root, ".winter", "settings.json"), json({ model: "project-model" }));
+    put(join(root, ".winter", "settings.local.json"), json({ env: { LOCAL: "1" } }));
+    const below = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }), { userHome });
+    expect(below.effectiveSettings).toEqual({ model: "project-model", env: { LOCAL: "1" } });
+    const homeGit = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: userHome }), { userHome });
+    expect(homeGit.effectiveSettings).toEqual({ model: "project-model" });
   });
 });
 

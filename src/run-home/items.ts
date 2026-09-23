@@ -21,7 +21,6 @@
 // kind directory, or a project dot-dir that is itself a link. A project item inside the root is linked
 // by its REAL path, so re-pointing a link in the repository after the build changes nothing.
 import { lstat, mkdir, readFile, readdir, realpath, stat, symlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { RunHomeBuildContext } from "./build.ts";
@@ -171,7 +170,7 @@ async function linkAll(dir: string, winners: Map<string, Candidate>, fileName: (
 export async function buildItems(context: RunHomeBuildContext): Promise<void> {
   const { input, sdkHome, dir, brand } = context;
   const code = input.mode === "code";
-  const walk = projectWalk(input.cwd, input.trustedProjectRoot, homedir());
+  const walk = projectWalk(input.cwd, input.trustedProjectRoot, context.userHome);
   const scope: ResolveScope = {
     context,
     realSdk: (await realOrMissing(sdkHome)) ?? sdkHome,

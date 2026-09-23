@@ -35,6 +35,7 @@ import { ALL_AUTH_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES } from "../official/a
 import { isExecutionIndirectionVariable, OFFICIAL_RUNTIME_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../official/env-allowlist.ts";
 import type { RunHomeBuildContext } from "./build.ts";
 import { fsRootAnchored, type RunHomeBrand } from "./types.ts";
+import { isHomeOrAbove } from "./walk.ts";
 
 const PRIVATE_FILE = 0o600;
 
@@ -355,10 +356,12 @@ async function readTier(path: string): Promise<Record<string, unknown> | undefin
 export async function buildEffectiveSettings(context: RunHomeBuildContext): Promise<Record<string, unknown>> {
   const { input, brand, sdkHome, dir } = context;
   const tiers: Array<{ tier: Tier; path: string; anchor: string }> = [{ tier: "user", path: join(sdkHome, "settings.json"), anchor: sdkHome }];
-  if (input.trustedProjectRoot !== null) {
+  // FIX ROUND 1, M2: a root (or a local anchor) at `$HOME` or above it is not a project — its dot-dir is
+  // the daemon's own home — so neither repository tier is read from it.
+  if (input.trustedProjectRoot !== null && !isHomeOrAbove(input.trustedProjectRoot, context.userHome)) {
     tiers.push({ tier: "project", path: join(input.trustedProjectRoot, brand.projectDirName, "settings.json"), anchor: input.trustedProjectRoot });
     const gitRoot = input.gitRoot ?? input.cwd;
-    tiers.push({ tier: "local", path: join(gitRoot, brand.projectDirName, "settings.local.json"), anchor: gitRoot });
+    if (!isHomeOrAbove(gitRoot, context.userHome)) tiers.push({ tier: "local", path: join(gitRoot, brand.projectDirName, "settings.local.json"), anchor: gitRoot });
   }
   let merged: Record<string, unknown> = {};
   for (const { tier, path, anchor } of tiers) {
