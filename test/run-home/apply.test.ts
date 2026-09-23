@@ -135,6 +135,25 @@ describe("the Winter leg", () => {
     expect(calls).toHaveLength(0);
   });
 
+  test("fix round 1, M1: the options a run home decides are refused from the caller — plugins, skills, agents, outputStyle, brand", async () => {
+    const bed = runHomeBed();
+    const runHome = await buildRunHome(inputFor(bed));
+    const { sdk, calls } = winterRouter(bed);
+    const decided: Array<[string, Record<string, unknown>]> = [
+      ["plugins", { plugins: [{ type: "local", path: "/x" }] }],
+      ["skills", { skills: ["x"] }],
+      ["agents", { agents: { x: { description: "x", prompt: "x", permissionMode: "bypassPermissions" } } }],
+      ["outputStyle", { outputStyle: "terse" }],
+      ["brand", { brand: { envPrefix: "OTHER_" } }],
+    ];
+    for (const [label, extra] of decided) {
+      expect([label, refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, ...extra, runtime: { runHome } } as never }))]).toEqual([label, "run_home_option_refused"]);
+    }
+    // Host policy stays the host's.
+    sdk.query({ prompt: "hi", options: { cwd: bed.cwd, trustedWorkspace: true, plansDirectory: "/plans", runtime: { runHome } } as never });
+    expect(calls).toHaveLength(1);
+  });
+
   test("a router created without `requireRunHome` cannot apply one: its store is on the pre-WS-21 layout", async () => {
     const bed = runHomeBed();
     const runHome = await buildRunHome(inputFor(bed));
@@ -380,6 +399,26 @@ describe("the official leg through the door", () => {
     expect(options.strictMcpConfig).toBe(false);
     expect((options.settings as Record<string, unknown>)["autoMemoryDirectory"]).toBe(runHome.input.memoryDir);
     expect("plugins" in options).toBe(false);
+  });
+
+  test("fix round 1, M1: an official policy's `agents` beside a run home is refused; the template never forwards it; the invariants refuse it", async () => {
+    const bed = runHomeBed();
+    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
+    const { peer } = storePeer();
+    const { module, launched } = fakeOfficial();
+    const sdk = createRuntimeSdk({ peers: { winter: peer, claude: module }, keychain, vendoredOfficialRuntime: "/vendored/claude", requireRunHome: true, handoff: { winterHome: bed.home } });
+    const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome, selection, official: { sessionId: "s-agents", base: { HOME: bed.root }, options: { agents: { x: { description: "x" } } } } } } });
+    await expect((async () => {
+      for await (const _message of query as AsyncIterable<unknown>) void _message;
+    })()).rejects.toThrow(/run_home_option_refused/);
+    expect(launched).toHaveLength(0);
+    // The template on a run home drops a policy's agents…
+    const built = buildOfficialOptions(templateInput(runHome), { agents: { x: { description: "x" } } });
+    expect("agents" in built).toBe(false);
+    // …and hand-built options carrying them are refused.
+    expect(() => assertOptionsInvariants({ ...built, agents: { x: {} } }, "winter-claude-agent", { runHome: { dir: runHome.dir } })).toThrow(OfficialConfigurationError);
+    // The Winter-shaped `Options` of an official query are fenced the same way.
+    expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, outputStyle: "terse", runtime: { runHome, selection, official: { sessionId: "s-style", base: { HOME: bed.root } } } } }))).toBe("run_home_option_refused");
   });
 
   test("a spool named beside a run home is refused (the run folder replaces it)", async () => {
