@@ -753,6 +753,13 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         reason: "a run home replaces the configured staging placeholder: a resume is configured on `<run folder>/.absent`, which is unpredictable and never created, so the wrapper stages nothing but the transcript (WS-21 §3.6)",
       });
     }
+    // FIX ROUND 1, M1: a host policy's `agents` beside a run home is refused, not silently dropped.
+    if (runHome !== undefined && (deps.policy?.options?.agents !== undefined || request.input.options?.agents !== undefined)) {
+      throw new RunHomeError(
+        "run_home_option_refused",
+        "the official policy names `agents` beside a run home; a run home's agents are its run folder's rewritten definitions (WS-21 §3.3, F19c)",
+      );
+    }
     if (runHome !== undefined && request.input.spool !== undefined) {
       throw new RuntimeLaunchInputError({
         leg: "official",

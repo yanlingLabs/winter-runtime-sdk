@@ -77,6 +77,25 @@ export function assertRunHomeApplicable(runHome: unknown, target: RunHomeApplyTa
   }
 }
 
+/**
+ * FIX ROUND 1, M1: THE OPTIONS A RUN HOME DECIDES are refused from the caller, on either leg. The run
+ * folder carries the plugins (`enabledPlugins`), the skills, the agents (rewritten, F19c), the output
+ * style (effective settings); the brand is the router's own. A caller-supplied agent would skip the F19c
+ * rewrite, and a caller-supplied brand would re-spell the env prefix the router's variables use.
+ * `trustedWorkspace` and `plansDirectory` stay: they are host policy.
+ */
+export const RUN_HOME_DECIDED_OPTIONS = ["plugins", "skills", "agents", "outputStyle", "brand"] as const;
+
+export function assertNoRunHomeDecidedOptions(options: object): void {
+  const present = RUN_HOME_DECIDED_OPTIONS.filter((key) => (options as Record<string, unknown>)[key] !== undefined);
+  if (present.length > 0) {
+    throw new RunHomeError(
+      "run_home_option_refused",
+      `the caller's options set ${present.join(", ")}, which a run home decides (its run folder's items and effective settings, and the router's own brand — WS-21 §3.3, §6.1); drop them from the options`,
+    );
+  }
+}
+
 /** The Winter child's host variables for a run home (spec §3.1, §3.7; the claude twins in comments). */
 export function winterRunHomeEnv(runHome: RunHome, brand: Pick<BrandProfile, "envPrefix">): Record<string, string> {
   return {
@@ -108,6 +127,7 @@ export function runHomeAutoMemoryEnabled(runHome: Pick<RunHome, "effectiveSettin
  * repository's own files (ruling Q1).
  */
 export function applyWinterRunHome<T extends Options>(options: T, runHome: RunHome, brand: Pick<BrandProfile, "envPrefix">): T {
+  assertNoRunHomeDecidedOptions(options);
   // THE ROUTER'S OWN VARIABLES ARE ITS OWN (Global Constraints: "only the router sets" them). A caller
   // that still sets one — e.g. a host that used to point the Winter child at its home itself — is
   // refused rather than silently overwritten, so the leftover surfaces instead of hiding.

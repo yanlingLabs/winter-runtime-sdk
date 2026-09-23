@@ -26,6 +26,12 @@ export type RunHomeErrorCode =
   | "setting_sources_refused"
   /** A caller-supplied value for a variable only the router sets. */
   | "router_owned_variable"
+  /**
+   * An option the run home decides, supplied by the caller beside one (fix round 1, M1): `plugins`,
+   * `skills`, `agents`, `outputStyle` or `brand`. They come from the run folder (items, effective
+   * settings) or from the router itself (the brand), and a caller's copy would bypass its rewrites.
+   */
+  | "run_home_option_refused"
   /** The router's cold-resume path needed a run home and the host registered no `runHomeFor`. */
   | "run_home_for_missing"
   /** `/loop` is not a Winter surface (spec §7.3 (d)): the prompt is refused, never dropped. */

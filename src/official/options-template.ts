@@ -233,7 +233,9 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     // The SAME subagent set the Winter leg is handed via `Options.agents`, forwarded verbatim (own
     // key, same shallow-copy discipline as `mcpServers` above) — never read here, never merged with
     // anything this branch owns.
-    ...(policy.agents === undefined ? {} : { agents: { ...policy.agents } }),
+    // FIX ROUND 1, M1: NOT beside a run home — its agents are the run folder's rewritten copies (F19c),
+    // and a host set here would skip that rewrite. The invariants refuse `agents` on a run-home launch.
+    ...(policy.agents === undefined || input.runHome !== undefined ? {} : { agents: { ...policy.agents } }),
 
     // WS-05 §6 / §5: ONE store instance, shared with the other branch. WS-18 W18-14 (P10b): the
     // caller (the door, `door.ts`) is the one that wraps it with `claude-ready-store.ts`'s
@@ -381,6 +383,9 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
     }
     if (options.strictMcpConfig !== false) {
       refuse("strictMcpConfig", "a run-home launch loads the run folder's MCP config (WS-21 §3.4.5); the router pins `strictMcpConfig: false`");
+    }
+    if (options["agents"] !== undefined) {
+      refuse("agents", "a run-home launch's agents are its run folder's rewritten definitions (WS-21 §3.3, F19c); host-supplied agents would skip the rewrite");
     }
     const configDir = (options.env as Record<string, string | undefined> | undefined)?.["CLAUDE_CONFIG_DIR"];
     if (configDir !== undefined && configDir !== context.runHome.dir && configDir !== join(context.runHome.dir, RUN_HOME_ABSENT_SEGMENT)) {

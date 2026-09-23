@@ -51,7 +51,7 @@ import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
 import { RunHomeError } from "./run-home/errors.ts";
-import { applyWinterRunHome, assertRunHomeApplicable } from "./run-home/apply.ts";
+import { applyWinterRunHome, assertNoRunHomeDecidedOptions, assertRunHomeApplicable } from "./run-home/apply.ts";
 import { reconcileRootForRecovery } from "./run-home/exit.ts";
 import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { sdkHomeOf, type RunHome, type RunHomeFor, type RunHomeOutcome } from "./run-home/types.ts";
@@ -651,7 +651,11 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       };
       // WS-21 §3.1: THE RUN HOME IS CHECKED FOR THE LEG IT IS ABOUT TO RUN ON, before either leg opens.
       const leg = decided !== undefined && decided.runtimeKind === "claude-agent" ? "official" : "winter";
-      if (runHome !== undefined) assertRunHomeApplicable(runHome, { leg, cwd: options.cwd, brand, storeHome });
+      if (runHome !== undefined) {
+        assertRunHomeApplicable(runHome, { leg, cwd: options.cwd, brand, storeHome });
+        // FIX ROUND 1, M1: on either leg, the options a run home decides are not the caller's.
+        assertNoRunHomeDecidedOptions(options);
+      }
       if (decided !== undefined && decided.runtimeKind === "claude-agent") {
         const official = runtime?.official;
         if (official === undefined) {
