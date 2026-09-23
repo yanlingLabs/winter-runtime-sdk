@@ -60,7 +60,7 @@ describe("the generated .winter.json", () => {
     expect(file["mcpServers"]).toBeUndefined();
   });
 
-  test("the walk's `$HOME` stop (fix round 1, M2): neither `$HOME/.winter/mcp.json` nor a local scope keyed at `$HOME` or above", async () => {
+  test("the walk's `$HOME` stop (fix round 1, M2, as ruled): never `$HOME/.winter/mcp.json` or one above it — but a local scope keyed at `$HOME` still applies, as claude applies it", async () => {
     const bed = runHomeBed("hm");
     const userHome = join(bed.root, "u");
     const daemonHome = join(userHome, ".winter");
@@ -69,12 +69,16 @@ describe("the generated .winter.json", () => {
     put(join(moved.sdk, ".winter.json"), json({ mcpServers: { u: server("user") }, projects: { [userHome]: { mcpServers: { homeLocal: server("home") } }, [bed.root]: { mcpServers: { aboveLocal: server("above") } } } }));
     put(join(daemonHome, "mcp.json"), json({ mcpServers: { daemonHome: server("daemon") } }));
     put(join(bed.root, ".winter", "mcp.json"), json({ mcpServers: { aboveHome: server("above") } }));
+    const expected: Record<string, Record<string, unknown>> = {
+      [userHome]: { u: server("user"), homeLocal: server("home") },
+      [bed.root]: { u: server("user"), aboveLocal: server("above") },
+    };
     for (const root of [userHome, bed.root]) {
       const runHome = await buildRunHome(inputFor(moved, { cwd: root, trustedProjectRoot: root, gitRoot: root }), { userHome });
       const file = JSON.parse(readFileSync(join(runHome.dir, ".winter.json"), "utf8")) as Record<string, unknown>;
-      expect([root, file["mcpServers"]]).toEqual([root, { u: server("user") }]);
+      expect([root, file["mcpServers"]]).toEqual([root, expected[root]]);
     }
-    // Below `$HOME` both still apply.
+    // Below `$HOME` the project file applies too.
     const below = join(userHome, "p");
     put(join(below, ".winter", "mcp.json"), json({ mcpServers: { project: server("project") } }));
     put(join(moved.sdk, ".winter.json"), json({ mcpServers: { u: server("user") }, projects: { [below]: { mcpServers: { local: server("local") } } } }));
