@@ -37,7 +37,7 @@ import { dirname, join } from "node:path";
 import * as winterSdk from "@yanlinglabs/winter-agent-sdk";
 import type { SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
-import { buildRunHome, createRuntimeSdk, type RunHome, type RunLeg, type RuntimeSdk, type RuntimeSdkPeers } from "../../src/index.ts";
+import { buildRunHome, createOfficialInputStream, createRuntimeSdk, escapeRulePath, type RunHome, type RunLeg, type RuntimeSdk, type RuntimeSdkPeers } from "../../src/index.ts";
 import { createInMemoryRuntimeDirectoryStore, type RuntimeDirectoryEntry, type RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import type { HandoffStepReport } from "../../src/store/index.ts";
@@ -125,6 +125,19 @@ function put(path: string, content: string): void {
   writeFileSync(path, content);
 }
 
+/** One scripted model turn, served to BOTH legs (SSE to the Winter runtime, a plain message to claude). */
+type SameViewTurn = { text: string } | { toolUses: Array<{ id: string; name: string; input: Record<string, unknown> }> };
+
+/** How many tool results the conversation carries — the script's cursor (the runtimes' side requests carry none). */
+function toolResultsIn(body: Record<string, unknown>): number {
+  let count = 0;
+  for (const message of (body["messages"] ?? []) as Array<{ content?: unknown }>) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content as Array<Record<string, unknown>>) if (block["type"] === "tool_result") count += 1;
+  }
+  return count;
+}
+
 const sessionRoots: string[] = [];
 
 /**
@@ -135,8 +148,8 @@ const sessionRoots: string[] = [];
  * does this bed. The base is the real temp dir when its key fits the pinned runtime's 64-character
  * `CLAUDE_CODE_PROJECT_DIR_NAME` cap, else the real `/tmp`.
  */
-function realPathSession(): HermeticSession {
-  const fits = (base: string): boolean => winterSdk.transcriptProjectKey(join(base, "w-XXXXXX", "w")).length <= 64;
+function realPathSession(dirName = "w"): HermeticSession {
+  const fits = (base: string): boolean => winterSdk.transcriptProjectKey(join(base, "w-XXXXXX", dirName)).length <= 64;
   const base = [tmpdir(), "/tmp"].filter((candidate) => existsSync(candidate)).map((candidate) => realpathSync(candidate)).find(fits);
   if (base === undefined) throw new Error("the same-view bed needs a real temp root short enough for the pinned runtime's 64-character project-key cap; set TMPDIR to a shorter path");
   const root = mkdtempSync(join(base, "w-"));
@@ -144,7 +157,7 @@ function realPathSession(): HermeticSession {
   const home = join(root, "home");
   const brandHome = join(home, ".winter");
   const spool = join(brandHome, "runtimes", "official-agent-spool");
-  const cwd = join(root, "w");
+  const cwd = join(root, dirName);
   const decoyVendorHome = join(home, ".claude");
   for (const dir of [home, brandHome, spool, cwd, decoyVendorHome]) mkdirSync(dir, { recursive: true });
   // The same decoy `hermeticSession` plants, so `decoyUntouched` reads it the same way.
@@ -224,7 +237,7 @@ const markerLabel = (name: string): string => (name === MCP_SERVERS.standingName
  * router must drop),
  * and an enabled directory-marketplace plugin with a skill and a SessionStart hook.
  */
-function plantFixture(session: HermeticSession, options: { installRecord: boolean; outputStyle?: string }): Fixture {
+function plantFixture(session: HermeticSession, options: { installRecord: boolean; outputStyle?: string; userPermissions?: (root: string) => Record<string, string[]> }): Fixture {
   const sdkHome = join(session.brandHome, "sdk");
   const root = session.cwd;
   const mcpMarkers = join(session.home, "markers", "mcp");
@@ -260,7 +273,7 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
   mkdirSync(dirname(marker), { recursive: true });
   // claude's own plugin hooks file shape: `{ "hooks": { <Event>: [...] } }`.
   put(join(market, "sv-plugin", "hooks", "hooks.json"), `${JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `echo ran >> '${marker}'` }] }] } })}\n`);
-  put(join(sdkHome, "settings.json"), `${JSON.stringify({ outputStyle: options.outputStyle ?? "sv-style", extraKnownMarketplaces: { sv: { source: { source: "directory", path: market } } }, enabledPlugins: { "sv-plugin@sv": true } })}\n`);
+  put(join(sdkHome, "settings.json"), `${JSON.stringify({ ...(options.userPermissions === undefined ? {} : { permissions: options.userPermissions(root) }), outputStyle: options.outputStyle ?? "sv-style", extraKnownMarketplaces: { sv: { source: { source: "directory", path: market } } }, enabledPlugins: { "sv-plugin@sv": true } })}\n`);
   if (options.installRecord) {
     // What `winter plugin marketplace add` + `winter plugin install sv-plugin@sv` write for a directory
     // marketplace, under the shared plugin root: the marketplace record, and an install record whose
@@ -313,6 +326,8 @@ function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyl
   };
 }
 
+type CanUseToolLike = (toolName: string, input: Record<string, unknown>, options?: { decisionReason?: string; blockedPath?: string }) => Promise<Record<string, unknown>>;
+
 interface SameViewBed {
   session: HermeticSession;
   fixture: Fixture;
@@ -320,17 +335,25 @@ interface SameViewBed {
   directory: RuntimeDirectoryStore;
   projectKey: string;
   build(leg: RunLeg): Promise<RunHome>;
-  runWinter(runHome: RunHome, over?: { prompt?: string; resume?: string }): Promise<Run>;
-  runClaude(runHome: RunHome, winterSessionId: string, over?: { prompt?: string; sessionId?: string }): Promise<Run>;
+  runWinter(runHome: RunHome, over?: { prompt?: string; resume?: string; permissionMode?: string; canUseTool?: CanUseToolLike }): Promise<Run>;
+  runClaude(runHome: RunHome, winterSessionId: string, over?: { prompt?: string; sessionId?: string; canUseTool?: CanUseToolLike; permissionMode?: string }): Promise<Run>;
   /** Set by a test that drives `sdk.handoff`: what each confirming destination opens. */
   destinations: Map<string, (runKind: "claude-agent" | "winter-agent") => Promise<HandoffStepReport>>;
 }
 
-async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: boolean; outputStyle?: string }, fn: (bed: SameViewBed) => Promise<T>): Promise<T> {
+async function withSameViewBed<T>(
+  options: { trusted: boolean; installRecord?: boolean; outputStyle?: string; dirName?: string; turns?: (root: string) => readonly SameViewTurn[]; userPermissions?: (root: string) => Record<string, string[]> },
+  fn: (bed: SameViewBed) => Promise<T>,
+): Promise<T> {
   /* c8 ignore next */
   if (runtime === undefined || WINTER_EXE === undefined) throw new Error("unreachable: the same-view suite is skipped without both runtimes");
-  const session = realPathSession();
-  const fixture = plantFixture(session, { installRecord: options.installRecord ?? true, ...(options.outputStyle === undefined ? {} : { outputStyle: options.outputStyle }) });
+  const session = realPathSession(options.dirName);
+  const turns: readonly SameViewTurn[] = options.turns?.(session.cwd) ?? [{ text: "ok" }];
+  const fixture = plantFixture(session, {
+    installRecord: options.installRecord ?? true,
+    ...(options.outputStyle === undefined ? {} : { outputStyle: options.outputStyle }),
+    ...(options.userPermissions === undefined ? {} : { userPermissions: options.userPermissions }),
+  });
   const home = session.brandHome;
   const sdkHome = join(home, "sdk");
   const projectKey = winterSdk.transcriptProjectKey(fixture.root);
@@ -351,9 +374,18 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
                 /* a shape this bed did not anticipate: recorded as empty, still answered */
               }
               requests.push(body);
+              const turn = turns[Math.min(toolResultsIn(body), turns.length - 1)] ?? { text: "ok" };
+              const usage = { input_tokens: 10, output_tokens: 2 };
               // The Winter runtime streams (SSE); the pinned claude accepts a plain message body.
-              if (body["stream"] === true) return fakes.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["ok"] }], stopReason: "end_turn", usage: { input_tokens: 10, output_tokens: 2 } });
-              return new Response(JSON.stringify({ id: "msg_same_view", type: "message", role: "assistant", model: "claude-sonnet-4-5-20250929", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 10, output_tokens: 2 } }), {
+              if (body["stream"] === true) {
+                return fakes.anthropicTurnResponse(
+                  "text" in turn
+                    ? { blocks: [{ type: "text", chunks: [turn.text] }], stopReason: "end_turn", usage }
+                    : { blocks: turn.toolUses.map((use) => ({ type: "tool_use" as const, id: use.id, name: use.name, jsonChunks: [JSON.stringify(use.input)] })), stopReason: "tool_use", usage },
+                );
+              }
+              const content = "text" in turn ? [{ type: "text", text: turn.text }] : turn.toolUses.map((use) => ({ type: "tool_use", id: use.id, name: use.name, input: use.input }));
+              return new Response(JSON.stringify({ id: "msg_same_view", type: "message", role: "assistant", model: "claude-sonnet-4-5-20250929", content, stop_reason: "text" in turn ? "end_turn" : "tool_use", stop_sequence: null, usage }), {
                 status: 200,
                 headers: { "content-type": "application/json" },
               });
@@ -454,7 +486,8 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
                 keychainService: "com.example.ws21-same-view",
                 env: childEnv,
                 stderr: (chunk: string) => stderr.push(chunk),
-                canUseTool: allow,
+                canUseTool: over.canUseTool ?? allow,
+                ...(over.permissionMode === undefined ? {} : { permissionMode: over.permissionMode }),
                 ...(over.resume === undefined ? {} : { resume: over.resume }),
                 runtime: { runHome },
               } as never,
@@ -467,11 +500,14 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
           requests.length = 0;
           const before = hookRuns();
           const startsBefore = fixture.mcpStarts();
+          // A PERMISSION MODE IS SET LIVE (the pin's own control request) on a streamed prompt: the
+          // launch path does not forward `Options.permissionMode` (a pre-existing gap, reported).
+          const stream = over.permissionMode === undefined ? undefined : createOfficialInputStream();
           const handle = sdk.query({
-            prompt: over.prompt ?? "hello",
+            prompt: stream ?? over.prompt ?? "hello",
             options: {
               cwd: fixture.root,
-              canUseTool: allow,
+              canUseTool: over.canUseTool ?? allow,
               ...(over.sessionId === undefined ? {} : { sessionId: over.sessionId }),
               runtime: {
                 runHome,
@@ -479,8 +515,17 @@ async function withSameViewBed<T>(options: { trusted: boolean; installRecord?: b
                 official: { sessionId: winterSessionId, credentials: [{ variable: "ANTHROPIC_API_KEY", ref: CREDENTIAL }], connectionEnv: { ANTHROPIC_BASE_URL: baseUrl }, base: childEnv },
               },
             } as never,
-          }) as unknown as AsyncIterable<unknown> & { initializationResult?: () => Promise<Record<string, unknown>> };
-          const draining = drain(handle);
+          }) as unknown as AsyncIterable<unknown> & { initializationResult?: () => Promise<Record<string, unknown>>; setPermissionMode?: (mode: string) => Promise<void> };
+          if (stream !== undefined) await handle.setPermissionMode?.(over.permissionMode as string);
+          const draining = (async () => {
+            const out: Array<Record<string, unknown>> = [];
+            for await (const message of handle as AsyncIterable<Record<string, unknown>>) {
+              out.push(message);
+              if (stream !== undefined && message["type"] === "result") stream.close();
+            }
+            return out;
+          })();
+          if (stream !== undefined) await stream.push(over.prompt ?? "hello");
           // THE STYLE LIST: claude answers it on its initialize response (`available_output_styles`).
           const initialization = typeof handle.initializationResult === "function" ? await handle.initializationResult().catch(() => undefined) : undefined;
           const messages = await draining;
@@ -757,6 +802,159 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     test("plugin style: the Winter runtime reports the same active style and sends the same style text", () => {
       expect({ outputStyle: winter.outputStyle, pluginStyleText: winter.pluginStyleText, styleText: winter.styleText }).toEqual({ outputStyle: claude.outputStyle, pluginStyleText: claude.pluginStyleText, styleText: claude.styleText });
+    });
+  });
+
+  describe("SV-6: a user `deny` rule with a character class reads the same on both legs", () => {
+    // The shared home's own rule, absolute: `[ab]` is a CLASS in claude's gitignore-style grammar, and
+    // in the Winter runtime's since `ws21/sdk`@57e7fef. The root part is spelled with `escapeRulePath`.
+    // The model writes `<root>/a/x.txt` (inside the class: denied) and `<root>/c/y.txt` (outside: asked,
+    // and the broker allows it) on each leg in turn.
+    const results: Record<string, { inClassWritten: boolean; outsideWritten: boolean; askedInClass: boolean }> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(root)}/[ab]/**)`] }),
+          turns: (root) => [
+            { toolUses: [{ id: "toolu_in_class", name: "Write", input: { file_path: join(root, "a", "x.txt"), content: "a\n" } }] },
+            { toolUses: [{ id: "toolu_outside", name: "Write", input: { file_path: join(root, "c", "y.txt"), content: "c\n" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const inClass = join(bed.fixture.root, "a", "x.txt");
+          const outside = join(bed.fixture.root, "c", "y.txt");
+          for (const dir of ["a", "c"]) mkdirSync(join(bed.fixture.root, dir), { recursive: true });
+          const measure = async (leg: string, run: (canUseTool: CanUseToolLike) => Promise<Run>): Promise<void> => {
+            rmSync(inClass, { force: true });
+            rmSync(outside, { force: true });
+            const asked: string[] = [];
+            await run(async (_tool, input) => {
+              asked.push(String(input["file_path"]));
+              return { behavior: "allow", updatedInput: input };
+            });
+            results[leg] = { inClassWritten: existsSync(inClass), outsideWritten: existsSync(outside), askedInClass: asked.includes(inClass) };
+          };
+          await measure("winter", async (canUseTool) => bed.runWinter(await bed.build("winter"), { canUseTool }));
+          await measure("claude", async (canUseTool) => bed.runClaude(await bed.build("official"), "s_sv_deny_class", { canUseTool }));
+          verbose("SV-6 deny class", results);
+        },
+      );
+    }, TIMEOUT);
+    test("SV-6: claude (the reference) denies the write inside the class and lets the one outside through", () => {
+      expect(results["claude"]).toEqual({ inClassWritten: false, outsideWritten: true, askedInClass: false });
+    });
+    test("SV-6 guard: the Winter runtime reads the class the same way", () => {
+      expect(results["winter"]).toEqual(results["claude"]);
+    });
+  });
+
+  describe("the Winter leg under a trusted root NAMED `[wip] app`", () => {
+    // Since the Winter runtime reads claude's grammar (SV-6), a raw `[wip]` in a router-written anchor
+    // is a class there too. Under acceptEdits: the project's own re-anchored `ask` rule and the
+    // protected project item dir both reach canUseTool; an ordinary sibling write does not.
+    const asked: string[] = [];
+    const reasons: Record<string, string> = {};
+    const written: Record<string, boolean> = {};
+    let paths: { free: string; guarded: string; protectedFile: string; denied: string } | undefined;
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          dirName: "[wip] app",
+          turns: (root) => [
+            { toolUses: [{ id: "toolu_free", name: "Write", input: { file_path: join(root, "free.txt"), content: "free\n" } }] },
+            { toolUses: [{ id: "toolu_guarded", name: "Write", input: { file_path: join(root, "guarded.txt"), content: "guarded\n" } }] },
+            { toolUses: [{ id: "toolu_protected", name: "Write", input: { file_path: join(root, "p", ".winter", "skills", "x", "SKILL.md"), content: "---\nname: x\ndescription: x\n---\n" } }] },
+            { toolUses: [{ id: "toolu_denied", name: "Write", input: { file_path: join(root, "denied.txt"), content: "denied\n" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const root = bed.fixture.root;
+          paths = { free: join(root, "free.txt"), guarded: join(root, "guarded.txt"), protectedFile: join(root, "p", ".winter", "skills", "x", "SKILL.md"), denied: join(root, "denied.txt") };
+          // The trusted project's own rules, relative to its root (F17), re-anchored by the router.
+          put(join(root, ".winter", "settings.json"), `${JSON.stringify({ permissions: { ask: ["Edit(/guarded.txt)", "Write(/guarded.txt)"], deny: ["Edit(/denied.txt)", "Write(/denied.txt)"] } })}\n`);
+          const runHome = await bed.build("winter");
+          verbose("[wip] winter rules", runHome.effectiveSettings["permissions"]);
+          await bed.runWinter(runHome, {
+            permissionMode: "acceptEdits",
+            canUseTool: async (_tool, input, options) => {
+              asked.push(String(input["file_path"]));
+              reasons[String(input["file_path"])] = String(options?.decisionReason ?? "");
+              return { behavior: "deny", message: "the test broker records and denies" };
+            },
+          });
+          for (const [name, path] of Object.entries(paths)) written[name] = existsSync(path);
+          verbose("[wip] winter", { asked, written, reasons });
+        },
+      );
+    }, TIMEOUT);
+    test("[wip] app, Winter leg: the trusted project's own re-anchored `ask` rule fires (the Winter runtime names the rule)", () => {
+      expect(asked).toContain(paths!.guarded);
+      expect(reasons[paths!.guarded]).toContain("matched ask rule");
+      expect(written["guarded"]).toBe(false);
+    });
+    test("[wip] app, Winter leg: the trusted project's own re-anchored `deny` rule fires — never asked, never written", () => {
+      expect(asked).not.toContain(paths!.denied);
+      expect(written["denied"]).toBe(false);
+    });
+    test("[wip] app, Winter leg: a protected project item dir asks too", () => {
+      expect(asked).toContain(paths!.protectedFile);
+      expect(reasons[paths!.protectedFile]).toContain("protected path");
+      expect(written["protectedFile"]).toBe(false);
+    });
+    test.todo("[wip] app, Winter leg: an ordinary in-cwd write under acceptEdits is not asked (claude: not asked, measured) — SV-8 (the Winter runtime's acceptEdits bound anchors `**` at the cwd unescaped, so under a `[wip]` cwd nothing is inside it)", () => {
+      expect(asked).not.toContain(paths!.free);
+      expect(written["free"]).toBe(true);
+    });
+  });
+
+  describe("SV-7: which rules a Write is matched against", () => {
+    // claude matches a Write against `Edit(...)` rules — for deny AND ask (a `Write(...)` rule never
+    // fired on the pin, measured). The model writes `<root>/d/z.txt` (an `Edit` deny covers `d/`) and
+    // `<root>/q/z.txt` (an `Edit` ask covers `q/`), under acceptEdits, on each leg in turn.
+    const results: Record<string, { denyStopsWrite: boolean; askAskedForWrite: boolean; askedTargetWritten: boolean }> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(root)}/d/**)`], ask: [`Edit(/${escapeRulePath(root)}/q/**)`] }),
+          turns: (root) => [
+            { toolUses: [{ id: "toolu_d", name: "Write", input: { file_path: join(root, "d", "z.txt"), content: "d\n" } }] },
+            { toolUses: [{ id: "toolu_q", name: "Write", input: { file_path: join(root, "q", "z.txt"), content: "q\n" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const denied = join(bed.fixture.root, "d", "z.txt");
+          const guarded = join(bed.fixture.root, "q", "z.txt");
+          for (const dir of ["d", "q"]) mkdirSync(join(bed.fixture.root, dir), { recursive: true });
+          const measure = async (leg: string, run: (canUseTool: CanUseToolLike) => Promise<Run>): Promise<void> => {
+            rmSync(denied, { force: true });
+            rmSync(guarded, { force: true });
+            const asked: string[] = [];
+            await run(async (_tool, input) => {
+              asked.push(String(input["file_path"]));
+              return { behavior: "deny", message: "the test broker records and denies" };
+            });
+            results[leg] = { denyStopsWrite: !existsSync(denied) && !asked.includes(denied), askAskedForWrite: asked.includes(guarded), askedTargetWritten: existsSync(guarded) };
+          };
+          await measure("winter", async (canUseTool) => bed.runWinter(await bed.build("winter"), { canUseTool, permissionMode: "acceptEdits" }));
+          await measure("claude", async (canUseTool) => bed.runClaude(await bed.build("official"), "s_sv_edit_rules", { canUseTool, permissionMode: "acceptEdits" }));
+          verbose("SV-7", results);
+        },
+      );
+    }, TIMEOUT);
+    test("SV-7: claude (the reference) — an `Edit(...)` deny stops a Write, and an `Edit(...)` ask asks for one", () => {
+      expect(results["claude"]).toEqual({ denyStopsWrite: true, askAskedForWrite: true, askedTargetWritten: false });
+    });
+    test("SV-7 deny: the Winter runtime's `Edit(...)` deny stops a Write too", () => {
+      expect(results["winter"]?.denyStopsWrite).toBe(results["claude"]?.denyStopsWrite);
+    });
+    test.todo("SV-7 ask: the Winter runtime's `Edit(...)` ask asks for a Write too — SV-7 (the Winter runtime applies an `Edit(...)` ASK rule to the Edit tool only: under acceptEdits the Write is auto-approved and written; its `Write(...)` ask does fire, which claude's never does)", () => {
+      expect({ askAskedForWrite: results["winter"]?.askAskedForWrite, askedTargetWritten: results["winter"]?.askedTargetWritten }).toEqual({ askAskedForWrite: results["claude"]?.askAskedForWrite, askedTargetWritten: results["claude"]?.askedTargetWritten });
     });
   });
 
