@@ -490,8 +490,11 @@ export function officialRunHomeBinding(runHome: RunHome): OfficialRunHomeBinding
     trustedProjectRoot: runHome.input.trustedProjectRoot,
     memoryDir: runHome.input.memoryDir,
     autoMemoryEnabled: runHomeAutoMemoryEnabled(runHome),
+    ...(isPlainRecord(runHome.effectiveSettings["skillOverrides"]) ? { skillOverrides: runHome.effectiveSettings["skillOverrides"] } : {}),
   };
 }
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
 /**
  * §11's `mcpServers` for this session, built by the ROUTER rather than by the host (R-8 / R-8-1).

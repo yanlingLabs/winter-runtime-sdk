@@ -159,6 +159,8 @@ export function brandedFlagSettings(args: {
   autoMemoryDirectory: string;
   autoMemoryEnabled: boolean;
   protectedAsk?: readonly string[];
+  /** V19: the user's own skill visibility, pinned above a repository's per-source read. */
+  skillOverrides?: Readonly<Record<string, unknown>>;
   extra?: Readonly<Record<string, unknown>>;
 }): Record<string, unknown> {
   const extra = args.extra ?? {};
@@ -173,6 +175,7 @@ export function brandedFlagSettings(args: {
   return {
     ...extra,
     ...(permissions === undefined ? {} : { permissions }),
+    ...(args.skillOverrides === undefined ? {} : { skillOverrides: { ...args.skillOverrides } }),
     // §2: "else plan mode falls back to the vendor's own user-level plans directory".
     plansDirectory: containmentPaths(args.brand).plans,
     autoMemoryEnabled: args.autoMemoryEnabled,
@@ -207,6 +210,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
       autoMemoryDirectory: input.runHome?.memoryDir ?? input.autoMemoryDirectory,
       autoMemoryEnabled: input.runHome?.autoMemoryEnabled ?? true,
       ...(input.runHome === undefined ? {} : { protectedAsk: protectedPathRules(input.runHome.sdkHome, input.runHome.trustedProjectRoot, input.brand) }),
+      ...(input.runHome?.skillOverrides === undefined ? {} : { skillOverrides: input.runHome.skillOverrides }),
       ...(policy.settings === undefined ? {} : { extra: policy.settings }),
     }),
 

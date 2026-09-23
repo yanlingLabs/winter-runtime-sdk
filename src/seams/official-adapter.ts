@@ -81,6 +81,12 @@ export interface OfficialRunHomeBinding {
   memoryDir: string;
   /** `autoMemoryEnabled`, from the run home's effective settings (spec §3.4.4). */
   autoMemoryEnabled: boolean;
+  /**
+   * V19: the user's own `skillOverrides` (the run home's effective value), pinned in the flag layer. The
+   * pinned runtime reads a repository's `.claude/settings.json` `skillOverrides` per-source, whatever
+   * the setting sources are, and consults it BEFORE the user's — but after the flag layer's.
+   */
+  skillOverrides?: Readonly<Record<string, unknown>>;
 }
 
 /** What `buildOptions` is given. Every field is something WS-14 §2/§5 pins as normative. */
