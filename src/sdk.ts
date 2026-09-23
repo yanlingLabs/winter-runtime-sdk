@@ -27,7 +27,7 @@
 // Both are in the Task 1 report under "what the pinned interfaces forced me to change".
 import type { BrandProfile, McpSdkServerConfigWithInstance, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
 
-import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError } from "./errors.ts";
+import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError, RuntimeSdkError } from "./errors.ts";
 import { officialLegAddress, openOfficialLeg, sessionLedgerKey, type RouterOfficialInput, type RouterOfficialPolicy, type RouterQuery } from "./door.ts";
 import type { SeamContext, SeamContextWithDirectory } from "./seams/context.ts";
 import type { OfficialSdkModule } from "./seams/official-sdk-shapes.ts";
@@ -50,6 +50,8 @@ import { capabilityNameCollisionError, capabilityServerDescriptors, type InputSh
 import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
+import { RunHomeError } from "./run-home/errors.ts";
+import type { RunHome, RunHomeFor, RunHomeOutcome } from "./run-home/types.ts";
 
 /**
  * The injected peers.
@@ -197,6 +199,23 @@ export interface RuntimeSdkOptions {
    * owes ("fail-closed until `official.permissionClass` is wired") had no field to name.
    */
   messaging?: { directory?: RuntimeDirectoryOptions; messaging?: GlobalMessagingOptions };
+  /**
+   * WS-21 §3.1: EVERY GENERATION CARRIES A RUN HOME, or the router refuses it (`run_home_required`).
+   *
+   * OPT-IN, AND THAT IS THE FEATURE DETECTION (the plan's Global Constraints). A host that has not
+   * adopted WS-21 keeps its old defaults and this router serves it unchanged; the daemon sets this the
+   * moment it links a router that exports `buildRunHome`, and from then on no child can run on the
+   * user's real home by accident — a missing run home is a typed refusal on both overloads, raised
+   * synchronously, before either leg is touched.
+   */
+  requireRunHome?: boolean;
+  /**
+   * WS-21 §3.1: the host's run-home builder, for the router's OWN cold-resume path
+   * (`messaging/winter-adapter.ts`), which opens a Winter query no host call site is awaiting. The
+   * router awaits it before it opens that query and applies the result exactly as `query()` does.
+   * Absent with `requireRunHome` set, the cold resume answers a typed non-retryable `unavailable`.
+   */
+  runHomeFor?: RunHomeFor;
 }
 
 /** Options members this package OWNS. Never forwarded to either SDK — see `query()`. */
@@ -227,6 +246,12 @@ export interface RouterRuntimeInput {
    */
   sessionId?: string;
   /**
+   * WS-21 §3.1: the per-run folder this generation runs on, built by `buildRunHome` and awaited by the
+   * host before it calls `query()`. Applied synchronously on either leg; required when the router was
+   * created with `requireRunHome: true`.
+   */
+  runHome?: RunHome;
+  /**
    * What the OFFICIAL leg needs and only the host knows (Task 6b) — the session id its directory row
    * is addressed by, its credential plan for families whose variables are the host's, the vendored
    * runtime's neighbours. Ignored entirely on the Winter leg, where the pinned `Options` already say
@@ -253,7 +278,7 @@ export interface RuntimeSdk {
    * of the two runtimes' own handles, because neither of them is the other and this package will not
    * flatten them into a facade (see `RouterQuery`).
    */
-  query(args: { prompt: string | AsyncIterable<string>; options?: Options & { runtime?: never } }): Query;
+  query(args: { prompt: string | AsyncIterable<string>; options?: Options & { runtime?: WinterLegRuntimeInput } }): Query;
   query(args: { prompt: string | AsyncIterable<string>; options: RouterOptions }): RouterQuery;
   /** D13/D28, pure. Throws `SelectionRefusedError` on a typed refusal (see that class's own note). */
   selectRuntime(input: SelectionInput): RuntimeSelection;
@@ -272,7 +297,32 @@ export interface RuntimeSdk {
   /** WS-05 §12's mechanics; the host renders the outcome (R-7b-3). */
   handoff(session: SessionKey, to: RuntimeKind): Promise<HandoffOutcome>;
   readonly versions: VersionMatrixReport;
+  /**
+   * WS-21 §3.8: what became of a run home's working copy. `safe` — nothing is left to reconcile, the
+   * host may `dispose()` it; `quarantined` — it diverged from the canonical store and its `projects/`
+   * was copied to `<home>/cache/quarantine/`; `pending` — the incarnation is still running, or the run
+   * id is one this handle never applied.
+   */
+  runHomeOutcome(runId: string): RunHomeOutcome;
+  /**
+   * WS-21 §3.8's recovery door: reconciles a recorded local-write root left behind by a crash, through
+   * THIS handle's own store, after recomputing the claude-ready copy the root was staged from.
+   * `clean` — nothing was missing; `appended` — the canonical file was behind and is now level;
+   * `quarantined` — the canonical file could not be proven a prefix of the working copy.
+   */
+  reconcileRootForRecovery(root: string): Promise<"clean" | "appended" | "quarantined">;
   dispose(): Promise<void>;
+}
+
+/**
+ * The Winter overload's `runtime` (WS-21): a run home and nothing else. A selection, a `select` or an
+ * official input would make the call the OTHER overload's, whose type is the union of both handles.
+ */
+export interface WinterLegRuntimeInput {
+  runHome: RunHome;
+  selection?: never;
+  select?: never;
+  official?: never;
 }
 
 /**
@@ -532,6 +582,15 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       // visible fork, never a silent rewrite", broken at the one door. F-4 made that a typed refusal;
       // this routes it.
       const options = args.options ?? {};
+      // WS-21 §3.1: NO GENERATION WITHOUT A RUN HOME, on either leg, refused before anything else —
+      // before the selection is decided, before a directory row, a credential or a child exists.
+      const runHome = (options as RouterOptions).runtime?.runHome;
+      if (opts.requireRunHome === true && runHome === undefined) {
+        throw new RunHomeError(
+          "run_home_required",
+          "this router was created with `requireRunHome: true`, so every generation must carry the per-run folder the host built for it (`runtime.runHome`, from `buildRunHome`) — without one the child would read the user's real home (WS-21 §3.1)",
+        );
+      }
       // BEFORE THE LEG IS PICKED (I-6): the caller's own `mcpServers` is only ever forwarded to the
       // WINTER leg, so a collision with a forwarded capability had to be judged here rather than
       // inside the leg that happens to read the field.
@@ -600,6 +659,9 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       return winterQuery;
   };
 
+  /** WS-21 §3.8: every run home this handle applied, by run id. Absent = `pending`. */
+  const runHomeOutcomes = new Map<string, RunHomeOutcome>();
+
   const sdk: RuntimeSdk & { [INTERNALS]: RuntimeSdkInternals } = {
     [INTERNALS]: internals,
     versions,
@@ -632,6 +694,13 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       // already knows which row it transferred, so the ledger uses that address.
       if (outcome.kind === "resumed") persistedRuntime.set(outcome.target?.address ?? sessionLedgerKey(session.sessionId), to);
       return outcome;
+    },
+    runHomeOutcome(runId) {
+      return runHomeOutcomes.get(runId) ?? "pending";
+    },
+    async reconcileRootForRecovery(root) {
+      assertLive("reconcileRootForRecovery");
+      throw new RuntimeSdkError(`winter-runtime-sdk: reconcileRootForRecovery(${JSON.stringify(root)}) is declared by Contract A and implemented in L2.7b`);
     },
     async dispose() {
       // IDEMPOTENT. A host that disposes twice (a shutdown path plus a signal handler) must not get
