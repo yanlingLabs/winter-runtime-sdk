@@ -63,6 +63,9 @@ import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { hasConversationalEntry, readProviderStateSidecar } from "./store/materialized-resume.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
+import type { RunHome } from "./run-home/types.ts";
+import { runHomeAutoMemoryEnabled } from "./run-home/apply.ts";
+import type { OfficialRunHomeBinding } from "./seams/official-adapter.ts";
 
 /**
  * What the door returns.
@@ -462,6 +465,24 @@ export interface OfficialLegRequest {
   options: Options;
   input: RouterOfficialInput;
   selection: RuntimeSelection;
+  /**
+   * WS-21: the run home this generation runs on, already checked by the door's caller
+   * (`assertRunHomeApplicable`). Absent = the pre-WS-21 profile (the spool, no setting source).
+   */
+  runHome?: RunHome;
+}
+
+/** The official leg's view of a run home: what the template, the launch and the proxy need. */
+export function officialRunHomeBinding(runHome: RunHome): OfficialRunHomeBinding {
+  return {
+    runId: runHome.runId,
+    dir: runHome.dir,
+    sdkHome: runHome.sdkHome,
+    home: runHome.input.home,
+    trustedProjectRoot: runHome.input.trustedProjectRoot,
+    memoryDir: runHome.input.memoryDir,
+    autoMemoryEnabled: runHomeAutoMemoryEnabled(runHome),
+  };
 }
 
 /**
@@ -664,6 +685,18 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     }
     const shared = deps.shared();
     const home = shared.identity.winterHome;
+    // WS-21: every CANONICAL path — the provider-state sidecar, the default memory dir — is under the
+    // store's own root (`<home>/sdk` on the WS-21 layout); `home` itself is left for the pre-WS-21 spool.
+    const storeHome = shared.identity.storeHome ?? home;
+    const runHome = request.runHome;
+    const runHomeBinding = runHome === undefined ? undefined : officialRunHomeBinding(runHome);
+    if (runHome !== undefined && request.input.spool !== undefined) {
+      throw new RuntimeLaunchInputError({
+        leg: "official",
+        field: "runtime.official.spool",
+        reason: "a run home replaces the spool: a fresh generation's config dir is its run folder (WS-21 §3.1), so naming a spool as well would describe a directory the child never uses",
+      });
+    }
     const cwd = request.options.cwd;
     if (cwd === undefined || cwd.length === 0) {
       throw new RuntimeLaunchInputError({ field: "options.cwd", reason: "the official branch's containment floor and its post-hoc sweep are both anchored on this session's working directory (WS-14 §8)" });
@@ -690,7 +723,13 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // request naming NEITHER field still means "let the vendor allocate one", which stays `undefined`.
     const freshSessionId = resume === undefined ? requestedBackendId : undefined;
     const profile: OfficialLaunchProfile = resume === undefined ? "fresh-spool" : "store-backed-resume";
-    const configDir = resume === undefined ? (request.input.spool ?? officialSpoolRoot(home)) : (request.input.stagingRoot ?? resumeStagingRoot(resume));
+    // WS-21: a fresh generation on a run home runs IN its run folder; the pre-WS-21 profile keeps the spool.
+    const configDir =
+      resume === undefined
+        ? runHome !== undefined
+          ? runHome.dir
+          : (request.input.spool ?? officialSpoolRoot(home))
+        : (request.input.stagingRoot ?? resumeStagingRoot(resume));
     // §3's child env is a REPLACEMENT, and a replacement without `HOME` is not one (review r1's nit).
     // The runtime derives paths from `os.homedir()`, whose OS-level fallback is the user database —
     // invisible to `CLAUDE_CONFIG_DIR` scoping, and on a developer machine it is the real vendor home
@@ -735,6 +774,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         ...(request.input.base === undefined ? {} : { base: request.input.base }),
         projectKey,
         ...(request.input.sharedTempRoot === undefined ? {} : { sharedTempRoot: request.input.sharedTempRoot }),
+        ...(runHome === undefined ? {} : { runHome: { sdkHome: runHome.sdkHome } }),
       },
       { ...(deps.policy?.env ?? {}), remoteConfig },
     );
@@ -789,7 +829,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     const resolveEndpoint = deps.resolveEndpoint ?? defaultEndpointResolver();
     const target = resolveEndpoint({ providerId: request.selection.providerId, modelKey: request.selection.modelRef, family: request.selection.family });
     const readyStore = claudeReadyStore(shared.store, {
-      readSidecar: (key) => readProviderStateSidecar(home, key),
+      readSidecar: (key) => readProviderStateSidecar(storeHome, key),
       resolveEndpoint,
       target,
     });
@@ -802,12 +842,14 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         selection: request.selection,
         cwd,
         sessionStore: readyStore,
-        autoMemoryDirectory: request.input.autoMemoryDirectory ?? `${home}/projects/${projectKey}/memory`,
+        // WS-21 §3.7: the run home pins the memory dir; without one, the host's or the store's default.
+        autoMemoryDirectory: runHome?.input.memoryDir ?? request.input.autoMemoryDirectory ?? `${storeHome}/projects/${projectKey}/memory`,
         brand: deps.brand,
         pathToClaudeCodeExecutable: executable,
         spawnProxy: deps.official.spawnProxy,
         profile,
         configDir,
+        ...(runHomeBinding === undefined ? {} : { runHome: runHomeBinding }),
       },
       templatePolicy,
     );
@@ -821,6 +863,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       configDir,
       cwd,
       remoteConfig,
+      ...(runHomeBinding === undefined ? {} : { runHome: runHomeBinding }),
     };
 
     // THE ROW EXISTS BEFORE THE CHILD DOES. The record sink writes `configDir`/`processIdentity` at the

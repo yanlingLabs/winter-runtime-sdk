@@ -83,6 +83,35 @@ function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; //
 | `sdk.runHomeOutcome(runId)` | `safe` → the host may `runHome.dispose()`; `quarantined` → its working copy was copied to `<home>/cache/quarantine/`; `pending` → still running (or unknown). |
 | `sdk.reconcileRootForRecovery(root)` | The crash-recovery door for a recorded root: `clean` / `appended` / `quarantined`. The host never calls `reconcileLocalWriteRoot` itself. |
 
+**What applying a run home does** (the router, synchronously, before the pass-through / the launch):
+
+| | Winter leg | official leg |
+|---|---|---|
+| checks | built by `buildRunHome` and not disposed (`run_home_foreign`); built for this leg (`run_home_leg_mismatch`), this cwd (`run_home_cwd_mismatch`), this brand (`run_home_brand_mismatch`) and this router's store (`run_home_store_mismatch`) | the same |
+| config dir | `env.<PREFIX>HOME = runHome.dir` | `CLAUDE_CONFIG_DIR = runHome.dir` (fresh); `<dir>/.absent` then the linked staging dir (resume, §3.6) |
+| router-set env | `<PREFIX>STORE_HOME = <home>/sdk`, `<PREFIX>PLUGIN_CACHE_DIR = <home>/sdk/plugins`, `<PREFIX>PROVIDER_MANAGED_BY_HOST = 1`, `<PREFIX>DISABLE_CRON = 1` (laid over the caller's env) | `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = 1`, `CLAUDE_CODE_DISABLE_CRON = 1` — branch-owned, refused from `configuredExtras` |
+| setting sources | `["user"]`; a caller's `project`/`local` is refused (`setting_sources_refused`) | `["user"]`; the invariants refuse anything else, and `["user"]` without a run home; the spawn proxy re-checks the final argv |
+| MCP | the run folder's `.winter.json` | `strictMcpConfig: false` (and `true` is refused on a run home) |
+| memory | `autoMemory: { directory: memoryDir, enabled }` | flag layer: `autoMemoryDirectory = memoryDir`, `autoMemoryEnabled` from the effective settings |
+| flag layer | — | `plansDirectory`, and `permissions.ask` = `protectedPathRules(...)` appended to the host's own (a host `permissions.deny` survives) |
+| plugins | from the run home's `enabledPlugins` | the same; `Options.plugins` and `OptionsTemplatePolicy.plugins` are gone, and a `plugins` key is refused on every launch |
+| outcome | `safe` at open (no working copy) | `pending` until the exit reconcile |
+
+**Every router consumer of the home, decided** (plan r2 I3). `handoff.winterHome` stays the daemon's
+home; a router created with `requireRunHome` (which must name it) roots its store at
+`sdkHomeOf(winterHome)`, exposed as `SharedStoreIdentity.storeHome`.
+
+| consumer | decision |
+|---|---|
+| `store/wiring.ts` — `createSharedSessionStore` / `lazySharedSessionStore` | the concrete store is rooted at `storeHome` (`<home>/sdk`); `identity.winterHome` stays the daemon home |
+| `store/handoff-barrier.ts` — the lease root | kept at `<home>/runtimes/handoff-leases` (`homeOf()`) |
+| `store/handoff-barrier.ts` — step 5's validation, step 8's canonical path, the sidecar report | `storeHomeOf()` = `identity.storeHome` |
+| `store/materialized-resume.ts` — the decorator's canonical path | `identity.storeHome` |
+| `door.ts` — the provider-state sidecar, the default memory dir | `identity.storeHome` |
+| `door.ts` — the spool (`officialSpoolRoot(home)`) | pre-WS-21 profile only; a fresh generation on a run home runs in its run folder, and naming `runtime.official.spool` beside a run home is refused |
+| `messaging/winter-adapter.ts` — the cold resume | awaits the host's `runHomeFor` first and applies the result with the same check-and-apply as `query()`; without `runHomeFor` under `requireRunHome` it answers a non-retryable `unavailable`; the router disposes that run home when the resume ends |
+| the peer's `resolveWinterHome()` fallback | never used under `requireRunHome` (the home must be explicit — the agent SDK's WS-21 default moves to `~/.winter/sdk`, so `sdkHomeOf` of it would double up) |
+
 **What `0.0.11` changes** (a security fix: the official leg no longer loads the session's
 own project directory as a plugin; no peer floor change, no devDependency change):
 

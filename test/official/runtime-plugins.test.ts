@@ -270,6 +270,36 @@ async function runDirect(session: HermeticSession, args: { turns: readonly Scrip
   return result;
 }
 
+/**
+ * WS-21: A PLUGIN MEASUREMENT RUNS ON THE PIN DIRECTLY. `Options.plugins` is refused by this branch since
+ * WS-21 — the plugins a session loads come from its run home's `enabledPlugins` — so the rows below that
+ * characterise what the pinned runtime DOES with a plugin directory (CONTROL, 3b, 3c) hand the pin an
+ * options object this branch never built, exactly like the SURVEY CONTROL. What they measure is the
+ * runtime, and it is the same runtime a run home's enabled plugin reaches.
+ */
+async function runPin(session: HermeticSession, args: { plugins: Array<{ type: "local"; path: string; skipMcpDiscovery: true }>; turns?: readonly ScriptedTurn[]; prompt?: string; broker?: ApprovalBroker; preToolUse?: string[] }): Promise<RunResult> {
+  /* c8 ignore next */
+  if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
+  const { routes, record } = scriptedLoopback(args.turns ?? [{ text: "ok" }]);
+  const result: RunResult = { init: undefined, record, systemSubtypes: [] };
+  const broker = args.broker ?? (async (request) => ({ behavior: "deny" as const, message: "no broker in this bed", toolUseID: request.toolUseID }));
+  await withLoopbackFake({ routes }, async (fake) => {
+    const options: OfficialOptions = {
+      cwd: session.cwd,
+      env: buildEnv(session, fake.url),
+      pathToClaudeCodeExecutable: bed.executable,
+      settingSources: [],
+      plugins: args.plugins,
+      canUseTool: async (toolName: string, input: Record<string, unknown>, options: { toolUseID: string; signal: AbortSignal }) =>
+        broker({ toolName, input, toolUseID: options.toolUseID, signal: options.signal, requestId: options.toolUseID }),
+      ...(args.preToolUse === undefined ? {} : { hooks: { PreToolUse: [{ hooks: [async (input: { tool_name?: string }) => (args.preToolUse?.push(input.tool_name ?? "?"), {})] }] } }),
+    };
+    await collect(bed.module.query({ prompt: args.prompt ?? "hello", options }), result);
+  });
+  if (process.env["PLUGIN_PROBE_VERBOSE"] !== undefined) console.log(JSON.stringify({ init: result.init, systemSubtypes: result.systemSubtypes }, null, 1));
+  return result;
+}
+
 /** Every name in the init that could only have come from a planted file. */
 const plantedNames = (init: InitView): string[] =>
   [...init.skills, ...init.agents, ...init.slash_commands, ...init.plugins.map((plugin) => plugin.name), ...init.mcp_servers.map((server) => server.name)].filter((name) => /project-|vendor-|planted/.test(name) || name.startsWith(`${WINTER_BRAND.projectDirName}:`));
@@ -297,7 +327,7 @@ describeRuntime("0.0.11 — plugins are the host's decision (the real pinned run
       // live through a path the host is allowed to name. Same hooks, same absolute marker paths.
       const copy = join(session.home, "copied", WINTER_BRAND.projectDirName);
       cpSync(planted.projectDir, copy, { recursive: true });
-      const { init } = await runSession(session, { policy: { plugins: [{ type: "local", path: copy, skipMcpDiscovery: true }] } });
+      const { init } = await runPin(session, { plugins: [{ type: "local", path: copy, skipMcpDiscovery: true }] });
       // If these fail the bed cannot run hooks at all, and 3a below would be passing for nothing. BOTH
       // events are asserted live here, because 3a asserts both absent.
       expect(existsSync(planted.pluginHookMarker)).toBe(true);
@@ -360,13 +390,11 @@ describeRuntime("0.0.11 — plugins are the host's decision (the real pinned run
       const views = join(session.brandHome, "runtimes", "plugin-views");
       const manifestless = plantSkillsView(views, "battery-limiter", "limit-battery");
       const manifested = plantSkillsView(views, "dir-name-differs", "take-notes", { manifestName: "notes-plugin", frontmatterName: "frontmatter-name-differs" });
-      const { init } = await runSession(session, {
-        policy: {
-          plugins: [
-            { type: "local", path: manifestless, skipMcpDiscovery: true },
-            { type: "local", path: manifested, skipMcpDiscovery: true },
-          ],
-        },
+      const { init } = await runPin(session, {
+        plugins: [
+          { type: "local", path: manifestless, skipMcpDiscovery: true },
+          { type: "local", path: manifested, skipMcpDiscovery: true },
+        ],
       });
       expect(init).toBeDefined();
       // A directory with NO `.claude-plugin/plugin.json` is accepted, and its name is the directory's
@@ -441,8 +469,8 @@ describeRuntime("0.0.11 — 3c: a skill file is code (the real pinned runtime)",
       writeFileSync(join(session.cwd, "seed.txt"), "seed\n");
       const asked: string[] = [];
       const preToolUse: string[] = [];
-      await runSession(session, {
-        policy: { plugins: [{ type: "local", path: view.path, skipMcpDiscovery: true }] },
+      await runPin(session, {
+        plugins: [{ type: "local", path: view.path, skipMcpDiscovery: true }],
         turns: [
           { toolUses: [{ id: "toolu_skill", name: "Skill", input: { skill: "hazard:run-it" } }] },
           { toolUses: [{ id: "toolu_read", name: "Read", input: { file_path: join(session.cwd, "seed.txt") } }] },
@@ -467,8 +495,8 @@ describeRuntime("0.0.11 — 3c: a skill file is code (the real pinned runtime)",
       const view = plantHazardView(session);
       const later = join(session.home, "markers", "later-bash-ran");
       const asked: string[] = [];
-      await runSession(session, {
-        policy: { plugins: [{ type: "local", path: view.path, skipMcpDiscovery: true }] },
+      await runPin(session, {
+        plugins: [{ type: "local", path: view.path, skipMcpDiscovery: true }],
         turns: [
           { toolUses: [{ id: "toolu_skill", name: "Skill", input: { skill: "hazard:run-it" } }] },
           { toolUses: [{ id: "toolu_bash", name: "Bash", input: { command: `/usr/bin/touch ${later}` } }] },
@@ -489,8 +517,8 @@ describeRuntime("0.0.11 — 3c: a skill file is code (the real pinned runtime)",
       const session = hermeticSession("plugins-hazard-typed");
       const view = plantHazardView(session);
       const asked: string[] = [];
-      await runSession(session, {
-        policy: { plugins: [{ type: "local", path: view.path, skipMcpDiscovery: true }] },
+      await runPin(session, {
+        plugins: [{ type: "local", path: view.path, skipMcpDiscovery: true }],
         prompt: "/hazard:run-it",
         // Everything is denied if asked.
         broker: recordingBroker(asked, () => false),

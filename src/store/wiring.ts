@@ -173,7 +173,15 @@ export interface SharedStoreIdentity {
   packageVersion: string;
   /** Unique per `createSharedSessionStore` call, so "the same store" is provable by value. */
   instanceId: string;
+  /** The daemon's home, as the host named it. The handoff leases live under it. */
   winterHome: string;
+  /**
+   * WS-21: where the canonical store actually lives — `<winterHome>/sdk` (the shared runtime home)
+   * for a router created with `requireRunHome`, `winterHome` itself on the pre-WS-21 layout. Every
+   * canonical-path consumer (transcripts, the provider-state sidecar, the default memory dir) reads
+   * THIS, never `winterHome`.
+   */
+  storeHome: string;
 }
 
 /** Options members WS-14 §5.1 rules on. Structural, so both branches' option objects fit. */
@@ -389,6 +397,8 @@ export function assertOneSharedStore(shared: SharedSessionStore, ...options: Rea
 export interface SharedSessionStoreInput {
   peers: RuntimeSdkPeers;
   winterHome: string;
+  /** WS-21: the directory the canonical store is rooted at. Absent = `winterHome` (the pre-WS-21 layout). */
+  storeHome?: string;
   policy?: Partial<MirrorPolicy>;
   /** Injectable clock for the records' timestamps. */
   now?: () => Date;
@@ -406,7 +416,10 @@ export interface SharedSessionStoreInput {
 export function createSharedSessionStore(input: SharedSessionStoreInput): SharedSessionStore {
   const Store = (input.peers.winter as unknown as { WinterCompatibilitySessionStore?: CanonicalSessionStoreConstructor }).WinterCompatibilitySessionStore;
   if (typeof Store !== "function") throw new SharedStoreUnavailableError();
-  const canonical = new Store({ winterHome: input.winterHome });
+  const storeHome = input.storeHome ?? input.winterHome;
+  // The concrete store's option is still called `winterHome`: it is the ROOT it resolves `projects/`
+  // under, which for WS-21 is the shared runtime home rather than the daemon's own.
+  const canonical = new Store({ winterHome: storeHome });
   const policy: MirrorPolicy = { ...DEFAULT_MIRROR_POLICY, ...input.policy };
   const now = input.now ?? (() => new Date());
   const identity: SharedStoreIdentity = {
@@ -414,6 +427,7 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
     packageVersion: readPeerVersion(input.peers),
     instanceId: randomUUID(),
     winterHome: input.winterHome,
+    storeHome,
   };
 
   const decorations = input.decorations ?? createDecorationRegistry();
@@ -663,6 +677,8 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
 export function lazySharedSessionStore(input: {
   peers: RuntimeSdkPeers;
   winterHome?: string;
+  /** WS-21: the store's root when it is not the home itself (`sdkHomeOf(winterHome)`). */
+  storeHome?: string;
   /**
    * The RESOLVED profile. NOT optional in practice: `resolveWinterHome()` defaults to `WINTER_BRAND`,
    * so a call without it would send a rebranded host's sessions to Winter's own home directory — the
@@ -687,7 +703,7 @@ export function lazySharedSessionStore(input: {
         }
         return resolveWinterHome(undefined, input.brand);
       })();
-    resolved = createSharedSessionStore({ peers: input.peers, winterHome, ...(input.policy === undefined ? {} : { policy: input.policy }) });
+    resolved = createSharedSessionStore({ peers: input.peers, winterHome, ...(input.storeHome === undefined ? {} : { storeHome: input.storeHome }), ...(input.policy === undefined ? {} : { policy: input.policy }) });
     return resolved;
   };
 }

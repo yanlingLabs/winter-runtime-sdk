@@ -23,17 +23,26 @@
 // GOLDEN CAPTURES PER MODE (§15) are `test/official/fixtures/options-<mode>.golden.json`: the built
 // object with functions and instances replaced by markers, so a diff shows a field that moved, an
 // invariant that was dropped, or a name that stopped being brand-derived.
-import { isAbsolute, join, normalize } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { mcpToolName, type BrandProfile, type SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
-import type { OfficialOptions, OfficialPluginConfig } from "../seams/official-sdk-shapes.ts";
-import type { OptionsTemplateInput } from "../seams/official-adapter.ts";
+import type { OfficialOptions } from "../seams/official-sdk-shapes.ts";
+import type { OfficialRunHomeBinding, OptionsTemplateInput } from "../seams/official-adapter.ts";
+import { protectedPathRules } from "../run-home/types.ts";
 import { officialToolAliases } from "./aliases.ts";
 import { createApprovalBridge, createContainmentHooks, isOurApprovalBridge, isOurContainmentHook, type OfficialPermissionMode } from "./callbacks.ts";
 import type { OfficialApprovalBridge } from "./callbacks.ts";
 import { containmentPaths, officialDisallowedTools, type ContainmentPolicy } from "./containment.ts";
 import { officialBranchLabel } from "./branding.ts";
 import { OfficialConfigurationError } from "./errors.ts";
+
+/**
+ * WS-21 §3.6: the resume placeholder's last segment. On a store-backed resume the door sets
+ * `Options.env.CLAUDE_CONFIG_DIR` to `<run folder>/<this>`: a path inside a folder named by a random
+ * UUID (so unpredictable), never created, under the daemon's write-fenced cache — so the wrapper's
+ * staging step finds nothing there to copy (F11).
+ */
+export const RUN_HOME_ABSENT_SEGMENT = ".absent";
 
 /** The vendor's own preset name — a Claude-mirroring literal, fixed (WS-01 §5 / D16). */
 export const PINNED_SYSTEM_PROMPT_PRESET = "claude_code";
@@ -98,47 +107,11 @@ export interface OptionsTemplatePolicy {
    * than a session that never mentioned `agents` at all.
    */
   agents?: Readonly<Record<string, unknown>>;
-  /**
-   * The plugins this session loads — the HOST's decision, and the only way a plugin reaches this
-   * branch (0.0.11). Forwarded to `Options.plugins`; absent means the key is absent and the session
-   * loads no plugin at all.
-   *
-   * THE ROUTER NAMES NONE OF ITS OWN, and the reason is a measurement: through 0.0.10 this template
-   * named `<cwd>/<projectDirName>` here with no trust decision anywhere, and a cloned repository's own
-   * `hooks/hooks.json` ran on the first prompt of a Code session opened on it
-   * (`test/official/runtime-plugins.test.ts`). Since 0.0.11 the official leg therefore loads NO project
-   * skills, agents or commands until the host names a trust-gated list here.
-   *
-   * EVERYTHING IN A PLUGIN ROOT IS CODE ON THIS RUNTIME — including a skill file. The pinned runtime
-   * loads `hooks/hooks.json`, skills, agents, commands, output styles, `.lsp.json` language servers
-   * (processes it spawns), a plugin `settings.json` (whose `agent` key can replace the main agent),
-   * and whatever else it reads from a plugin root. A "skills-only" directory narrows WHAT loads; it
-   * sanitises nothing. MEASURED on 0.3.250 (test 3c): a view holding only `skills/x/SKILL.md` with
-   * `allowed-tools: Bash(...)` and an inline `` !`cmd` `` ran the shell when the model invoked the skill,
-   * after the broker had approved only the `Skill` call — the broker never saw Bash, and PreToolUse
-   * hooks never saw it either; the skill's frontmatter `hooks` ran; its `allowed-tools` stayed granted
-   * for the model's later calls without the broker being asked; and a user-typed `/<plugin>:<skill>`
-   * ran the shell with no approval at all. So exposing a project's skills — or anyone's — is the SAME
-   * trust decision as exposing its hooks, and only the host can make it.
-   *
-   * WHAT THIS BRANCH CHECKS IS THE ENTRY, never the directory's contents (`assertOptionsInvariants`):
-   * `local` only; an absolute path with no `..` segment and no NUL byte; `skipMcpDiscovery: true` (§11,
-   * required by the type as well); and never the session's own working directory, its project
-   * directory or the vendor's project directory in it, however spelled. The checks are lexical — a
-   * symlink is not resolved.
-   *
-   * MEASURED NAMING: a directory with no `.claude-plugin/plugin.json` is accepted and named after its
-   * basename (a manifest's `name` wins when present); its skills qualify as
-   * `<plugin name>:<skill directory name>` — a SKILL.md frontmatter `name:` does not rename them.
-   *
-   * THE BUILDER COPIES the list and each entry, so a host mutating its own array later cannot change
-   * what launches. `launch()` given options a caller built BY HAND validates them but forwards the
-   * caller's own array — mutating it between the launch and the child's spawn is the caller's own act.
-   *
-   * Per-query policy REPLACES the deployment-wide list rather than merging with it (the door spreads
-   * the two policies, the same precedence every other field here has).
-   */
-  plugins?: ReadonlyArray<OfficialPluginConfig & { skipMcpDiscovery: true }>;
+  // WS-21: NO `plugins` FIELD. Through 0.0.11 a host named the plugin directories this branch loaded
+  // here; since WS-21 the plugins a session loads are the run home's `enabledPlugins`, installed under
+  // the shared plugin root the router points `CLAUDE_CODE_PLUGIN_CACHE_DIR` at — one mechanism for both
+  // runtimes, gated by mode in the run home's settings (spec §5.3). `Options.plugins` is refused outright
+  // (`assertOptionsInvariants`): a session-scoped plugin directory is a second door nobody reviews.
   /** §10's bridge. Absent -> a fail-closed one is installed, because the invariants require one. */
   canUseTool?: OfficialApprovalBridge;
   /** The session's permission mode, for the fail-closed bridge the template installs. */
@@ -170,14 +143,39 @@ export function mergeHooks(ours: Record<string, unknown[]>, hostHooks: unknown):
   return merged;
 }
 
-/** The settings the flag layer must carry for this branch to behave (see this module's header). */
-export function brandedFlagSettings(args: { brand: Pick<BrandProfile, "projectDirName">; autoMemoryDirectory: string; extra?: Readonly<Record<string, unknown>> }): Record<string, unknown> {
+/**
+ * The settings the flag layer must carry for this branch to behave (see this module's header).
+ *
+ * The flag layer is the highest user-controlled layer, so these PIN: the auto-memory directory (F19b —
+ * a repository's `autoMemoryDirectory` is read per-source, whatever the setting sources are, and the
+ * flag layer is what beats it), whether auto-memory is on (WS-21: from the run home's effective
+ * settings, never hard-coded; the pre-WS-21 profile keeps `true`), the plans directory, and — for a run
+ * home — the protected-path `permissions.ask` rules (spec §7.2), which the runtime checks before its
+ * bypass step. The host's own flag settings are MERGED under them, `permissions` included: a host's
+ * `permissions.deny` survives, and the protected `ask` rules are appended to the host's own.
+ */
+export function brandedFlagSettings(args: {
+  brand: Pick<BrandProfile, "projectDirName">;
+  autoMemoryDirectory: string;
+  autoMemoryEnabled: boolean;
+  protectedAsk?: readonly string[];
+  extra?: Readonly<Record<string, unknown>>;
+}): Record<string, unknown> {
+  const extra = args.extra ?? {};
+  const hostPermissions = extra["permissions"];
+  const permissions: Record<string, unknown> | undefined =
+    args.protectedAsk === undefined || args.protectedAsk.length === 0
+      ? undefined
+      : {
+          ...(hostPermissions !== null && typeof hostPermissions === "object" && !Array.isArray(hostPermissions) ? (hostPermissions as Record<string, unknown>) : {}),
+          ask: [...(Array.isArray((hostPermissions as { ask?: unknown } | undefined)?.ask) ? ((hostPermissions as { ask: unknown[] }).ask as unknown[]) : []), ...args.protectedAsk],
+        };
   return {
-    ...(args.extra ?? {}),
+    ...extra,
+    ...(permissions === undefined ? {} : { permissions }),
     // §2: "else plan mode falls back to the vendor's own user-level plans directory".
     plansDirectory: containmentPaths(args.brand).plans,
-    // §2's supersession note: shared memory is the target — enabled, with the ONE shared directory.
-    autoMemoryEnabled: true,
+    autoMemoryEnabled: args.autoMemoryEnabled,
     autoMemoryDirectory: args.autoMemoryDirectory,
   };
 }
@@ -196,17 +194,25 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
   const options: OfficialOptions = {
     cwd: input.cwd,
 
-    // §2: no user/project/local discovery of vendor-named sources. Discovery ONLY — §8's containment
-    // is what handles the built-ins that carry vendor-named paths in their own semantics.
-    settingSources: [],
+    // WS-21 §3.5: with a run home, the USER source only — which is the run folder the router built, the
+    // one place the trusted project's tiers reach this child (merged by the router, ruling Q1). Without
+    // one, the pre-WS-21 profile: no discovery at all. `project`/`local` are never offered. Discovery
+    // ONLY either way — §8's containment handles the built-ins that carry vendor-named paths.
+    settingSources: input.runHome === undefined ? [] : ["user"],
 
-    // The flag layer: the three fields §2 names that are not on `Options` at all, plus whatever the
-    // host has already verified against the runtime's own settings schema.
-    settings: brandedFlagSettings({ brand: input.brand, autoMemoryDirectory: input.autoMemoryDirectory, ...(policy.settings === undefined ? {} : { extra: policy.settings }) }),
+    // The flag layer: the fields §2 names that are not on `Options` at all, the run home's pins, plus
+    // whatever the host has already verified against the runtime's own settings schema.
+    settings: brandedFlagSettings({
+      brand: input.brand,
+      autoMemoryDirectory: input.runHome?.memoryDir ?? input.autoMemoryDirectory,
+      autoMemoryEnabled: input.runHome?.autoMemoryEnabled ?? true,
+      ...(input.runHome === undefined ? {} : { protectedAsk: protectedPathRules(input.runHome.sdkHome, input.runHome.trustedProjectRoot, input.brand) }),
+      ...(policy.settings === undefined ? {} : { extra: policy.settings }),
+    }),
 
-    // 0.0.11: NO PLUGIN OF THE ROUTER'S OWN. The only plugins are the host's, forwarded below — this
-    // template used to name the session's own project directory here, and the runtime ran that
-    // directory's hooks with no trust decision anywhere (see `OptionsTemplatePolicy.plugins`).
+    // 0.0.11: NO PLUGIN OF THE ROUTER'S OWN — this template used to name the session's own project
+    // directory here, and the runtime ran that directory's hooks with no trust decision anywhere.
+    // WS-21: no `plugins` key at all; plugins come from the run home's `enabledPlugins`.
 
     systemPrompt: {
       type: "preset",
@@ -215,16 +221,15 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
       excludeDynamicSections,
     },
 
-    strictMcpConfig: true,
+    // WS-21 §3.4.5: with a run home, the runtime also loads the servers of the run folder's MCP config
+    // (the user's, the local scope and the trusted project's, filtered by the router). Without one, the
+    // host is the sole owner of every server (WS-14 §11).
+    strictMcpConfig: input.runHome === undefined,
     ...(policy.mcpServers === undefined ? {} : { mcpServers: { ...policy.mcpServers } }),
     // The SAME subagent set the Winter leg is handed via `Options.agents`, forwarded verbatim (own
     // key, same shallow-copy discipline as `mcpServers` above) — never read here, never merged with
     // anything this branch owns.
     ...(policy.agents === undefined ? {} : { agents: { ...policy.agents } }),
-    // The HOST's plugins, verbatim in content and order. Each entry is copied (as is the list), so a
-    // host that mutates its own array after `assertOptionsInvariants` ran below cannot change what
-    // launches; absent stays absent, exactly like `agents` — "the host named none" is no key at all.
-    ...(policy.plugins === undefined ? {} : { plugins: copyPlugins(policy.plugins) }),
 
     // WS-05 §6 / §5: ONE store instance, shared with the other branch. WS-18 W18-14 (P10b): the
     // caller (the door, `door.ts`) is the one that wraps it with `claude-ready-store.ts`'s
@@ -277,7 +282,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     spawnClaudeCodeProcess: input.spawnProxy,
   };
 
-  assertOptionsInvariants(options, branchLabel, { projectDirName: input.brand.projectDirName });
+  assertOptionsInvariants(options, branchLabel, { projectDirName: input.brand.projectDirName, ...(input.runHome === undefined ? {} : { runHome: input.runHome }) });
   return options;
 }
 
@@ -321,18 +326,16 @@ export function assertPermissionModeAllowed(mode: unknown, branchLabel: string):
  * used it. These are the invariants that must hold for anything this adapter launches.
  */
 export interface OptionsInvariantContext {
-  /**
-   * The brand's project directory name. `<cwd>/<projectDirName>` is then refused as a plugin root
-   * however it is spelled — the 0.0.10 bug path. Both of this package's own callers pass it; a direct
-   * caller that omits it still gets the working directory and the vendor's project directory refused.
-   */
+  /** The brand's project directory name (kept for callers; no rule reads it since `plugins` is refused whole). */
   projectDirName?: string;
-  /**
-   * The session's working directory as the LAUNCH names it, for options that carry no `cwd` of their
-   * own. Both are checked when both are present. With neither, a `plugins` list is refused outright:
-   * an entry that cannot be checked against the session's working directory is not forwarded.
-   */
+  /** The session's working directory as the LAUNCH names it, for options that carry no `cwd` of their own. */
   cwd?: string;
+  /**
+   * WS-21: the run home this launch runs on. Its presence is the ONLY thing that makes
+   * `settingSources: ["user"]` and `strictMcpConfig: false` legal, and it names the one config dir the
+   * child may be given (the run folder, or the unpredictable placeholder inside it on a resume).
+   */
+  runHome?: Pick<OfficialRunHomeBinding, "dir">;
 }
 
 export function assertOptionsInvariants(options: OfficialOptions, branchLabel: string, context: OptionsInvariantContext = {}): void {
@@ -357,11 +360,28 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
   } else if (!executable.includes("/")) {
     refuse("pathToClaudeCodeExecutable", `${executable} is a bare command name, which resolves through PATH to the user's own installed binary — this branch is isolated from it (WS-14 §5.1)`);
   }
-  if (options.settingSources !== undefined && options.settingSources.length > 0) {
-    refuse("settingSources", "this branch reads no vendor-named settings source at any tier (WS-14 §2)");
-  }
-  if (options.strictMcpConfig !== true) {
-    refuse("strictMcpConfig", "the host is the sole owner of every MCP server and tool effect on this branch (WS-14 §11)");
+  // WS-21 §3.5: ONE RULE FOR THE SETTING SOURCES, keyed on the run home. Without one: no source at all
+  // (WS-14 §2). With one: exactly the user source, which is the run folder — never `project`/`local`,
+  // which would have the runtime read the repository's own vendor-named files (ruling Q1).
+  const sources = options.settingSources;
+  if (context.runHome === undefined) {
+    if (sources !== undefined && sources.length > 0) {
+      refuse("settingSources", "this branch reads no vendor-named settings source without a run home — `user` is legal only on a router-built run folder (WS-14 §2, WS-21 §3.5)");
+    }
+    if (options.strictMcpConfig !== true) {
+      refuse("strictMcpConfig", "without a run home the host is the sole owner of every MCP server and tool effect on this branch (WS-14 §11)");
+    }
+  } else {
+    if (sources === undefined || sources.length !== 1 || sources[0] !== "user") {
+      refuse("settingSources", `a run-home launch reads the user source and nothing else (got ${JSON.stringify(sources)}); \`project\` and \`local\` would read the repository's own files, which the router merged itself (WS-21 §3.5, ruling Q1)`);
+    }
+    if (options.strictMcpConfig !== false) {
+      refuse("strictMcpConfig", "a run-home launch loads the run folder's MCP config (WS-21 §3.4.5); the router pins `strictMcpConfig: false`");
+    }
+    const configDir = (options.env as Record<string, string | undefined> | undefined)?.["CLAUDE_CONFIG_DIR"];
+    if (configDir !== undefined && configDir !== context.runHome.dir && configDir !== join(context.runHome.dir, RUN_HOME_ABSENT_SEGMENT)) {
+      refuse("env.CLAUDE_CONFIG_DIR", `a run-home launch's config dir is its run folder (or, on a resume, the placeholder inside it); ${configDir} is neither (WS-21 §3.1, §3.6)`);
+    }
   }
   // REVIEW r2, NEW-1 — §8's FLOOR IS AN INVARIANT OF EVERY LAUNCH, not a courtesy of this builder.
   //
@@ -391,10 +411,13 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
     );
   }
 
-  // 0.0.11 — A PLUGIN ENTRY IS VALIDATED HERE, not only by the builder, because `launch()` accepts
-  // options a caller built by hand. The router adds no plugin of its own; these are the host's.
-  const cwds = [options.cwd, context.cwd].filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
-  assertPluginsAllowed(options["plugins"], refuse, { cwds, ...(context.projectDirName === undefined ? {} : { projectDirName: context.projectDirName }) });
+  // WS-21 — `Options.plugins` IS REFUSED WHOLE, on every launch (hand-built options included). The
+  // plugins a session loads are its run home's `enabledPlugins`, read by the runtime from the shared
+  // plugin root (spec §5.3); a session-scoped plugin directory is code no trust decision named. Through
+  // 0.0.11 the entries were validated one by one; there is no longer a legal entry to validate.
+  if (options["plugins"] !== undefined) {
+    refuse("plugins", "the plugins a session loads come only from its run home's `enabledPlugins` under the shared plugin root (WS-21 §5.3); a session-scoped plugin directory is refused");
+  }
 
   // REVIEW r3, NEW-13 — `bypassPermissions` IS REFUSED. ONE RULE, TWO DOORS since 0.0.10: the launch
   // path asserts it here and the LIVE setters (`OfficialSessionHandle.setPermissionMode`, and the door
@@ -418,105 +441,6 @@ export function assertOptionsInvariants(options: OfficialOptions, branchLabel: s
       refuse("extraArgs", "append-system-prompt-file must be an absolute path; the runtime resolves a relative one against the session's working directory, so it would name a file the project controls (WS-14 §5.1)");
     }
   }
-}
-
-/** A copy of the host's plugin list — a new array of new entry objects, fields unchanged. */
-function copyPlugins(plugins: ReadonlyArray<OfficialPluginConfig>): OfficialPluginConfig[] {
-  // A non-array is left for `assertOptionsInvariants` to refuse with a sentence rather than a TypeError.
-  if (!Array.isArray(plugins)) return plugins as unknown as OfficialPluginConfig[];
-  return plugins.map((plugin) => (plugin !== null && typeof plugin === "object" ? { ...plugin } : plugin));
-}
-
-/**
- * The shape rule for `Options.plugins` (0.0.11), applied to EVERY launch.
- *
- * WHAT IS CHECKED IS THE ENTRY, never the directory: this branch reads no ambient state, and what a
- * plugin root contains is the host's to decide — and the host must treat every file in it, skills
- * included, as code (see `OptionsTemplatePolicy.plugins`). On the `launch()` path the entries are the
- * caller's own objects: validated here, not copied.
- *
- *   - `type: "local"` only — the pinned runtime's SDK throws on any other, and a future type (a URL, a
- *     marketplace id) would be a fetch this branch never reviewed.
- *   - `path` ABSOLUTE — the runtime resolves a relative one against the child's working directory,
- *     which is the project: a relative entry is a project-controlled path by construction.
- *   - no `..` segment — a path that walks out of the directory it names is a path whose meaning is
- *     not what a reader of the host's configuration sees. (A name merely CONTAINING two dots is fine.)
- *   - no NUL byte — the child receives the path as an argv element.
- *   - `skipMcpDiscovery: true` — §11: the host is the sole owner of every MCP server on this branch,
- *     and a plugin's own `.mcp.json` is a server nobody registered. `strictMcpConfig` is the same rule
- *     for the settings layers; this is it for the plugin door.
- *   - not the session's working directory, nor its project directory, nor the vendor's project
- *     directory in it — compared after normalizing the spelling (see `comparablePath`). A list that
- *     cannot be checked because no working directory is known is refused.
- */
-function assertPluginsAllowed(plugins: unknown, refuse: (option: string, reason: string) => never, where: { cwds: readonly string[]; projectDirName?: string }): void {
-  if (plugins === undefined) return;
-  if (!Array.isArray(plugins)) {
-    refuse("plugins", "must be an array of plugin entries the host chose; this branch adds none of its own (0.0.11)");
-    return;
-  }
-  if (plugins.length > 0 && where.cwds.length === 0) {
-    refuse("plugins", "cannot be checked: neither the options nor the launch name the session's working directory, and an entry naming it (or its project directory) must never be forwarded");
-  }
-  // THE 0.0.10 BUG PATH, HOWEVER IT IS SPELLED (review). The rules below are lexical, so without this
-  // `<cwd>/<projectDirName>/`, `<cwd>/./<projectDirName>`, `<cwd>//<projectDirName>` or a case variant
-  // would pass them and load exactly what 0.0.11 removed. Refused: the working directory itself, the
-  // brand's project directory in it, and the vendor's project directory in it — nothing else under the
-  // working directory, because a session in `$HOME` legitimately names `~/<projectDirName>/cache/...`.
-  // STILL LEXICAL: a symlink is not resolved (this branch reads no ambient state); a host building a
-  // view must not build it out of links into a project.
-  const refusedRoots = where.cwds.flatMap((cwd) => [
-    { root: comparablePath(cwd), what: "the session's own working directory" },
-    { root: comparablePath(join(cwd, ".claude")), what: "the vendor's project directory in the session's working directory" },
-    ...(where.projectDirName === undefined || where.projectDirName.length === 0 ? [] : [{ root: comparablePath(join(cwd, where.projectDirName)), what: "the session's own project directory" }]),
-  ]);
-  plugins.forEach((entry: unknown, index: number) => {
-    const at = `plugins[${index}]`;
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      refuse("plugins", `${at} is not a plugin entry object ({ type: "local", path, skipMcpDiscovery: true })`);
-      return;
-    }
-    const { type, path, skipMcpDiscovery } = entry as { type?: unknown; path?: unknown; skipMcpDiscovery?: unknown };
-    if (type !== "local") {
-      refuse("plugins", `${at} has type ${JSON.stringify(type)}; only \`local\` plugins exist on the pinned runtime, and no other kind is reviewed for this branch`);
-    }
-    if (typeof path !== "string" || path.length === 0 || !isAbsolute(path)) {
-      refuse("plugins", `${at}.path must be an absolute path; a relative plugin root resolves against the session's working directory — the project — so it would be a project-controlled path`);
-      return;
-    }
-    if (path.includes("\u0000")) {
-      refuse("plugins", `${at}.path contains a NUL byte`);
-    }
-    if (path.split(/[\\/]/).includes("..")) {
-      refuse("plugins", `${at}.path contains a \`..\` segment; name the plugin directory itself, not a path that walks out of another one`);
-    }
-    if (skipMcpDiscovery !== true) {
-      refuse("plugins", `${at} must set skipMcpDiscovery: true — the host is the sole owner of every MCP server on this branch, and a plugin's own MCP configuration is a server nobody registered (WS-14 §11)`);
-    }
-    const candidate = comparablePath(path);
-    const hit = refusedRoots.find(({ root }) => root === candidate);
-    if (hit !== undefined) {
-      refuse("plugins", `${at}.path is ${hit.what}; everything in a plugin root loads as code (hooks, skills, agents, commands), so a project's own directories are never a plugin — a host that trusts a project's skills builds a view of them elsewhere and names that (0.0.11)`);
-    }
-  });
-}
-
-/**
- * Whether the filesystem a path lives on folds case. macOS (APFS/HFS+ by default) and Windows do, so
- * `<cwd>/.CLAUDE` IS `<cwd>/.claude` there; Linux does not. Read at call time, never at module load.
- */
-const foldsCase = (): boolean => process.platform === "darwin" || process.platform === "win32";
-
-/**
- * A path in the form two spellings of one directory share: separators collapsed, `.` segments removed,
- * trailing separators dropped, and — where the filesystem folds case — case-folded and
- * Unicode-normalized the way `containment.ts` folds its forbidden names. `..` never reaches here (the
- * caller refuses it first), so `normalize` cannot resolve a parent into a different directory.
- */
-function comparablePath(path: string): string {
-  let normal = normalize(path);
-  while (normal.length > 1 && (normal.endsWith("/") || normal.endsWith("\\"))) normal = normal.slice(0, -1);
-  return foldsCase() ? normal.normalize("NFKC").toLowerCase() : normal;
 }
 
 /**

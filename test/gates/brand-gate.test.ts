@@ -82,6 +82,11 @@ const PRODUCT_ENV_SUFFIXES = [
   "ENABLE_TELEMETRY",
   "ENHANCED_TELEMETRY_BETA",
   "PROFILE",
+  // WS-21's host variables (spec §3.1, §6.3 items 11/13): brand-derived, so never spelled literally.
+  "STORE_HOME",
+  "PLUGIN_CACHE_DIR",
+  "PROVIDER_MANAGED_BY_HOST",
+  "DISABLE_CRON",
 ] as const;
 const TOP_LEVEL_ENV_RE = new RegExp(`process\\.env\\.WINTER_(?:${PRODUCT_ENV_SUFFIXES.join("|")})\\b`, "g");
 /** Rule 10: a product env name spelled as a PROPERTY or a STRING KEY, on any receiver. */

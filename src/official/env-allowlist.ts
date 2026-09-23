@@ -19,6 +19,7 @@
 // any change to either is a reviewed compatibility event under the WS-17 drift gate, never a silent
 // update." A snapshot carrying values would put a credential in a fixture, which §12 forbids in the
 // same breath.
+import { join } from "node:path";
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
 import type { EnvInput, RemoteConfigPolicy } from "../seams/official-adapter.ts";
@@ -38,11 +39,23 @@ import { OfficialConfigurationError } from "./errors.ts";
 export const MINIMAL_OS_VARIABLES: readonly string[] = ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG"];
 export const MINIMAL_OS_VARIABLE_PREFIXES: readonly string[] = ["LC_"];
 
-/** The vendor-named variables this branch sets itself (§1/§3). Claude-mirroring literals (WS-01 §5). */
+/**
+ * The vendor-named variables this branch sets itself (§1/§3). Claude-mirroring literals (WS-01 §5).
+ *
+ * BRANCH-OWNED, which is the property that matters: a name here is refused from `configuredExtras`
+ * ("a configured extra may not override a variable this branch owns") and is known to the closed
+ * allowlist whether or not a given launch sets it. The last three are WS-21's (spec §3.1) and are set
+ * only for a run-home launch: the shared plugin root, the host-managed provider switch (F20) and the
+ * cron switch (F19a). `CLAUDE_CODE_PLUGIN_CACHE_DIR` moved here from the execution-indirection list —
+ * it is still refused from every other source, now as a variable the router sets itself.
+ */
 export const OFFICIAL_RUNTIME_VARIABLES = {
   configDir: "CLAUDE_CONFIG_DIR",
   projectDirName: "CLAUDE_CODE_PROJECT_DIR_NAME",
   tmpdir: "CLAUDE_CODE_TMPDIR",
+  pluginCacheDir: "CLAUDE_CODE_PLUGIN_CACHE_DIR",
+  providerManagedByHost: "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+  disableCron: "CLAUDE_CODE_DISABLE_CRON",
 } as const;
 
 /**
@@ -149,6 +162,11 @@ export function sanitizePathListValue(value: string): string {
 export interface OfficialEnvInput extends EnvInput {
   projectKey?: string;
   sharedTempRoot?: string;
+  /**
+   * WS-21 §3.1: the run home this launch runs on. Present, the builder sets the shared plugin root and
+   * the two host switches beside the config dir; absent, none of them is set (the pre-WS-21 profile).
+   */
+  runHome?: { sdkHome: string };
 }
 
 /** Host policy for the env builder — §3's "deliberate, documented addition" escape hatch, fenced. */
@@ -303,9 +321,9 @@ export const EXECUTION_INDIRECTION_ENV_NAMES: readonly string[] = [
   "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
   "CLAUDE_CODE_REMOTE_SETTINGS_PATH",
   "CLAUDE_CODE_MOCK_REMOTE_SETTINGS",
-  // plugins are code the runtime loads
+  // plugins are code the runtime loads (the plugin CACHE dir is a branch-owned variable since WS-21:
+  // see `OFFICIAL_RUNTIME_VARIABLES`)
   "CLAUDE_CODE_PLUGIN_SEED_DIR",
-  "CLAUDE_CODE_PLUGIN_CACHE_DIR",
   // package-manager and toolchain configuration files (a config file names scripts and registries)
   "BUN_CONFIG_FILE",
   "NPM_CONFIG_USERCONFIG",
@@ -403,6 +421,12 @@ export function buildOfficialChildEnv(input: OfficialEnvInput, policy: OfficialE
     env[OFFICIAL_RUNTIME_VARIABLES.projectDirName] = input.projectKey;
   }
   if (input.sharedTempRoot !== undefined && input.sharedTempRoot.length > 0) env[OFFICIAL_RUNTIME_VARIABLES.tmpdir] = input.sharedTempRoot;
+  // WS-21 §3.1: the router's three run-home variables. Set here, by the builder, and nowhere else.
+  if (input.runHome !== undefined) {
+    env[OFFICIAL_RUNTIME_VARIABLES.pluginCacheDir] = join(input.runHome.sdkHome, "plugins");
+    env[OFFICIAL_RUNTIME_VARIABLES.providerManagedByHost] = "1";
+    env[OFFICIAL_RUNTIME_VARIABLES.disableCron] = "1";
+  }
   // R-7b-11: the pin's tool surface is the pin's, unless this deployment says otherwise IN WRITING.
   if ((policy.remoteConfig ?? "deny") === "deny") for (const [name, value] of Object.entries(TRAFFIC_OPT_OUT_VARIABLES)) env[name] = value;
   for (const [name, value] of Object.entries(input.credentials)) env[name] = value;

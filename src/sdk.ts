@@ -51,7 +51,8 @@ import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
 import { RunHomeError } from "./run-home/errors.ts";
-import type { RunHome, RunHomeFor, RunHomeOutcome } from "./run-home/types.ts";
+import { applyWinterRunHome, assertRunHomeApplicable } from "./run-home/apply.ts";
+import { sdkHomeOf, type RunHome, type RunHomeFor, type RunHomeOutcome } from "./run-home/types.ts";
 
 /**
  * The injected peers.
@@ -465,6 +466,17 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
   const resolved = opts.peers.winter.resolveBrand(opts.brand);
   if (!resolved.ok) throw new opts.peers.winter.InvalidBrandError(resolved.reason);
   const brand = resolved.brand;
+  // WS-21: A RUN-HOME ROUTER NAMES ITS HOME. Its store is rooted at `sdkHomeOf(home)` — the shared
+  // runtime home — and a store resolved from the peer's own default instead would be a guess about
+  // which home that is (the default itself moves to the shared home in the agent SDK's WS-21 release,
+  // so `sdkHomeOf` of it would double up). Refused at construction, where it costs nothing.
+  if (opts.requireRunHome === true && (opts.handoff?.winterHome === undefined || opts.handoff.winterHome.length === 0)) {
+    throw new RuntimeLaunchInputError({
+      field: "handoff.winterHome",
+      reason: "a router created with `requireRunHome: true` roots its session store at the shared runtime home under the daemon's home, so the home must be named explicitly (WS-21 §3.1)",
+    });
+  }
+  const storeHome = opts.requireRunHome === true && opts.handoff?.winterHome !== undefined ? sdkHomeOf(opts.handoff.winterHome) : undefined;
   const directoryStore = opts.directoryStore ?? createInMemoryRuntimeDirectoryStore();
   // THE CAPABILITY SERVERS, BUILT ONCE (R-8). Both shapes are derived here, beside the store, rather
   // than per query: the Winter leg's record is the object every query forwards — value identity across
@@ -487,13 +499,30 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     // The barrier's home IS the context's home (F-3): one field, so the store the barrier resolves and
     // the store any later seam resolves through the context cannot end up being two.
     ...(opts.handoff?.winterHome === undefined ? {} : { winterHome: opts.handoff.winterHome }),
+    // WS-21: the store's root, for every seam that resolves the shared store through the context.
+    ...(storeHome === undefined ? {} : { storeHome }),
   };
   // LANES B AND C ARE LANDED (controller wiring, one commit): the directory and the messaging router
   // come from ONE factory (the directory's child view delivers through the router while the router
   // resolves through the directory -- a real circularity closed by a late binding inside
   // `createRuntimeMessaging`); the barrier OWNS its decorator so one store, one decoration registry
   // and one door are structural (`decorator: barrier.decorator` is load-bearing, not a shortcut).
-  const { directory, messaging } = createRuntimeMessaging(base, opts.messaging ?? {});
+  // WS-21 §3.8: every run home this handle applied, by run id. Absent = `pending`. Built BEFORE the
+  // messaging router, because the router's own cold resume records into it too.
+  const runHomeOutcomes = new Map<string, RunHomeOutcome>();
+  const { directory, messaging } = createRuntimeMessaging(base, opts.messaging ?? {}, {
+    winterRunHomes: {
+      require: opts.requireRunHome === true,
+      ...(opts.runHomeFor === undefined ? {} : { runHomeFor: opts.runHomeFor }),
+      apply: (options, runHome) => {
+        assertRunHomeApplicable(runHome, { leg: "winter", cwd: options.cwd, brand, storeHome });
+        return applyWinterRunHome(options, runHome, brand);
+      },
+      record: (runId, outcome) => {
+        runHomeOutcomes.set(runId, outcome);
+      },
+    },
+  });
   const context: SeamContextWithDirectory = { ...base, directory };
   // R-7b-12: THE PREFERRED DOOR, KEYED TO THE PIN BY MEASUREMENT. The four WS-17 §8 probes pass
   // against 0.3.250 on both supported platforms, so a handle over THAT peer gets the decorated
@@ -618,6 +647,9 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
       const noteOpened = (kind: RuntimeKind): void => {
         if (ledgerKey !== undefined) persistedRuntime.set(ledgerKey, kind);
       };
+      // WS-21 §3.1: THE RUN HOME IS CHECKED FOR THE LEG IT IS ABOUT TO RUN ON, before either leg opens.
+      const leg = decided !== undefined && decided.runtimeKind === "claude-agent" ? "official" : "winter";
+      if (runHome !== undefined) assertRunHomeApplicable(runHome, { leg, cwd: options.cwd, brand, storeHome });
       if (decided !== undefined && decided.runtimeKind === "claude-agent") {
         const official = runtime?.official;
         if (official === undefined) {
@@ -650,17 +682,22 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
           // THE OFFICIAL LEG TAKES NO CAPABILITY RECORD HERE: its `mcpServers` are materialized by the
           // leg itself (`officialCapabilityServers`) and merged into the options TEMPLATE, because the
           // vendor's `Options.mcpServers` is not the Winter shape this record holds.
-          { prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand), input: official, selection: decided },
+          { prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand), input: official, selection: decided, ...(runHome === undefined ? {} : { runHome }) },
         );
       }
-      const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand, capabilityServers) });
+      // WS-21 §3.1: the run home's env, setting source and memory pin, laid over the caller's options
+      // before the pass-through — synchronously, so nothing reaches the peer without them.
+      const winterOptions = runHome === undefined ? options : applyWinterRunHome(options, runHome, brand);
+      const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(winterOptions, opts.brand === undefined ? undefined : brand, capabilityServers) });
       // AFTER the peer returned, because that is when the Winter leg actually opened (I-1).
       noteOpened("winter-agent");
+      // WS-21 §3.8 DECISION: a Winter-leg run home is SAFE from the moment it is applied — the Winter
+      // child writes the canonical store directly (its `projects/` is a link to it), so there is no
+      // working copy that could ever need reconciling. The host still disposes only after it observes
+      // the incarnation's end; "safe" says nothing would be lost if it did.
+      if (runHome !== undefined) runHomeOutcomes.set(runHome.runId, "safe");
       return winterQuery;
   };
-
-  /** WS-21 §3.8: every run home this handle applied, by run id. Absent = `pending`. */
-  const runHomeOutcomes = new Map<string, RunHomeOutcome>();
 
   const sdk: RuntimeSdk & { [INTERNALS]: RuntimeSdkInternals } = {
     [INTERNALS]: internals,

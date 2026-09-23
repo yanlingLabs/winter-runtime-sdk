@@ -40,6 +40,21 @@ export interface RunHomeBuildContext {
 
 const PRIVATE_DIR = 0o700;
 
+/**
+ * EVERY RUN HOME THIS MODULE BUILT, by identity (spec §3.5: "a router-built run folder").
+ *
+ * The router applies a run home by pointing a child at `runHome.dir`, so an object a host assembled
+ * by hand — or one whose `dir` names the user's real home — must not pass for one. A `WeakSet` is
+ * membership nothing outside this module can confer, the same rule the approval bridge's identity
+ * check follows. A disposed run home leaves the set: its folder is gone.
+ */
+const BUILT_RUN_HOMES = new WeakSet<RunHome>();
+
+/** True for a run home `buildRunHome` built and that has not been disposed. */
+export function isRouterBuiltRunHome(value: unknown): value is RunHome {
+  return typeof value === "object" && value !== null && BUILT_RUN_HOMES.has(value as RunHome);
+}
+
 /** Builds `<home>/cache/runs/<uuid>` for one generation (spec §3). */
 export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
   assertInput(input);
@@ -65,15 +80,20 @@ export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
     await rm(dir, { recursive: true, force: true });
     throw error;
   }
-  return {
+  const runHome: RunHome = {
     runId,
     dir,
     sdkHome,
     input,
     effectiveSettings,
     report,
-    dispose: () => rm(dir, { recursive: true, force: true }),
+    dispose: async () => {
+      BUILT_RUN_HOMES.delete(runHome);
+      await rm(dir, { recursive: true, force: true });
+    },
   };
+  BUILT_RUN_HOMES.add(runHome);
+  return runHome;
 }
 
 function assertInput(input: RunHomeInput): void {
