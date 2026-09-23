@@ -22,6 +22,7 @@ import { chmod, lstat, mkdir, rm, symlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 import { RunHomeError } from "./errors.ts";
+import { buildItems } from "./items.ts";
 import { RUN_HOME_PERSISTENT_ENTRIES, runHomeBrandOf, sdkHomeOf, type RunHome, type RunHomeBrand, type RunHomeInput, type RunHomeReport } from "./types.ts";
 
 /** What every build step is handed. */
@@ -51,6 +52,7 @@ export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
   const context: RunHomeBuildContext = { input, brand, sdkHome, dir, report };
   try {
     await buildCore(context);
+    await buildItems(context);
   } catch (error) {
     // A HALF-BUILT FOLDER IS NEVER HANDED OUT — and never left behind for a sweep to wonder about.
     await rm(dir, { recursive: true, force: true });
