@@ -76,8 +76,10 @@ const PLUGIN_STYLE = "sv-plugin:sv-plug-style";
  * `slash_commands` and in the Skill listing, with the meta's description).
  */
 const PLUGIN_WORKFLOW = "sv-plugin:sv-flow";
+/** claude's name for the USER-tier workflow `<sdk>/workflows/user-flow-file.js` (`meta.name: "sv-user-flow"`): the bare meta name (measured). */
+const USER_WORKFLOW = "sv-user-flow";
 /** Any listed name that could be the fixture workflow, under either naming (meta name or file name). */
-const isWorkflowName = (name: string): boolean => name.includes("sv-flow") || name.includes("flow-file");
+const isWorkflowName = (name: string): boolean => name.includes("sv-flow") || name.includes("flow-file") || name.includes("sv-user-flow");
 
 interface SameView {
   skills: string[];
@@ -252,6 +254,8 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
   // A plugin OUTPUT STYLE, and a plugin WORKFLOW whose declared `meta.name` differs from its file name.
   put(join(market, "sv-plugin", "output-styles", "sv-plug-style.md"), `---\nname: sv-plug-style\ndescription: the plugin style\n---\n${PLUGIN_STYLE_TOKEN}\n`);
   put(join(market, "sv-plugin", "workflows", "flow-file.js"), 'export const meta = { name: "sv-flow", description: "the fixture workflow" };\n');
+  // A USER-TIER workflow (the shared home's own `workflows/`), whose declared name also differs from its file.
+  put(join(sdkHome, "workflows", "user-flow-file.js"), 'export const meta = { name: "sv-user-flow", description: "the user workflow" };\n');
   const marker = join(session.home, "markers", "sv-plugin-session-start");
   mkdirSync(dirname(marker), { recursive: true });
   // claude's own plugin hooks file shape: `{ "hooks": { <Event>: [...] } }`.
@@ -297,7 +301,14 @@ function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyl
     // The local scope is not trust-gated (it is the user's own entry in the shared file).
     mcpServers: trusted ? ["sv-local-mcp", "sv-project-mcp", "sv-user-mcp"] : ["sv-local-mcp", "sv-user-mcp"],
     mcpStarted: trusted ? ["sv-local-mcp", "sv-project-mcp", "sv-user-mcp"] : ["sv-local-mcp", "sv-user-mcp"],
-    workflows: [`listing:- ${PLUGIN_WORKFLOW}: the fixture workflow`, `skills:${PLUGIN_WORKFLOW}`, `slash:${PLUGIN_WORKFLOW}`],
+    workflows: [
+      `listing:- ${PLUGIN_WORKFLOW}: the fixture workflow`,
+      `listing:- ${USER_WORKFLOW}: the user workflow`,
+      `skills:${PLUGIN_WORKFLOW}`,
+      `skills:${USER_WORKFLOW}`,
+      `slash:${PLUGIN_WORKFLOW}`,
+      `slash:${USER_WORKFLOW}`,
+    ],
     instructions: trusted ? [TOKENS.userInstructions, TOKENS.projectInstructions, TOKENS.projectRule, TOKENS.userRule] : [TOKENS.userInstructions, TOKENS.userRule],
   };
 }
@@ -577,6 +588,11 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     claudeReferenceTests("fresh", true, () => claude);
     itemTests("fresh", true, () => ({ claude, winter }));
     forbiddenServerTests("fresh", () => ({ starts, perRun: [{ leg: "winter", started: winter.mcpStarted }, { leg: "claude", started: claude.mcpStarted }] }));
+    test("fresh: the USER-tier workflow is listed identically on both legs, under its meta.name (never its file name)", () => {
+      const user = (view: SameView): string[] => view.workflows.filter((entry) => entry.includes(USER_WORKFLOW) || entry.includes("user-flow-file"));
+      expect(user(claude)).toEqual([`listing:- ${USER_WORKFLOW}: the user workflow`, `skills:${USER_WORKFLOW}`, `slash:${USER_WORKFLOW}`]);
+      expect(user(winter)).toEqual(user(claude));
+    });
     test("fresh: the local-scope and the project-scope servers reach both legs identically — listed and started", () => {
       for (const view of [claude, winter]) {
         expect(view.mcpServers).toEqual(expect.arrayContaining([MCP_SERVERS.local, MCP_SERVERS.project]));
