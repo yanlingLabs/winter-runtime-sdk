@@ -1105,12 +1105,10 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
       expect(seen["winter"]?.workflow).toContain("async_launched");
       expect(seen["winter"]?.workflow).toContain("sv-flow");
     });
-    test.todo(
-      "round 5, claude: the Workflow tool launches it too — R-1 (ROUTER, ruling needed: the official leg's containment floor refuses every Workflow call by default, `src/official/containment.ts:390-396`, 'named workflow resolution reads the vendor's own workflows directory'. Measured with the floor lifted (`containment.workflows: \"host-replacement\"`): claude launches `sv-plugin:sv-flow`, and a repository `.claude/workflows/` name is NOT resolvable under a run home ('not found. Available: deep-research, sv-plugin:sv-flow, sv-user-flow'))",
-      () => {
-        expect(seen["claude"]?.workflow).toContain("Workflow launched");
-      },
-    );
+    test("round 5, claude: the Workflow tool launches it too under a run home (R-1 ruling: the containment floor lets a named workflow through)", () => {
+      expect(seen["claude"]?.workflow).toContain("Workflow launched");
+      expect(seen["claude"]?.workflow).toContain("the fixture workflow");
+    });
   });
 
   describe("untrusted project: every project item is absent on both", () => {

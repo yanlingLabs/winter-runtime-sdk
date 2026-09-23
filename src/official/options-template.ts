@@ -32,7 +32,7 @@ import { protectedPathRules } from "../run-home/types.ts";
 import { officialToolAliases } from "./aliases.ts";
 import { createApprovalBridge, createContainmentHooks, isOurApprovalBridge, isOurContainmentHook, type OfficialPermissionMode } from "./callbacks.ts";
 import type { OfficialApprovalBridge } from "./callbacks.ts";
-import { containmentPaths, officialDisallowedTools, type ContainmentPolicy } from "./containment.ts";
+import { containmentPaths, effectiveContainmentPolicy, officialDisallowedTools, type ContainmentPolicy } from "./containment.ts";
 import { officialBranchLabel } from "./branding.ts";
 import { OfficialConfigurationError } from "./errors.ts";
 
@@ -193,6 +193,9 @@ export function brandedFlagSettings(args: {
 export function buildOfficialOptions(input: OptionsTemplateInput, policy: OptionsTemplatePolicy = {}): OfficialOptions {
   const branchLabel = officialBranchLabel(input.brand);
   const excludeDynamicSections = policy.excludeDynamicSections ?? DEFAULT_EXCLUDE_DYNAMIC_SECTIONS[input.mode];
+  // R-1 ruling: under a run home the workflow floor's default is `"run-home"` (named and inline
+  // workflows run; see `ContainmentPolicy.workflows`). A host's explicit choice always wins.
+  const containment: ContainmentPolicy | undefined = effectiveContainmentPolicy(policy.containment, input.runHome !== undefined);
 
   const options: OfficialOptions = {
     cwd: input.cwd,
@@ -246,7 +249,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     sessionStoreFlush: policy.advertisesHandoff === true ? "eager" : "batched",
 
     toolAliases: officialToolAliases(input.brand),
-    disallowedTools: [...officialDisallowedTools(policy.containment ?? {}, input.brand), ...(policy.additionalDisallowedTools ?? [])],
+    disallowedTools: [...officialDisallowedTools(containment ?? {}, input.brand), ...(policy.additionalDisallowedTools ?? [])],
 
     includePartialMessages: true,
     includeHookEvents: true,
@@ -255,7 +258,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
     // §8's floor is installed as a PreToolUse hook ALWAYS, merged ahead of the host's own matchers —
     // see `createContainmentHooks` for the measurement that made this mandatory (the permission
     // callback is not consulted for every tool on this runtime).
-    hooks: mergeHooks(createContainmentHooks({ brand: input.brand, ...(policy.containment === undefined ? {} : { containment: policy.containment }) }), policy.hooks),
+    hooks: mergeHooks(createContainmentHooks({ brand: input.brand, ...(containment === undefined ? {} : { containment }) }), policy.hooks),
     // §10's bridge is INSTALLED, not merely accepted (review r2, NEW-1): the invariants below refuse an
     // options object without it, so the template must produce one. A host that supplies its own broker
     // gets it wrapped; a host that supplies none gets a fail-closed one that says so.
@@ -264,7 +267,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
       createApprovalBridge({
         brand: input.brand,
         mode: policy.permissionMode ?? "default",
-        ...(policy.containment === undefined ? {} : { containment: policy.containment }),
+        ...(containment === undefined ? {} : { containment }),
         broker: async (request) => ({
           behavior: "deny",
           message: `no approval broker is configured for this session, so ${request.toolName} cannot be approved; this branch owns permissions (settingSources is empty) and a host must bridge its broker into canUseTool (WS-14 §10)`,
