@@ -108,6 +108,17 @@ export function runHomeAutoMemoryEnabled(runHome: Pick<RunHome, "effectiveSettin
  * repository's own files (ruling Q1).
  */
 export function applyWinterRunHome<T extends Options>(options: T, runHome: RunHome, brand: Pick<BrandProfile, "envPrefix">): T {
+  // THE ROUTER'S OWN VARIABLES ARE ITS OWN (Global Constraints: "only the router sets" them). A caller
+  // that still sets one — e.g. a host that used to point the Winter child at its home itself — is
+  // refused rather than silently overwritten, so the leftover surfaces instead of hiding.
+  const owned = new Set(Object.keys(winterRunHomeEnv(runHome, brand)).map((name) => name.toUpperCase()));
+  const clashing = Object.keys(options.env ?? {}).filter((name) => owned.has(name.toUpperCase()));
+  if (clashing.length > 0) {
+    throw new RunHomeError(
+      "router_owned_variable",
+      `the caller's env sets ${clashing.join(", ")}, which only the router sets under a run home (the run folder, the shared runtime home, the plugin root and the two host switches — WS-21 §3.1); drop it from the options`,
+    );
+  }
   const requested = options.settingSources;
   if (requested !== undefined && requested.some((source) => source !== "user")) {
     throw new RunHomeError(

@@ -22,7 +22,6 @@
     "skillOverrides": "flag-pinned",
     "skipDangerousModePermissionPrompt": "harmless:the router refuses bypassPermissions, so the prompt this skips is never reached",
     "skipWorkflowUsageWarning": "harmless:suppresses a UI usage warning only",
-    "some": "harmless:this reader returns a source's permission RULES; `some` is the array method a trust warning uses to list the files that grant a tool",
     "spellcheck": "harmless:read only to warn that a repository's spellcheck block is ignored"
   }
 }
