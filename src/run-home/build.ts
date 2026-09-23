@@ -19,6 +19,7 @@
 // reports the run home `safe` (spec §3.8).
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, rm, symlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import { RunHomeError } from "./errors.ts";
@@ -36,6 +37,13 @@ export interface RunHomeBuildContext {
   /** The run folder being built. */
   dir: string;
   report: RunHomeReport;
+  /** `$HOME` — where every project walk and project tier stops (`os.homedir()` unless a test injects one). */
+  userHome: string;
+}
+
+/** Test-only construction knobs; not part of Contract A. */
+export interface RunHomeBuildInternals {
+  userHome?: string;
 }
 
 const PRIVATE_DIR = 0o700;
@@ -56,7 +64,7 @@ export function isRouterBuiltRunHome(value: unknown): value is RunHome {
 }
 
 /** Builds `<home>/cache/runs/<uuid>` for one generation (spec §3). */
-export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
+export async function buildRunHome(input: RunHomeInput, internals: RunHomeBuildInternals = {}): Promise<RunHome> {
   assertInput(input);
   const brand = runHomeBrandOf(input);
   const sdkHome = sdkHomeOf(input.home);
@@ -67,7 +75,7 @@ export async function buildRunHome(input: RunHomeInput): Promise<RunHome> {
   await mkdir(dir, { mode: PRIVATE_DIR });
   await chmod(dir, PRIVATE_DIR); // the umask may have narrowed `mode`; never widened, but be exact
   const report: RunHomeReport = { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] };
-  const context: RunHomeBuildContext = { input, brand, sdkHome, dir, report };
+  const context: RunHomeBuildContext = { input, brand, sdkHome, dir, report, userHome: internals.userHome ?? homedir() };
   let effectiveSettings: Record<string, unknown>;
   try {
     await buildCore(context);

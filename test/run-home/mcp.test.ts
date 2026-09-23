@@ -60,6 +60,29 @@ describe("the generated .winter.json", () => {
     expect(file["mcpServers"]).toBeUndefined();
   });
 
+  test("the walk's `$HOME` stop (fix round 1, M2): neither `$HOME/.winter/mcp.json` nor a local scope keyed at `$HOME` or above", async () => {
+    const bed = runHomeBed("hm");
+    const userHome = join(bed.root, "u");
+    const daemonHome = join(userHome, ".winter");
+    mkdirSync(join(userHome, "p"), { recursive: true });
+    const moved: RunHomeBed = { ...bed, home: daemonHome, sdk: join(daemonHome, "sdk"), cwd: userHome };
+    put(join(moved.sdk, ".winter.json"), json({ mcpServers: { u: server("user") }, projects: { [userHome]: { mcpServers: { homeLocal: server("home") } }, [bed.root]: { mcpServers: { aboveLocal: server("above") } } } }));
+    put(join(daemonHome, "mcp.json"), json({ mcpServers: { daemonHome: server("daemon") } }));
+    put(join(bed.root, ".winter", "mcp.json"), json({ mcpServers: { aboveHome: server("above") } }));
+    for (const root of [userHome, bed.root]) {
+      const runHome = await buildRunHome(inputFor(moved, { cwd: root, trustedProjectRoot: root, gitRoot: root }), { userHome });
+      const file = JSON.parse(readFileSync(join(runHome.dir, ".winter.json"), "utf8")) as Record<string, unknown>;
+      expect([root, file["mcpServers"]]).toEqual([root, { u: server("user") }]);
+    }
+    // Below `$HOME` both still apply.
+    const below = join(userHome, "p");
+    put(join(below, ".winter", "mcp.json"), json({ mcpServers: { project: server("project") } }));
+    put(join(moved.sdk, ".winter.json"), json({ mcpServers: { u: server("user") }, projects: { [below]: { mcpServers: { local: server("local") } } } }));
+    const runHome = await buildRunHome(inputFor(moved, { cwd: below, trustedProjectRoot: below, gitRoot: below }), { userHome });
+    const file = JSON.parse(readFileSync(join(runHome.dir, ".winter.json"), "utf8")) as Record<string, unknown>;
+    expect(file["mcpServers"]).toEqual({ u: server("user"), project: server("project"), local: server("local") });
+  });
+
   test("disabled servers and reserved names are dropped and reported — the brand's standing server name included", async () => {
     const bed = runHomeBed();
     put(join(bed.sdk, ".winter.json"), json({ mcpServers: { keep: server("k"), off: server("o"), winter__computer: server("c"), winter: server("w") } }));
