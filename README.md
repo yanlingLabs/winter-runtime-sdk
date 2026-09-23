@@ -51,21 +51,24 @@ interface RunHomeInput {
   dispatchChild: boolean;                // a code-mode dispatch child: output style skipped
   leg: RunLeg;
   cwd: string;
-  trustedProjectRoot: string | null;     // repoRootFor(cwd) when trusted, else null
+  trustedProjectRoot: string | null;     // repoRootFor(cwd) when trusted, else null; at $HOME or above it,
+                                         // no project/local tier (items, instructions, settings, MCP) is read
   gitRoot: string | null;                // the canonical git root (the local settings tier)
   mcpDisabled: readonly string[];
   reservedMcpServerNames: readonly string[];
   memoryDir: string;                     // the auto-memory directory for this incarnation
   brand?: RunHomeBrand;                  // optional; absent = the Winter SDK's own profile
 }
-interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules; droppedImports }
+interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules; droppedImports;
+  skippedAgents }                        // an agent the runtime's own YAML parse cannot read (or no Bun.YAML): never copied
 interface RunHome { runId; dir; sdkHome; input; effectiveSettings; report; dispose(): Promise<void> }
 const RUN_HOME_CONTRACT_VERSION = 1;
 const RUN_HOME_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"];
 function sdkHomeOf(home: string): string;                                  // join(home, "sdk")
 function buildRunHome(input: RunHomeInput): Promise<RunHome>;
 function fsRootAnchored(absPath: string): string;                          // "/" + absPath ("//Users/x")
-function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?): string[];
+function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
+  walk?: { cwd: string; userHome?: string }): string[];                  // with `walk`: every project dir cwd → root
 type RunHomeOutcome = "safe" | "quarantined" | "pending";
 type RunHomeFor = (ctx: { sessionId: string; leg: RunLeg; cwd: string; mode: RunMode }) => Promise<RunHome>;
 class RunHomeError extends RuntimeSdkError { code: RunHomeErrorCode }    // forwarded as data.code
@@ -80,7 +83,7 @@ function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; //
 | `createRuntimeSdk({ runHomeFor })` | The host's builder for the router's OWN cold-resume path (messaging delivery to an exited Winter session). Absent with `requireRunHome`, that path answers a typed non-retryable `unavailable`. |
 | `query({ prompt, options: { ...options, runtime: { runHome } } })` | The Winter overload (still typed `Query`). The host awaits `buildRunHome` in `optionsFor` and passes the result. |
 | `query({ prompt, options: { ...options, runtime: { selection, official, runHome } } })` | The official overload. The host awaits `buildRunHome` in the official session's `open()`. |
-| `sdk.runHomeOutcome(runId)` | `safe` → the host may `runHome.dispose()`; `quarantined` → its working copy was copied to `<home>/cache/quarantine/`; `pending` → still running (or unknown). |
+| `sdk.runHomeOutcome(runId)` | `safe` → the host may `runHome.dispose()`; `quarantined` → its working copy was copied to `<home>/cache/quarantine/`; `pending` → still running (or unknown). Dispose only on `safe`. A `query()` that THROWS synchronously (every run-home refusal does) opened no incarnation and records nothing — the host disposes that run home on the throw, not on the outcome. |
 | `sdk.reconcileRootForRecovery(root)` | The crash-recovery door for a recorded root: `clean` / `appended` / `quarantined`. The host never calls `reconcileLocalWriteRoot` itself. |
 
 **What applying a run home does** (the router, synchronously, before the pass-through / the launch):
@@ -90,12 +93,13 @@ function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; //
 | checks | built by `buildRunHome` and not disposed (`run_home_foreign`); built for this leg (`run_home_leg_mismatch`), this cwd (`run_home_cwd_mismatch`), this brand (`run_home_brand_mismatch`) and this router's store (`run_home_store_mismatch`) | the same |
 | config dir | `env.<PREFIX>HOME = runHome.dir` | `CLAUDE_CONFIG_DIR = runHome.dir` (fresh); `<dir>/.absent` then the linked staging dir (resume, §3.6) |
 | router-set env | `<PREFIX>STORE_HOME = <home>/sdk`, `<PREFIX>PLUGIN_CACHE_DIR = <home>/sdk/plugins`, `<PREFIX>PROVIDER_MANAGED_BY_HOST = 1`, `<PREFIX>DISABLE_CRON = 1` (laid over the caller's env) | `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = 1`, `CLAUDE_CODE_DISABLE_CRON = 1` — branch-owned, refused from `configuredExtras` |
+| options the run home decides | `plugins`, `skills`, `agents`, `outputStyle`, `brand` are refused from the caller (`run_home_option_refused`); so are the router-set variables in `env` (`router_owned_variable`) | the same options refused; a policy's `agents` is refused beside a run home and never forwarded |
 | setting sources | `["user"]`; a caller's `project`/`local` is refused (`setting_sources_refused`) | `["user"]`; the invariants refuse anything else, and `["user"]` without a run home; the spawn proxy re-checks the final argv |
 | MCP | the run folder's `.winter.json` | `strictMcpConfig: false` (and `true` is refused on a run home) |
 | memory | `autoMemory: { directory: memoryDir, enabled }` | flag layer: `autoMemoryDirectory = memoryDir`, `autoMemoryEnabled` from the effective settings |
-| flag layer | — | `plansDirectory`, and `permissions.ask` = `protectedPathRules(...)` appended to the host's own (a host `permissions.deny` survives) |
+| flag layer | — | `plansDirectory`, and `permissions.ask` = `protectedPathRules(..., { cwd })` (every project dir the walk loads items from, both spellings) appended to the host's own (a host `permissions.deny` survives) |
 | plugins | from the run home's `enabledPlugins` | the same; `Options.plugins` and `OptionsTemplatePolicy.plugins` are gone, and a `plugins` key is refused on every launch |
-| outcome | `safe` at open (no working copy) | `pending` until the exit reconcile |
+| outcome | `pending` while the returned `Query` runs; `safe` once it settles (done, `return()`/`throw()`, a rejection, or disposal) — no working copy, but the child reads the run folder while it runs | `pending` until the exit reconcile |
 
 **Every router consumer of the home, decided** (plan r2 I3). `handoff.winterHome` stays the daemon's
 home; a router created with `requireRunHome` (which must name it) roots its store at
