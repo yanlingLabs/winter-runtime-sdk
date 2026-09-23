@@ -87,6 +87,14 @@ export interface OfficialRunHomeBinding {
    * the setting sources are, and consults it BEFORE the user's — but after the flag layer's.
    */
   skillOverrides?: Readonly<Record<string, unknown>>;
+  /**
+   * The protected-path ask rules (spec §7.2), precomputed by the door for the given AND the real
+   * (symlink-resolved) spelling of each root. Measured on 0.3.250: a rule in the given spelling already
+   * fires for a root reached through a link (`/var` → `/private/var`); the real-path twin is kept so the
+   * rule cannot depend on which of the two spellings a future pin compares. Absent, the template
+   * computes them from `sdkHome`/`trustedProjectRoot` as given.
+   */
+  protectedAsk?: readonly string[];
 }
 
 /** What `buildOptions` is given. Every field is something WS-14 §2/§5 pins as normative. */

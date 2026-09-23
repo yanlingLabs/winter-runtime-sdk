@@ -36,6 +36,7 @@
 //      own variables, because only the host knows them.
 //   5. NOTHING HERE CACHES A CREDENTIAL. `fetchAuthCredentials` returns material to one caller, this
 //      module puts it in the child environment, and the object is dropped when the launch returns.
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { BrandProfile, CredentialRef, Options, ProviderSelection, Query } from "@yanlinglabs/winter-agent-sdk";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
@@ -64,7 +65,7 @@ import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { hasConversationalEntry, readProviderStateSidecar } from "./store/materialized-resume.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
-import type { RunHome, RunHomeOutcome } from "./run-home/types.ts";
+import { protectedPathRules, runHomeBrandOf, type RunHome, type RunHomeOutcome } from "./run-home/types.ts";
 import { runHomeExitReconciler } from "./run-home/exit.ts";
 import { RunHomeError } from "./run-home/errors.ts";
 import { runHomeAutoMemoryEnabled } from "./run-home/apply.ts";
@@ -507,7 +508,23 @@ export function officialRunHomeBinding(runHome: RunHome): OfficialRunHomeBinding
     memoryDir: runHome.input.memoryDir,
     autoMemoryEnabled: runHomeAutoMemoryEnabled(runHome),
     ...(isPlainRecord(runHome.effectiveSettings["skillOverrides"]) ? { skillOverrides: runHome.effectiveSettings["skillOverrides"] } : {}),
+    protectedAsk: protectedAskRulesFor(runHome),
   };
+}
+
+/** Spec §7.2's ask rules for the given and the real spelling of the shared home and the trusted root. */
+function protectedAskRulesFor(runHome: RunHome): string[] {
+  const real = (path: string): string => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
+  const brand = runHomeBrandOf(runHome.input);
+  const root = runHome.input.trustedProjectRoot;
+  const rules = [...protectedPathRules(runHome.sdkHome, root, brand), ...protectedPathRules(real(runHome.sdkHome), root === null ? null : real(root), brand)];
+  return [...new Set(rules)];
 }
 
 const isPlainRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);

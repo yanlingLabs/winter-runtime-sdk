@@ -209,7 +209,7 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
       brand: input.brand,
       autoMemoryDirectory: input.runHome?.memoryDir ?? input.autoMemoryDirectory,
       autoMemoryEnabled: input.runHome?.autoMemoryEnabled ?? true,
-      ...(input.runHome === undefined ? {} : { protectedAsk: protectedPathRules(input.runHome.sdkHome, input.runHome.trustedProjectRoot, input.brand) }),
+      ...(input.runHome === undefined ? {} : { protectedAsk: input.runHome.protectedAsk ?? protectedPathRules(input.runHome.sdkHome, input.runHome.trustedProjectRoot, input.brand) }),
       ...(input.runHome?.skillOverrides === undefined ? {} : { skillOverrides: input.runHome.skillOverrides }),
       ...(policy.settings === undefined ? {} : { extra: policy.settings }),
     }),
