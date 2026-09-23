@@ -115,6 +115,22 @@ describe("reconcileRootForRecovery", () => {
     expect(existsSync(join(quarantine, dir!, "projects", KEY.projectKey, `${KEY.sessionId}.jsonl`))).toBe(true);
   });
 
+  test("a crashed resume root whose tail starts with the barrier's staged handoff note is quarantined — the note is never washed back", async () => {
+    const bed = runHomeBed();
+    const { sdk, shared } = router(bed);
+    const first = user("q1", null);
+    const second = user("q2", String(first["uuid"]));
+    await shared.store.append(KEY, [first, second]);
+    await shared.settle(KEY);
+    // The shape step 8 stages: the canonical copy, then ONE trailing labeled note (copy-only under the
+    // preferred door), then whatever the resumed child wrote.
+    const note = user("[handoff: continued from the winter-agent runtime at 2026-09-23T00:00:00.000Z]\nthe note", String(second["uuid"]));
+    const tail = user("q3 after the resume", String(note["uuid"]));
+    const root = stagingWith(bed, [JSON.stringify(first), JSON.stringify(second), JSON.stringify(note), JSON.stringify(tail)]);
+    expect(await sdk.reconcileRootForRecovery(root)).toBe("quarantined");
+    expect(canonicalUuids(bed)).toEqual([String(first["uuid"]), String(second["uuid"])]);
+  });
+
   test("a router on the pre-WS-21 layout refuses: there is no shared runtime home to recover into", async () => {
     const bed = runHomeBed();
     const { sdk } = router(bed, false);

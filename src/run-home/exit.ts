@@ -27,7 +27,7 @@ import { toClaudeReady, type ContinuityEndpoint, type MessageOrigin } from "@yan
 import { RunHomeError } from "./errors.ts";
 import type { RunHomeOutcome } from "./types.ts";
 import { compareTranscriptTail, reconcileLocalWriteRoot, scanLocalWriteRoot } from "../store/reconcile.ts";
-import { readProviderStateSidecar } from "../store/materialized-resume.ts";
+import { HANDOFF_ENTRY_LABEL, readProviderStateSidecar } from "../store/materialized-resume.ts";
 import type { SharedSessionStore } from "../store/wiring.ts";
 
 const PRIVATE_DIR = 0o700;
@@ -106,6 +106,10 @@ export interface RecoveryInput {
  * prefix can be proved.
  */
 function recomputedClaudeReadyLines(canonical: SessionStoreEntry[], sidecar: Parameters<typeof toClaudeReady>[1], resolveEndpoint: RecoveryInput["resolveEndpoint"]): string[] | undefined {
+  // THE TARGET IS NOT KNOWABLE after a crash, and it does not need to be: it only decides which
+  // decorations the fold adds INSIDE foreign assistant entries, and the prefix proof below compares
+  // records by uuid (`compareTranscriptTail`), which the fold preserves record-for-record. A claude
+  // target is the one this root was staged for; do not "fix" it into a lookup.
   let target: ContinuityEndpoint;
   try {
     target = resolveEndpoint({ providerId: "anthropic", modelKey: "claude", family: "claude" } as MessageOrigin);
@@ -116,6 +120,13 @@ function recomputedClaudeReadyLines(canonical: SessionStoreEntry[], sidecar: Par
   if (entries.length !== canonical.length) return undefined;
   for (let i = 0; i < entries.length; i += 1) if (entries[i]!["uuid"] !== canonical[i]!["uuid"]) return undefined;
   return entries.map((entry) => JSON.stringify(entry));
+}
+
+/** The barrier's staged handoff note (`materialized-resume.ts`'s `buildHandoffEntry`), recognised by its label. */
+function isHandoffNote(entry: SessionStoreEntry): boolean {
+  if (entry["type"] !== "user") return false;
+  const content = (entry["message"] as { content?: unknown } | undefined)?.content;
+  return typeof content === "string" && content.startsWith(`[${HANDOFF_ENTRY_LABEL}`);
 }
 
 /** Spec §3.8's recovery door. */
@@ -134,6 +145,11 @@ export async function reconcileRootForRecovery(root: string, input: RecoveryInpu
       if (expected === undefined) return quarantined();
       const comparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: expected, isDecoration: (uuid) => input.shared.decorations.has(transcript.key, uuid) });
       if (comparison.kind === "diverged" || comparison.kind === "canonical-ahead") return quarantined();
+      // A HANDOFF NOTE IN THE TAIL IS NOT THE SESSION'S OWN LINE. The barrier's step 8 stages its note as
+      // a separate trailing entry of the copy, registered as a copy-only decoration — and that registry
+      // died with the process. Appending it now would wash a decoration into the byte-pure canonical
+      // file, so a tail that carries one cannot be proved the session's and is quarantined instead.
+      if (comparison.kind === "canonical-behind" && comparison.missing.some(isHandoffNote)) return quarantined();
     }
     const report = await reconcileLocalWriteRoot(root, { shared: input.shared });
     if (report.status === "diverged") return quarantined();

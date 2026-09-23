@@ -28,6 +28,8 @@ export interface V19Read {
 }
 
 const IDENT = "[A-Za-z_$][\\w$]*";
+/** Array methods a helper may call on what a rules reader returns — never settings keys. */
+const ARRAY_METHODS: ReadonlySet<string> = new Set(["some", "every", "map", "filter", "find", "findIndex", "includes", "forEach", "reduce", "flatMap", "length", "slice", "join"]);
 const SOURCES = ["projectSettings", "localSettings"] as const;
 
 /** Every property read on `name` in `text`: `name?.key`, `name.key`, `name?.[…]`. */
@@ -124,7 +126,9 @@ export function enumerateV19Reads(js: string): { readers: string[]; reads: V19Re
           for (const call of scope.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})\\(${variable.replace(/\$/g, "\\$")}[,)]`, "g"))) {
             const helper = helperBody(js, call[1] as string, window.start + at);
             if (helper === undefined) continue;
-            for (const key of propertyReads(helper.body, helper.param)) add({ reader, source, key, shape: "helper" });
+            // A helper handed a reader that returns an ARRAY (a source's permission rules) calls array
+            // methods on it; those are not settings keys.
+            for (const key of propertyReads(helper.body, helper.param)) if (!ARRAY_METHODS.has(key)) add({ reader, source, key, shape: "helper" });
           }
         }
         // listed: the reader call inside an array literal that is then `.some((t)=>t?.key…)`

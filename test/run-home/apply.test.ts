@@ -63,7 +63,7 @@ describe("the Winter leg", () => {
     const bed = runHomeBed();
     const runHome = await buildRunHome(inputFor(bed));
     const { sdk, calls } = winterRouter(bed);
-    sdk.query({ prompt: "hi", options: { cwd: bed.cwd, model: "m", env: { KEEP: "yes", WINTER_HOME: "/caller/home" }, settingSources: [], runtime: { runHome } } });
+    sdk.query({ prompt: "hi", options: { cwd: bed.cwd, model: "m", env: { KEEP: "yes" }, settingSources: [], runtime: { runHome } } });
     expect(calls).toHaveLength(1);
     const forwarded = calls[0]!.options as Record<string, unknown>;
     expect("runtime" in forwarded).toBe(false);
@@ -105,6 +105,9 @@ describe("the Winter leg", () => {
     const runHome = await buildRunHome(inputFor(bed));
     const { sdk, calls } = winterRouter(bed);
     expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, settingSources: ["project"], runtime: { runHome } } }))).toBe("setting_sources_refused");
+    // A variable only the router sets, from the caller — refused, never silently overwritten (any case).
+    expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, env: { WINTER_HOME: "/caller/home" }, runtime: { runHome } } }))).toBe("router_owned_variable");
+    expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, env: { winter_store_home: "/x" }, runtime: { runHome } } }))).toBe("router_owned_variable");
     expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, settingSources: ["user", "local"], runtime: { runHome } } }))).toBe("setting_sources_refused");
 
     const official = await buildRunHome(inputFor(bed, { leg: "official" }));
