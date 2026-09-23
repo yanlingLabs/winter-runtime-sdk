@@ -33,7 +33,7 @@ import { toClaudeReady, type ContinuityEndpoint, type MessageOrigin } from "@yan
 
 import { RunHomeError } from "./errors.ts";
 import type { RunHomeOutcome } from "./types.ts";
-import { compareTranscriptTail, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge } from "../store/reconcile.ts";
+import { compareTranscriptTail, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge, type TranscriptReconcileOutcome } from "../store/reconcile.ts";
 import { HANDOFF_ENTRY_LABEL, readProviderStateSidecar } from "../store/materialized-resume.ts";
 import type { SharedSessionStore } from "../store/wiring.ts";
 
@@ -140,6 +140,30 @@ export function quarantineTranscripts(root: string, home: string, label: string,
   return destination;
 }
 
+/**
+ * One reconciled transcript's recovery outcome. A quarantine REASON names what actually happened: "not
+ * level after appending N entries" only when an append was made and the re-read disagreed; otherwise the
+ * comparison's own reason (minors round, item 4).
+ */
+export function recoveryOutcomeOf(transcript: TranscriptReconcileOutcome): RecoveryTranscriptOutcome {
+  const { key } = transcript;
+  const of = (rest: Omit<RecoveryTranscriptOutcome, "projectKey" | "sessionId" | "subpath">): RecoveryTranscriptOutcome => ({
+    projectKey: key.projectKey,
+    sessionId: key.sessionId,
+    ...(key.subpath === undefined ? {} : { subpath: key.subpath }),
+    ...rest,
+  });
+  if (transcript.verdict === "excluded") return of({ outcome: "quarantined", appended: 0, reason: transcript.reason ?? "unprovable" });
+  if (transcript.verdict === "level") return of({ outcome: "canonical-ahead", appended: 0 });
+  if (transcript.appended > 0) return of({ outcome: "appended", appended: transcript.appended });
+  if (transcript.comparison.kind === "match") return of({ outcome: "clean", appended: 0 });
+  if (transcript.attempted !== undefined && transcript.attempted > 0) {
+    return of({ outcome: "quarantined", appended: 0, reason: `the canonical file is not level with the working copy after appending ${transcript.attempted} entr${transcript.attempted === 1 ? "y" : "ies"} (${transcript.comparison.kind})` });
+  }
+  const reason = transcript.comparison.kind === "diverged" ? transcript.comparison.reason : `the working copy and the canonical file disagree (${transcript.comparison.kind})`;
+  return of({ outcome: "quarantined", appended: 0, reason });
+}
+
 /** What `reconcileRootForRecovery` needs from the handle. */
 export interface RecoveryInput {
   shared: SharedSessionStore;
@@ -151,9 +175,9 @@ export interface RecoveryInput {
 }
 
 /**
- * The claude-ready copy's lines, recomputed; `undefined` when the fold cannot be shown to be the
- * record-for-record image of the canonical file (a different count or uuid sequence), in which case no
- * prefix can be proved.
+ * The claude-ready copy's lines, recomputed; `undefined` when there is no fold to prove against — the
+ * claude target cannot be resolved, or the fold is not the record-for-record image of the canonical
+ * file (a different count or uuid sequence) — in which case no prefix can be proved THROUGH the fold.
  */
 function recomputedClaudeReadyLines(canonical: SessionStoreEntry[], sidecar: Parameters<typeof toClaudeReady>[1], resolveEndpoint: RecoveryInput["resolveEndpoint"]): string[] | undefined {
   // THE TARGET IS NOT KNOWABLE after a crash, and it does not need to be: it only decides which
@@ -192,10 +216,12 @@ export async function reconcileRootForRecovery(root: string, input: RecoveryInpu
     const canonical = ((await input.shared.store.load(transcript.key)) ?? []).filter((entry) => entry["type"] !== "agent_metadata");
     const isLocalDecoration = (uuid: string): boolean => input.shared.decorations.has(transcript.key, uuid);
     // A WORKING COPY THAT IS A RECORD-FOR-RECORD PREFIX OF THE CANONICAL FILE HOLDS NOTHING TO APPEND AND
-    // NOTHING TO LOSE — whatever the claude-ready fold of the canonical file looks like. Proved against
-    // the canonical records themselves first, because the fold is not always record-for-record (it
-    // inserts decorations for foreign turns with a summary, and translates legacy compaction), and a
-    // session continued on the Winter leg after its spool copy was written is exactly such a file.
+    // NOTHING TO LOSE — whatever the claude-ready fold of the canonical file looks like, or whether one
+    // can be computed at all. Proved against the canonical records themselves first: the fold is
+    // record-for-record today (measured — decorations ride inside an entry's content, legacy compaction
+    // keeps count and uuids), but proving through it needs the endpoint resolver and the sidecar, and a
+    // prefix needs neither. Only a copy that EXTENDS or DEPARTS from the canonical records is judged
+    // against the fold below.
     const raw = canonical.map((entry) => JSON.stringify(entry));
     if (localIsCanonicalPrefix({ localPath: transcript.path, canonicalLines: raw, isDecoration: isLocalDecoration })) {
       const rawComparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: raw, isDecoration: isLocalDecoration });
@@ -233,16 +259,9 @@ export async function reconcileRootForRecovery(root: string, input: RecoveryInpu
   try {
     const report = await reconcileLocalWriteRoot(root, { shared: input.shared, judge });
     transcripts = report.transcripts.map((transcript) => {
-      if (transcript.verdict === "excluded") {
-        toQuarantine.push(transcript.localPath);
-        return outcomeOf(transcript.key, { outcome: "quarantined", appended: 0, reason: transcript.reason ?? "unprovable" });
-      }
-      if (transcript.verdict === "level") return outcomeOf(transcript.key, { outcome: "canonical-ahead", appended: 0 });
-      if (transcript.appended > 0) return outcomeOf(transcript.key, { outcome: "appended", appended: transcript.appended });
-      if (transcript.comparison.kind === "match") return outcomeOf(transcript.key, { outcome: "clean", appended: 0 });
-      // The ordinary path came back not level (the re-read after the append disagreed).
-      toQuarantine.push(transcript.localPath);
-      return outcomeOf(transcript.key, { outcome: "quarantined", appended: 0, reason: `the canonical file is not level with the working copy after the append (${transcript.comparison.kind})` });
+      const outcome = recoveryOutcomeOf(transcript);
+      if (outcome.outcome === "quarantined") toQuarantine.push(transcript.localPath);
+      return outcome;
     });
   } catch (error) {
     if (error instanceof RunHomeError) throw error;

@@ -316,7 +316,9 @@ export interface RuntimeSdk {
    * `quarantined` (unprovable: its file is copied to `<home>/cache/quarantine/`, nothing of it is
    * appended, its session keeps its repair flag). The root `outcome` is `quarantined` if any transcript
    * was, else `appended` if any was, else `clean`. A session's repair flag is cleared when every one of
-   * its transcripts came back level.
+   * its transcripts came back level — `canonical-ahead` included, without checking for a live writer (the
+   * store facade keeps no live-session registry to check against), so a host MUST let this finish
+   * before any session whose key it recovers opens. The daemon runs it at boot, before sessions open.
    */
   reconcileRootForRecovery(root: string): Promise<RecoveryReport>;
   dispose(): Promise<void>;

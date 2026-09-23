@@ -227,3 +227,47 @@ describe("the hook inside the proxy's gate", () => {
     expect(seenAtExit).toEqual(["safe"]);
   });
 });
+
+describe("minors round, item 6: the exit reconcile (no judge) clears repair flags PER SESSION", () => {
+  test("a root with one level session and one diverged session: the root is quarantined, the level session's flag is cleared, the diverged one's stays", async () => {
+    const bed = runHomeBed();
+    const failing = { on: false };
+    class FlakyStore extends WinterCompatibilitySessionStore {
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        if (failing.on) throw new Error("the disk said no");
+        return super.append(key, entries);
+      }
+    }
+    const { peer } = createFakeWinterPeer();
+    const peers = { winter: { ...peer, WinterCompatibilitySessionStore: FlakyStore } as unknown as RuntimeSdkPeers["winter"] };
+    const shared = createSharedSessionStore({ peers, winterHome: bed.home, storeHome: bed.sdk, policy: { batchWindowMs: 1, backoffMs: 1 } });
+    const level: SessionKey = { projectKey: KEY.projectKey, sessionId: "aaaaaaaa-0000-4000-8000-00000000000a" };
+    const diverged: SessionKey = { projectKey: KEY.projectKey, sessionId: "bbbbbbbb-0000-4000-8000-00000000000b" };
+    const forKey = (key: SessionKey, entries: SessionStoreEntry[]): SessionStoreEntry[] => entries.map((entry) => ({ ...entry, sessionId: key.sessionId }));
+    const levelEntries = forKey(level, chain(3));
+    const divergedEntries = forKey(diverged, chain(2));
+    await shared.store.append(level, levelEntries.slice(0, 2));
+    await shared.store.append(diverged, divergedEntries);
+    await shared.settle();
+    failing.on = true;
+    for (const key of [level, diverged]) {
+      await shared.store.append(key, forKey(key, chain(1)));
+      await shared.settle(key);
+      expect(shared.health(key).transcriptHealth).toBe("repair-required");
+    }
+    failing.on = false;
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    const write = (key: SessionKey, entries: SessionStoreEntry[]): void => {
+      const dir = join(runFolder, "projects", key.projectKey);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${key.sessionId}.jsonl`), entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+    };
+    write(level, levelEntries); // an appendable tail
+    write(diverged, [divergedEntries[0]!, forKey(diverged, chain(1, String(divergedEntries[0]!["uuid"])))[0]!]); // a line the canonical file never had
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 5, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("quarantined");
+    expect(shared.health(level).transcriptHealth).toBe("ok");
+    expect(shared.health(diverged).transcriptHealth).toBe("repair-required");
+  });
+});
