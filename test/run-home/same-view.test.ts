@@ -377,7 +377,10 @@ async function withSameViewBed<T>(
                 /* a shape this bed did not anticipate: recorded as empty, still answered */
               }
               requests.push(body);
-              const turn = turns[Math.min(toolResultsIn(body), turns.length - 1)] ?? { text: "ok" };
+              // A subagent's own requests (its prompt carries this marker) get a plain answer, so a script
+              // indexed by the parent's tool results is never replayed inside the subagent.
+              const isSubagent = JSON.stringify(body["messages"] ?? []).includes("SUBAGENT-PROMPT-7f");
+              const turn = isSubagent ? { text: "sub done" } : (turns[Math.min(toolResultsIn(body), turns.length - 1)] ?? { text: "ok" });
               const usage = { input_tokens: 10, output_tokens: 2 };
               // The Winter runtime streams (SSE); the pinned claude accepts a plain message body.
               if (body["stream"] === true) {
@@ -1109,6 +1112,74 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
       expect(seen["claude"]?.workflow).toContain("Workflow launched");
       expect(seen["claude"]?.workflow).toContain("the fixture workflow");
     });
+  });
+
+  describe("session artifacts survive the run folder (official leg), and what each leg's transcript points at", () => {
+    // MEASURED (claude 2.1.250): a large tool output is saved to `<config dir>/projects/<key>/<sid>/
+    // tool-results/<id>.txt` and the transcript names that ABSOLUTE path; a launched workflow saves
+    // `workflows/scripts/<name>-<run>.js` and `workflows/<run>.json`; a subagent adds
+    // `subagents/agent-<id>.meta.json` beside its transcript.
+    const seen: Record<string, { persisted: boolean; references: string[]; existsAfterDispose: boolean[]; storeHas: boolean[]; storeFiles: string[] }> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          turns: () => [
+            { toolUses: [{ id: "toolu_big", name: "Bash", input: { command: "seq 1 120000", description: "print a lot" } }] },
+            { toolUses: [{ id: "toolu_wf", name: "Workflow", input: { name: PLUGIN_WORKFLOW } }] },
+            { toolUses: [{ id: "toolu_agent", name: "Agent", input: { description: "a sub", prompt: "SUBAGENT-PROMPT-7f say hi", subagent_type: "general-purpose" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const allow: CanUseToolLike = async (_tool, input) => ({ behavior: "allow", updatedInput: input });
+          const storeProjects = join(bed.session.brandHome, "sdk", "projects");
+          const measure = async (leg: "claude" | "winter", runHome: RunHome, run: () => Promise<Run>): Promise<void> => {
+            const result = await run();
+            await Bun.sleep(1500);
+            const text = JSON.stringify(result.requests.at(-1)?.["messages"] ?? []);
+            const persisted = text.includes("<persisted-output>");
+            const references = [...new Set([...text.matchAll(/(\/[^"\\ ]*?\/projects\/[^"\\ ]*?\/tool-results\/[^"\\ ]+?\.txt)/g)].map((match) => match[1]!))];
+            await runHome.dispose();
+            const relativeToProjects = (path: string): string => path.slice(path.indexOf("/projects/") + "/projects/".length);
+            const files = Bun.spawnSync(["/bin/sh", "-c", `cd '${storeProjects}' && find . -type f | sort`]).stdout.toString().split("\n").filter((line) => line.length > 0);
+            seen[leg] = {
+              persisted,
+              references,
+              existsAfterDispose: references.map((path) => existsSync(path)),
+              storeHas: references.map((path) => existsSync(join(storeProjects, relativeToProjects(path)))),
+              storeFiles: files,
+            };
+          };
+          const official = await bed.build("official");
+          await measure("claude", official, () => bed.runClaude(official, "s_sv_artifacts", { canUseTool: allow }));
+          const winter = await bed.build("winter");
+          await measure("winter", winter, () => bed.runWinter(winter, { canUseTool: allow }));
+          verbose("session artifacts", seen);
+        },
+      );
+    }, TIMEOUT);
+    test("official leg: after the run folder is disposed, the large tool result, the workflow's script and run record, and the subagent metadata are in sdk/projects/<key>/<sid>/", () => {
+      const files = seen["claude"]!.storeFiles;
+      for (const pattern of [/\/tool-results\/[^/]+\.txt$/, /\/workflows\/scripts\/sv-flow-[^/]+\.js$/, /\/workflows\/wf_[^/]+\.json$/, /\/subagents\/agent-[^/]+\.meta\.json$/]) {
+        expect([String(pattern), files.some((file) => pattern.test(file))]).toEqual([String(pattern), true]);
+      }
+      // The file the transcript names is in the store, under the same path below `projects/`.
+      expect(seen["claude"]!.references.length).toBeGreaterThan(0);
+      expect(seen["claude"]!.storeHas.every(Boolean)).toBe(true);
+    });
+    test.todo(
+      "Winter leg: a large tool output is persisted like claude's (`<persisted-output>` + a tool-results file the transcript names) — SV-10 (the Winter runtime returns the whole 711.8 KB `seq 1 120000` output inline; claude saves it to `tool-results/<id>.txt` and sends a 2 KB preview)",
+      () => {
+        expect({ persisted: seen["winter"]!.persisted, named: seen["winter"]!.references.length > 0, survives: seen["winter"]!.storeHas.every(Boolean) }).toEqual({ persisted: true, named: true, survives: true });
+      },
+    );
+    test.todo(
+      "official leg: the LITERAL path the transcript names still resolves after the run folder is disposed — R-2 (claude writes `<run folder>/projects/<key>/<sid>/tool-results/<id>.txt` into the transcript as an absolute path; the carried-back copy lives at `<sdk>/projects/<key>/<sid>/tool-results/<id>.txt`, so a later generation that Reads the named path gets ENOENT — needs a ruling)",
+      () => {
+        expect(seen["claude"]!.existsAfterDispose.every(Boolean)).toBe(true);
+      },
+    );
   });
 
   describe("untrusted project: every project item is absent on both", () => {
