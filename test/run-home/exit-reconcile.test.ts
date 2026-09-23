@@ -156,6 +156,36 @@ describe("the exit reconcile", () => {
   });
 });
 
+describe("fix round 1, I3: a failed mirror batch is repaired by the exit reconcile, not quarantined", () => {
+  test("the batch fails (append-failed), the reconcile appends the whole working copy, the outcome is safe", async () => {
+    const bed = runHomeBed();
+    const failing = { on: false };
+    class FlakyStore extends WinterCompatibilitySessionStore {
+      override async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+        if (failing.on) throw new Error("the disk said no");
+        return super.append(key, entries);
+      }
+    }
+    const { peer } = createFakeWinterPeer();
+    const peers = { winter: { ...peer, WinterCompatibilitySessionStore: FlakyStore } as unknown as RuntimeSdkPeers["winter"] };
+    const shared = createSharedSessionStore({ peers, winterHome: bed.home, storeHome: bed.sdk, policy: { batchWindowMs: 1, backoffMs: 1 } });
+    const entries = chain(3);
+    failing.on = true;
+    await shared.store.append(KEY, entries); // the wrapper's mirror batch — every attempt fails
+    await shared.settle(KEY);
+    expect(shared.health(KEY).transcriptHealth).toBe("repair-required");
+    expect(shared.health(KEY).errors.at(-1)?.cause).toBe("append-failed");
+    failing.on = false;
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, entries); // claude's own local copy has all three
+    const outcomes = new Map<string, RunHomeOutcome>();
+    await hook({ shared, home: bed.home, mirrored: 3, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    expect(outcomes.get("run-1")).toBe("safe");
+    expect(canonicalLines(bed.sdk).map((line) => (JSON.parse(line) as { uuid: string }).uuid)).toEqual(entries.map((entry) => String(entry["uuid"])));
+    expect(shared.health(KEY).transcriptHealth).toBe("ok");
+  });
+});
+
 describe("the hook inside the proxy's gate", () => {
   test("the outcome is recorded BEFORE the SDK can observe the exit", async () => {
     const bed = runHomeBed();

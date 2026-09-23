@@ -437,7 +437,9 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
   const batches = new Map<string, PendingBatch>();
   /**
    * The most recent uuids appended through this facade, per exact key (subpath included) — the
-   * idempotence guard above. BOUNDED, because a late duplicate is always a recent record: the last
+   * idempotence guard above. A uuid is held from the moment its batch is queued; a batch that ends
+   * `append-failed` is FORGOTTEN (it never landed, so a later append of it is a repair, not a duplicate),
+   * while a `timed-out` one is kept (it may still land). BOUNDED, because a late duplicate is always a recent record: the last
    * `RECENT_UUIDS_PER_KEY` are enough to catch a wrapper's final batch, and a daemon's lifetime of
    * sessions must not grow this without limit.
    */
@@ -463,6 +465,17 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
       out.push(entry);
     }
     return out;
+  };
+  /** Removes a failed batch's uuids from the idempotence guard (they never reached the file). */
+  const forgetAppended = (key: SessionKey, entries: readonly SessionStoreEntry[]): void => {
+    const recent = recentUuids.get(keyOf(key));
+    if (recent === undefined) return;
+    for (const entry of entries) {
+      const uuid = entry["uuid"];
+      if (typeof uuid !== "string" || !recent.set.delete(uuid)) continue;
+      const index = recent.order.indexOf(uuid);
+      if (index >= 0) recent.order.splice(index, 1);
+    }
   };
   const sessions = new Map<string, SessionState>();
 
@@ -532,6 +545,11 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
             cause: "append-failed",
             detail: error instanceof Error ? error.message : String(error),
           });
+          // FIX ROUND 1, I3: THESE RECORDS DID NOT LAND, so they are not "already appended": forget them,
+          // or the idempotence guard would drop the very repair the exit reconcile makes from the working
+          // copy. (A TIMED-OUT attempt keeps them — that write may still land, and a second copy of it is
+          // exactly what the guard is for.)
+          forgetAppended(key, entries);
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, policy.backoffMs));
