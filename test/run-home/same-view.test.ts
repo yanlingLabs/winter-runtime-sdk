@@ -126,6 +126,10 @@ interface SameView {
 interface Run {
   messages: Array<Record<string, unknown>>;
   requests: Array<Record<string, unknown>>;
+  /** Touch 3: epoch ms — when the run began, when each message arrived, when each request reached the loopback. */
+  startedAt: number;
+  messageTimes: number[];
+  requestTimes: number[];
   stderr: string;
   hookRuns: number;
   mcpStarted: string[];
@@ -273,13 +277,17 @@ const isFixtureMcpTool = (name: string): boolean => name.startsWith("mcp__sv-");
 
 /**
  * A minimal stdio MCP server (newline-delimited JSON-RPC): `initialize`, `tools/list` with one `echo`
- * tool, `tools/call` answering `MCP-ECHO <server>: <text>`, `ping`. argv: <start marker> <server name>.
+ * tool, `tools/call` answering `MCP-ECHO <server>: <text>`, `ping`. argv: <start marker> <server name> [ms to wait before answering `initialize` — Touch 3].
+ * Timing lines `at <event> <epoch ms>` (start, initialize-received, initialize-answered, call) go to the
+ * marker file too; the start and listed counters read only their own exact lines.
  * It records its start FIRST (the SV-2 guard counts `started` lines), a `listed` line each time a client
  * reads its tool list, and exits when its client closes stdin.
  */
 const MCP_FIXTURE_SERVER = `import { appendFileSync } from "node:fs";
-const [marker, name] = process.argv.slice(2);
+const [marker, name, initializeDelay] = process.argv.slice(2);
 appendFileSync(marker, "started\\n");
+const at = (event) => appendFileSync(marker, "at " + event + " " + Date.now() + "\\n");
+at("start");
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 let buffer = "";
 process.stdin.setEncoding("utf8");
@@ -294,12 +302,21 @@ process.stdin.on("data", (chunk) => {
     try { message = JSON.parse(line); } catch { continue; }
     if (message.id === undefined || message.id === null) continue;
     const reply = (result) => send({ jsonrpc: "2.0", id: message.id, result });
-    if (message.method === "initialize") reply({ protocolVersion: message.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name, version: "1.0.0" } });
+    if (message.method === "initialize") {
+      at("initialize-received");
+      setTimeout(() => {
+        at("initialize-answered");
+        reply({ protocolVersion: message.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name, version: "1.0.0" } });
+      }, Number(initializeDelay ?? 0));
+    }
     else if (message.method === "tools/list") {
       appendFileSync(marker, "listed\\n");
       reply({ tools: [{ name: "${MCP_TOOL}", description: "echoes its text (" + name + ")", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }] });
     }
-    else if (message.method === "tools/call") reply({ content: [{ type: "text", text: "${MCP_ECHO_MARK} " + name + ": " + String(message.params?.arguments?.text ?? "") }] });
+    else if (message.method === "tools/call") {
+      at("call");
+      reply({ content: [{ type: "text", text: "${MCP_ECHO_MARK} " + name + ": " + String(message.params?.arguments?.text ?? "") }] });
+    }
     else if (message.method === "ping") reply({});
     else send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "method not found" } });
   }
@@ -509,6 +526,7 @@ async function withSameViewBed<T>(
   const projectKey = winterSdk.transcriptProjectKey(fixture.root);
   const fakes = await anthropicFake();
   const requests: Array<Record<string, unknown>> = [];
+  const requestTimes: number[] = [];
   const hooks: SameViewBed["hooks"] = {};
   const live: SameViewBed["live"] = {};
   return withLoopbackFake(
@@ -526,6 +544,7 @@ async function withSameViewBed<T>(
                 /* a shape this bed did not anticipate: recorded as empty, still answered */
               }
               requests.push(body);
+              requestTimes.push(Date.now());
               // A subagent's own requests (its prompt carries this marker) get a plain answer, so a script
               // indexed by the parent's tool results is never replayed inside the subagent.
               const isSubagent = JSON.stringify(body["messages"] ?? []).includes("SUBAGENT-PROMPT-7f");
@@ -599,9 +618,12 @@ async function withSameViewBed<T>(
           .sort();
       };
       const hookRuns = (): number => (existsSync(fixture.marker) ? readFileSync(fixture.marker, "utf8").split("\n").filter((line) => line === "ran").length : 0);
-      const drain = async (query: unknown): Promise<Array<Record<string, unknown>>> => {
+      const drain = async (query: unknown, times: number[]): Promise<Array<Record<string, unknown>>> => {
         const out: Array<Record<string, unknown>> = [];
-        for await (const message of query as AsyncIterable<Record<string, unknown>>) out.push(message);
+        for await (const message of query as AsyncIterable<Record<string, unknown>>) {
+          out.push(message);
+          times.push(Date.now());
+        }
         return out;
       };
       const allow = async (_name: string, input: Record<string, unknown>) => ({ behavior: "allow", updatedInput: input });
@@ -630,6 +652,9 @@ async function withSameViewBed<T>(
           }),
         async runWinter(runHome, over = {}) {
           requests.length = 0;
+          requestTimes.length = 0;
+          const startedAt = Date.now();
+          const messageTimes: number[] = [];
           const before = hookRuns();
           const startsBefore = fixture.mcpStarts();
           const stderr: string[] = [];
@@ -651,13 +676,17 @@ async function withSameViewBed<T>(
                 runtime: { runHome },
               } as never,
             }),
+            messageTimes,
           );
           delete live.mcpStatus;
-          return { messages, requests: [...requests], stderr: stderr.join(""), hookRuns: hookRuns() - before, mcpStarted: await startedSince(startsBefore) };
+          return { messages, requests: [...requests], startedAt, messageTimes, requestTimes: [...requestTimes], stderr: stderr.join(""), hookRuns: hookRuns() - before, mcpStarted: await startedSince(startsBefore) };
           // (the Winter runtime's Query offers no `initializationResult`, so no style list is read here)
         },
         async runClaude(runHome, winterSessionId, over = {}) {
           requests.length = 0;
+          requestTimes.length = 0;
+          const startedAt = Date.now();
+          const messageTimes: number[] = [];
           const before = hookRuns();
           const startsBefore = fixture.mcpStarts();
           // A PERMISSION MODE IS SET LIVE (the pin's own control request) on a streamed prompt: the
@@ -682,6 +711,7 @@ async function withSameViewBed<T>(
             const out: Array<Record<string, unknown>> = [];
             for await (const message of handle as AsyncIterable<Record<string, unknown>>) {
               out.push(message);
+              messageTimes.push(Date.now());
               if (stream !== undefined && message["type"] === "result") stream.close();
             }
             return out;
@@ -695,6 +725,9 @@ async function withSameViewBed<T>(
           return {
             messages,
             requests: [...requests],
+            startedAt,
+            messageTimes,
+            requestTimes: [...requestTimes],
             stderr: "",
             hookRuns: hookRuns() - before,
             mcpStarted: await startedSince(startsBefore),
@@ -1655,6 +1688,143 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     test("a scripted call to each folded server's tool gets its result on the Winter runtime too (needs SDK round 19)", () => {
       expect(measured["winter"]?.called).toEqual(measured["claude"]?.called);
+    });
+  });
+
+  // TOUCH 3: claude's SDK-driven runner waits up to 2 s for pending MCP servers before its first turn
+  // (the SDK reviewer, 2.1.250: `runHeadless`, `km` default 2000 ms with `waitForDeferrable`; `system/init`
+  // is built per query AFTER the wait). A server connecting within that window is in claude's init AND
+  // its first request; one connecting later is not. Two servers under `node` (never `bun`: its startup
+  // alone took 2.5–4.5 s here, Touch 2) answer `initialize` after ~1 s and ~3.5 s. NO hold on any answer.
+  const NODE = Bun.which("node");
+  if (NODE === null) {
+    // eslint-disable-next-line no-console
+    console.warn("[same-view] SKIPPING the Touch 3 MCP prewait row — it needs `node` on PATH (bun's own startup would swamp the 1 s / 3.5 s timing)");
+  }
+  (NODE === null ? describe.skip : describe)("Touch 3: the pre-first-turn MCP wait — a server connecting within 2 s is in the init report AND the first request; one connecting later is not, until a later turn", () => {
+    const FAST = "sv-fast-mcp";
+    const SLOW = "sv-slow-mcp";
+    const DELAY: Record<string, number> = { [FAST]: 1000, [SLOW]: 3500 };
+    /**
+     * Turn 0 calls BOTH tools, plus a `Bash` `sleep` — so turn 1's request is built after the slow
+     * server has connected on EITHER leg, whatever turn 0's MCP calls did (the tool's own latency, not a
+     * hold on an answer; the first attempt put the delay in the fast call itself, which coupled the slow
+     * row to the fast one). Turn 1 (three tool results in the conversation) calls the slow one again.
+     */
+    const SLEEP_S = 5;
+    type Kind = string;
+    interface Observed {
+      init: Record<string, string>;
+      firstRequest: Record<string, boolean>;
+      turn0: Record<string, Kind>;
+      turn1Request: Record<string, boolean>;
+      turn1: Record<string, Kind>;
+    }
+    const observed: Record<string, Observed> = {};
+    const timings: Record<string, Record<string, number | null>> = {};
+    const refusalText: Record<string, string> = {};
+    beforeAll(async () => {
+      const t0 = {
+        toolUses: [
+          { id: "toolu_t0_fast", name: mcpToolName(FAST), input: { text: "t0 fast" } },
+          { id: "toolu_t0_slow", name: mcpToolName(SLOW), input: { text: "t0 slow" } },
+          { id: "toolu_t0_sleep", name: "Bash", input: { command: `sleep ${SLEEP_S}`, description: "wait a moment" } },
+        ],
+      };
+      const t1 = { toolUses: [{ id: "toolu_t1_slow", name: mcpToolName(SLOW), input: { text: "t1 slow" } }] };
+      // Indexed by the tool results in the conversation: 0 → turn 0; 3 → turn 1; 4 → done.
+      await withSameViewBed({ trusted: true, turns: () => [t0, t1, t1, t1, { text: "done" }] }, async (bed) => {
+        const sdkHome = join(bed.session.brandHome, "sdk");
+        const markers = join(bed.session.home, "markers", "mcp");
+        const script = join(bed.session.home, "markers", "mcp-server.mjs");
+        const config = JSON.parse(readFileSync(join(sdkHome, ".winter.json"), "utf8")) as { mcpServers: Record<string, unknown> };
+        for (const name of [FAST, SLOW]) config.mcpServers[name] = { type: "stdio", command: NODE as string, args: [script, join(markers, name), name, String(DELAY[name])] };
+        writeFileSync(join(sdkHome, ".winter.json"), `${JSON.stringify(config)}\n`);
+        /** The server's `at <event> <ms>` lines at or after `since`, first of each event. */
+        const eventsOf = (name: string, since: number): Record<string, number> => {
+          const path = join(markers, name);
+          const out: Record<string, number> = {};
+          if (!existsSync(path)) return out;
+          for (const line of readFileSync(path, "utf8").split("\n")) {
+            const match = /^at (\S+) (\d+)$/.exec(line);
+            if (match === null || Number(match[2]) < since || out[match[1]!] !== undefined) continue;
+            out[match[1]!] = Number(match[2]);
+          }
+          return out;
+        };
+        const mainRequests = (run: Run): Array<{ body: Record<string, unknown>; at: number }> =>
+          run.requests.map((body, index) => ({ body, at: run.requestTimes[index]! })).filter(({ body }) => Array.isArray(body["tools"]) && (body["tools"] as unknown[]).length > 0);
+        const offers = (body: Record<string, unknown> | undefined, name: string): boolean => ((body?.["tools"] as Array<{ name?: unknown }> | undefined) ?? []).some((tool) => tool.name === mcpToolName(name));
+        const resultText = (run: Run, toolUseId: string): string | undefined => {
+          for (const body of run.requests) {
+            for (const message of (body["messages"] ?? []) as Array<{ content?: unknown }>) {
+              if (!Array.isArray(message.content)) continue;
+              for (const block of message.content as Array<Record<string, unknown>>) {
+                if (block["type"] !== "tool_result" || block["tool_use_id"] !== toolUseId) continue;
+                const content = block["content"];
+                return typeof content === "string" ? content : JSON.stringify(content);
+              }
+            }
+          }
+          return undefined;
+        };
+        const kindOf = (text: string | undefined, server: string, said: string): Kind => {
+          if (text === undefined) return "no result";
+          if (text.includes(`${MCP_ECHO_MARK} ${server}: ${said}`)) return "echo";
+          if (text.includes("No such tool available")) return "No such tool available";
+          return `other: ${text.slice(0, 160)}`;
+        };
+        const measure = async (leg: string, run: () => Promise<Run>): Promise<void> => {
+          const result = await run();
+          const init = initOf(result);
+          const initIndex = result.messages.indexOf(init as Record<string, unknown>);
+          const statuses = Object.fromEntries(((init?.["mcp_servers"] as Array<{ name: string; status: string }> | undefined) ?? []).map((server) => [server.name, server.status]));
+          const main = mainRequests(result);
+          const turn1 = main.find(({ body }) => toolResultsIn(body) === 3);
+          observed[leg] = {
+            init: { [FAST]: statuses[FAST] ?? "absent", [SLOW]: statuses[SLOW] ?? "absent" },
+            firstRequest: { [FAST]: offers(main[0]?.body, FAST), [SLOW]: offers(main[0]?.body, SLOW) },
+            turn0: { [FAST]: kindOf(resultText(result, "toolu_t0_fast"), FAST, "t0 fast"), [SLOW]: kindOf(resultText(result, "toolu_t0_slow"), SLOW, "t0 slow") },
+            turn1Request: { [SLOW]: offers(turn1?.body, SLOW) },
+            turn1: { [SLOW]: kindOf(resultText(result, "toolu_t1_slow"), SLOW, "t1 slow") },
+          };
+          refusalText[leg] = (resultText(result, "toolu_t0_slow") ?? "").slice(0, 200);
+          const since = result.startedAt;
+          const rel = (at: number | undefined): number | null => (at === undefined ? null : at - since);
+          const fast = eventsOf(FAST, since);
+          const slow = eventsOf(SLOW, since);
+          timings[leg] = {
+            fastStart: rel(fast["start"]),
+            fastInitializeAnswered: rel(fast["initialize-answered"]),
+            slowStart: rel(slow["start"]),
+            slowInitializeAnswered: rel(slow["initialize-answered"]),
+            initFrame: initIndex < 0 ? null : rel(result.messageTimes[initIndex]),
+            firstRequest: rel(main[0]?.at),
+            turn1Request: rel(turn1?.at),
+          };
+        };
+        await measure("claude", async () => bed.runClaude(await bed.build("official"), "s_sv_mcp_prewait"));
+        await measure("winter", async () => bed.runWinter(await bed.build("winter")));
+        verbose("mcp prewait", { observed, timings, refusalText });
+      });
+    }, TIMEOUT);
+    const expected: Observed = {
+      init: { [FAST]: "connected", [SLOW]: "pending" },
+      firstRequest: { [FAST]: true, [SLOW]: false },
+      turn0: { [FAST]: "echo", [SLOW]: "No such tool available" },
+      turn1Request: { [SLOW]: true },
+      turn1: { [SLOW]: "echo" },
+    };
+    const fastRow = (o: Observed | undefined) => ({ init: o?.init[FAST], firstRequest: o?.firstRequest[FAST], turn0: o?.turn0[FAST] });
+    const slowRow = (o: Observed | undefined) => ({ init: o?.init[SLOW], firstRequest: o?.firstRequest[SLOW], turn0: o?.turn0[SLOW], turn1Request: o?.turn1Request[SLOW], turn1: o?.turn1[SLOW] });
+    test("claude (the reference): the ~1 s server is `connected` in its init report, in its first request, and its turn-0 call succeeds; the ~3.5 s server is `pending`, absent from the first request, answered \"No such tool available\" on turn 0, and offered and callable on turn 1", () => {
+      expect(observed["claude"]).toEqual(expected);
+    });
+    test("the Winter runtime, the ~1 s server: the same as claude — `connected` at init, in the first request, its turn-0 call succeeds (RED at ws21/sdk@b97200a: round 19 removed the pre-first-turn wait; round 20 restores it)", () => {
+      expect(fastRow(observed["winter"])).toEqual(fastRow(observed["claude"]));
+    });
+    test("the Winter runtime, the ~3.5 s server: the same as claude — `pending` at init, absent from the first request, \"No such tool available\" on turn 0, offered and callable on turn 1", () => {
+      expect(slowRow(observed["winter"])).toEqual(slowRow(observed["claude"]));
     });
   });
 
