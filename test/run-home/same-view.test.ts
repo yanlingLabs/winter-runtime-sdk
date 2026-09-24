@@ -566,16 +566,14 @@ const GUARDS: Partial<Record<Item, { id: string; trustedOnly?: boolean }>> = {
   mcpStarted: { id: "SV-2 guard" },
   hookRuns: { id: "SV-3 guard: claude's `hooks/hooks.json` `{ hooks: … }` document is unwrapped" },
   workflows: { id: "SV-5 guard: a workflow is listed under `meta.name` in init `skills`, `slash_commands` and the Skill listing" },
+  slashDuplicates: { id: "SV-9 guard: every workflow is listed ONCE in init `slash_commands` (a regression at ws21/sdk@20b623e, fixed by 6170adb)" },
 };
 
 /**
  * SV-n STILL OPEN: a measured difference in the Winter runtime's own reading, kept as a `test.todo`
  * (the real assertion; `bun test --todo` fails it the moment the SDK is fixed).
  */
-const LEDGER: Partial<Record<Item, string>> = {
-  slashDuplicates:
-    "SV-9 (regression at ws21/sdk@20b623e: the Winter runtime lists every workflow TWICE in init `slash_commands` — once through the synthetic workflow skills, once through the explicit append)",
-};
+const LEDGER: Partial<Record<Item, string>> = {};
 
 function itemTests(label: string, trusted: boolean, views: () => { claude: SameView; winter: SameView }): void {
   for (const item of ITEMS) {
