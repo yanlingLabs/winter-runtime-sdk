@@ -1325,6 +1325,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
       projectDeny: ["denied.txt"],
       backslash: ["b\\x", "f.txt"],
       backslashParen: ["q\\(y", "f.txt"],
+      trailingSpace: ["sp "],
       protectedItem: ["p", ".winter", "skills", "x", "SKILL.md"],
     } as const;
     type Target = keyof typeof TARGETS;
@@ -1334,7 +1335,9 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         {
           trusted: true,
           dirName: "Project (old)",
-          userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(join(root, "b\\x"))}/**)`, `Edit(/${escapeRulePath(join(root, "q\\(y"))}/**)`] }),
+          // The trailing-space FILE ends its rule. MEASURED unescaped: claude 2.1.250 still denied it, the
+          // Winter runtime at 6170adb dropped the space and let the write through; escaped, both deny.
+          userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(join(root, "b\\x"))}/**)`, `Edit(/${escapeRulePath(join(root, "q\\(y"))}/**)`, `Edit(/${escapeRulePath(join(root, "sp "))})`] }),
           turns: (root) => [
             ...Object.entries(TARGETS).map(([name, parts]) => ({ toolUses: [{ id: `toolu_${name}`, name: "Write", input: { file_path: join(root, ...parts), content: `${name}\n` } }] })),
             { text: "done" },
@@ -1366,6 +1369,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         projectDeny: { asked: false, written: false },
         backslash: { asked: false, written: false },
         backslashParen: { asked: false, written: false },
+        trailingSpace: { asked: false, written: false },
         protectedItem: { asked: true, written: false },
       });
     });

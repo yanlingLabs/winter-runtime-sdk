@@ -74,6 +74,11 @@ describe("WS-21 Contract A: helpers and constants", () => {
     // The helper itself, exported for a host that spells rules over the same paths.
     expect(router.escapeRulePath(String.raw`/x/[a]*b?\c`)).toBe(String.raw`/x/\\[a\\]\\*b?\\\\c`);
     expect(router.escapeRulePath(String.raw`/p (old)/q\(y`)).toBe(String.raw`/p \\\(old\\\)/q\\\\\\\(y`);
+    // Trailing whitespace is escaped char by char, as claude's own path escaper does (gitignore drops an
+    // unescaped trailing space), so the helper is safe for a path that ENDS the rule.
+    expect(router.escapeRulePath("/x/sp ")).toBe(String.raw`/x/sp\\ `);
+    expect(router.escapeRulePath("/x/tab\t \t")).toBe(`/x/tab${String.raw`\\`}\t${String.raw`\\`} ${String.raw`\\`}\t`);
+    expect(router.escapeRulePath("/x/in side/y")).toBe("/x/in side/y");
   });
 
   test("escapeRulePath is claude's rule-content escape over the gitignore-layer escape: the read side's one unescape gives back the gitignore pattern, and the rule's own parens stay findable", () => {
@@ -98,6 +103,13 @@ describe("WS-21 Contract A: helpers and constants", () => {
     const escapeRulePathFor = (path: string): string => router.escapeRulePath(path);
     for (const path of ["/x/[wip] app", String.raw`/x/a\b`, "/x/Project (old)", "/x/p (x", "/x/p x)", String.raw`/x/q\(y`, String.raw`/x/q\)`, String.raw`/x/q8\[w] *z`, String.raw`/x/end\\`]) {
       expect([path, parse(`Edit(${escapeRulePathFor(path)}/**)`)]).toEqual([path, { tool: "Edit", content: `${gitignore(path)}/**` }]);
+      // And as the LAST part of the rule, where a trailing backslash or space matters most.
+      expect([path, parse(`Edit(${escapeRulePathFor(path)})`)]).toEqual([path, { tool: "Edit", content: gitignore(path) }]);
+    }
+    for (const path of ["/x/sp ", "/x/sp  \t"]) {
+      const trailing = path.length - path.trimEnd().length;
+      const expected = `${gitignore(path.trimEnd())}${[...path.slice(path.length - trailing)].map((character) => `\\${character}`).join("")}`;
+      expect([path, parse(`Edit(${escapeRulePathFor(path)})`)]).toEqual([path, { tool: "Edit", content: expected }]);
     }
   });
 
