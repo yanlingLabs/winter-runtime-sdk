@@ -152,8 +152,18 @@ export function fsRootAnchored(absPath: string): string {
 /**
  * A literal PATH, spelled for the content of a permission rule (`Tool(<content>)`): TWO LAYERS.
  *
- * 1. The gitignore layer: `\`, `[`, `]`, `*`, `(` and `)` are backslash-escaped, so a directory named
- *    `[wip] app` is that directory rather than a character class. `?` stays RAW.
+ * 1. The gitignore layer is claude's OWN path escaper, character for character (`I_t` in claude 2.1.250,
+ *    called with `escapeGlobs`, as its "allow this directory" rule builder calls it; R.3 M1):
+ *
+ *      I_t(e,r){let t=e.replaceAll("\\","\\\\").replace(/[[\]()|+^$]/g,(n)=>`\\${n}`);
+ *        if(r?.escapeGlobs)t=t.replaceAll("*","\\*");if(t.startsWith("!")||t.startsWith("#"))t=`\\${t}`;
+ *        return t=t.replace(/\s+$/,(n)=>Array.from(n,(s)=>`\\${s}`).join("")),t}
+ *
+ *    So `\ [ ] ( ) | + ^ $ *` are backslash-escaped (a directory named `[wip] app` is that directory,
+ *    not a character class), a LEADING `!` or `#` is backslash-prefixed (never the case for an absolute
+ *    path), TRAILING whitespace is escaped char by char (the gitignore layer drops an unescaped trailing
+ *    space), and `?` stays RAW. node-ignore reads an escaped `| + ^ $` as the literal character, so those
+ *    four match exactly as before; the table is simply claude's own.
  * 2. Claude's own rule-content escape over that (`c()` in claude 2.1.250, verbatim):
  *    `replaceAll("\\","\\\\").replaceAll("(","\\(").replaceAll(")","\\)")`. The read side finds the
  *    content between the first and the last UNESCAPED paren (an even run of backslashes before it) and
@@ -161,7 +171,8 @@ export function fsRootAnchored(absPath: string): string {
  *    rule strings this way (the Winter runtime since `ws21/sdk`@6170adb, L1a's port).
  *
  * THE TABLE, per character of the path: `\` → `\\\\` (four), `[` → `\\[`, `]` → `\\]`, `*` → `\\*`,
- * `(` → `\\\(`, `)` → `\\\)`, `?` → `?`; everything else as written.
+ * `(` → `\\\(`, `)` → `\\\)`, `|` → `\\|`, `+` → `\\+`, `^` → `\\^`, `$` → `\\$`, `?` → `?`; a leading
+ * `!`/`#` → `\\!`/`\\#`; trailing whitespace → `\\<char>` each; everything else as written.
  *
  * MEASURED on claude 2.1.250 and on the Winter runtime at 6170adb (a Write under a directory of each
  * name, a user-tier deny rule; the escape-table round): a literal `\` matches only as four; unescaped
@@ -170,16 +181,18 @@ export function fsRootAnchored(absPath: string): string {
  * gitignore layer too, not only by `c()`: with `c()` alone, a `\` followed by `(` becomes `\\\\\(`,
  * which unescapes to `\\(` — and both runtimes then fail to compile the rule ("Invalid regular
  * expression: missing )"; claude errors every file tool call, the Winter runtime fails the run). With
- * the paren escaped at both layers (claude's own path escaper does the same at the gitignore layer) the
- * rule compiles and matches on both. `{}`, `!`, `#` and inner spaces are literal as written; TRAILING
- * whitespace is escaped char by char (each becomes `\\<char>`), as claude's path escaper does (final round).
+ * the paren escaped at both layers (as `I_t` does) the rule compiles and matches on both. `{}`, a
+ * mid-path `!`/`#` and inner spaces are literal as written.
  */
 export function escapeRulePath(path: string): string {
-  const gitignore = path
-    .replace(/[[\]*\\()]/g, (character) => `\\${character}`)
-    // Trailing whitespace, char by char — claude's own path escaper does the same, because the gitignore
-    // layer drops an unescaped trailing space; so a path that ENDS a rule keeps its last characters.
-    .replace(/\s+$/, (run) => Array.from(run, (character) => `\\${character}`).join(""));
+  let gitignore = path
+    .replaceAll("\\", "\\\\")
+    .replace(/[[\]()|+^$]/g, (character) => `\\${character}`)
+    .replaceAll("*", "\\*");
+  if (gitignore.startsWith("!") || gitignore.startsWith("#")) gitignore = `\\${gitignore}`;
+  // Trailing whitespace, char by char: the gitignore layer drops an unescaped trailing space, so a path
+  // that ENDS a rule keeps its last characters.
+  gitignore = gitignore.replace(/\s+$/, (run) => Array.from(run, (character) => `\\${character}`).join(""));
   return gitignore.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
 }
 
