@@ -12,8 +12,9 @@
 // `@~/.aws/credentials` left as a token would be followed by the runtime under the user rule. And why
 // NEUTRALISE the leftovers: an import token is resolved relative to the file that holds it, and that
 // file is now `<run>/<file>` — so an unresolved `@settings.json` would import the run folder's own
-// effective settings. Every leftover token gets a zero-width space after its `@`, which no import
-// grammar accepts and a reader does not see.
+// effective settings. Every leftover `@` that could begin an import gets a zero-width space after it,
+// which no import grammar accepts and a reader does not see — code blocks included, because the pinned
+// runtime's lexer and a line scanner disagree about what is code (R.3, C1 ii; see `escapeImportTokens`).
 //
 // PROJECT RULES' `paths:` ARE RE-EXPRESSED FROM THE CWD. A project rule's globs resolve from the parent
 // of its dot-dir; in the run folder it is a user-tier rule, whose globs resolve from the cwd. A glob
@@ -157,9 +158,31 @@ export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
   return { content: expand(input.content, input.filePath, 0, new Set(self === undefined ? [] : [self])), dropped };
 }
 
-/** Neutralises every import-shaped token outside code: `@x` becomes `@<ZWSP>x`. */
+/**
+ * Every `@` the pinned runtime's lexer could read as the start of an import: one NOT preceded by an ASCII
+ * letter or digit, and followed by something (not whitespace, not an already-inserted zero-width space).
+ */
+const NEUTRALISABLE_AT = /(?<![A-Za-z0-9])@(?=[^\s\u200b])/g;
+
+/**
+ * Neutralises every `@` that could begin an import, ANYWHERE in the text: `@x` becomes `@<ZWSP>x`, which
+ * no import grammar accepts (the path would start with the zero-width space) and a reader does not see.
+ *
+ * CODE-BLIND, ON PURPOSE (R.3, C1 ii). claude 2.1.250 lexes a memory file with marked (`gfm: false`) and
+ * skips only true `code`/`codespan` tokens, then matches `(?:^|\s)@…` against each TEXT TOKEN's own text.
+ * Any per-line guess at "this is code" that disagrees with that lexer leaves a token raw that claude then
+ * follows (MEASURED, marked 18.0.6 + claude's `cYt`): a backtick fence whose info string holds a backtick
+ * (not a fence), a tab-led fence (an indented line), mismatched backtick runs (not a code span). And a text
+ * token can START with `@` after an inline token closes — `>@x`, `**x**@x`, `a<b>@x`, `<!-- c -->@x`,
+ * `\*@x` — where the source has no whitespace before the `@` at all. So the test is not the import regex
+ * but the character before the `@`: a token boundary never falls between an ASCII letter/digit and an `@`
+ * (marked's text tokens end only before markup or after a non-local-part character), which is why an
+ * e-mail address (`me@example.com`) is left as written. A fuzz of claude's extractor over 1.1M generated
+ * markdown strings found 837 per 100k importing after a whitespace-only neutraliser and none after this one.
+ * Inside a real code block the inserted character is invisible too.
+ */
 export function escapeImportTokens(content: string): string {
-  return mapOutsideCode(content, (text) => text.replace(IMPORT_TOKEN, (_whole, lead: string, raw: string) => `${lead}@${ZERO_WIDTH_SPACE}${raw}`));
+  return content.replace(NEUTRALISABLE_AT, `@${ZERO_WIDTH_SPACE}`);
 }
 
 function realOrUndefined(path: string): string | undefined {

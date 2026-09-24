@@ -6,7 +6,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync 
 import { join } from "node:path";
 
 import { buildRunHome } from "../../src/index.ts";
-import { expandImports } from "../../src/run-home/instructions.ts";
+import { escapeImportTokens, expandImports } from "../../src/run-home/instructions.ts";
 import { cleanupRunHomeBeds, inputFor, put, runHomeBed, type RunHomeBed } from "./support.ts";
 
 afterAll(cleanupRunHomeBeds);
@@ -116,6 +116,49 @@ describe("imports (F17's tier rule)", () => {
     expect(text).toContain(`@${ZWSP}settings.json`);
     expect(text).toContain(`@${ZWSP}.winter.json`);
     expect(text).not.toMatch(/(^|\s)@settings\.json/);
+  });
+});
+
+describe("the neutraliser is code-blind (R.3, C1 ii): no `@` claude's lexer could read as an import survives", () => {
+  // claude 2.1.250 lexes with marked (`gfm: false`) and skips only true `code`/`codespan` tokens; the
+  // router's per-line code detection disagreed on these shapes, left the token raw, reported nothing,
+  // and claude imported the file (MEASURED with marked 18.0.6 and claude's own `cYt`). The first three
+  // are the review's; the rest are marked text tokens that START with `@` after an inline token closes
+  // (a fuzz of claude's extractor over 1.1M markdown strings found them; none survive the neutraliser).
+  const shapes = (secret: string): Record<string, string> => ({
+    "backtick fence whose info string holds a backtick (not a fence)": `\`\`\`x\`\n@${secret}\n`,
+    "tab-led fence (an indented line, not a fence)": `\t\`\`\`\n@${secret}\n\`\`\`\n`,
+    "mismatched backtick runs (not a code span)": `\` @${secret} \`\`\n`,
+    "after a blockquote marker": `>@${secret}\n`,
+    "after strong emphasis": `**x**@${secret}\n`,
+    "after an inline html tag": `a<b>@${secret}</b>\n`,
+    "after an html comment": `<!-- c -->@${secret}\n`,
+    "after an escaped character": `\\*@${secret}\n`,
+    "after a code span": `\`c\`@${secret}\n`,
+  });
+
+  test("every measured shape, in a trusted project's instructions file: no raw `@<path>` is left, each is neutralised", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const secret = join(bed.root, "outside", "secret.md");
+    put(secret, "SECRET-CONTENT\n");
+    const cases = shapes(secret);
+    put(join(p.root, "WINTER.md"), `${Object.values(cases).join("\n")}\n`);
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.cwd, trustedProjectRoot: p.root, gitRoot: p.root }));
+    const text = readFileSync(join(runHome.dir, "WINTER.md"), "utf8");
+    expect(text).not.toContain("SECRET-CONTENT");
+    for (const [label, shape] of Object.entries(cases)) {
+      const neutralised = escapeImportTokens(shape);
+      expect([label, neutralised.includes(`@${secret}`), neutralised.includes(`@${ZWSP}${secret}`)]).toEqual([label, false, true]);
+    }
+    expect(text.split(`@${secret}`).length - 1).toBe(0);
+    expect(text.split(`@${ZWSP}${secret}`).length - 1).toBe(Object.keys(cases).length);
+  });
+
+  test("inside a real fenced block and a real code span too (a zero-width space there is invisible); an e-mail address and an already-neutral token are left as they are", () => {
+    expect(escapeImportTokens("```\n@a.md\n```\n`@b.md`\n")).toBe(`\`\`\`\n@${ZWSP}a.md\n\`\`\`\n\`@${ZWSP}b.md\`\n`);
+    expect(escapeImportTokens("mail me@example.com or a1@x.y\n")).toBe("mail me@example.com or a1@x.y\n");
+    expect(escapeImportTokens(`@${ZWSP}done and @ alone and trailing @`)).toBe(`@${ZWSP}done and @ alone and trailing @`);
   });
 });
 
