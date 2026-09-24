@@ -113,9 +113,9 @@ export function createFakeWinterPeer(options: FakeWinterPeerOptions = {}): FakeW
   const calls: RecordedQueryCall[] = [];
   const scripted = options.messages ?? [defaultMessage()];
   const namespace = {
-    // WS-20: the floor moved to >=0.0.13 — the default must stay INSIDE the matrix, per this option's
-    // own doc comment. (Was 0.0.10, P10b-6 R9's own bump for the same reason.)
-    SDK_VERSION: options.packageVersion ?? "0.0.13",
+    // R.4 (0.0.12): the floor moved to >=0.0.21 — the default must stay INSIDE the matrix, per this
+    // option's own doc comment. (Was 0.0.13, WS-20's own bump for the same reason.)
+    SDK_VERSION: options.packageVersion ?? "0.0.21",
     PROTOCOL_VERSION: options.protocolVersion ?? "1.0",
     // THE REAL brand functions, not stand-ins. `createRuntimeSdk` calls `resolveBrand` and throws
     // `InvalidBrandError` THROUGH THE INJECTED PEER (so a host that vendored its own copy catches its

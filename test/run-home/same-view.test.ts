@@ -23,8 +23,9 @@
 // weakened one, and `bun test --todo` fails the moment the SDK is fixed and the todo can be removed.
 // SV-1..SV-4 were fixed in `ws21/sdk`@267ea34, SV-5 and SV-6 in `ws21/sdk`@57e7fef, SV-7 and SV-8 in
 // `ws21/sdk`@20b623e; all are plain assertions now, named as regression guards.
-// SV-12 (live-gate F2: claude's parallel-call DAG read along one parentUuid chain) is OPEN — its rows
-// are `test.todo`.
+// SV-12 (live-gate F2: claude's parallel-call DAG read along one parentUuid chain) was fixed at
+// `@yanlinglabs/winter-provider-runtime`@0.0.22 (router 0.0.12's floor, `ws21/sdk@38d9940`); its rows
+// are plain assertions now, named as regression guards.
 //
 // PLUGIN OUTPUT STYLES AND WORKFLOWS (round 3). The style LIST is observable on claude only
 // (`initializationResult().available_output_styles`, names without descriptions); the Winter Query has
@@ -1882,19 +1883,20 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     // "No tool output found for function call <the Skill call's id>". The loopback here answers exactly
     // that 400 whenever a request carries a `tool_use` with no `tool_result` for it.
     //
-    // THE CAUSE IS THE WINTER RUNTIME'S OWN READING (SV-12, MEASURED here): claude persists a parallel
+    // THE CAUSE WAS THE WINTER RUNTIME'S OWN READING (SV-12, MEASURED here): claude persists a parallel
     // batch as one ONE-BLOCK `assistant` entry per `tool_use`, chained by `parentUuid`, and parents each
     // `tool_result` entry on ITS OWN call's entry (`sourceToolAssistantUUID`) — a DAG, whose leaf chain
     // runs through the LAST call's result only. claude's own reader splices the other results back in;
-    // the Winter runtime's `rebuildProviderMessages` (and the switch review's `switchFactsFor`) walk the
-    // single `parentUuid` chain from the leaf, so every call of the batch but the last reaches the
-    // provider without its output. Nothing here is the router's: the Winter destination resumes the
-    // canonical transcript itself, and step 5's pairing check (whole file) is right to pass it.
+    // the Winter runtime's `rebuildProviderMessages` (and the switch review's `switchFactsFor`) used to
+    // walk the single `parentUuid` chain from the leaf, so every call of the batch but the last reached
+    // the provider without its output. FIXED at `winter-provider-runtime`@0.0.22 (`ws21/sdk@38d9940`).
+    // Nothing here was the router's: the Winter destination resumes the canonical transcript itself, and
+    // step 5's pairing check (whole file) was always right to pass it.
     const SKILL_ID = "toolu_f2_skill";
     const SEARCH_ID = "toolu_f2_search";
     const MCP_ID = "toolu_f2_mcp";
     const CALLS = ["toolu_f2_read", SKILL_ID, SEARCH_ID, MCP_ID];
-    const SV12 = "SV-12: the Winter runtime reads claude's parallel-call DAG along one parentUuid chain (RED at ws21/sdk@38d9940)";
+    const SV12 = "SV-12 guard: the Winter runtime reads claude's parallel-call DAG along one parentUuid chain (a regression at ws21/sdk@38d9940, fixed at winter-provider-runtime@0.0.22)";
     let outcome = "";
     let claudeRun: Run | undefined;
     let winterRun: Run | undefined;
@@ -1989,20 +1991,20 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
       // …and each result names its own call's entry as its parent.
       expect(batch.map((id) => byResult.get(id) === byCall.get(id)?.uuid)).toEqual([true, true, true]);
     });
-    test.todo(`F2: the claude → Winter handoff resumed — ${SV12}`, () => {
+    test(`F2: the claude → Winter handoff resumed — ${SV12}`, () => {
       expect(outcome.split(":")[0]).toBe("resumed");
     });
-    test.todo(`F2: the Winter runtime's first request carries every call with its output — the Skill, ToolSearch and MCP calls included — ${SV12}`, () => {
+    test(`F2: the Winter runtime's first request carries every call with its output — the Skill, ToolSearch and MCP calls included — ${SV12}`, () => {
       const first = firstWinterRequest();
       expect(unpairedToolUses(first)).toEqual([]);
       expect(CALLS.filter((id) => JSON.stringify(first).includes(`"tool_use_id":"${id}"`))).toEqual(CALLS);
     });
-    test.todo(`F2: the first Winter turn after the switch succeeds (no provider 400) — ${SV12}`, () => {
+    test(`F2: the first Winter turn after the switch succeeds (no provider 400) — ${SV12}`, () => {
       const result = winterRun?.messages.find((m) => m["type"] === "result");
       expect([result?.["subtype"], result?.["is_error"]]).toEqual(["success", false]);
       expect(JSON.stringify(result)).toContain("F2-DONE");
     });
-    test.todo(`F2: the switch review counts every completed tool result the session holds — ${SV12} (\`switchFactsFor\`, the lossy warning's "N completed tool results")`, () => {
+    test(`F2: the switch review counts every completed tool result the session holds — ${SV12} (\`switchFactsFor\`, the lossy warning's "N completed tool results")`, () => {
       const facts = switchFactsFor({ entries, sidecarRecords: [], from: { providerId: "anthropic", modelKey: "claude-sonnet-4-5" } as never });
       expect(facts.completedToolResults).toBe(CALLS.length);
     });
