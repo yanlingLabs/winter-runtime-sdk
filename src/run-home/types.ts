@@ -70,7 +70,7 @@ export interface RunHomeReport {
   droppedMcpServers: { name: string; reason: "disabled" | "reserved-name" }[];
   /** Project rules whose `paths:` could not be expressed from the cwd, loaded unconditionally. */
   unconditionalRules: string[];
-  /** `@imports` a project or local instructions file named outside the project root. */
+  /** `@imports` a project or local instructions file, or a project rule (R.3, C1 i), named outside the project root. */
   droppedImports: string[];
   /**
    * Agent definitions not copied (fix round 1, I1): the runtime's own parse of the frontmatter failed,

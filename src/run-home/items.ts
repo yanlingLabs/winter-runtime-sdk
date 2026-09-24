@@ -10,7 +10,9 @@
 //   agents     project beats user; COPIED, never linked, with `permissionMode` removed and a
 //              `memory: project|local` scope rewritten to `memory: user` (F19c — a project-scoped agent
 //              memory would write into the repository's vendor dir).
-//   rules      no clash: every file is linked; a project file gets a path-derived unique name.
+//   rules      no clash: every file is linked; a project file gets a path-derived unique name (and is
+//              then COPIED by the instructions step when its `paths:` needs rewriting or it holds an
+//              `@` — a rule's imports are settled there, R.3 C1 i).
 //
 // THE PROJECT WALK (§3.4.2) runs from the cwd up to the trusted root, stopping at `$HOME` (the user's
 // home is never a project directory — its dot-dir is the daemon's). No trusted root, no walk.

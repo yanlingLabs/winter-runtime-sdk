@@ -66,6 +66,19 @@ const TOKENS = {
   projectRule: "PROJECT-RULE-TOKEN-d4",
   userRule: "USER-RULE-TOKEN-c3",
 } as const;
+/**
+ * R.3, C1: what the fixture's `@imports` may bring into a generation. A trusted project's rule imports a
+ * file OUTSIDE the root (and one inside it); its instructions file holds two shapes the old neutraliser
+ * took for code or missed (a tab-led fence; `**x**@path`), each naming a file outside the root. Only the
+ * in-root content may ever reach either leg — expanded by the router, since in the run folder the rule's
+ * relative token would resolve against `<run>/rules`.
+ */
+const IMPORT_TOKENS = {
+  ruleOutside: "RULE-OUTSIDE-SECRET-g7",
+  fenceOutside: "FENCE-OUTSIDE-SECRET-h8",
+  strongOutside: "STRONG-OUTSIDE-SECRET-i9",
+  ruleInRoot: "RULE-INROOT-TOKEN-j0",
+} as const;
 const STYLE_TOKEN = "STYLE-TOKEN-e5";
 const PLUGIN_STYLE_TOKEN = "PLUGIN-STYLE-TOKEN-f6";
 /** claude's name for the plugin's output style (`initializationResult().available_output_styles`, measured). */
@@ -102,6 +115,8 @@ interface SameView {
   workflows: string[];
   /** Fixture names listed MORE THAN ONCE in init `slash_commands`. */
   slashDuplicates: string[];
+  /** R.3, C1: which of the fixture's import tokens reached the first request ANYWHERE in it (sorted). */
+  imports: string[];
 }
 
 interface Run {
@@ -200,6 +215,9 @@ function viewOf(run: Run): SameView {
     mcpStarted: run.mcpStarted,
     pluginStyleText: text.includes(PLUGIN_STYLE_TOKEN),
     slashDuplicates: [...new Set(((init["slash_commands"] as string[] | undefined) ?? []).filter((name, index, all) => ours(name) && all.indexOf(name) !== index))].sort(),
+    imports: Object.values(IMPORT_TOKENS)
+      .filter((token) => text.includes(token))
+      .sort(),
     workflows: [...new Set([
       ...((init["skills"] as string[] | undefined) ?? []).filter(isWorkflowName).map((name) => `skills:${name}`),
       ...((init["slash_commands"] as string[] | undefined) ?? []).filter(isWorkflowName).map((name) => `slash:${name}`),
@@ -247,9 +265,18 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
   mkdirSync(mcpMarkers, { recursive: true });
   const server = (name: string): Record<string, unknown> => ({ type: "stdio", command: "/bin/sh", args: ["-c", `echo started >> '${join(mcpMarkers, markerLabel(name))}'; exit 1`] });
   put(join(sdkHome, "WINTER.md"), `${TOKENS.userInstructions}\n`);
-  put(join(root, "WINTER.md"), `${TOKENS.projectInstructions}\n`);
   put(join(sdkHome, "rules", "user-rule.md"), `${TOKENS.userRule}\n`);
   put(join(root, ".winter", "rules", "project-rule.md"), `${TOKENS.projectRule}\n`);
+  // R.3, C1: files OUTSIDE the project root (under the hermetic HOME) and one inside it, named by imports.
+  const outside = join(session.home, "outside");
+  put(join(outside, "rule-secret.md"), `${IMPORT_TOKENS.ruleOutside}\n`);
+  put(join(outside, "fence-secret.md"), `${IMPORT_TOKENS.fenceOutside}\n`);
+  put(join(outside, "strong-secret.md"), `${IMPORT_TOKENS.strongOutside}\n`);
+  put(join(root, "docs", "rule-inroot.md"), `${IMPORT_TOKENS.ruleInRoot}\n`);
+  put(join(root, ".winter", "rules", "import-rule.md"), `import rule: @${join(outside, "rule-secret.md")} and @../../docs/rule-inroot.md\n`);
+  // The tab-led "fence" is NOT one (an indented line), so it gets no closing line: a closing "```" would
+  // OPEN a real fence and swallow what follows (measured with marked).
+  put(join(root, "WINTER.md"), `${TOKENS.projectInstructions}\n\n**x**@${join(outside, "strong-secret.md")}\n\n\t\`\`\`\n@${join(outside, "fence-secret.md")}\n`);
   const skill = (name: string, description: string): string => `---\nname: ${name}\ndescription: ${description}\n---\nbody\n`;
   put(join(sdkHome, "skills", "sv-user-skill", "SKILL.md"), skill("sv-user-skill", "the user skill"));
   put(join(root, ".winter", "skills", "sv-project-skill", "SKILL.md"), skill("sv-project-skill", "the project skill"));
@@ -326,6 +353,8 @@ function expectedView(trusted: boolean): Omit<SameView, "hookRuns" | "outputStyl
       `slash:${USER_WORKFLOW}`,
     ],
     instructions: trusted ? [TOKENS.userInstructions, TOKENS.projectInstructions, TOKENS.projectRule, TOKENS.userRule] : [TOKENS.userInstructions, TOKENS.userRule],
+    // R.3, C1: only the IN-ROOT import, expanded by the router; nothing from outside the root, on any shape.
+    imports: trusted ? [IMPORT_TOKENS.ruleInRoot] : [],
   };
 }
 
@@ -552,7 +581,7 @@ async function withSameViewBed<T>(
 }
 
 /** The per-item assertions, shared by every scenario. */
-const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcpStarted", "outputStyle", "styleText", "pluginStyleText", "instructions", "hookRuns", "workflows", "slashDuplicates"] as const;
+const ITEMS = ["skills", "skillListing", "agents", "plugins", "mcpServers", "mcpStarted", "outputStyle", "styleText", "pluginStyleText", "instructions", "hookRuns", "workflows", "slashDuplicates", "imports"] as const;
 type Item = (typeof ITEMS)[number];
 
 /**
@@ -593,7 +622,7 @@ function claudeReferenceTests(label: string, trusted: boolean, view: () => SameV
   test(`${label}: claude (the reference) shows exactly the fixture's view`, () => {
     const claude = view();
     const expected = expectedView(trusted);
-    expect({ skills: claude.skills, skillListing: claude.skillListing, agents: claude.agents, plugins: claude.plugins, mcpServers: claude.mcpServers, mcpStarted: claude.mcpStarted, workflows: claude.workflows, instructions: claude.instructions }).toEqual(expected);
+    expect({ skills: claude.skills, skillListing: claude.skillListing, agents: claude.agents, plugins: claude.plugins, mcpServers: claude.mcpServers, mcpStarted: claude.mcpStarted, workflows: claude.workflows, instructions: claude.instructions, imports: claude.imports }).toEqual(expected);
     expect(claude.outputStyle).toBe("sv-style");
     expect(claude.styleText).toBe(true);
     expect(claude.pluginStyleText).toBe(false);

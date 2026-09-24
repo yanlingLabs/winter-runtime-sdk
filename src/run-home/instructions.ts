@@ -20,14 +20,19 @@
 // of its dot-dir; in the run folder it is a user-tier rule, whose globs resolve from the cwd. A glob
 // that reaches under the cwd is rewritten relative to it; one that can only match OUTSIDE the cwd's
 // subtree cannot be written at the user tier at all (a path starting `..` never matches, F17), so a
-// rule left with none is loaded unconditionally and reported. A rewritten rule is COPIED; an
-// untouched one stays a link.
+// rule left with none is loaded unconditionally and reported.
+//
+// PROJECT RULES' IMPORTS GET THE SAME TREATMENT AS THE INSTRUCTIONS FILE (R.3, C1 i). A project rule in
+// `<run>/rules` is a USER-tier rule, whose imports both runtimes follow anywhere — so its body is
+// expanded under the PROJECT rule here, the rest dropped and reported, every leftover `@` neutralised.
+// A rule that is rewritten or holds an `@` at all is COPIED; an untouched one stays a link.
 import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { RunHomeBuildContext } from "./build.ts";
+import { claudeFrontmatterSplit } from "./claude-frontmatter.ts";
 import { joinFrontmatter, keyRange, listOf, removeKey, splitFrontmatter } from "./frontmatter.ts";
 import { isWithin, projectRulesOf, projectWalk } from "./items.ts";
 
@@ -310,29 +315,52 @@ export function rebaseGlob(glob: string, relSegments: readonly string[]): string
   return rest.length === 0 ? "**" : rest.join("/");
 }
 
+/**
+ * The project rules `buildItems` linked, settled for the USER tier they are read at in the run folder.
+ * Each is COPIED (0600) when either step below changes it or it holds an `@` at all; otherwise it stays
+ * the link `buildItems` made.
+ *
+ *   1. `paths:` re-expressed from the cwd (a rule anchored AT the cwd reads the same at the user tier).
+ *   2. IMPORTS (R.3, C1 i). At the user tier both runtimes follow a rule's `@imports` ANYWHERE (claude's
+ *      `includeExternal` for the user tier; the Winter SDK expands a rule under its own tier), so a
+ *      trusted repository's rule could pull any file on the machine into every mode's context — and a
+ *      relative token would resolve against `<run>/rules`. So the rule gets the instructions treatment:
+ *      its BODY is expanded under the PROJECT rule (relative to the rule's own path, inside the root
+ *      only; the rest dropped and reported in `droppedImports`), then every leftover `@` is neutralised.
+ *      The body is the pinned runtime's own split (`claudeFrontmatterSplit`) — what both runtimes scan —
+ *      and the frontmatter block before it is left as written.
+ */
 async function rewriteProjectRules(context: RunHomeBuildContext): Promise<void> {
   const { input, dir, report } = context;
   const cwd = resolve(input.cwd);
   for (const link of projectRulesOf(context)) {
-    const rel = relative(link.anchor, cwd);
-    if (rel === "") continue; // anchored at the cwd itself: the user-tier reading is identical
-    const relSegments = rel.split(sep);
     const text = await textOf(link.real);
     if (text === undefined) continue;
-    const doc = splitFrontmatter(text);
-    if (doc === undefined) continue;
-    const globs = listOf(doc.lines, "paths");
-    if (globs === undefined) continue; // unconditional already: nothing to re-anchor
-    const rebased = globs.map((glob) => rebaseGlob(glob, relSegments)).filter((glob): glob is string => glob !== undefined);
-    if (rebased.length === 0) {
-      removeKey(doc.lines, "paths");
-      report.unconditionalRules.push(link.path);
-    } else {
-      const range = keyRange(doc.lines, "paths") as [number, number];
-      doc.lines.splice(range[0], range[1] - range[0], "paths:", ...rebased.map((glob) => `  - ${JSON.stringify(glob)}`));
+    let next = text;
+    const rel = relative(link.anchor, cwd);
+    const doc = rel === "" ? undefined : splitFrontmatter(text);
+    const globs = doc === undefined ? undefined : listOf(doc.lines, "paths");
+    if (doc !== undefined && globs !== undefined) {
+      const relSegments = rel.split(sep);
+      const rebased = globs.map((glob) => rebaseGlob(glob, relSegments)).filter((glob): glob is string => glob !== undefined);
+      if (rebased.length === 0) {
+        removeKey(doc.lines, "paths");
+        report.unconditionalRules.push(link.path);
+      } else {
+        const range = keyRange(doc.lines, "paths") as [number, number];
+        doc.lines.splice(range[0], range[1] - range[0], "paths:", ...rebased.map((glob) => `  - ${JSON.stringify(glob)}`));
+      }
+      next = joinFrontmatter(doc);
     }
+    if (next.includes("@")) {
+      const { head, body } = claudeFrontmatterSplit(next);
+      const expanded = expandImports({ content: body, filePath: link.path, tier: "project", projectRoot: input.trustedProjectRoot });
+      report.droppedImports.push(...expanded.dropped);
+      next = `${head}${escapeImportTokens(expanded.content)}`;
+    }
+    if (next === text && !text.includes("@")) continue;
     const destination = join(dir, "rules", link.name);
     await rm(destination, { force: true });
-    await writeFile(destination, joinFrontmatter(doc), { mode: PRIVATE_FILE, flag: "wx" });
+    await writeFile(destination, next, { mode: PRIVATE_FILE, flag: "wx" });
   }
 }
