@@ -1974,6 +1974,9 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         }
       }
       const batch = [SKILL_ID, SEARCH_ID, MCP_ID];
+      // The transcript really holds every call and its result — a wrong store root or key (an empty load)
+      // must fail here, never pass the shape checks below as `undefined === undefined`.
+      expect(batch.map((id) => byCall.has(id) && byResult.has(id))).toEqual([true, true, true]);
       // Each call's entry chains on the one before it…
       expect(batch.slice(1).map((id, index) => byCall.get(id)?.parentUuid === byCall.get(batch[index]!)?.uuid)).toEqual([true, true]);
       // …and each result names its own call's entry as its parent.
