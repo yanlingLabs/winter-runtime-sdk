@@ -199,6 +199,26 @@ function metadataPathOf(transcript: LocalTranscript): string {
   return `${transcript.path.slice(0, -".jsonl".length)}${META_JSON}`;
 }
 
+/**
+ * The fields claude's LIVE MIRROR sends for an agent's metadata — `persistAgentMetadata`'s mirror shape
+ * in 2.1.250, verbatim in its conditions: `agentType` always; `isFork`, `isBuiltIn`, `spawnDepth`,
+ * `planModeRequired` and the four carried observer fields when defined; `stoppedByUser` only when true
+ * (as `true`); every other field only when truthy. The local `.meta.json` holds MORE (a `false`, an
+ * empty string, fields the mirror never sends), so two copies are the same metadata when THIS projection
+ * of both agrees — comparing whole objects would report every such agent as different on every exit.
+ */
+const MIRROR_WHEN_DEFINED = ["isFork", "isBuiltIn", "spawnDepth", "planModeRequired", "isObserver", "observerStopped", "observerTaskId", "armingPermissionMode"] as const;
+const MIRROR_WHEN_TRUTHY = ["worktreePath", "worktreeBranch", "cwd", "spawnMode", "description", "name", "toolUseId", "parentAgentId", "taskKind", "teamName", "color", "customAgentType", "model", "permissionMode"] as const;
+
+function mirroredMetadataFields(metadata: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { type: "agent_metadata" };
+  if (metadata["agentType"] !== undefined) out["agentType"] = metadata["agentType"];
+  for (const field of MIRROR_WHEN_DEFINED) if (metadata[field] !== undefined) out[field] = metadata[field];
+  for (const field of MIRROR_WHEN_TRUTHY) if (metadata[field]) out[field] = metadata[field];
+  if (metadata["stoppedByUser"]) out["stoppedByUser"] = true;
+  return out;
+}
+
 export interface MetadataRepairReport {
   /** Appended to the store as `{ type: "agent_metadata", …parsed }` — the store had none. */
   repaired: CarriedArtifact[];
@@ -218,7 +238,8 @@ export interface MetadataRepairReport {
  * transcripts are reconciled, each one that came back level (`eligible`) has its `.meta.json` repaired
  * the same way:
  *   * the store has none → appended, then re-read to confirm;
- *   * the store holds the same → left;
+ *   * the store holds the same — compared on the fields claude's live mirror sends
+ *     (`mirroredMetadataFields`), since the local file carries more → left;
  *   * the store holds a DIFFERENT one → never overwritten, reported skipped;
  *   * unreadable, not a JSON object, or carrying a `type` of its own other than `agent_metadata` (claude's
  *     spread would let it replace the entry's type and write it into the transcript) → reported skipped.
@@ -271,8 +292,8 @@ export async function repairTranscriptMetadata(
     try {
       const existing = await stored();
       if (existing !== undefined) {
-        if (isDeepStrictEqual(existing, entry)) report.identical.push(artifact);
-        else skip("the store already holds different metadata for this key; it is never overwritten");
+        if (isDeepStrictEqual(mirroredMetadataFields(existing), mirroredMetadataFields(entry))) report.identical.push(artifact);
+        else skip("the store already holds different metadata for this key (on the fields claude's mirror sends); it is never overwritten");
         continue;
       }
       await shared.store.append(transcript.key, [entry]);

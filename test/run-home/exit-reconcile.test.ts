@@ -670,6 +670,26 @@ describe("final round: a transcript's or journal's `.meta.json` is repaired into
     expect(warnings.some((line) => line.includes("agent-same.meta.json"))).toBe(false);
   });
 
+  test("polish: compared on the fields claude's LIVE MIRROR sends (`persistAgentMetadata`) — a local file with extra fields beside the mirrored entry is identical, never a skip; a mirrored field that differs still is", async () => {
+    const mirrored: SessionKey = { ...KEY, subpath: "subagents/agent-mirrored" };
+    const drifted: SessionKey = { ...KEY, subpath: "subagents/agent-drifted" };
+    const entries = chain(1).map((entry) => ({ ...entry, isSidechain: true }));
+    // What the mirror sent: `stoppedByUser` only when true, a falsy `description`/`worktreePath` left out, no unknown fields.
+    const mirrorEntry = { type: "agent_metadata", agentType: "general-purpose", isBuiltIn: true, toolUseId: "toolu_1", spawnDepth: 1 } as SessionStoreEntry;
+    const local = { agentType: "general-purpose", isBuiltIn: true, toolUseId: "toolu_1", spawnDepth: 1, stoppedByUser: false, description: "", worktreePath: "", localOnly: { kept: "by claude's own writer" } };
+    const { shared, outcome, warnings } = await run(async ({ shared: store, runFolder }) => {
+      for (const key of [mirrored, drifted]) await store.store.append(key, [...entries, mirrorEntry]);
+      await store.settle();
+      for (const stem of ["agent-mirrored", "agent-drifted"]) put(runFolder, `subagents/${stem}.jsonl`, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+      put(runFolder, "subagents/agent-mirrored.meta.json", JSON.stringify(local));
+      put(runFolder, "subagents/agent-drifted.meta.json", JSON.stringify({ ...local, stoppedByUser: true }));
+    });
+    expect(outcome).toBe("safe");
+    expect(warnings.some((line) => line.includes("agent-mirrored.meta.json"))).toBe(false);
+    expect(warnings.some((line) => line.includes("agent-drifted.meta.json") && line.includes("never overwritten"))).toBe(true);
+    for (const key of [mirrored, drifted]) expect(metaOf(await shared.store.load(key))).toEqual([mirrorEntry]);
+  });
+
   test("what cannot be repaired is reported skipped, never appended: unparseable, not an object, a foreign `type`, a link, and a `.meta.json` with no reconciled transcript beside it", async () => {
     const { shared, outcome, warnings } = await run(async ({ runFolder }) => {
       for (const stem of ["agent-bad", "agent-array", "agent-typed", "agent-linked"]) put(runFolder, `subagents/${stem}.jsonl`, `${JSON.stringify(chain(1)[0])}\n`);
