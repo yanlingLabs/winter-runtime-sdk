@@ -37,7 +37,7 @@
 // is pointed at a throwaway keychain service. Nothing reads or writes `~/.winter*`, `~/.claude*` or a
 // real Keychain item. Skips (with a warning) without `WINTER_RUNTIME_EXECUTABLE` or the pinned claude.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as winterSdk from "@yanlinglabs/winter-agent-sdk";
@@ -542,6 +542,8 @@ async function withSameViewBed<T>(
     userPermissions?: (root: string) => Record<string, string[]>;
     /** F2: answer a request that carries a `tool_use` without its `tool_result` with the provider's HTTP 400, as a Responses provider does. */
     rejectUnpairedToolUse?: boolean;
+    /** Touch 5: run BELOW the trusted project root, in this subdirectory of it (the root stays the project and git root). */
+    cwdBelowRoot?: string;
   },
   fn: (bed: SameViewBed) => Promise<T>,
 ): Promise<T> {
@@ -556,6 +558,9 @@ async function withSameViewBed<T>(
   });
   const home = session.brandHome;
   const sdkHome = join(home, "sdk");
+  /** The generations' working directory: the project root, or (Touch 5) a directory below it. */
+  const runCwd = options.cwdBelowRoot === undefined ? fixture.root : join(fixture.root, options.cwdBelowRoot);
+  mkdirSync(runCwd, { recursive: true });
   const projectKey = winterSdk.transcriptProjectKey(fixture.root);
   const fakes = await anthropicFake();
   const requests: Array<Record<string, unknown>> = [];
@@ -684,7 +689,7 @@ async function withSameViewBed<T>(
             mode: "code",
             dispatchChild: false,
             leg,
-            cwd: fixture.root,
+            cwd: runCwd,
             trustedProjectRoot: options.trusted ? fixture.root : null,
             gitRoot: options.trusted ? fixture.root : null,
             mcpDisabled: ["sv-disabled-mcp"],
@@ -703,7 +708,7 @@ async function withSameViewBed<T>(
             sdk.query({
               prompt: over.prompt ?? "hello",
               options: {
-                cwd: fixture.root,
+                cwd: runCwd,
                 model: WINTER_MODEL,
                 provider: { providerId: "anthropic", authRef: { kind: "inline", value: "sk-ant-loopback" }, connection: { baseUrl, local: true } },
                 pathToClaudeCodeExecutable: WINTER_EXE,
@@ -736,7 +741,7 @@ async function withSameViewBed<T>(
           const handle = sdk.query({
             prompt: stream ?? over.prompt ?? "hello",
             options: {
-              cwd: fixture.root,
+              cwd: runCwd,
               canUseTool: over.canUseTool ?? allow,
               ...(over.sessionId === undefined ? {} : { sessionId: over.sessionId }),
               ...(over.model === undefined ? {} : { model: over.model }),
@@ -2062,6 +2067,95 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     test("row 2: a model-written `<cwd>/.claude/settings.json` still ENDS the turn — no follow-up request, and nothing survives", () => {
       expect({ mainRequests: measured["r2"]?.mainRequests, outputReachedModel: measured["r2"]?.outputReachedModel, vendorDirLeft: measured["r2"]?.vendorDirLeft }).toEqual({ mainRequests: 1, outputReachedModel: false, vendorDirLeft: false });
+    });
+  });
+
+  describe("Touch 5 (F3 corrected), official leg: claude stages `.cc-writes` under its CURRENT cwd and its PROJECT ROOT too — neither ends the turn or leaves residue", () => {
+    // claude's `j0` (2.1.250): the original cwd, the CURRENT cwd (`project.cwd`, which follows the model's
+    // own `cd`), the project root (above the cwd when the cwd is below it), the config dir and the
+    // local-settings dir. Touch 4 allowed only `<cwd>/.claude` and `<home>/.claude`: after `cd sub` the next
+    // sandboxed call's `<cwd>/sub/.claude/.cc-writes` was a breach again, and with the cwd below the project
+    // root claude's root copy was left in the repository, where the sweep never looked.
+    const SANDBOX = { sandbox: { enabled: true, autoAllowBashIfSandboxed: true } };
+    type Row = { reached: string[]; mainRequests: number; residue: string[]; batchSpanMs?: number };
+    const rows: Record<string, Row> = {};
+    const residueUnder = (root: string): string[] => {
+      const found: string[] = [];
+      const walk = (dir: string, depth: number): void => {
+        if (depth > 4 || !existsSync(dir)) return;
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (entry.name === ".git" || entry.name === "node_modules") continue;
+          if (entry.name === ".claude") found.push(join(dir, entry.name).slice(root.length) || "/");
+          else if (entry.isDirectory()) walk(join(dir, entry.name), depth + 1);
+        }
+      };
+      walk(root, 0);
+      return found.sort();
+    };
+    const measureRow = async (bed: SameViewBed, label: string, tokens: readonly string[]): Promise<void> => {
+      put(join(bed.fixture.root, ".winter", "settings.json"), `${JSON.stringify(SANDBOX)}\n`);
+      const run = await bed.runClaude(await bed.build("official"), `s_sv_cc_writes_t5_${label}`);
+      const main = run.requests.map((body, index) => ({ body, at: run.requestTimes[index]! })).filter(({ body }) => Array.isArray(body["tools"]) && (body["tools"] as unknown[]).length > 0);
+      const text = JSON.stringify(main.slice(1).map(({ body }) => body["messages"]));
+      rows[label] = { reached: tokens.filter((token) => text.includes(token)), mainRequests: main.length, residue: residueUnder(bed.fixture.root) };
+      if (label === "parallel" && main.length >= 2) rows[label]!.batchSpanMs = main[1]!.at - main[0]!.at;
+    };
+    beforeAll(async () => {
+      // Rows 1 and 3 run at the project root.
+      await withSameViewBed(
+        {
+          trusted: true,
+          turns: () => [
+            { toolUses: [{ id: "toolu_cd", name: "Bash", input: { command: "cd sub && pwd", description: "enter sub" } }] },
+            { toolUses: [{ id: "toolu_after_cd", name: "Bash", input: { command: "echo BASH-OUT-after-cd", description: "echo a token" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          mkdirSync(join(bed.fixture.root, "sub"), { recursive: true });
+          await measureRow(bed, "cd", ["BASH-OUT-after-cd"]);
+        },
+      );
+      await withSameViewBed(
+        {
+          trusted: true,
+          turns: () => [
+            {
+              toolUses: [
+                { id: "toolu_par_a", name: "Bash", input: { command: "sleep 2; echo BASH-OUT-par-a", description: "first" } },
+                { id: "toolu_par_b", name: "Bash", input: { command: "sleep 2; echo BASH-OUT-par-b", description: "second" } },
+              ],
+            },
+            { text: "done" },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          await measureRow(bed, "parallel", ["BASH-OUT-par-a", "BASH-OUT-par-b"]);
+        },
+      );
+      // Row 2 runs BELOW the project root (which is also the git root, so claude's project root is above the cwd).
+      await withSameViewBed(
+        {
+          trusted: true,
+          cwdBelowRoot: "pkg",
+          turns: () => [{ toolUses: [{ id: "toolu_below", name: "Bash", input: { command: "echo BASH-OUT-below-root", description: "echo a token" } }] }, { text: "done" }],
+        },
+        async (bed) => {
+          Bun.spawnSync(["git", "init", "-q", bed.fixture.root]);
+          await measureRow(bed, "below-root", ["BASH-OUT-below-root"]);
+        },
+      );
+      verbose("t5 cc-writes", rows);
+    }, TIMEOUT);
+    test("row 1: after the model's `cd sub`, the next sandboxed Bash call's output reaches a follow-up request of the SAME turn, and no `.claude` is left anywhere in the project", () => {
+      expect(rows["cd"]).toEqual({ reached: ["BASH-OUT-after-cd"], mainRequests: 3, residue: [] });
+    });
+    test("row 2: with the cwd BELOW the project (and git) root, the call's output reaches the follow-up request and no `.claude` residue is left at the root (claude's project-root copy)", () => {
+      expect(rows["below-root"]).toEqual({ reached: ["BASH-OUT-below-root"], mainRequests: 2, residue: [] });
+    });
+    test("row 3 (the cleanup race, observed): two parallel sandboxed Bash calls in one turn both reach the follow-up request and leave no residue", () => {
+      expect({ reached: rows["parallel"]?.reached, residue: rows["parallel"]?.residue }).toEqual({ reached: ["BASH-OUT-par-a", "BASH-OUT-par-b"], residue: [] });
     });
   });
 

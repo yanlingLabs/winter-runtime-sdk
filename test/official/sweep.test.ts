@@ -4,7 +4,7 @@
 // The live half is in `runtime-containment.test.ts`, where a real `Bash` call builds the vendor's name
 // out of fragments the pre-hoc scan cannot read.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -203,7 +203,7 @@ describe("Touch 4 (F3): claude's own `.cc-writes` staging is runtime bookkeeping
     expect(sweep.breaches).toHaveLength(1);
   });
 
-  test("only the exact vendor spelling at a root counts: a FILE named `.cc-writes`, a `.cc-writes` one level deeper, or a nested `<cwd>/sub/.claude/.cc-writes` is a breach", async () => {
+  test("only the vendor's own shape counts: a FILE named `.cc-writes`, a `.cc-writes` one level deeper, or a symlinked `.claude`/`.cc-writes` is a breach", async () => {
     for (const plant of [
       (cwd: string) => {
         mkdirSync(join(cwd, ".claude"), { recursive: true });
@@ -213,7 +213,13 @@ describe("Touch 4 (F3): claude's own `.cc-writes` staging is runtime bookkeeping
         mkdirSync(join(cwd, ".claude", "x", ".cc-writes"), { recursive: true });
       },
       (cwd: string) => {
-        mkdirSync(join(cwd, "sub", ".claude", ".cc-writes"), { recursive: true });
+        mkdirSync(join(cwd, "elsewhere", ".cc-writes"), { recursive: true });
+        symlinkSync(join(cwd, "elsewhere"), join(cwd, ".claude"));
+      },
+      (cwd: string) => {
+        mkdirSync(join(cwd, "real-staging"), { recursive: true });
+        mkdirSync(join(cwd, ".claude"), { recursive: true });
+        symlinkSync(join(cwd, "real-staging"), join(cwd, ".claude", ".cc-writes"));
       },
     ]) {
       const cwd = workspace();
@@ -223,6 +229,36 @@ describe("Touch 4 (F3): claude's own `.cc-writes` staging is runtime bookkeeping
       expect((await post(sweep, "odd"))["continue"]).toBe(false);
       expect(sweep.breaches).toHaveLength(1);
     }
+  });
+
+  test("Touch 5: claude stages under its CURRENT cwd too — after the model's `cd sub`, a new `<cwd>/sub/.claude` holding only `.cc-writes` is bookkeeping (any depth under the cwd walk)", async () => {
+    const cwd = workspace();
+    const sweep = createContainmentSweep({ cwd });
+    await pre(sweep, "after-cd");
+    stage(cwd);
+    stage(join(cwd, "sub"));
+    expect(await post(sweep, "after-cd")).toEqual({});
+    expect([existsSync(join(cwd, ".claude")), existsSync(join(cwd, "sub", ".claude"))]).toEqual([false, false]);
+    expect(sweep.breaches).toEqual([]);
+  });
+
+  test("Touch 5: claude stages under the PROJECT ROOT too — with the cwd below it, a new `<root>/.claude` holding only `.cc-writes` above the cwd is removed; a pre-existing one, or one with other content, is left alone (outside the sweep's scope)", async () => {
+    const root = workspace();
+    const cwd = join(root, "pkg", "app");
+    mkdirSync(cwd, { recursive: true });
+    const sweep = createContainmentSweep({ cwd });
+    await pre(sweep, "root-staging");
+    stage(root);
+    stage(cwd);
+    expect(await post(sweep, "root-staging")).toEqual({});
+    expect([existsSync(join(root, ".claude")), existsSync(join(cwd, ".claude"))]).toEqual([false, false]);
+    // Above the cwd the sweep only ever cleans claude's own staging: other content there is not its to judge.
+    await pre(sweep, "root-other");
+    mkdirSync(join(root, ".claude"), { recursive: true });
+    writeFileSync(join(root, ".claude", "notes.md"), "x");
+    expect(await post(sweep, "root-other")).toEqual({});
+    expect(existsSync(join(root, ".claude", "notes.md"))).toBe(true);
+    expect(sweep.breaches).toEqual([]);
   });
 
   test("the home is checked at its TOP level only — never walked (it is the user's real home in production)", async () => {
