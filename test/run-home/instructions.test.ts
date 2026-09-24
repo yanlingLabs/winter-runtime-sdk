@@ -220,12 +220,14 @@ describe("project rules' `paths:` (F17: a project rule resolves from its dot-dir
     expect(runHome.report.unconditionalRules).toEqual([]);
   });
 
-  test("a rule anchored at the cwd itself needs no rewrite: it stays a link", async () => {
+  test("a rule anchored at the cwd itself needs no rewrite: copied as written (every project rule is a copy, R.3 touch)", async () => {
     const bed = runHomeBed();
     const p = project(bed);
     put(join(p.cwd, ".winter", "rules", "here.md"), rule(["src/**"]));
     const runHome = await buildRunHome(inputFor(bed, { cwd: p.cwd, trustedProjectRoot: p.root, gitRoot: p.root }));
-    expect(lstatSync(join(runHome.dir, "rules", "project--pkg--.winter--rules--here.md")).isSymbolicLink()).toBe(true);
+    const copied = join(runHome.dir, "rules", "project--pkg--.winter--rules--here.md");
+    expect(lstatSync(copied).isSymbolicLink()).toBe(false);
+    expect(readFileSync(copied, "utf8")).toBe(rule(["src/**"]));
   });
 });
 
@@ -297,13 +299,18 @@ describe("project rules' imports (R.3, C1 i): a rule is read at the USER tier in
     expect(readFileSync(join(runHome.dir, "rules", ruleName), "utf8")).toBe(`---\ndescription: "mail @team"\n---\nbody @${ZWSP}${secret}\n`);
   });
 
-  test("a rule with no `@` and nothing to rewrite stays a link; a user rule is never touched", async () => {
+  test("R.3 touch: EVERY project rule is a copy — the build is a snapshot, so an edit in the repository after the build (say, an added `@~/…`) never reaches the run home; a user rule stays a link", async () => {
     const bed = runHomeBed();
     const p = project(bed);
-    put(join(p.root, ".winter", "rules", "x.md"), "plain rule\n");
+    const rule = join(p.root, ".winter", "rules", "x.md");
+    put(rule, "plain rule\n");
     put(join(bed.sdk, "rules", "mine.md"), "user rule @./nope.md\n");
     const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
-    expect(lstatSync(join(runHome.dir, "rules", ruleName)).isSymbolicLink()).toBe(true);
+    const copied = join(runHome.dir, "rules", ruleName);
+    expect(lstatSync(copied).isSymbolicLink()).toBe(false);
+    expect(statSync(copied).mode & 0o777).toBe(0o600);
+    put(rule, "plain rule\n@~/.ssh/id_rsa\n");
+    expect(readFileSync(copied, "utf8")).toBe("plain rule\n");
     expect(lstatSync(join(runHome.dir, "rules", "mine.md")).isSymbolicLink()).toBe(true);
   });
 });
