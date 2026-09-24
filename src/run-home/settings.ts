@@ -145,8 +145,9 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
  *   * `fallbackModel` — from EVERY tier, the user's included: claude honours it from settings on
  *     overload, which is exactly a silent switch to another model.
  *   * `model`, `modelOverrides`, `availableModels`, `advisorModel`, `enforceAvailableModels` — from the
- *     project and local tiers. The user tier keeps them: the daemon's `Options.model` wins over `model`,
- *     and the rest are the user's own choices. `enforceAvailableModels` (R.3 touch) is a switch too: the
+ *     project and local tiers. The user tier keeps them: the host's `Options.model` — forwarded to the
+ *     official child as `--model` (Touch 4, F1) — outranks any settings `model`, and the rest are the
+ *     user's own choices. `enforceAvailableModels` (R.3 touch) is a switch too: the
  *     pin's schema text says that with it "Default resolves to the first allowed availableModels entry".
  */
 export const EVERY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["fallbackModel"];

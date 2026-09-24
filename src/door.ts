@@ -889,6 +889,10 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       ...(routerBuiltMcpServers === undefined && request.input.mcpServers === undefined ? {} : { mcpServers: { ...routerBuiltMcpServers, ...request.input.mcpServers } }),
       ...(bridge === undefined ? {} : { canUseTool: bridge }),
       ...(request.options.permissionMode === undefined ? {} : { permissionMode: request.options.permissionMode as OfficialPermissionMode }),
+      // Touch 4 (F1): the query's own model and effort reach the child (`--model`, `--effort`). Never
+      // forwarded before, so a session recorded on one model ran claude's default instead.
+      ...(request.options.model === undefined ? {} : { model: request.options.model }),
+      ...(request.options.effort === undefined ? {} : { effort: request.options.effort }),
       // W18-8/P10b-4: `freshSessionId`/`resume` are THIS door's own decision (above), never the raw
       // `request.options` fields — the two are never passed together (the pinned runtime refuses that
       // combination), and which one applies is exactly what the canonical-transcript check decided.

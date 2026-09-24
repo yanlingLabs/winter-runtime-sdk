@@ -133,7 +133,18 @@ export interface OptionsTemplatePolicy {
   appendSystemPromptFile?: string;
   /** Extra tool names this deployment denies, merged with the containment floor's own list. */
   additionalDisallowedTools?: readonly string[];
+  /**
+   * Touch 4 (F1): the session's model, as the child's own wire id (`claude-sonnet-5`, never a
+   * provider-qualified tag). Forwarded as the pinned `Options.model` (`--model`), which outranks every
+   * settings layer; a flag-settings `model` in `settings` stays the fallback when this is absent.
+   */
+  model?: string;
+  /** Touch 4 (F1): the session's effort, forwarded as the pinned `Options.effort` (`--effort`). */
+  effort?: OfficialEffortLevel;
 }
+
+/** The pinned runtime's `EffortLevel` (`sdk.d.ts`), verbatim. */
+export type OfficialEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Puts the containment matchers FIRST, then whatever the host installed for the same events. */
 export function mergeHooks(ours: Record<string, unknown[]>, hostHooks: unknown): Record<string, unknown[]> {
@@ -275,6 +286,10 @@ export function buildOfficialOptions(input: OptionsTemplateInput, policy: Option
         }),
       }),
     ...(policy.env === undefined ? {} : { env: { ...policy.env } }),
+    // Touch 4 (F1): the session's model and effort — the door dropped both before, so the child ran
+    // its own default model and effort whatever the session had chosen.
+    ...(policy.model === undefined ? {} : { model: policy.model }),
+    ...(policy.effort === undefined ? {} : { effort: policy.effort }),
     ...(policy.sessionId === undefined ? {} : { sessionId: policy.sessionId }),
     ...(policy.resume === undefined ? {} : { resume: policy.resume }),
     ...(policy.forkSession === undefined ? {} : { forkSession: policy.forkSession }),
