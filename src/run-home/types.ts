@@ -78,8 +78,11 @@ export interface RunHomeReport {
    */
   skippedAgents: { path: string; reason: "unparseable" | "no-yaml-parser" }[];
   /**
-   * Re-anchored rules the builder dropped rather than widen (review minor: an ALLOW under an anchor holding `?`;
-   * a sandbox ALLOW entry whose anchor holds `*`/`?`, on either leg).
+   * Rules and settings the builder dropped rather than widen: a re-anchored ALLOW under an anchor holding `?`
+   * (review minor); a sandbox ALLOW entry whose anchor holds `*`/`?`, on either leg; a repository tier's
+   * escalating `permissions.defaultMode` (`"permissions.defaultMode: <mode>"`, R.3 I1); `fallbackModel` from
+   * any tier and `model`/`modelOverrides`/`availableModels`/`advisorModel` from a repository tier (the key's
+   * name, R.3 M3).
    */
   droppedRules: { rule: string; tier: "user" | "project" | "local"; reason: string }[];
 }
