@@ -454,10 +454,14 @@ and `PostToolBatch` that snapshots the forbidden names under the session's cwd a
 removes what APPEARED under its roots during the call, records a typed breach and ends the turn — its
 diff is TIME-BASED rather than causal, so under the child's HOME a vendor home created by something
 else during a long call is removed and attributed to that call (narrow: an existing one is in every
-baseline and is never touched). The sweep walks both
-roots to a bounded depth (6 by default) around every filesystem-touching call, so **it costs a walk
-per call**: on a large tree that is the dominant cost of the floor, and an incremental/fs-events
-design is the follow-up. It sees the synchronously-visible effects of the call it brackets; a
+baseline and is never touched). The sweep walks the cwd to a bounded depth (6 by default) and
+checks the HOME at its top level only (Touch 4: in production it is the user's real home) around every
+filesystem-touching call, so **it costs a walk per call**: on a large tree that is the dominant cost of
+the floor, and an incremental/fs-events design is the follow-up. **The vendor runtime's own write
+staging is not a breach**: claude 2.1.250 creates `<cwd>/.claude/.cc-writes/` and `<home>/.claude/.cc-writes/`
+before every sandboxed Bash call, so a vendor folder that a call created holding ONLY `.cc-writes` is
+removed quietly and the turn goes on (it used to end every sandboxed Bash turn in a project with no
+vendor folder); anything else in it still ends the turn. It sees the synchronously-visible effects of the call it brackets; a
 background write that lands later is caught opportunistically by the next swept call.
 
 **A host `PreToolUse` hook that answers `allow` makes 0.3.250 skip `canUseTool` for that call.** The
