@@ -168,6 +168,11 @@ home; a router created with `requireRunHome` (which must name it) roots its stor
 | `messaging/winter-adapter.ts` — the cold resume | awaits the host's `runHomeFor` first and applies the result with the same check-and-apply as `query()`; without `runHomeFor` under `requireRunHome` it answers a non-retryable `unavailable`; the router disposes that run home when the resume ends |
 | the peer's `resolveWinterHome()` fallback | never used under `requireRunHome` (the home must be explicit — the agent SDK's WS-21 default moves to `~/.winter/sdk`, so `sdkHomeOf` of it would double up) |
 
+**What `0.0.13` changes**: 0.0.12 was tagged but never published — a scheduler control test assumed
+which planted task claude fires first (measured non-deterministic across platforms: the Linux CI
+runner fires the one-shot, the local machine the recurring one); 0.0.13 is 0.0.12 plus that test fix,
+no peer floor change.
+
 **What `0.0.12` changes** (WS-21's run home lands, Contract A; peer floor:
 `@yanlinglabs/winter-agent-sdk >=0.0.21 <0.1.0`, and the sibling `winter-provider-catalog`/
 `winter-provider-runtime`/`winter-provider-conformance` ranges move to the same `>=0.0.21 <0.1.0` —

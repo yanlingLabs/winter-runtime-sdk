@@ -424,12 +424,16 @@ describeRuntime("0.0.11 — plugins are the host's decision (the real pinned run
   );
 
   test(
-    "CRON CONTROL: without the router's CLAUDE_CODE_DISABLE_CRON, a planted recurring task's prompt DOES reach the model",
+    "CRON CONTROL: without the router's CLAUDE_CODE_DISABLE_CRON, a planted scheduled task's prompt DOES reach the model",
     async () => {
       const session = hermeticSession("plugins-cron-control", { compact: true });
       const hostile = plantWs21Hostile(session);
       const { record } = await runDirect(session, { prompt: "hello", turns: [{ text: "ok" }], settingSources: [] });
-      expect(JSON.stringify(record.requests)).toContain(hostile.tokens.scheduledRecurring);
+      // claude's own scheduler fires whichever due task it picks first — measured non-deterministic
+      // across platforms (the Linux CI runner fires the one-shot, not the recurring one) — so the
+      // control only needs to prove the scheduler is LIVE, not which of the two planted tasks won.
+      const sent = JSON.stringify(record.requests);
+      expect([sent.includes(hostile.tokens.scheduledRecurring), sent.includes(hostile.tokens.scheduledOneShot)]).toContain(true);
     },
     TIMEOUT,
   );
