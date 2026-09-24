@@ -65,6 +65,10 @@ import type { RuntimeSdkPeers } from "./sdk.ts";
  * approve an upgrade — a new official version is a reviewed compatibility event (WS-17's drift gate),
  * not a range that quietly widens.
  */
+// TODO(R.4): raise `winterAgentSdk` — and package.json's `@yanlinglabs/winter-agent-sdk` peer range with it —
+// to the SDK release that carries ws21/sdk@6170adb (L1a's port of claude's rule-content grammar, which
+// `escapeRulePath`'s two-layer spelling needs on the Winter leg), once that version exists. A Winter
+// runtime older than that misreads `\`, `(`, `)` and the doubled `\\[` in every router-written rule.
 export const SUPPORTED = { winterAgentSdk: ">=0.0.13 <0.1.0", claudeAgentSdk: "0.3.250" } as const;
 
 /**
