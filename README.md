@@ -458,10 +458,13 @@ baseline and is never touched). The sweep walks the cwd to a bounded depth (6 by
 checks the HOME at its top level only (Touch 4: in production it is the user's real home) around every
 filesystem-touching call, so **it costs a walk per call**: on a large tree that is the dominant cost of
 the floor, and an incremental/fs-events design is the follow-up. **The vendor runtime's own write
-staging is not a breach**: claude 2.1.250 creates `<cwd>/.claude/.cc-writes/` and `<home>/.claude/.cc-writes/`
-before every sandboxed Bash call, so a vendor folder that a call created holding ONLY `.cc-writes` is
-removed quietly and the turn goes on (it used to end every sandboxed Bash turn in a project with no
-vendor folder); anything else in it still ends the turn. It sees the synchronously-visible effects of the call it brackets; a
+staging is not a breach**: before every sandboxed Bash call claude 2.1.250 creates `.claude/.cc-writes/`
+under its original cwd, its CURRENT cwd (which follows the model's own `cd`), its project root (above the
+cwd when the cwd is below it), its config dir and its local-settings dir — the home only when it is the
+project root. So a `.claude` a call created, at any depth under the cwd, holding ONLY a real `.cc-writes`
+directory is removed quietly and the turn goes on (it used to end every sandboxed Bash turn in a project
+with no vendor folder); the same is cleaned from the cwd's ancestors (the project root's copy), where
+nothing else is touched. Anything else in such a folder, or a link, still ends the turn. It sees the synchronously-visible effects of the call it brackets; a
 background write that lands later is caught opportunistically by the next swept call.
 
 **A host `PreToolUse` hook that answers `allow` makes 0.3.250 skip `canUseTool` for that call.** The
