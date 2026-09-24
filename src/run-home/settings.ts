@@ -164,8 +164,11 @@ export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "
  *     project-tier filter does not name the local tier.
  *
  * DIVERGENCE, deliberate: claude drops the EFFECTIVE mode when the highest tier that sets one is the
- * project, so a user's own `plan` under a project's `bypassPermissions` becomes no mode at all. Filtering
- * per tier keeps the user's value instead: it is the user's own choice, and it is never wider.
+ * project, so a user's own mode under a project's escalating one becomes no mode at all (`default`).
+ * Filtering per tier keeps the user's value instead. The result is therefore always the user's own
+ * tier's mode (or none): the repository never sets or changes it. That is not always the narrower of the
+ * two — a user's own `acceptEdits` under a project's `bypassPermissions` stays `acceptEdits`, where
+ * claude would fall to `default` — but it is exactly what the user chose.
  */
 export const REFUSED_DEFAULT_MODES: { readonly project: ReadonlySet<string>; readonly local: ReadonlySet<string> } = {
   project: new Set(["bypassPermissions", "auto", "acceptEdits"]),
