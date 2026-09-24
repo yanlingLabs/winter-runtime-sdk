@@ -63,7 +63,8 @@ interface RunHomeInput {
 }
 interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules;
   droppedImports;                        // an @import a project/local instructions file OR a project rule named outside the root (a rule in
-                                         // <run>/rules is read at the USER tier, so its body is expanded under the project rule and COPIED);
+                                         // <run>/rules is read at the USER tier, so its body is expanded under the project rule; every project
+                                         // rule is a COPY — a snapshot, so a later edit in the repository never reaches the run home);
                                          // every leftover `@` that could begin an import is neutralised, code blocks included
   skippedAgents;                         // an agent the runtime's own YAML parse cannot read (or no Bun.YAML): never copied
   droppedRules }                         // { rule, tier, reason }: an ALLOW re-anchored under an anchor holding `?` (it would widen);

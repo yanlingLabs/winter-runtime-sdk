@@ -110,7 +110,7 @@ describe("output styles (F8: project beats user; the FARTHEST project dir wins)"
   });
 });
 
-describe("rules (every file linked; project files get a path-derived name)", () => {
+describe("rules (user files linked; project files COPIED under a path-derived name — R.3 touch)", () => {
   test("user rules keep their relative paths; project rules are `project--<path>.md`", async () => {
     const bed = runHomeBed();
     const p = project(bed);
@@ -125,6 +125,8 @@ describe("rules (every file linked; project files get a path-derived name)", () 
     expect(lstatSync(join(rules, "lang")).isSymbolicLink()).toBe(false);
     expect(readFileSync(join(rules, "project--.winter--rules--style.md"), "utf8")).toBe("root style\n");
     expect(readFileSync(join(rules, "project--pkg--.winter--rules--nested--deep.md"), "utf8")).toBe("pkg deep\n");
+    expect(lstatSync(join(rules, "style.md")).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(rules, "project--.winter--rules--style.md")).isSymbolicLink()).toBe(false);
   });
 });
 

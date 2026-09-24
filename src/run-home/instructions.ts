@@ -25,7 +25,8 @@
 // PROJECT RULES' IMPORTS GET THE SAME TREATMENT AS THE INSTRUCTIONS FILE (R.3, C1 i). A project rule in
 // `<run>/rules` is a USER-tier rule, whose imports both runtimes follow anywhere — so its body is
 // expanded under the PROJECT rule here, the rest dropped and reported, every leftover `@` neutralised.
-// A rule that is rewritten or holds an `@` at all is COPIED; an untouched one stays a link.
+// EVERY project rule is COPIED, so the build is a snapshot (R.3 touch): a link would let a later edit
+// in the repository reach the run home unsettled.
 import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -322,8 +323,9 @@ export function rebaseGlob(glob: string, relSegments: readonly string[]): string
 
 /**
  * The project rules `buildItems` linked, settled for the USER tier they are read at in the run folder.
- * Each is COPIED (0600) when either step below changes it or it holds an `@` at all; otherwise it stays
- * the link `buildItems` made.
+ * EVERY one is replaced by a COPY (0600) — the build is a SNAPSHOT (R.3 touch): a link would let a later
+ * edit in the repository (an approved Write adding `@~/…`, say) reach the run home unsettled, read at the
+ * user tier. A rule that can no longer be read is removed and reported (`skippedLinks`, `missing`).
  *
  *   1. `paths:` re-expressed from the cwd (a rule anchored AT the cwd reads the same at the user tier).
  *   2. IMPORTS (R.3, C1 i). At the user tier both runtimes follow a rule's `@imports` ANYWHERE (claude's
@@ -339,8 +341,13 @@ async function rewriteProjectRules(context: RunHomeBuildContext): Promise<void> 
   const { input, dir, report } = context;
   const cwd = resolve(input.cwd);
   for (const link of projectRulesOf(context)) {
+    const destination = join(dir, "rules", link.name);
     const text = await textOf(link.real);
-    if (text === undefined) continue;
+    if (text === undefined) {
+      await rm(destination, { force: true });
+      report.skippedLinks.push({ path: link.path, reason: "missing" });
+      continue;
+    }
     let next = text;
     const rel = relative(link.anchor, cwd);
     const doc = rel === "" ? undefined : splitFrontmatter(text);
@@ -363,8 +370,6 @@ async function rewriteProjectRules(context: RunHomeBuildContext): Promise<void> 
       report.droppedImports.push(...expanded.dropped);
       next = `${head}${escapeImportTokens(expanded.content)}`;
     }
-    if (next === text && !text.includes("@")) continue;
-    const destination = join(dir, "rules", link.name);
     await rm(destination, { force: true });
     await writeFile(destination, next, { mode: PRIVATE_FILE, flag: "wx" });
   }
