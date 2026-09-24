@@ -28,13 +28,13 @@
 // off the path its author meant. The runtime's own schema text says project paths are "relative to
 // the settings file root (project root for project settings)".
 import { readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { envName } from "@yanlinglabs/winter-agent-sdk";
 
 import { ALL_AUTH_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES } from "../official/auth.ts";
 import { isExecutionIndirectionVariable, OFFICIAL_RUNTIME_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../official/env-allowlist.ts";
 import type { RunHomeBuildContext } from "./build.ts";
-import { escapeRulePath, fsRootAnchored, type RunHomeBrand } from "./types.ts";
+import { escapeRulePath, fsRootAnchored, type RunHomeBrand, type RunLeg } from "./types.ts";
 import { isHomeOrAbove } from "./walk.ts";
 
 const PRIVATE_FILE = 0o600;
@@ -259,7 +259,45 @@ function anchorPath(path: unknown, anchor: string): unknown {
   return resolve(anchor, path);
 }
 
-function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: (rule: string) => void = () => undefined): Record<string, unknown> {
+/**
+ * A path spelled for CLAUDE'S SANDBOX grammar (review N-1 minor), which is not the rule grammar.
+ *
+ * MEASURED on the pinned runtime (claude 2.1.250, macOS): a `sandbox.filesystem` entry holding any of
+ * `* ? [ ]` is a GLOB — the runtime renders it as a seatbelt `(regex …)` instead of `(subpath …)` — and
+ * its glob-to-regex step escapes a backslash into a LITERAL backslash, so `escapeRulePath`'s spelling
+ * would make the entry name a path that does not exist (a deny that covers nothing). The one escape that
+ * grammar honours is a character class: `[` → `[[]` (a lone `]` is already literal). Under a root named
+ * `[wip] app`, a re-anchored `denyWrite` spelled raw did NOT stop a sandboxed write (the class matched
+ * `w app`, not the literal root); spelled `[[]wip] app/…` it did. `*` and `?` have no spelling there
+ * (the regex step rewrites every one of them), so they stay raw: a deny is then wider — stricter — and an
+ * allow is dropped by the caller.
+ */
+export function escapeSandboxGlobPath(path: string): string {
+  return path.replace(/\[/g, "[[]");
+}
+
+const SANDBOX_UNESCAPABLE = /[*?]/;
+
+/**
+ * One `sandbox.filesystem` entry, re-anchored. On the OFFICIAL leg the ANCHOR's part of the result — the
+ * deepest ancestor of the anchor the resolved path still lies under (a `../x` lands above it) — is
+ * spelled with `escapeSandboxGlobPath`; the author's own part (`out/**`, `[ab]`) keeps its glob meaning.
+ * The WINTER leg is left literal: its sandbox renders these entries as `(subpath …)` (ws21/sdk source),
+ * where a class spelling would name a path that does not exist. `undefined` = dropped (an allow whose
+ * anchor part holds an unescapable `*`/`?` on the official leg).
+ */
+function anchorSandboxPath(path: unknown, anchor: string, leg: RunLeg, allowShaped: boolean): unknown {
+  if (typeof path !== "string" || path.length === 0) return path;
+  if (isAbsolute(path) || path.startsWith("~")) return path;
+  const absolute = resolve(anchor, path);
+  if (leg !== "official") return absolute;
+  let base = anchor;
+  while (absolute !== base && !absolute.startsWith(base.endsWith(sep) ? base : `${base}${sep}`) && dirname(base) !== base) base = dirname(base);
+  if (allowShaped && SANDBOX_UNESCAPABLE.test(base)) return undefined;
+  return `${escapeSandboxGlobPath(base)}${absolute.slice(base.length)}`;
+}
+
+function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: (rule: string, reason: string) => void = () => undefined, leg: RunLeg = "official"): Record<string, unknown> {
   const out: Record<string, unknown> = { ...settings };
   const permissions = out["permissions"];
   if (isPlainObject(permissions)) {
@@ -274,7 +312,7 @@ function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: 
         // `?` matches any one character, so an anchor holding one would WIDEN an allow rule to sibling
         // directories. An ask or deny that widens is stricter, never looser; an allow is dropped.
         if (list === "allow" && anchored !== rule && anchor.includes("?")) {
-          dropped(rule);
+          dropped(rule, `its re-anchored form would carry the anchor's \`?\` (${anchor}), a one-character wildcard that stays raw, and so allow sibling directories too`);
           return [];
         }
         return [anchored];
@@ -289,7 +327,17 @@ function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: 
     const filesystem = next["filesystem"];
     if (isPlainObject(filesystem)) {
       const fs: Record<string, unknown> = { ...filesystem };
-      for (const [key, value] of Object.entries(fs)) if (Array.isArray(value)) fs[key] = value.map((path) => anchorPath(path, anchor));
+      for (const [key, value] of Object.entries(fs)) {
+        if (!Array.isArray(value)) continue;
+        // `denyWrite`/`denyRead` narrow; every other list (allowWrite, allowRead, a key added later) widens.
+        const allowShaped = !key.startsWith("deny");
+        fs[key] = value.flatMap((path) => {
+          const anchored = anchorSandboxPath(path, anchor, leg, allowShaped);
+          if (anchored !== undefined) return [anchored];
+          dropped(`sandbox.filesystem.${key}: ${String(path)}`, `its re-anchored form would carry the anchor's \`*\`/\`?\` (${anchor}), which claude's sandbox glob grammar cannot escape, and so allow sibling paths too`);
+          return [];
+        });
+      }
       next["filesystem"] = fs;
     }
     const credentials = next["credentials"];
@@ -388,10 +436,10 @@ export async function buildEffectiveSettings(context: RunHomeBuildContext): Prom
   for (const { tier, path, anchor } of tiers) {
     const raw = await readTier(path);
     if (raw === undefined) continue;
-    const dropped = (rule: string): void => {
-      context.report.droppedRules.push({ rule, tier, reason: `its re-anchored form would carry the anchor's \`?\` (${anchor}), a one-character wildcard that stays raw, and so allow sibling directories too` });
+    const dropped = (rule: string, reason: string): void => {
+      context.report.droppedRules.push({ rule, tier, reason });
     };
-    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor, dropped));
+    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor, dropped, input.leg));
   }
   const settings = stripForMode(merged, input.mode, input.dispatchChild);
   const effective: Record<string, unknown> = {};
