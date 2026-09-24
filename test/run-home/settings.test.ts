@@ -61,13 +61,29 @@ describe("the tiers and claude's merge (F17)", () => {
     ]);
   });
 
-  test("M3 (R.3): `model`, `modelOverrides`, `availableModels`, `advisorModel` and `enforceAvailableModels` never come from a repository tier (reported); the user's own are kept", async () => {
+  test("Touch 4 add-on: `modelOverrides` is dropped from EVERY tier, the user's included, and reported — a user-tier remap made claude report one model at init and send another on the wire", async () => {
+    const bed = runHomeBed();
+    const { root } = repo(bed);
+    put(join(bed.sdk, "settings.json"), json({ modelOverrides: { "claude-haiku-4-5": "claude-opus-5" }, outputStyle: "u" }));
+    put(join(root, ".winter", "settings.json"), json({ modelOverrides: { x: "y" } }));
+    put(join(root, ".winter", "settings.local.json"), json({ modelOverrides: { x: "z" } }));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+    expect(runHome.effectiveSettings).toEqual({ outputStyle: "u" });
+    const reason = expect.stringContaining("wire");
+    expect(runHome.report.droppedRules).toEqual([
+      { rule: "modelOverrides", tier: "user", reason },
+      { rule: "modelOverrides", tier: "project", reason },
+      { rule: "modelOverrides", tier: "local", reason },
+    ]);
+  });
+
+  test("M3 (R.3): `model`, `modelOverrides`, `availableModels`, `advisorModel` and `enforceAvailableModels` never come from a repository tier (reported); the user's own are kept (but `modelOverrides`, which no tier keeps)", async () => {
     // `enforceAvailableModels` (R.3 touch): the pin's schema text — "if the default model for the user tier
     // is not in availableModels, Default resolves to the first allowed availableModels entry instead" — so
     // a repository setting it would switch the model.
     const bed = runHomeBed();
     const { root } = repo(bed);
-    const user = { model: "user-model", modelOverrides: { a: "b" }, availableModels: ["user-a"], advisorModel: "user-advisor", enforceAvailableModels: true };
+    const user = { model: "user-model", availableModels: ["user-a"], advisorModel: "user-advisor", enforceAvailableModels: true };
     put(join(bed.sdk, "settings.json"), json(user));
     put(join(root, ".winter", "settings.json"), json({ model: "p", modelOverrides: { a: "p" }, availableModels: ["p"], advisorModel: "p", enforceAvailableModels: false, outputStyle: "p" }));
     put(join(root, ".winter", "settings.local.json"), json({ model: "l", advisorModel: "l", enforceAvailableModels: true }));
@@ -75,8 +91,8 @@ describe("the tiers and claude's merge (F17)", () => {
     expect(runHome.effectiveSettings).toEqual({ ...user, outputStyle: "p" });
     const reason = expect.stringContaining("repository never chooses");
     expect(runHome.report.droppedRules).toEqual([
+      { rule: "modelOverrides", tier: "project", reason: expect.stringContaining("wire") },
       { rule: "model", tier: "project", reason },
-      { rule: "modelOverrides", tier: "project", reason },
       { rule: "availableModels", tier: "project", reason },
       { rule: "advisorModel", tier: "project", reason },
       { rule: "enforceAvailableModels", tier: "project", reason },
