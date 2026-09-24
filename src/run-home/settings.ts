@@ -144,12 +144,13 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
  *
  *   * `fallbackModel` — from EVERY tier, the user's included: claude honours it from settings on
  *     overload, which is exactly a silent switch to another model.
- *   * `model`, `modelOverrides`, `availableModels`, `advisorModel` — from the project and local tiers.
- *     The user tier keeps them: the daemon's `Options.model` wins over `model`, and the rest are the
- *     user's own choices.
+ *   * `model`, `modelOverrides`, `availableModels`, `advisorModel`, `enforceAvailableModels` — from the
+ *     project and local tiers. The user tier keeps them: the daemon's `Options.model` wins over `model`,
+ *     and the rest are the user's own choices. `enforceAvailableModels` (R.3 touch) is a switch too: the
+ *     pin's schema text says that with it "Default resolves to the first allowed availableModels entry".
  */
 export const EVERY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["fallbackModel"];
-export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "modelOverrides", "availableModels", "advisorModel"];
+export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "modelOverrides", "availableModels", "advisorModel", "enforceAvailableModels"];
 
 /**
  * `permissions.defaultMode` values a repository tier may not set (R.3, I1), dropped and REPORTED.
