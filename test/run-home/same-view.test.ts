@@ -2001,6 +2001,68 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
   });
 
+  describe("Touch 4 (F3), official leg: a sandboxed Bash call's output reaches the model on the SAME turn — claude's own `.cc-writes` staging is bookkeeping, not a breach", () => {
+    // THE LIVE GATE: claude 2.1.250 creates `<cwd>/.claude/.cc-writes/` (and `<home>/.claude/…` and
+    // `<config dir>/.cc-writes`) before every sandboxed Bash call (`ensureAtomicWriteStagingDirs`). The
+    // router's post-call sweep saw a new `<cwd>/.claude`, removed it and ENDED THE TURN: the model never
+    // saw the output and no follow-up request was made, while the host saw a normal completion. The
+    // existing Bash rows never asked for a follow-up request, which is why it was missed.
+    const measured: Record<string, { mainRequests: number; outputReachedModel: boolean; vendorDirLeft: boolean; stagedInConfigDir: boolean }> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          turns: () => [
+            {
+              toolUses: [
+                {
+                  id: "toolu_bash",
+                  name: "Bash",
+                  // Row 1's call is an ordinary echo; row 2's builds the vendor's name out of fragments (so the
+                  // pre-hoc floor cannot read it) and writes `<cwd>/.claude/settings.json` — the model-created
+                  // content the sweep must still end the turn for.
+                  input: { command: `if [ -f row2 ]; then d=.cla; d="\${d}ude"; mkdir -p "$d" && echo '{}' > "$d/settings.json"; fi; echo BASH-OUT-$(cat row 2>/dev/null)`, description: "echo a token" },
+                },
+              ],
+            },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const root = bed.fixture.root;
+          const measure = async (row: string, settings: Record<string, unknown>): Promise<void> => {
+            put(join(root, ".winter", "settings.json"), `${JSON.stringify(settings)}\n`);
+            writeFileSync(join(root, "row"), row);
+            if (row === "r2") writeFileSync(join(root, "row2"), "");
+            const runHome = await bed.build("official");
+            const run = await bed.runClaude(runHome, `s_sv_cc_writes_${row}`);
+            const main = run.requests.filter((body) => Array.isArray(body["tools"]) && (body["tools"] as unknown[]).length > 0);
+            measured[row] = {
+              mainRequests: main.length,
+              outputReachedModel: main.slice(1).some((body) => JSON.stringify(body["messages"] ?? []).includes(`BASH-OUT-${row}`)),
+              vendorDirLeft: existsSync(join(root, ".claude")),
+              stagedInConfigDir: existsSync(join(runHome.dir, ".cc-writes")),
+            };
+            rmSync(join(root, "row"), { force: true });
+            rmSync(join(root, "row2"), { force: true });
+          };
+          // Row 1: the sandbox on (claude stages `.cc-writes` for a SANDBOXED call); an ordinary echo.
+          await measure("r1", { sandbox: { enabled: true, autoAllowBashIfSandboxed: true } });
+          // Row 2: the sandbox off (a sandboxed write under `.claude/` is refused by claude's own sandbox, so
+          // it would never reach the sweep); the call writes `<cwd>/.claude/settings.json`.
+          await measure("r2", {});
+          verbose("cc-writes", measured);
+        },
+      );
+    }, TIMEOUT);
+    test("row 1: claude really staged `.cc-writes` for the call (its config-dir copy is there), and the Bash output reached the model in a FOLLOW-UP request of the same turn; no `<cwd>/.claude` is left in the repository", () => {
+      expect(measured["r1"]).toEqual({ mainRequests: 2, outputReachedModel: true, vendorDirLeft: false, stagedInConfigDir: true });
+    });
+    test("row 2: a model-written `<cwd>/.claude/settings.json` still ENDS the turn — no follow-up request, and nothing survives", () => {
+      expect({ mainRequests: measured["r2"]?.mainRequests, outputReachedModel: measured["r2"]?.outputReachedModel, vendorDirLeft: measured["r2"]?.vendorDirLeft }).toEqual({ mainRequests: 1, outputReachedModel: false, vendorDirLeft: false });
+    });
+  });
+
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;
