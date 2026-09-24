@@ -676,7 +676,9 @@ export function createHandoffBarrier(context: SeamContextWithDirectory, deps: Ha
     // (repaired-or-not) entry; this function reads the store directly and appends nothing.
     const store = sharedOf();
     const entries = (await store.store.load(args.session)) ?? [];
-    const sidecar = await readProviderStateSidecar(homeOf(), args.session);
+    // The STORE home (integration Important): under WS-21 the child writes the sidecar beside the canonical
+    // transcript in the shared runtime home, `<home>/sdk` — never under the daemon's own home.
+    const sidecar = await readProviderStateSidecar(storeHomeOf(), args.session);
     const resolve = deps.resolveEndpoint ?? defaultEndpointResolver();
     const fromEndpoint = resolve(liveSourceOrigin({ entries, sidecarRecords: sidecar, entry: args.entry }));
     const toEndpoint = resolve(originFrom(args.requested));
