@@ -112,8 +112,10 @@ export interface ContainmentPolicy {
    * folder's `workflows/` (→ `sdk/workflows`), plugin workflows and the built-ins, and a repository's
    * `.claude/workflows/` name is NOT found; an inline script persists under the run folder's own
    * `projects/<key>/<session>/workflows/` and wrote nothing into the repository or `$TMPDIR`. So a
-   * NAMED or INLINE `Workflow` call is allowed; a `scriptPath` (runs any file on disk, "takes
-   * precedence over script and name") and a `resumeFromRunId` were not measured and stay refused.
+   * NAMED or INLINE `Workflow` call is allowed, and ONLY that (R.3 M2: an allowlist of `name`,
+   * `script`, `args`, `description`, `title`): a `scriptPath` (runs any file on disk, "takes precedence
+   * over script and name"), a `resumeFromRunId`, the schema's hidden `runId` and its gated `remote`/
+   * run-op fields — every other field — were not measured and are refused.
    */
   workflows?: "deny" | "host-replacement" | "run-home";
   /** The product's project directory, so a refusal can NAME where the replacement lives. */
@@ -346,6 +348,15 @@ const AGENT_TOOLS = ["Task", "Agent"] as const;
 const WORKFLOW_TOOLS = ["Workflow"] as const;
 
 /**
+ * R-1 + R.3 M2: the ONLY `Workflow` input fields a run home lets through — an ALLOWLIST, never a list of
+ * refusals. The measured forms are a named or an inline workflow (`name` or `script`, with `args`;
+ * `description`/`title` are ignored by the runtime). The pinned schema takes more than its declaration
+ * shows — `scriptPath`, `resumeFromRunId`, a hidden `runId` (a run operation on a prior run: "runId is
+ * not a field of this tool here" outside its gate), and gated `remote`/run-op fields — none measured.
+ */
+const RUN_HOME_WORKFLOW_FIELDS: ReadonlySet<string> = new Set(["name", "script", "args", "description", "title"]);
+
+/**
  * R-1 ruling: the containment policy a launch actually applies. Under a run home, an UNSET workflow
  * disposition becomes `"run-home"` (named and inline workflows run); a host's explicit choice always
  * wins, and without a run home nothing changes. ONE helper for the three places a floor is built — the
@@ -429,6 +440,14 @@ export function containmentDecisionFor(toolName: string, input: Record<string, u
         allow: false,
         target: `${FORBIDDEN_TARGETS.projectDir}/workflows/`,
         reason: "resuming a prior Workflow run (resumeFromRunId) is not available on this branch yet; start the workflow again by name or with an inline script (WS-21, R-1)",
+      };
+    }
+    const unmeasured = Object.keys(input).filter((key) => input[key] !== undefined && !RUN_HOME_WORKFLOW_FIELDS.has(key));
+    if (unmeasured.length > 0) {
+      return {
+        allow: false,
+        target: `${FORBIDDEN_TARGETS.projectDir}/workflows/`,
+        reason: `under a run home a Workflow call takes only ${[...RUN_HOME_WORKFLOW_FIELDS].join(", ")}; ${unmeasured.join(", ")} ${unmeasured.length === 1 ? "is" : "are"} not measured on this branch (a run operation, a remote launch or a newer field), so the call is refused rather than passed through — start the workflow by name or with an inline script (WS-21, R-1, R.3 M2)`,
       };
     }
   }

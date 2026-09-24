@@ -321,6 +321,13 @@ describe("the official template on a run home", () => {
     expect(await hookVerdict(onRunHome, { script: 'export const meta = { name: "x", description: "x" };\n' })).toBe("allow");
     expect(await hookVerdict(onRunHome, { scriptPath: "/repo/.claude/workflows/x.js" })).toMatch(/^deny: .*scriptPath/);
     expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", resumeFromRunId: "wf_1" })).toMatch(/^deny: .*resume/);
+    // M2 (R.3): an ALLOWLIST, not two named refusals — the pinned runtime's schema also takes a hidden
+    // `runId` (a run operation on a prior run) and gated `remote`/run-op fields, none of them measured.
+    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", args: { q: 1 }, description: "d", title: "t" })).toBe("allow");
+    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", runId: "wf_1" })).toMatch(/^deny: .*runId/);
+    expect(await hookVerdict(onRunHome, { script: 'export const meta = { name: "x", description: "x" };\n', remote: true })).toMatch(/^deny: .*remote/);
+    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", runOp: "stop" })).toMatch(/^deny: .*runOp/);
+    expect(await bridgeVerdict(onRunHome, { name: "sv-plugin:sv-flow", runId: "wf_1" })).toMatch(/^deny: .*runId/);
     expect(await hookVerdict(pre, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
     expect(await bridgeVerdict(pre, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
     expect(await bridgeVerdict(onRunHome, { name: "sv-plugin:sv-flow" })).not.toMatch(/named workflow resolution/);
