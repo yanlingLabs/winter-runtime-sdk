@@ -141,18 +141,32 @@ export function fsRootAnchored(absPath: string): string {
 }
 
 /**
- * A PATH, spelled for a permission rule's gitignore-style pattern: `[`, `]`, `*` and `\` are
- * backslash-escaped, so a directory named `[wip] app` is that directory rather than a character class.
+ * A literal PATH, spelled for the content of a permission rule (`Tool(<content>)`): TWO LAYERS.
  *
- * MEASURED on the pinned runtime (minors round, item 2 — a Write under a root of each name, the rule in
- * the flag layer, `acceptEdits`): unescaped `[w]` never matched and `\[w\]` did; `\*` matched exactly
- * (a raw `*` matches too, and more); `?` must stay RAW — an escaped `\?` never matched, while a raw
- * `?` matches the character (and any one other); `{}`, `!`, `(`, `)`, `#` and spaces matched as
- * written, escaped or not. The backslash itself is escaped as gitignore's own escape character
- * (not measured: this bed could not create a directory with one in its name).
+ * 1. The gitignore layer: `\`, `[`, `]`, `*`, `(` and `)` are backslash-escaped, so a directory named
+ *    `[wip] app` is that directory rather than a character class. `?` stays RAW.
+ * 2. Claude's own rule-content escape over that (`c()` in claude 2.1.250, verbatim):
+ *    `replaceAll("\\","\\\\").replaceAll("(","\\(").replaceAll(")","\\)")`. The read side finds the
+ *    content between the first and the last UNESCAPED paren (an even run of backslashes before it) and
+ *    unescapes it ONCE (`\(`→`(`, `\)`→`)`, `\\`→`\`) before the gitignore layer sees it; both legs parse
+ *    rule strings this way (the Winter runtime since `ws21/sdk`@6170adb, L1a's port).
+ *
+ * THE TABLE, per character of the path: `\` → `\\\\` (four), `[` → `\\[`, `]` → `\\]`, `*` → `\\*`,
+ * `(` → `\\\(`, `)` → `\\\)`, `?` → `?`; everything else as written.
+ *
+ * MEASURED on claude 2.1.250 and on the Winter runtime at 6170adb (a Write under a directory of each
+ * name, a user-tier deny rule; the escape-table round): a literal `\` matches only as four; unescaped
+ * `[w]` never matched and escaped did; `?` must stay raw (an escaped `\?` never matched); balanced raw
+ * `(old)` matched but an UNBALANCED raw paren broke the rule on claude. And WHY `(`/`)` are escaped at the
+ * gitignore layer too, not only by `c()`: with `c()` alone, a `\` followed by `(` becomes `\\\\\(`,
+ * which unescapes to `\\(` — and both runtimes then fail to compile the rule ("Invalid regular
+ * expression: missing )"; claude errors every file tool call, the Winter runtime fails the run). With
+ * the paren escaped at both layers (claude's own path escaper does the same at the gitignore layer) the
+ * rule compiles and matches on both. `{}`, `!`, `#` and spaces are literal as written.
  */
 export function escapeRulePath(path: string): string {
-  return path.replace(/[[\]*\\]/g, (character) => `\\${character}`);
+  const gitignore = path.replace(/[[\]*\\()]/g, (character) => `\\${character}`);
+  return gitignore.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
 }
 
 /** The item directories whose writes are protected (spec §7.2). */

@@ -1315,6 +1315,67 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     );
   });
 
+  describe("the escape table: a trusted root NAMED `Project (old)`, and deny targets holding `\\` and `\\(`", () => {
+    // `escapeRulePath` is claude's rule-content escape over the gitignore escape (the escape-table
+    // round). Under acceptEdits: the project's own re-anchored deny, and two user-tier denies the host
+    // spells with `escapeRulePath` over paths holding a backslash (never the cwd — claude refuses a
+    // backslash cwd), stop their writes without asking; the protected item dir asks; a free write lands.
+    // MEASURED before this round: the old spelling (`\\` → two) never matched on claude, and a `\\(`
+    // spelled by `c()` alone failed to compile on both runtimes.
+    const TARGETS = {
+      free: ["free.txt"],
+      projectDeny: ["denied.txt"],
+      backslash: ["b\\x", "f.txt"],
+      backslashParen: ["q\\(y", "f.txt"],
+      protectedItem: ["p", ".winter", "skills", "x", "SKILL.md"],
+    } as const;
+    type Target = keyof typeof TARGETS;
+    const results: Record<string, Record<Target, { asked: boolean; written: boolean }>> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          dirName: "Project (old)",
+          userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(join(root, "b\\x"))}/**)`, `Edit(/${escapeRulePath(join(root, "q\\(y"))}/**)`] }),
+          turns: (root) => [
+            ...Object.entries(TARGETS).map(([name, parts]) => ({ toolUses: [{ id: `toolu_${name}`, name: "Write", input: { file_path: join(root, ...parts), content: `${name}\n` } }] })),
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const root = bed.fixture.root;
+          const pathOf = (name: Target): string => join(root, ...TARGETS[name]);
+          for (const dir of ["b\\x", "q\\(y"]) mkdirSync(join(root, dir), { recursive: true });
+          put(join(root, ".winter", "settings.json"), `${JSON.stringify({ permissions: { deny: ["Edit(/denied.txt)"] } })}\n`);
+          const measure = async (leg: string, run: (canUseTool: CanUseToolLike) => Promise<Run>): Promise<void> => {
+            for (const name of Object.keys(TARGETS) as Target[]) rmSync(pathOf(name), { force: true });
+            const asked: string[] = [];
+            await run(async (_tool, input) => {
+              asked.push(String(input["file_path"]));
+              return { behavior: "deny", message: "the test broker records and denies" };
+            });
+            results[leg] = Object.fromEntries((Object.keys(TARGETS) as Target[]).map((name) => [name, { asked: asked.includes(pathOf(name)), written: existsSync(pathOf(name)) }])) as Record<Target, { asked: boolean; written: boolean }>;
+          };
+          await measure("claude", async (canUseTool) => bed.runClaude(await bed.build("official"), "s_sv_escape_table", { canUseTool, permissionMode: "acceptEdits" }));
+          await measure("winter", async (canUseTool) => bed.runWinter(await bed.build("winter"), { canUseTool, permissionMode: "acceptEdits" }));
+          verbose("escape table", results);
+        },
+      );
+    }, TIMEOUT);
+    test("claude (the reference): every deny holds without asking, the protected item dir asks, the free write lands", () => {
+      expect(results["claude"]).toEqual({
+        free: { asked: false, written: true },
+        projectDeny: { asked: false, written: false },
+        backslash: { asked: false, written: false },
+        backslashParen: { asked: false, written: false },
+        protectedItem: { asked: true, written: false },
+      });
+    });
+    test("the Winter runtime reads the same table the same way (needs a binary at ws21/sdk@6170adb or later — L1a's rule-content port)", () => {
+      expect(results["winter"]).toEqual(results["claude"]);
+    });
+  });
+
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;

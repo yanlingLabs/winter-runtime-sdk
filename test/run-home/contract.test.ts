@@ -59,18 +59,46 @@ describe("WS-21 Contract A: helpers and constants", () => {
     expect(router.protectedPathRules("/h/sdk", null).some((rule) => rule.includes("//repo"))).toBe(false);
   });
 
-  test("protectedPathRules: glob metacharacters in a path are escaped the way the pinned matcher reads them (minors round, item 2)", () => {
-    // MEASURED on the pin: `[`/`]` open a character class unless backslash-escaped, `*` matches itself
-    // either way but only exactly when escaped; `?` must stay RAW (an escaped `\?` never matches);
-    // `{}`, `!`, `(`, `)`, `#` and spaces are literal as written.
+  test("protectedPathRules: glob metacharacters in a path are escaped the way the pinned matcher reads them (minors round, item 2; the rule-content layer since the escape-table round)", () => {
+    // TWO LAYERS, both measured on claude 2.1.250 and on the Winter runtime at ws21/sdk@6170adb: the
+    // gitignore layer (`[`/`]` open a class unless backslash-escaped, `*` matches itself exactly only
+    // when escaped, `?` must stay RAW, `(`/`)` are escaped too), then claude's own rule-content escape
+    // `c()` (every backslash doubled, `(`/`)` escaped), because the rule string is unescaped once before
+    // the gitignore layer sees it. `{}`, `!`, `#` and spaces are literal as written.
     const rules = router.protectedPathRules("/h/[s]dk", "/x/[wip] a*b?c{d}!(e)#f");
-    expect(rules).toContain("Write(//x/\\[wip\\] a\\*b?c{d}!(e)#f/**/.winter/skills/**)");
-    expect(rules).toContain("Edit(//h/\\[s\\]dk/skills/**)");
-    expect(rules).toContain("Edit(//h/\\[s\\]dk/WINTER.md)");
-    // A backslash in a path is escaped too (gitignore's own escape character).
-    expect(router.protectedPathRules("/h/sdk", "/x/a\\b")).toContain("Write(//x/a\\\\b/**/.winter/skills/**)");
+    expect(rules).toContain(String.raw`Write(//x/\\[wip\\] a\\*b?c{d}!\\\(e\\\)#f/**/.winter/skills/**)`);
+    expect(rules).toContain(String.raw`Edit(//h/\\[s\\]dk/skills/**)`);
+    expect(rules).toContain(String.raw`Edit(//h/\\[s\\]dk/WINTER.md)`);
+    // A literal backslash is FOUR in the rule string (claude matches nothing less — measured).
+    expect(router.protectedPathRules("/h/sdk", String.raw`/x/a\b`)).toContain(String.raw`Write(//x/a\\\\b/**/.winter/skills/**)`);
     // The helper itself, exported for a host that spells rules over the same paths.
-    expect(router.escapeRulePath("/x/[a]*b?\\c")).toBe("/x/\\[a\\]\\*b?\\\\c");
+    expect(router.escapeRulePath(String.raw`/x/[a]*b?\c`)).toBe(String.raw`/x/\\[a\\]\\*b?\\\\c`);
+    expect(router.escapeRulePath(String.raw`/p (old)/q\(y`)).toBe(String.raw`/p \\\(old\\\)/q\\\\\\\(y`);
+  });
+
+  test("escapeRulePath is claude's rule-content escape over the gitignore-layer escape: the read side's one unescape gives back the gitignore pattern, and the rule's own parens stay findable", () => {
+    // The read side, as claude 2.1.250 does it (L1a's port, ws21/sdk@6170adb): the tool name ends at the
+    // first UNESCAPED `(` and the content at the last unescaped `)` (an even run of backslashes before
+    // it), then the content is unescaped once: `\(`→`(`, `\)`→`)`, `\\`→`\`, in that order.
+    const unescaped = (index: number, text: string): boolean => {
+      let run = 0;
+      for (let i = index - 1; i >= 0 && text[i] === "\\"; i -= 1) run += 1;
+      return run % 2 === 0;
+    };
+    const parse = (rule: string): { tool: string; content: string } => {
+      let open = -1;
+      for (let i = 0; i < rule.length && open === -1; i += 1) if (rule[i] === "(" && unescaped(i, rule)) open = i;
+      let close = -1;
+      for (let i = rule.length - 1; i >= 0 && close === -1; i -= 1) if (rule[i] === ")" && unescaped(i, rule)) close = i;
+      expect(close).toBe(rule.length - 1);
+      const content = rule.slice(open + 1, close).replaceAll("\\(", "(").replaceAll("\\)", ")").replaceAll("\\\\", "\\");
+      return { tool: rule.slice(0, open), content };
+    };
+    const gitignore = (path: string): string => path.replace(/[[\]*\\()]/g, "\\$&");
+    const escapeRulePathFor = (path: string): string => router.escapeRulePath(path);
+    for (const path of ["/x/[wip] app", String.raw`/x/a\b`, "/x/Project (old)", "/x/p (x", "/x/p x)", String.raw`/x/q\(y`, String.raw`/x/q\)`, String.raw`/x/q8\[w] *z`, String.raw`/x/end\\`]) {
+      expect([path, parse(`Edit(${escapeRulePathFor(path)}/**)`)]).toEqual([path, { tool: "Edit", content: `${gitignore(path)}/**` }]);
+    }
   });
 
   test("protectedPathRules: the walk adds nothing any more — every walk dir is under the root, which the any-depth rule already covers (C1)", () => {

@@ -73,7 +73,14 @@ function fsRootAnchored(absPath: string): string;                          // "/
 function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
   /** @deprecated ignored */ walk?: { cwd: string; userHome?: string }): string[];
                                          // project item dirs at ANY depth: //<root>/**/.winter/<kind>/**, every path part escaped
-function escapeRulePath(path: string): string;                             // `[` `]` `*` `\` backslash-escaped for a rule pattern ("[wip]" → "\[wip\]"); `?` stays raw (measured). Both legs read this grammar (the Winter runtime since SV-6); the router escapes every path it writes into a rule, on both legs
+function escapeRulePath(path: string): string;                             // a literal path spelled for a rule's content: claude's own rule-content escape c() over the gitignore escape (table below); both legs
+// escapeRulePath's table, per character of the path (measured on claude 2.1.250 and on the Winter runtime at ws21/sdk@6170adb, whose rule
+// parse is claude's: the content between the first and last UNESCAPED paren, unescaped once — `\(`→`(`, `\)`→`)`, `\\`→`\` — before the
+// gitignore layer reads it):
+//   `\` → `\\\\` (four)   `[` → `\\[`   `]` → `\\]`   `*` → `\\*`   `(` → `\\\(`   `)` → `\\\)`   `?` → `?` (raw: an escaped `\?` never matches)
+// e.g. "/x/[wip] app" → "/x/\\[wip\\] app", "/x/Project (old)" → "/x/Project \\\(old\\\)". The parens are escaped at BOTH layers: with c() alone a
+// `\` followed by `(` fails to compile on both runtimes ("Invalid regular expression: missing )"). A Winter binary older than 6170adb
+// misreads `\`, `(` and `)` (and the doubled `\\[`) in these rules.
 // A relative `sandbox.filesystem.*` entry is re-anchored too, and on the OFFICIAL leg its anchor part is spelled for claude's
 // SANDBOX grammar, which is not the rule grammar (measured, claude 2.1.250): an entry holding `* ? [ ]` is a glob rendered as a
 // seatbelt regex, where a backslash is literal — so `[` → `[[]` ("[wip] app" → "[[]wip] app"), `]` stays, and `*`/`?` cannot be
