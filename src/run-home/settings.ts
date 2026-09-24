@@ -11,7 +11,8 @@
 // THE STEPS, in order:
 //   1. read the tiers — project and local only for a trusted project;
 //   2. drop the keys the runtime refuses from that tier (`PROJECT_TIER_REFUSED_KEYS`, from the pinned
-//      runtime: its trusted-source-only readers and its repo-controllable warnings);
+//      runtime: its trusted-source-only readers and its repo-controllable warnings), and a repository's
+//      escalating permission mode (`REFUSED_DEFAULT_MODES`, reported);
 //   3. filter `env` — the runtime's own per-tier sets, plus `CLAUDE_CONFIG_DIR` and every variable the
 //      ROUTER sets (a settings `env` block would otherwise override the process environment the router
 //      built), plus the router's refused execution-indirection list;
@@ -101,7 +102,7 @@ const CLAUDE_SETTINGS_KEY_SET: ReadonlySet<string> = new Set(CLAUDE_SETTINGS_KEY
  *     `syncClaudeAiSkills`/`syncClaudeAiPlugins`/`skipWorkflowUsageWarning` (not read from the project);
  *   * `claudeMd` — honoured from managed settings only.
  *
- * `permissions.defaultMode: "auto"` is handled beside these (a value, not a key).
+ * `permissions.defaultMode` is handled beside these (a value, not a key): `REFUSED_DEFAULT_MODES`.
  */
 export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; readonly local: readonly string[] } = (() => {
   const both = [
@@ -134,6 +135,26 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
   const projectOnly = ["skipDangerousModePermissionPrompt", "skipWorkflowUsageWarning", "syncClaudeAiSkills", "syncClaudeAiPlugins"];
   return { project: [...both, ...projectOnly], local: both };
 })();
+
+/**
+ * `permissions.defaultMode` values a repository tier may not set (R.3, I1), dropped and REPORTED.
+ *
+ *   * project — every ESCALATING mode: `bypassPermissions`, `auto`, `acceptEdits`. That is claude's own
+ *     trust-tier filter (`filterEscalatingDefaultMode`, `sdk.d.ts`; in 2.1.250 `Dn` = those three modes and
+ *     `An` = `{project}`). Once the router has merged a tier into the user tier that filter never fires,
+ *     and the router sets no `Options.permissionMode` on the official child, so a repository's
+ *     `"acceptEdits"` would have the child approve every in-cwd write without asking.
+ *   * local — `auto` only, as before (claude takes `auto` from user, flag or managed settings only); the
+ *     project-tier filter does not name the local tier.
+ *
+ * DIVERGENCE, deliberate: claude drops the EFFECTIVE mode when the highest tier that sets one is the
+ * project, so a user's own `plan` under a project's `bypassPermissions` becomes no mode at all. Filtering
+ * per tier keeps the user's value instead: it is the user's own choice, and it is never wider.
+ */
+export const REFUSED_DEFAULT_MODES: { readonly project: ReadonlySet<string>; readonly local: ReadonlySet<string> } = {
+  project: new Set(["bypassPermissions", "auto", "acceptEdits"]),
+  local: new Set(["auto"]),
+};
 
 /**
  * The pinned runtime's env filter for the project and local tiers (its own set, verbatim; matched
@@ -364,15 +385,22 @@ function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: 
   return out;
 }
 
-function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<RunHomeBrand, "envPrefix">): Record<string, unknown> {
+function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<RunHomeBrand, "envPrefix">, dropped: (rule: string, reason: string) => void = () => undefined): Record<string, unknown> {
   const out: Record<string, unknown> = { ...settings };
   if (tier !== "user") {
     for (const key of PROJECT_TIER_REFUSED_KEYS[tier]) delete out[key];
     const permissions = out["permissions"];
-    if (isPlainObject(permissions) && permissions["defaultMode"] === "auto") {
+    const mode = isPlainObject(permissions) ? permissions["defaultMode"] : undefined;
+    if (isPlainObject(permissions) && typeof mode === "string" && REFUSED_DEFAULT_MODES[tier].has(mode)) {
       const { defaultMode: _refused, ...rest } = permissions;
       if (Object.keys(rest).length === 0) delete out["permissions"];
       else out["permissions"] = rest;
+      dropped(
+        `permissions.defaultMode: ${mode}`,
+        tier === "project"
+          ? "a repository never sets the session's permission mode: claude drops an escalating mode (bypassPermissions, auto, acceptEdits) from the project tier, and merged into the user tier it would reach the child unfiltered"
+          : "the `auto` permission mode is taken from the user's own settings only (claude refuses it from a repository tier)",
+      );
     }
   }
   const env = out["env"];
@@ -454,7 +482,7 @@ export async function buildEffectiveSettings(context: RunHomeBuildContext): Prom
     const dropped = (rule: string, reason: string): void => {
       context.report.droppedRules.push({ rule, tier, reason });
     };
-    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor, dropped));
+    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand, dropped), anchor, dropped));
   }
   const settings = stripForMode(merged, input.mode, input.dispatchChild);
   const effective: Record<string, unknown> = {};

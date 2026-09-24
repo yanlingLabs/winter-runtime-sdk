@@ -31,11 +31,11 @@ describe("the tiers and claude's merge (F17)", () => {
   test("user < project < local; arrays concatenated and deduplicated; objects deep-merged", async () => {
     const bed = runHomeBed();
     const { root } = repo(bed);
-    put(join(bed.sdk, "settings.json"), json({ model: "user-model", permissions: { allow: ["Bash(ls:*)", "Bash(pwd)"] }, env: { A: "user", B: "user" } }));
-    put(join(root, ".winter", "settings.json"), json({ model: "project-model", permissions: { allow: ["Bash(pwd)", "Bash(git status)"] }, env: { B: "project" } }));
+    put(join(bed.sdk, "settings.json"), json({ outputStyle: "user-style", permissions: { allow: ["Bash(ls:*)", "Bash(pwd)"] }, env: { A: "user", B: "user" } }));
+    put(join(root, ".winter", "settings.json"), json({ outputStyle: "project-style", permissions: { allow: ["Bash(pwd)", "Bash(git status)"] }, env: { B: "project" } }));
     put(join(root, ".winter", "settings.local.json"), json({ permissions: { allow: ["Bash(make)"] }, env: { C: "local" } }));
     const settings = await effective(bed, root);
-    expect(settings["model"]).toBe("project-model");
+    expect(settings["outputStyle"]).toBe("project-style");
     expect((settings["permissions"] as { allow: string[] }).allow).toEqual(["Bash(ls:*)", "Bash(pwd)", "Bash(git status)", "Bash(make)"]);
     expect(settings["env"]).toEqual({ A: "user", B: "project", C: "local" });
   });
@@ -107,12 +107,12 @@ describe("the walk's `$HOME` stop (fix round 1, M2): a root at `$HOME` or above 
   test("a project BELOW `$HOME` still contributes both tiers; a local anchor at `$HOME` alone contributes nothing", async () => {
     const { bed, userHome } = homeBed();
     const root = join(userHome, "p");
-    put(join(root, ".winter", "settings.json"), json({ model: "project-model" }));
+    put(join(root, ".winter", "settings.json"), json({ outputStyle: "project-style" }));
     put(join(root, ".winter", "settings.local.json"), json({ env: { LOCAL: "1" } }));
     const below = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }), { userHome });
-    expect(below.effectiveSettings).toEqual({ model: "project-model", env: { LOCAL: "1" } });
+    expect(below.effectiveSettings).toEqual({ model: "user-model", outputStyle: "project-style", env: { LOCAL: "1" } });
     const homeGit = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: userHome }), { userHome });
-    expect(homeGit.effectiveSettings).toEqual({ model: "project-model" });
+    expect(homeGit.effectiveSettings).toEqual({ model: "user-model", outputStyle: "project-style" });
   });
 });
 
@@ -142,15 +142,48 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
     for (const key of Object.keys(hostile)) expect(PROJECT_TIER_REFUSED_KEYS.project).toContain(key);
   });
 
-  test('`permissions.defaultMode: "auto"` is refused from a repository tier; another mode is kept', async () => {
+  test("I1 (R.3): an ESCALATING `permissions.defaultMode` (`bypassPermissions`, `auto`, `acceptEdits`) is dropped from the PROJECT tier and reported; the local tier drops only `auto`; the user tier keeps every mode", async () => {
+    // claude's own filter (`filterEscalatingDefaultMode`; 2.1.250 `Dn = {bypassPermissions, auto,
+    // acceptEdits}`, `An = {project}`) never fires once the router has merged the value into the user
+    // tier, and the router sets no `Options.permissionMode`, so the child would take a repository's mode.
+    const reason = expect.stringContaining("permission mode");
+    for (const mode of ["bypassPermissions", "auto", "acceptEdits"]) {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(join(root, ".winter", "settings.json"), json({ permissions: { defaultMode: mode, allow: ["Bash(ls)"] } }));
+      const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+      expect([mode, runHome.effectiveSettings["permissions"]]).toEqual([mode, { allow: ["Bash(ls)"] }]);
+      expect([mode, runHome.report.droppedRules]).toEqual([mode, [{ rule: `permissions.defaultMode: ${mode}`, tier: "project", reason }]]);
+    }
+    for (const mode of ["default", "plan", "dontAsk"]) {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(join(root, ".winter", "settings.json"), json({ permissions: { defaultMode: mode } }));
+      const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+      expect([mode, runHome.effectiveSettings["permissions"], runHome.report.droppedRules]).toEqual([mode, { defaultMode: mode }, []]);
+    }
+    // The LOCAL tier (claude parity: `An` names the project tier only) drops `auto` alone.
+    for (const [mode, kept] of [["auto", false], ["acceptEdits", true], ["bypassPermissions", true]] as const) {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(join(root, ".winter", "settings.local.json"), json({ permissions: { defaultMode: mode } }));
+      const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+      expect([mode, runHome.effectiveSettings["permissions"]]).toEqual([mode, kept ? { defaultMode: mode } : undefined]);
+      expect([mode, runHome.report.droppedRules]).toEqual([mode, kept ? [] : [{ rule: `permissions.defaultMode: ${mode}`, tier: "local", reason }]]);
+    }
+    // The user's own file is the user's choice.
+    const bed = runHomeBed();
+    put(join(bed.sdk, "settings.json"), json({ permissions: { defaultMode: "acceptEdits" } }));
+    const runHome = await buildRunHome(inputFor(bed));
+    expect([runHome.effectiveSettings["permissions"], runHome.report.droppedRules]).toEqual([{ defaultMode: "acceptEdits" }, []]);
+  });
+
+  test("I1 (R.3): a project's escalating mode never overrides the user's own mode — the user's value survives (claude would drop the effective value outright)", async () => {
     const bed = runHomeBed();
     const { root } = repo(bed);
-    put(join(root, ".winter", "settings.json"), json({ permissions: { defaultMode: "auto" } }));
-    expect((await effective(bed, root))["permissions"]).toBeUndefined();
-    const bed2 = runHomeBed();
-    const r2 = repo(bed2);
-    put(join(r2.root, ".winter", "settings.json"), json({ permissions: { defaultMode: "acceptEdits" } }));
-    expect((await effective(bed2, r2.root))["permissions"]).toEqual({ defaultMode: "acceptEdits" });
+    put(join(bed.sdk, "settings.json"), json({ permissions: { defaultMode: "plan" } }));
+    put(join(root, ".winter", "settings.json"), json({ permissions: { defaultMode: "bypassPermissions" } }));
+    expect((await effective(bed, root))["permissions"]).toEqual({ defaultMode: "plan" });
   });
 });
 
