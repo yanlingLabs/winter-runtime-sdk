@@ -38,6 +38,7 @@ export {
   createTranscriptReconciler,
   guardedImportSessionToStore,
   isFile,
+  isJournalKey,
   isTranscriptPath,
   localTranscriptPath,
   reconcileLocalWriteRoot,

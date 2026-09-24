@@ -18,8 +18,8 @@ importers:
         specifier: ^26.4.0
         version: 26.5.0
       '@yanlinglabs/winter-agent-sdk':
-        specifier: ^0.0.16
-        version: 0.0.16
+        specifier: ^0.0.20
+        version: 0.0.20
       '@yanlinglabs/winter-conformance':
         specifier: ^0.0.3
         version: 0.0.3
@@ -134,8 +134,8 @@ packages:
     os: [darwin]
     hasBin: true
 
-  '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.16':
-    resolution: {integrity: sha512-S1YR0gHJeYfelvnD4MTjUQkk03UgIxGJk5Ug/7ZDFfZzq+k3Qqshi6wjUoZ5L4dTfQIExGxwcXmztjAAua5I0Q==}
+  '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.20':
+    resolution: {integrity: sha512-NA9AgwUoQG6ygZMHXtcpuRjCiPA4n1OjG++AF3mGzkfUIUz6MW9TU7Ennja3DJ2uIcuTI7myhlFUYTMAoRA7bg==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
@@ -144,8 +144,8 @@ packages:
     resolution: {integrity: sha512-dLCzYSl7wtxlktIpj+Vu8kHD6Fl2TEPgTG62+ouCHoraTBUgg+WxMxXc1cgydSvd3xpaC66jNIt3gqhLmNrriQ==}
     engines: {node: '>=18'}
 
-  '@yanlinglabs/winter-agent-sdk@0.0.16':
-    resolution: {integrity: sha512-UBpWB8j8W1impX3J72nDQGm80tCqCHGl+XXRJp58fRN0WjxQd8H4IIChJV2tHCqO8Ju/tnZR4+fU3XwN87yZPA==}
+  '@yanlinglabs/winter-agent-sdk@0.0.20':
+    resolution: {integrity: sha512-oi1dx9/fE7Hw7fWaGIISqXpeejiYxuXHQTCcnzhke+dytveKZ3dhUYgqUhJRKVRTD9iJy4byeCGLhSb8BXTnSQ==}
     engines: {node: '>=18'}
 
   '@yanlinglabs/winter-agent-sdk@0.0.3':
@@ -160,8 +160,8 @@ packages:
     resolution: {integrity: sha512-jCbxAmeYzTgi6nvNf/x64eKCDvTZDRiA7E9Vr6369VTanUH58ETKNHe57QKPQTHrBhoHM8C1adqTMpuGCDFv8g==}
     engines: {node: '>=18'}
 
-  '@yanlinglabs/winter-provider-catalog@0.0.16':
-    resolution: {integrity: sha512-gxKkgrD+ZIsgfMk/4+1DpdgW62A0QMpgAyo1J102TZ1lSSWnODbjZxEKJdZYUiJHVx6hkHKAxVEy6TMGrO9cpQ==}
+  '@yanlinglabs/winter-provider-catalog@0.0.20':
+    resolution: {integrity: sha512-WzpuC45bKUv4+vI2n22lx0fta1aglIw/SEdcwAP5gfomaTPeSQirJh9nFYsZE3tnVoacHS1ntAHvZejxLVt0Xw==}
     engines: {node: '>=18'}
 
   '@yanlinglabs/winter-provider-catalog@0.0.3':
@@ -647,7 +647,7 @@ snapshots:
   '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.10':
     optional: true
 
-  '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.16':
+  '@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.20':
     optional: true
 
   '@yanlinglabs/winter-agent-sdk@0.0.10':
@@ -656,11 +656,11 @@ snapshots:
     optionalDependencies:
       '@yanlinglabs/winter-agent-sdk-darwin-arm64': 0.0.10
 
-  '@yanlinglabs/winter-agent-sdk@0.0.16':
+  '@yanlinglabs/winter-agent-sdk@0.0.20':
     dependencies:
-      '@yanlinglabs/winter-provider-catalog': 0.0.16
+      '@yanlinglabs/winter-provider-catalog': 0.0.20
     optionalDependencies:
-      '@yanlinglabs/winter-agent-sdk-darwin-arm64': 0.0.16
+      '@yanlinglabs/winter-agent-sdk-darwin-arm64': 0.0.20
 
   '@yanlinglabs/winter-agent-sdk@0.0.3':
     dependencies:
@@ -670,7 +670,7 @@ snapshots:
 
   '@yanlinglabs/winter-provider-catalog@0.0.10': {}
 
-  '@yanlinglabs/winter-provider-catalog@0.0.16': {}
+  '@yanlinglabs/winter-provider-catalog@0.0.20': {}
 
   '@yanlinglabs/winter-provider-catalog@0.0.3': {}
 

@@ -34,6 +34,7 @@ export { renderAttributedTurn, renderOwnerQualifiedTurn, UnattributableSenderErr
 import { createRuntimeDirectory, type RuntimeDirectoryHandle, type RuntimeDirectoryOptions } from "../directory/directory.ts";
 import type { SeamContext } from "../seams/context.ts";
 import { createGlobalMessaging, type GlobalMessagingHandle, type GlobalMessagingOptions } from "./router.ts";
+import type { WinterColdResumeRunHomes } from "./winter-adapter.ts";
 
 export interface RuntimeMessaging {
   directory: RuntimeDirectoryHandle;
@@ -49,7 +50,11 @@ export interface RuntimeMessaging {
  * router does not exist yet when the directory is constructed, so the hook closes over a variable
  * that is assigned one line later.
  */
-export function createRuntimeMessaging(context: SeamContext, options: { directory?: RuntimeDirectoryOptions; messaging?: GlobalMessagingOptions } = {}): RuntimeMessaging {
+export function createRuntimeMessaging(
+  context: SeamContext,
+  options: { directory?: RuntimeDirectoryOptions; messaging?: GlobalMessagingOptions } = {},
+  internal: { winterRunHomes?: WinterColdResumeRunHomes } = {},
+): RuntimeMessaging {
   let messaging: GlobalMessagingHandle | undefined;
   const directory = createRuntimeDirectory(context, {
     ...(options.directory ?? {}),
@@ -59,6 +64,6 @@ export function createRuntimeMessaging(context: SeamContext, options: { director
       return messaging.deliver({ ...message, to: entry.parsed, toGeneration: entry.generation });
     },
   });
-  messaging = createGlobalMessaging({ ...context, directory }, options.messaging ?? {});
+  messaging = createGlobalMessaging({ ...context, directory }, options.messaging ?? {}, internal);
   return { directory, messaging };
 }

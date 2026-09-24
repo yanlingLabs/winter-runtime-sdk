@@ -33,6 +33,141 @@ barrier, and runtime selection — are on `main`, with WS-17's eighteen router-o
 cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
 interfaces and how this package consumes the Winter SDK.
 
+## Run home (WS-21)
+
+**Unreleased (0.0.12).** Both agent runtimes read ONE shared home, `<home>/sdk`, in the official
+runtime's config-dir formats with the brand's names. Neither reads it directly: before every
+generation a per-run folder is built, `<home>/cache/runs/<runId>`, and the child is pointed at it.
+This section is the contract a host builds against (Contract A); `src/run-home/types.ts` is its source.
+
+**The exports** (package root):
+
+```ts
+type RunMode = "code" | "dispatch" | "chat";
+type RunLeg = "winter" | "official";
+interface RunHomeInput {
+  home: string;                          // the daemon's home; the shared home is sdkHomeOf(home)
+  mode: RunMode;
+  dispatchChild: boolean;                // a code-mode dispatch child: output style skipped
+  leg: RunLeg;
+  cwd: string;
+  trustedProjectRoot: string | null;     // repoRootFor(cwd) when trusted, else null; at $HOME or above it, no
+                                         // project item, instruction, settings tier or project MCP file is read
+                                         // (the local MCP scope in <home>/sdk/.winter.json still applies)
+  gitRoot: string | null;                // the canonical git root (the local settings tier)
+  mcpDisabled: readonly string[];
+  reservedMcpServerNames: readonly string[]; // a configured server whose claude-NORMALISED name (`on()`: [^A-Za-z0-9_-] → `_`) equals a
+                                         // reserved one's is dropped (reason "reserved-name") — `x..y` spells the same tool names as `x__y`
+  memoryDir: string;                     // the auto-memory directory for this incarnation
+  brand?: RunHomeBrand;                  // optional; absent = the Winter SDK's own profile
+}
+interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules;
+  droppedImports;                        // an @import a project/local instructions file OR a project rule named outside the root (a rule in
+                                         // <run>/rules is read at the USER tier, so its body is expanded under the project rule; every project
+                                         // rule is a COPY — a snapshot, so a later edit in the repository never reaches the run home);
+                                         // every leftover `@` that could begin an import is neutralised, code blocks included
+  skippedAgents;                         // an agent the runtime's own YAML parse cannot read (or no Bun.YAML): never copied
+  droppedRules }                         // { rule, tier, reason }: an ALLOW re-anchored under an anchor holding `?` (it would widen);
+                                         // on either leg also a sandbox allow entry ("sandbox.filesystem.allowWrite: out") whose anchor holds `*`/`?`;
+                                         // a repository's escalating mode ("permissions.defaultMode: acceptEdits" — project: bypassPermissions/auto/
+                                         // acceptEdits, local: auto); "fallbackModel" and "modelOverrides" from ANY tier (a silent model switch: on
+                                         // overload, or on the wire behind the reported model); and "model", "availableModels", "advisorModel",
+                                         // "enforceAvailableModels" from a repository tier (a repository never chooses models)
+interface RunHome { runId; dir; sdkHome; input; effectiveSettings; report; dispose(): Promise<void> }
+const RUN_HOME_CONTRACT_VERSION = 1;
+const RUN_HOME_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"];
+function sdkHomeOf(home: string): string;                                  // join(home, "sdk")
+function buildRunHome(input: RunHomeInput): Promise<RunHome>;
+function fsRootAnchored(absPath: string): string;                          // "/" + absPath ("//Users/x")
+function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
+  /** @deprecated ignored */ walk?: { cwd: string; userHome?: string }): string[];
+                                         // project item dirs at ANY depth: //<root>/**/.winter/<kind>/**, every path part escaped
+function escapeRulePath(path: string): string;                             // a literal path spelled for a rule's content: claude's own rule-content escape c() over its own path escaper I_t (table below); both legs
+function escapeSandboxGlobPath(path: string): string;                      // a literal path spelled for claude's SANDBOX glob grammar ("[wip] app" → "[[]wip] app"; `]` and everything else as written).
+                                         // For a host's own ABSOLUTE `sandbox.filesystem` paths on EITHER leg (a denyWrite fence, <cwd>/.winter/agents, …):
+                                         // claude treats an entry holding `* ? [ ]` as a glob, so a raw `[` makes a deny miss the literal path (measured), and the
+                                         // Winter runtime routes every deny entry through the same glob-shape check (ws21/sdk round 11). `*`/`?` have no spelling
+                                         // there. Not for rules (escapeRulePath).
+                                         // On an ALLOW entry (allowWrite/allowRead): a `[` makes it match the EXACT path only — nothing under it (claude renders a glob
+                                         // allow as an exact-path match) — and a `*` or `?` widens it to sibling paths. The router drops such allows itself
+                                         // (droppedRules); a host calling this directly must too.
+// escapeRulePath's table, per character of the path (measured on claude 2.1.250 and on the Winter runtime at ws21/sdk@6170adb, whose rule
+// parse is claude's: the content between the first and last UNESCAPED paren, unescaped once — `\(`→`(`, `\)`→`)`, `\\`→`\` — before the
+// gitignore layer reads it):
+//   `\` → `\\\\` (four)   `[` → `\\[`   `]` → `\\]`   `*` → `\\*`   `(` → `\\\(`   `)` → `\\\)`   `?` → `?` (raw: an escaped `\?` never matches)
+//   `|` → `\\|`   `+` → `\\+`   `^` → `\\^`   `$` → `\\$`   a LEADING `!`/`#` → `\\!`/`\\#`   trailing whitespace → `\\<char>` each
+// The gitignore layer is claude's own path escaper `I_t` (with escapeGlobs), character for character (R.3 M1); node-ignore reads an
+// escaped `| + ^ $` as the literal character, so those four match as they did unescaped.
+// e.g. "/x/[wip] app" → "/x/\\[wip\\] app", "/x/Project (old)" → "/x/Project \\\(old\\\)". The parens are escaped at BOTH layers: with c() alone a
+// `\` followed by `(` fails to compile on both runtimes ("Invalid regular expression: missing )"). A Winter binary older than 6170adb
+// misreads `\`, `(` and `)` (and the doubled `\\[`) in these rules.
+// A relative `sandbox.filesystem.*` entry is re-anchored too, and ON BOTH LEGS its anchor part is spelled for claude's
+// SANDBOX grammar, which is not the rule grammar (measured, claude 2.1.250): an entry holding `* ? [ ]` is a glob rendered as a
+// seatbelt regex, where a backslash is literal — so `[` → `[[]` ("[wip] app" → "[[]wip] app"), `]` stays, and `*`/`?` cannot be
+// spelled (a deny keeps the wider, stricter form; an allow is dropped into droppedRules). The Winter runtime reads the same grammar
+// (every deny entry goes through claude's glob-shape check since ws21/sdk round 11), so a literal `[wip] app` anchor would be a class
+// there too (R.3, C-1). `permissions.additionalDirectories` is left literal on both: claude's permission scope reads it
+// as a path (its sandbox side treats a bracketed one as an exact-path glob, so a write inside it is refused either way).
+type RunHomeOutcome = "safe" | "quarantined" | "pending";
+interface RecoveryTranscriptOutcome {
+  projectKey: string; sessionId: string; subpath?: string;             // subpath: "subagents/…/agent-<id>", a run journal
+                                                                       // "subagents/<rel>/journal", or the session journal "world"
+  outcome: "clean" | "appended" | "canonical-ahead" | "quarantined";
+  appended: number; reason?: string;                                   // reason: why it was quarantined
+  artifacts?: { copied: number; identical: number; quarantined: string[] }; // on a session's own entry: its session dir's other files
+}
+interface RecoveryReport {
+  outcome: "clean" | "appended" | "quarantined";                       // quarantined > appended > clean (an artifact conflict counts)
+  transcripts: RecoveryTranscriptOutcome[];
+  quarantine?: string;                                                 // <home>/cache/quarantine/<ts>-<root name>
+  artifacts?: { copied: number; identical: number; quarantined: string[]; skipped: string[] }; // all carried files, totalled
+}
+type RunHomeFor = (ctx: { sessionId: string; leg: RunLeg; cwd: string; mode: RunMode }) => Promise<RunHome>;
+class RunHomeError extends RuntimeSdkError { code: RunHomeErrorCode }    // forwarded as data.code
+function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; // the one reconcile (read-only for hosts)
+```
+
+**The attach points.**
+
+| | |
+|---|---|
+| `createRuntimeSdk({ requireRunHome: true })` | Opt-in, and that is the feature detection: without it an existing host is served unchanged. With it, a generation with no `runtime.runHome` is refused `run_home_required` on BOTH overloads, synchronously, before either leg is touched. |
+| `createRuntimeSdk({ runHomeFor })` | The host's builder for the router's OWN cold-resume path (messaging delivery to an exited Winter session). Absent with `requireRunHome`, that path answers a typed non-retryable `unavailable`. |
+| `query({ prompt, options: { ...options, runtime: { runHome } } })` | The Winter overload (still typed `Query`). The host awaits `buildRunHome` in `optionsFor` and passes the result. |
+| `query({ prompt, options: { ...options, runtime: { selection, official, runHome } } })` | The official overload. The host awaits `buildRunHome` in the official session's `open()`. |
+| `sdk.runHomeOutcome(runId)` | `safe` → the host may `runHome.dispose()`; `quarantined` → its working copy was copied to `<home>/cache/quarantine/`; `pending` → still running (or unknown). Dispose only on `safe`. A `query()` that THROWS synchronously (every run-home refusal does) opened no incarnation and records nothing — the host disposes that run home on the throw, not on the outcome. |
+| `sdk.reconcileRootForRecovery(root): Promise<RecoveryReport>` | The recovery door for a recorded root (a crashed run folder or staging root) or a pre-WS-21 spool root (Migration C's `runtimes/claude-config`), judged PER TRANSCRIPT: `clean` (level); `appended` (the canonical file was behind; the tail is appended); `canonical-ahead` (the working copy is a prefix of a canonical history that moved on — a resume through staging, a continuation on the other leg — so nothing is appended and nothing is lost); `quarantined` (unprovable: that transcript's file alone is copied to `report.quarantine`, nothing of it is appended). **Session artifacts** — every non-transcript file claude keeps under `projects/<key>/<sid>/` (large tool outputs in `tool-results/`, a workflow's saved script and run record under `workflows/`, subagent `*.meta.json`) and any per-project file beside the session dirs — are carried into `<sdk>/projects/` at the same relative path, by this door and by the exit reconcile alike (a run folder or a `claude-resume-*` staging root): copied when absent, left when byte-identical, **never overwritten** (a differing destination quarantines the working copy's file), never through a link on either side. A `*.jsonl` is never carried as a file: claude's transcripts (nested workflow subagents at any depth), a workflow run's journal (`subagents/<rel>/journal.jsonl`) and the session journal (`<sid>/world.jsonl`) are reconciled through the store under claude's own import keys — the journals byte for byte, never through the claude-ready fold — and any other `*.jsonl` is reported under `artifacts.skipped` (the exit reconcile logs it), never dropped silently. A session's repair flag is cleared when every one of its transcripts came back level — `canonical-ahead` included, without asking whether a live writer holds the session, so **the host runs it to completion before any session with a recovered key opens** (the daemon does, at boot); the router keeps no live-session registry to check it against. The host never calls `reconcileLocalWriteRoot` itself. |
+
+**What applying a run home does** (the router, synchronously, before the pass-through / the launch):
+
+| | Winter leg | official leg |
+|---|---|---|
+| checks | built by `buildRunHome` and not disposed (`run_home_foreign`); built for this leg (`run_home_leg_mismatch`), this cwd (`run_home_cwd_mismatch`), this brand (`run_home_brand_mismatch`) and this router's store (`run_home_store_mismatch`) | the same |
+| config dir | `env.<PREFIX>HOME = runHome.dir` | `CLAUDE_CONFIG_DIR = runHome.dir` (fresh); `<dir>/.absent` then the linked staging dir (resume, §3.6) |
+| router-set env | `<PREFIX>STORE_HOME = <home>/sdk`, `<PREFIX>PLUGIN_CACHE_DIR = <home>/sdk/plugins`, `<PREFIX>PROVIDER_MANAGED_BY_HOST = 1`, `<PREFIX>DISABLE_CRON = 1` (laid over the caller's env) | `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = 1`, `CLAUDE_CODE_DISABLE_CRON = 1` — branch-owned, refused from `configuredExtras` |
+| options the run home decides | `plugins`, `skills`, `agents`, `outputStyle`, `brand` are refused from the caller (`run_home_option_refused`); so are the router-set variables in `env` (`router_owned_variable`) | the same options refused; a policy's `agents` is refused beside a run home and never forwarded |
+| setting sources | `["user"]`; a caller's `project`/`local` is refused (`setting_sources_refused`) | `["user"]`; the invariants refuse anything else, and `["user"]` without a run home; the spawn proxy re-checks the final argv |
+| MCP | the run folder's `.winter.json` | `strictMcpConfig: false` (and `true` is refused on a run home) |
+| memory | `autoMemory: { directory: memoryDir, enabled }` | flag layer: `autoMemoryDirectory = memoryDir`, `autoMemoryEnabled` from the effective settings |
+| flag layer | — | `plansDirectory`, and `permissions.ask` = `protectedPathRules(...)` (the sdk home's item dirs and instructions file, and the trusted project's item dirs at any depth under the root — `//<root>/**/.winter/<kind>/**`, measured to fire on the pin — in both spellings) appended to the host's own (a host `permissions.deny` survives) |
+| plugins | from the run home's `enabledPlugins` | the same; `Options.plugins` and `OptionsTemplatePolicy.plugins` are gone, and a `plugins` key is refused on every launch |
+| outcome | `pending` while the returned `Query` runs; `safe` once it settles (done, `return()`/`throw()`, a rejection, or disposal) — no working copy, but the child reads the run folder while it runs | `pending` until the exit reconcile |
+
+**Every router consumer of the home, decided** (plan r2 I3). `handoff.winterHome` stays the daemon's
+home; a router created with `requireRunHome` (which must name it) roots its store at
+`sdkHomeOf(winterHome)`, exposed as `SharedStoreIdentity.storeHome`.
+
+| consumer | decision |
+|---|---|
+| `store/wiring.ts` — `createSharedSessionStore` / `lazySharedSessionStore` | the concrete store is rooted at `storeHome` (`<home>/sdk`); `identity.winterHome` stays the daemon home |
+| `store/handoff-barrier.ts` — the lease root | kept at `<home>/runtimes/handoff-leases` (`homeOf()`) |
+| `store/handoff-barrier.ts` — step 5's validation, step 8's canonical path, the sidecar report | `storeHomeOf()` = `identity.storeHome` |
+| `store/materialized-resume.ts` — the decorator's canonical path | `identity.storeHome` |
+| `door.ts` — the provider-state sidecar, the default memory dir | `identity.storeHome` |
+| `door.ts` — the spool (`officialSpoolRoot(home)`) | pre-WS-21 profile only; a fresh generation on a run home runs in its run folder, and naming `runtime.official.spool` beside a run home is refused |
+| `messaging/winter-adapter.ts` — the cold resume | awaits the host's `runHomeFor` first and applies the result with the same check-and-apply as `query()`; without `runHomeFor` under `requireRunHome` it answers a non-retryable `unavailable`; the router disposes that run home when the resume ends |
+| the peer's `resolveWinterHome()` fallback | never used under `requireRunHome` (the home must be explicit — the agent SDK's WS-21 default moves to `~/.winter/sdk`, so `sdkHomeOf` of it would double up) |
+
 **What `0.0.11` changes** (a security fix: the official leg no longer loads the session's
 own project directory as a plugin; no peer floor change, no devDependency change):
 
@@ -319,15 +454,33 @@ and `PostToolBatch` that snapshots the forbidden names under the session's cwd a
 removes what APPEARED under its roots during the call, records a typed breach and ends the turn — its
 diff is TIME-BASED rather than causal, so under the child's HOME a vendor home created by something
 else during a long call is removed and attributed to that call (narrow: an existing one is in every
-baseline and is never touched). The sweep walks both
-roots to a bounded depth (6 by default) around every filesystem-touching call, so **it costs a walk
-per call**: on a large tree that is the dominant cost of the floor, and an incremental/fs-events
-design is the follow-up. It sees the synchronously-visible effects of the call it brackets; a
+baseline and is never touched). The sweep walks the cwd to a bounded depth (6 by default) and
+checks the HOME at its top level only (Touch 4: in production it is the user's real home) around every
+filesystem-touching call, so **it costs a walk per call**: on a large tree that is the dominant cost of
+the floor, and an incremental/fs-events design is the follow-up. **The vendor runtime's own write
+staging is not a breach**: before every sandboxed Bash call claude 2.1.250 creates `.claude/.cc-writes/`
+under its original cwd, its CURRENT cwd (which follows the model's own `cd`), its project root (above the
+cwd when the cwd is below it), its config dir and its local-settings dir — the home only when it is the
+project root. So a `.claude` a call created, at any depth under the cwd, holding ONLY a real `.cc-writes`
+directory is removed quietly and the turn goes on (it used to end every sandboxed Bash turn in a project
+with no vendor folder); the same is cleaned from the cwd's ancestors (the project root's copy), where
+nothing else is touched. Anything else in such a folder, or a link, still ends the turn. It sees the synchronously-visible effects of the call it brackets; a
 background write that lands later is caught opportunistically by the next swept call.
 
 **A host `PreToolUse` hook that answers `allow` makes 0.3.250 skip `canUseTool` for that call.** The
 floor runs first and any deny wins, so containment is unaffected — but your broker will not see that
 call, which matters if you were counting on it for audit.
+
+**The worktree refusal is not a veto.** While `containment.worktrees` is `"deny"` the floor also
+installs a `WorktreeCreate` hook that refuses, because a workflow script's `agent(…, { isolation:
+"worktree" })` is started by the workflow runtime with no tool call for the `PreToolUse` floor to
+see; with a `WorktreeCreate` hook configured, the runtime asks the hooks instead of running
+`git worktree add` itself. It asks EVERY configured hook, and a user, project or plugin
+`WorktreeCreate` **command** hook that returns a path wins over this refusal — the worktree is then
+created wherever that hook put it, by that hook. The refusal closes the vendor's OWN writer
+(`<repo>/.claude/worktrees/` and its branch); it does not police a worktree hook someone else
+configured. If that matters to you, control which hooks load (settings sources, trust, the plugins
+you enable) rather than relying on this one.
 
 **The extras door is a positive allowlist with two closed escape hatches.** `configuredExtras` admits
 only names the pinned artifact's own environment registry declares AND that an independent rule

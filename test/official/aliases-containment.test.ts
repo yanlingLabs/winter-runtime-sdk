@@ -11,7 +11,7 @@ import { WINTER_BRAND, mcpToolName } from "@yanlinglabs/winter-agent-sdk";
 
 import { ALIASED_BUILTINS, CANONICAL_DUPLICATE_EXPOSURE, aliasTargetFor, officialToolAliases } from "../../src/official/aliases.ts";
 import { containmentDecisionFor, containmentDispositions, containmentPaths, officialDisallowedTools, resolveSavedApprovalDisposition, targetsForbiddenPath } from "../../src/official/containment.ts";
-import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
+import { APPROVAL_BRIDGE_MARK, carriesMark, createApprovalBridge, createContainmentHooks, createFirstResponseWins, isOurApprovalBridge, revalidateResumedDecision, type ApprovalRequest } from "../../src/official/callbacks.ts";
 
 const brand = WINTER_BRAND;
 
@@ -60,12 +60,13 @@ describe("WS-14 §8 — builtin-path containment", () => {
     expect(rows.map((row) => row.disposition)).toEqual(["redirect", "disable", "redirect", "disable", "owned-by-product", "deny"]);
     // review r1, M2: what the row SAYS and what this package DOES are two fields, because they were
     // two different things — three rows said "redirect" while nothing redirected.
-    expect(rows.map((row) => row.enforcement)).toEqual(["floor-deny", "deny-list", "floor-deny", "approval-stripped", "host-ui", "floor-deny"]);
+    // WS-21 §4.3: the saved-approval row's durable update is now rewritten to `session`, not dropped.
+    expect(rows.map((row) => row.enforcement)).toEqual(["floor-deny", "deny-list", "floor-deny", "approval-session-only", "host-ui", "floor-deny"]);
     expect(containmentDispositions(brand, { worktrees: "host-replacement", workflows: "host-replacement" }).map((row) => row.enforcement)).toEqual([
       "host-implementation",
       "deny-list",
       "host-implementation",
-      "approval-stripped",
+      "approval-session-only",
       "host-ui",
       "floor-deny",
     ]);
@@ -244,5 +245,18 @@ describe("WS-14 §10 — callback bridging", () => {
     expect(latch.claim("req-1")).toBe(false);
     expect(latch.claim("req-2")).toBe(true);
     expect(latch.claimed()).toEqual(["req-1", "req-2"]);
+  });
+});
+
+describe("review I-2: the WorktreeCreate hook", () => {
+  test("installed while worktrees are denied (the default), absent under host-replacement; it refuses with the floor's reason and reports the decision", async () => {
+    const decisions: Array<{ tool: string; target: string; reason: string }> = [];
+    const denied = createContainmentHooks({ brand: WINTER_BRAND, onDecision: (decision) => void decisions.push(decision) });
+    expect(Object.keys(denied).sort()).toEqual(["PreToolUse", "WorktreeCreate"]);
+    const hook = denied["WorktreeCreate"]![0]!.hooks[0]!;
+    await expect(hook({ hook_event_name: "WorktreeCreate", name: "agent-x" })).rejects.toThrow(/worktree creation is refused on this branch/);
+    expect(decisions).toEqual([expect.objectContaining({ tool: "WorktreeCreate", target: ".claude/worktrees/agent-x" })]);
+    const replaced = createContainmentHooks({ brand: WINTER_BRAND, containment: { worktrees: "host-replacement" } });
+    expect(Object.keys(replaced)).toEqual(["PreToolUse"]);
   });
 });

@@ -18,13 +18,13 @@
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 
 import type { SeamContextWithDirectory } from "../seams/context.ts";
-import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialResumePlan, OfficialSession, OptionsTemplateInput } from "../seams/official-adapter.ts";
+import type { OfficialAdapter, OfficialLaunchPlan, OfficialLaunchProfile, OfficialResumePlan, OfficialRunHomeBinding, OfficialSession, OptionsTemplateInput } from "../seams/official-adapter.ts";
 import type { OfficialOptions, OfficialQuery, OfficialSpawnClaudeCodeProcess, OfficialSpawnOptions, OfficialSpawnedProcess } from "../seams/official-sdk-shapes.ts";
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
 
 import { officialBranchLabel } from "./branding.ts";
 import { createApprovalBridge, createContainmentHooks, isOurApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./callbacks.ts";
-import { resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
+import { effectiveContainmentPolicy, resolveSavedApprovalDisposition, type ContainmentPolicy } from "./containment.ts";
 import { createContainmentSweep, type ContainmentBreach, type ContainmentSweep } from "./sweep.ts";
 import { mergeHooks } from "./options-template.ts";
 import { buildOfficialChildEnv, type OfficialEnvInput, type OfficialEnvPolicy } from "./env-allowlist.ts";
@@ -247,7 +247,9 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
       // …AND ONLY FOR A ROOT THAT NAMES ONE GENERATION (M-1). A shared spool root skips the map
       // entirely and must be attributed by the directory or refused, because "the most recent launch
       // under the spool" is a guess about which session this spawn belongs to.
-      const known = classifyLocalWriteRoot(observedRoot).kind === "sdk-resume-staging" ? sinkByRoot.get(observedRoot) : undefined;
+      // The map only ever holds roots unique to one generation (`registerRoot` below), so a hit is an
+      // attribution, never a guess.
+      const known = sinkByRoot.get(observedRoot);
       if (known !== undefined) return known;
       const matches = (await context.directoryStore.load()).filter((entry) => entry.configDir === observedRoot);
       if (matches.length === 1) return directoryRecordSink({ store: context.directoryStore, address: (matches[0] as { address: string }).address });
@@ -270,18 +272,29 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     };
   };
 
-  const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string, sink: SpawnRecordSink): SupervisedSpawnProxy =>
-    createSupervisedSpawnProxy({
+  const makeProxy = (profile: OfficialLaunchProfile, configuredConfigDir: string, sink: SpawnRecordSink, runHome?: OfficialRunHomeBinding, planReconcile?: OfficialLaunchPlan["reconcile"]): SupervisedSpawnProxy => {
+    // WS-21 §3.8: the generation's own reconcile FIRST (the run home's exit reconcile), then the
+    // deployment-wide one — both inside the proxy's exit gate.
+    const reconcile: TranscriptReconcile | undefined =
+      planReconcile === undefined
+        ? policy.reconcile
+        : async (input) => {
+            await planReconcile(input);
+            await policy.reconcile?.(input);
+          };
+    return createSupervisedSpawnProxy({
       brand,
       profile,
       configuredConfigDir,
       sink,
-      ...(policy.reconcile === undefined ? {} : { reconcile: policy.reconcile }),
+      ...(runHome === undefined ? {} : { runHome: { dir: runHome.dir } }),
+      ...(reconcile === undefined ? {} : { reconcile }),
       ...(policy.verifyCleanup === undefined ? {} : { verifyCleanup: policy.verifyCleanup }),
       ...(policy.spawnChild === undefined ? {} : { spawnChild: policy.spawnChild }),
       ...(policy.onCrash === undefined ? {} : { onCrash: policy.onCrash }),
       ...(policy.now === undefined ? {} : { now: policy.now }),
     });
+  };
 
   /**
    * The seam's single `spawnProxy`.
@@ -320,7 +333,8 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
    * therefore per-launch rather than per-adapter.
    */
   const installFloor = (plan: OfficialLaunchPlan): OfficialOptions => {
-    const containment: ContainmentPolicy = { projectDirName: brand.projectDirName, ...(policy.containment ?? {}) };
+    // R-1: under a run home the workflow floor's default is `"run-home"` (see `effectiveContainmentPolicy`).
+    const containment: ContainmentPolicy = { projectDirName: brand.projectDirName, ...(effectiveContainmentPolicy(policy.containment, plan.runHome !== undefined) ?? {}) };
     // THE ADAPTER'S OWN POLICY IS VALIDATED ON EVERY LAUNCH, whichever bridge the caller brought (review
     // r4, NEW-19). `redirect` was a typed refusal only on the route where this adapter happened to
     // construct the bridge, and a silent `disable` when the caller's bridge was one this package made.
@@ -401,7 +415,7 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     // The brand's project directory and the PLAN's working directory ride along (0.0.11), so a plugin
     // entry naming the session's own project directory is refused on this path too — including for
     // hand-built options that carry no `cwd` of their own.
-    assertOptionsInvariants(withFloor, branchLabel, { projectDirName: brand.projectDirName, cwd: plan.cwd });
+    assertOptionsInvariants(withFloor, branchLabel, { projectDirName: brand.projectDirName, cwd: plan.cwd, ...(plan.runHome === undefined ? {} : { runHome: plan.runHome }) });
     if (resume !== undefined && resume.resume.length === 0) {
       throw new OfficialInvalidResumeError({ reason: "a resume needs the backend session id it is resuming", branchLabel });
     }
@@ -412,14 +426,15 @@ export function createOfficialAdapter(context: SeamContextWithDirectory, policy:
     // ONE SUPERVISOR PER GENERATION, bound into the options this generation is started with. A copy,
     // because the caller's plan is theirs — and the ONLY field changed is the spawn hook.
     const launchSink = sinkFor(plan);
-    const supervisor = makeProxy(plan.profile, plan.configDir, launchSink);
+    const supervisor = makeProxy(plan.profile, plan.configDir, launchSink, plan.runHome, plan.reconcile);
     // The pair this launch knows and the dispatcher does not: the CONFIGURED root and, once the
     // wrapper hands the child a different one (§1 profile 2), the OBSERVED root — each registered only
     // when it names ONE generation (M-1), which a `claude-resume-<uuid>` staging root does and the
     // shared spool does not.
     const registered: string[] = [];
     const registerRoot = (root: string): void => {
-      if (classifyLocalWriteRoot(root).kind !== "sdk-resume-staging") return;
+      // A staging root and (WS-21) a run folder are unique per generation; the shared spool is not (M-1).
+      if (classifyLocalWriteRoot(root, plan.runHome?.dir).kind === "official-spool") return;
       sinkByRoot.set(root, launchSink);
       registered.push(root);
     };
