@@ -9,6 +9,10 @@
 // view (so a comparison can never pass because both runtimes lost everything), then asserts the Winter
 // runtime's view equals claude's, item by item.
 //
+// MCP (Touch 2): starting a server is not offering it. The fixture servers are real stdio MCP servers,
+// and one describe holds each leg to OFFERING their `mcp__<server>__echo` tools to the model, reporting
+// them `connected` on a live status request, and answering a call to each.
+//
 // SCENARIOS: fresh (trusted); after a store-backed claude resume; after a Winter → claude → Winter
 // switch through `sdk.handoff` (each destination confirms by opening its generation on a fresh run
 // home); an untrusted variant, where every project item is absent on both; and a plugin enabled only in
@@ -236,8 +240,9 @@ interface Fixture {
 
 /**
  * The fixture's MCP servers, by the name they are CONFIGURED under → the marker label. Every one is a
- * stdio server that records its own start and exits, so "did this leg start it" is measured on the
- * process, not read off an init report. `winter` is the brand's standing-server name, which the router
+ * real stdio MCP server with one `echo` tool (Touch 2; it used to record its start and exit) that records
+ * its own start, so "did this leg start it" is measured on the process, not read off an init report — and
+ * the Touch 2 describe holds each leg to OFFERING its tool and answering a call to it. `winter` is the brand's standing-server name, which the router
  * reserves for itself: a user server under it must never start on either leg (SV-2's guard), exactly
  * like the host-reserved `sv-reserved-mcp` and the user-disabled `sv-disabled-mcp`.
  */
@@ -252,6 +257,57 @@ const MCP_SERVERS = {
 const markerLabel = (name: string): string => (name === MCP_SERVERS.standingName ? "sv-standing-name-mcp" : name);
 
 /**
+ * What runs the fixture server script: `node` when it is on PATH, else this process's own `bun`.
+ * MEASURED: spawned by either runtime, `bun` took 2.5–4.5 s from process start to the script's first
+ * statement (the servers then started after the generation had ended); `node` took ~25 ms.
+ */
+const MCP_SERVER_INTERPRETER = Bun.which("node") ?? process.execPath;
+
+/** The fixture servers' one tool, and what a call answers (Touch 2). */
+const MCP_TOOL = "echo";
+const MCP_ECHO_MARK = "MCP-ECHO";
+/** The canonical name a leg offers the model for a fixture server's tool. */
+const mcpToolName = (server: string): string => `mcp__${server}__${MCP_TOOL}`;
+/** A fixture server's tool, under the canonical `mcp__<server>__<tool>` name. */
+const isFixtureMcpTool = (name: string): boolean => name.startsWith("mcp__sv-");
+
+/**
+ * A minimal stdio MCP server (newline-delimited JSON-RPC): `initialize`, `tools/list` with one `echo`
+ * tool, `tools/call` answering `MCP-ECHO <server>: <text>`, `ping`. argv: <start marker> <server name>.
+ * It records its start FIRST (the SV-2 guard counts `started` lines), a `listed` line each time a client
+ * reads its tool list, and exits when its client closes stdin.
+ */
+const MCP_FIXTURE_SERVER = `import { appendFileSync } from "node:fs";
+const [marker, name] = process.argv.slice(2);
+appendFileSync(marker, "started\\n");
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let end;
+  while ((end = buffer.indexOf("\\n")) >= 0) {
+    const line = buffer.slice(0, end).trim();
+    buffer = buffer.slice(end + 1);
+    if (line.length === 0) continue;
+    let message;
+    try { message = JSON.parse(line); } catch { continue; }
+    if (message.id === undefined || message.id === null) continue;
+    const reply = (result) => send({ jsonrpc: "2.0", id: message.id, result });
+    if (message.method === "initialize") reply({ protocolVersion: message.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name, version: "1.0.0" } });
+    else if (message.method === "tools/list") {
+      appendFileSync(marker, "listed\\n");
+      reply({ tools: [{ name: "${MCP_TOOL}", description: "echoes its text (" + name + ")", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }] });
+    }
+    else if (message.method === "tools/call") reply({ content: [{ type: "text", text: "${MCP_ECHO_MARK} " + name + ": " + String(message.params?.arguments?.text ?? "") }] });
+    else if (message.method === "ping") reply({});
+    else send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "method not found" } });
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`;
+
+/**
  * The fixture home and project (brief L2.10): user/project/clashing skills, user/project agents plus a
  * DOUBLE-BOM agent, user/project rules, user/project instructions, an output style, a user MCP server
  * a local-scope one and a project `.winter/mcp.json` one (plus a disabled and a reserved-name one the
@@ -263,7 +319,11 @@ function plantFixture(session: HermeticSession, options: { installRecord: boolea
   const root = session.cwd;
   const mcpMarkers = join(session.home, "markers", "mcp");
   mkdirSync(mcpMarkers, { recursive: true });
-  const server = (name: string): Record<string, unknown> => ({ type: "stdio", command: "/bin/sh", args: ["-c", `echo started >> '${join(mcpMarkers, markerLabel(name))}'; exit 1`] });
+  // Touch 2: every fixture server is a REAL stdio MCP server (one `echo` tool), so a leg can be held to
+  // OFFERING its tools, not only to starting it. It still records its own start first.
+  const serverScript = join(session.home, "markers", "mcp-server.mjs");
+  put(serverScript, MCP_FIXTURE_SERVER);
+  const server = (name: string): Record<string, unknown> => ({ type: "stdio", command: MCP_SERVER_INTERPRETER, args: [serverScript, join(mcpMarkers, markerLabel(name)), name] });
   put(join(sdkHome, "WINTER.md"), `${TOKENS.userInstructions}\n`);
   put(join(sdkHome, "rules", "user-rule.md"), `${TOKENS.userRule}\n`);
   put(join(root, ".winter", "rules", "project-rule.md"), `${TOKENS.projectRule}\n`);
@@ -367,10 +427,68 @@ interface SameViewBed {
   directory: RuntimeDirectoryStore;
   projectKey: string;
   build(leg: RunLeg): Promise<RunHome>;
-  runWinter(runHome: RunHome, over?: { prompt?: string; resume?: string; permissionMode?: string; canUseTool?: CanUseToolLike }): Promise<Run>;
+  runWinter(runHome: RunHome, over?: { prompt?: string; resume?: string; permissionMode?: string; canUseTool?: CanUseToolLike; probeMcp?: boolean }): Promise<Run>;
   runClaude(runHome: RunHome, winterSessionId: string, over?: { prompt?: string; sessionId?: string; canUseTool?: CanUseToolLike; permissionMode?: string }): Promise<Run>;
   /** Set by a test that drives `sdk.handoff`: what each confirming destination opens. */
   destinations: Map<string, (runKind: "claude-agent" | "winter-agent") => Promise<HandoffStepReport>>;
+  /**
+   * Touch 2: awaited before the loopback answers a MAIN model request (one offering tools), with the
+   * number of tool results the conversation carries — so a test can gate a turn on a live condition.
+   */
+  hooks: { onTurn?: (index: number) => Promise<void> };
+  /**
+   * Touch 2: the LIVE generation's MCP status, while it runs — the Winter leg through an `mcp_status`
+   * control_request on its own stdio (`runWinter(…, { probeMcp: true })`), claude through its
+   * `mcpServerStatus()`. Cleared when the run ends.
+   */
+  live: { mcpStatus?: () => Promise<Array<{ name: string; status: string }>> };
+}
+
+/**
+ * Touch 2: a Winter-leg spawn that ALSO lets the test ask the live runtime for its MCP status — an
+ * `mcp_status` control_request (top-level `subtype: "mcp_status"`, the runtime's own handler) written on
+ * the child's stdin, its `control_response` taken out of stdout before the SDK sees it (the SDK has no
+ * such request of its own, so an answer to one would be a stranger to it). Everything else passes through.
+ */
+function mcpStatusProbingSpawn(live: SameViewBed["live"]): (opts: Parameters<typeof winterSdk.defaultSpawn>[0]) => ReturnType<typeof winterSdk.defaultSpawn> {
+  return (opts) => {
+    const proc = winterSdk.defaultSpawn(opts);
+    const waiting = new Map<string, (servers: Array<{ name: string; status: string }>) => void>();
+    let counter = 0;
+    live.mcpStatus = () =>
+      new Promise((resolve) => {
+        const requestId = `sv-mcp-status-${(counter += 1)}`;
+        waiting.set(requestId, resolve);
+        proc.stdin.write(`${JSON.stringify({ type: "control_request", requestId, subtype: "mcp_status", payload: null })}\n`);
+      });
+    const stdout = (async function* (): AsyncGenerator<string> {
+      let carry = "";
+      for await (const chunk of proc.stdout) {
+        carry += chunk;
+        const lines = carry.split("\n");
+        carry = lines.pop() ?? "";
+        const passed: string[] = [];
+        for (const line of lines) {
+          let frame: { type?: unknown; requestId?: unknown; payload?: { servers?: Array<{ name: string; status: string }> } } | undefined;
+          try {
+            frame = JSON.parse(line) as typeof frame;
+          } catch {
+            frame = undefined;
+          }
+          const answer = frame?.type === "control_response" && typeof frame.requestId === "string" ? waiting.get(frame.requestId) : undefined;
+          if (answer !== undefined && frame !== undefined) {
+            waiting.delete(frame.requestId as string);
+            answer((frame.payload?.servers ?? []).map(({ name, status }) => ({ name, status })));
+            continue;
+          }
+          passed.push(`${line}\n`);
+        }
+        if (passed.length > 0) yield passed.join("");
+      }
+      if (carry.length > 0) yield carry;
+    })();
+    return { stdin: proc.stdin, stdout, ...(proc.stderr === undefined ? {} : { stderr: proc.stderr }), kill: (signal?: string) => proc.kill(signal), exited: proc.exited, get pid() { return proc.pid; } };
+  };
 }
 
 async function withSameViewBed<T>(
@@ -391,6 +509,8 @@ async function withSameViewBed<T>(
   const projectKey = winterSdk.transcriptProjectKey(fixture.root);
   const fakes = await anthropicFake();
   const requests: Array<Record<string, unknown>> = [];
+  const hooks: SameViewBed["hooks"] = {};
+  const live: SameViewBed["live"] = {};
   return withLoopbackFake(
     {
       routes: [
@@ -409,6 +529,7 @@ async function withSameViewBed<T>(
               // A subagent's own requests (its prompt carries this marker) get a plain answer, so a script
               // indexed by the parent's tool results is never replayed inside the subagent.
               const isSubagent = JSON.stringify(body["messages"] ?? []).includes("SUBAGENT-PROMPT-7f");
+              if (!isSubagent && Array.isArray(body["tools"]) && (body["tools"] as unknown[]).length > 0) await hooks.onTurn?.(toolResultsIn(body));
               const turn = isSubagent ? { text: "sub done" } : (turns[Math.min(toolResultsIn(body), turns.length - 1)] ?? { text: "ok" });
               const usage = { input_tokens: 10, output_tokens: 2 };
               // The Winter runtime streams (SSE); the pinned claude accepts a plain message body.
@@ -492,6 +613,8 @@ async function withSameViewBed<T>(
         directory,
         projectKey,
         destinations,
+        hooks,
+        live,
         build: (leg) =>
           buildRunHome({
             home,
@@ -524,10 +647,12 @@ async function withSameViewBed<T>(
                 canUseTool: over.canUseTool ?? allow,
                 ...(over.permissionMode === undefined ? {} : { permissionMode: over.permissionMode }),
                 ...(over.resume === undefined ? {} : { resume: over.resume }),
+                ...(over.probeMcp === true ? { spawnClaudeCodeProcess: mcpStatusProbingSpawn(live) } : {}),
                 runtime: { runHome },
               } as never,
             }),
           );
+          delete live.mcpStatus;
           return { messages, requests: [...requests], stderr: stderr.join(""), hookRuns: hookRuns() - before, mcpStarted: await startedSince(startsBefore) };
           // (the Winter runtime's Query offers no `initializationResult`, so no style list is read here)
         },
@@ -550,7 +675,8 @@ async function withSameViewBed<T>(
                 official: { sessionId: winterSessionId, credentials: [{ variable: "ANTHROPIC_API_KEY", ref: CREDENTIAL }], connectionEnv: { ANTHROPIC_BASE_URL: baseUrl }, base: childEnv },
               },
             } as never,
-          }) as unknown as AsyncIterable<unknown> & { initializationResult?: () => Promise<Record<string, unknown>>; setPermissionMode?: (mode: string) => Promise<void> };
+          }) as unknown as AsyncIterable<unknown> & { initializationResult?: () => Promise<Record<string, unknown>>; setPermissionMode?: (mode: string) => Promise<void>; mcpServerStatus?: () => Promise<Array<{ name: string; status: string }>> };
+          live.mcpStatus = async () => ((await handle.mcpServerStatus?.()) ?? []).map(({ name, status }) => ({ name, status }));
           if (stream !== undefined) await handle.setPermissionMode?.(over.permissionMode as string);
           const draining = (async () => {
             const out: Array<Record<string, unknown>> = [];
@@ -564,6 +690,7 @@ async function withSameViewBed<T>(
           // THE STYLE LIST: claude answers it on its initialize response (`available_output_styles`).
           const initialization = typeof handle.initializationResult === "function" ? await handle.initializationResult().catch(() => undefined) : undefined;
           const messages = await draining;
+          delete live.mcpStatus;
           const availableOutputStyles = initialization?.["available_output_styles"];
           return {
             messages,
@@ -1450,6 +1577,84 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     test("trailing space, the Winter runtime: both trim; the escaped rule can never match a Write — `<root>/sp` is written, `sp ` is not, nothing asked (needs a binary at ws21/sdk@79773aa or later; 5e37898 asks for `sp `)", () => {
       expect(trailing["winter"]).toEqual(trimmedRow);
+    });
+  });
+
+  describe("Touch 2: the folded MCP servers' tools are OFFERED to the model, and callable — not only started", () => {
+    // THE LIVE GATE (R.3): the Winter runtime at ws21/sdk@47d9adc connected every server folded into the
+    // run folder and offered NONE of their tools to the model, while every row above — which measures only
+    // which servers START — passed. Here each fixture server is a real stdio MCP server with one `echo`
+    // tool, folded from the user, local and project scopes; the dropped ones (disabled, host-reserved, the
+    // standing name) must never be offered.
+    //
+    // THE STARTUP DEADLINE. Neither leg waits for a stdio server before its init report or its first
+    // request (MEASURED: both init reports say `pending`, and claude's first request offers no `mcp__`
+    // tool), so the loopback holds the first main request until every folded server has answered a
+    // `tools/list` for this run (10 s at most) and asks the live generation for its MCP status; the NEXT
+    // turn calls each server's tool. "Offered" is every `mcp__sv-…` tool in any model request of the run;
+    // "called" is each server's echo reaching the following request as a tool result.
+    const expected = [MCP_SERVERS.local, MCP_SERVERS.project, MCP_SERVERS.user].sort();
+    const PROBE_FAILURES: ReadonlySet<string> = new Set(["status-request-failed", "no-status-probe"]);
+    const measured: Record<string, { offered: string[]; status: Array<{ name: string; status: string }>; called: string[] }> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          // Turn 0 is a plain Read: a request is built BEFORE the gate holds it, so the one that can offer
+          // the connected servers' tools is the next (MEASURED on claude: a call made on turn 0 names a tool
+          // its request did not offer, and claude answers "no such tool").
+          turns: (root) => [
+            { toolUses: [{ id: "toolu_read", name: "Read", input: { file_path: join(root, "WINTER.md") } }] },
+            { toolUses: expected.map((server, index) => ({ id: `toolu_mcp_${index}`, name: mcpToolName(server), input: { text: `hello ${server}` } })) },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const markers = join(bed.session.home, "markers", "mcp");
+          const listed = (server: string): number => {
+            const path = join(markers, markerLabel(server));
+            return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter((line) => line === "listed").length : 0;
+          };
+          const measure = async (leg: string, run: () => Promise<Run>): Promise<void> => {
+            const before = Object.fromEntries(expected.map((server) => [server, listed(server)]));
+            let status: Array<{ name: string; status: string }> = [];
+            let gated = false;
+            bed.hooks.onTurn = async (index) => {
+              if (index !== 0 || gated) return;
+              gated = true;
+              const deadline = Date.now() + 10_000;
+              while (Date.now() < deadline && expected.some((server) => listed(server) <= before[server]!)) await Bun.sleep(50);
+              await Bun.sleep(300);
+              status = (await bed.live.mcpStatus?.().catch((error: unknown) => [{ name: "status-request-failed", status: String(error) }])) ?? [{ name: "no-status-probe", status: "absent" }];
+            };
+            const result = await run();
+            delete bed.hooks.onTurn;
+            const text = JSON.stringify(result.requests);
+            measured[leg] = {
+              offered: [...new Set(result.requests.flatMap((request) => ((request["tools"] as Array<{ name?: unknown }> | undefined) ?? []).map((tool) => String(tool.name ?? "")).filter(isFixtureMcpTool)))].sort(),
+              // The fixture's own servers (and a failed probe, so it shows); the brand's standing server is not ours.
+              status: status.filter((entry) => entry.name.startsWith("sv-") || PROBE_FAILURES.has(entry.name)).sort((a, b) => (a.name < b.name ? -1 : 1)),
+              called: expected.filter((server) => text.includes(`${MCP_ECHO_MARK} ${server}: hello ${server}`)),
+            };
+          };
+          await measure("claude", async () => bed.runClaude(await bed.build("official"), "s_sv_mcp_offered"));
+          await measure("winter", async () => bed.runWinter(await bed.build("winter"), { probeMcp: true }));
+          verbose("mcp offered", measured);
+        },
+      );
+    }, TIMEOUT);
+    const connected = expected.map((name) => ({ name, status: "connected" }));
+    test("claude (the reference): every folded server's tool is offered to the model, `mcpServerStatus()` says connected, and a call to each gets its result", () => {
+      expect(measured["claude"]).toEqual({ offered: expected.map(mcpToolName), status: connected, called: expected });
+    });
+    test("the Winter runtime OFFERS the same `mcp__sv-…` tools as claude (RED at ws21/sdk@47d9adc: none offered; needs SDK round 19)", () => {
+      expect(measured["winter"]?.offered).toEqual(measured["claude"]?.offered);
+    });
+    test("the Winter runtime's `mcp_status` control request says every folded server is connected", () => {
+      expect(measured["winter"]?.status).toEqual(connected);
+    });
+    test("a scripted call to each folded server's tool gets its result on the Winter runtime too (needs SDK round 19)", () => {
+      expect(measured["winter"]?.called).toEqual(measured["claude"]?.called);
     });
   });
 
