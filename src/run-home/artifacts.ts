@@ -20,6 +20,8 @@
 //     `*.tail-quarantine` and `*.tmp-*` files;
 //   * a `*.jsonl` the reconcile does NOT pick up (review N-1) is never copied as a file either — the store
 //     owns every `.jsonl` name — and never dropped silently: it is reported under `skipped`, with why;
+//   * a `*.meta.json` beside a reconciled subagent transcript or journal is `repairTranscriptMetadata`'s
+//     (below: into the store, the way claude's import does); any other one is reported under `skipped`;
 //   * a LINK in the working copy is never followed and never copied — it is reported and skipped;
 //   * the destination is `<store>/projects/<same relative path>`, confined there: a destination whose
 //     path passes through a link, or whose place is taken by something that is not a file, is a conflict;
@@ -27,8 +29,11 @@
 //     overwritten — the working copy's file is reported as a conflict for the caller to quarantine.
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, type Stats } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 
-import { scanLocalWriteRoot } from "../store/reconcile.ts";
+import { scanLocalWriteRoot, type LocalTranscript } from "../store/reconcile.ts";
+import type { SharedSessionStore } from "../store/wiring.ts";
 
 const PRIVATE_DIR = 0o700;
 const PROJECTS_DIR = "projects";
@@ -107,10 +112,14 @@ export function carryBackSessionArtifacts(root: string, storeHome: string): Arti
   // here would drift from it, and a file both halves skip is exactly the loss N-1 found. A scan that
   // cannot complete leaves the set empty, so every `.jsonl` is reported rather than assumed carried.
   let reconciled: ReadonlySet<string>;
+  let metadataBeside: ReadonlySet<string>;
   try {
-    reconciled = new Set(scanLocalWriteRoot(root).map((transcript) => transcript.path));
+    const scanned = scanLocalWriteRoot(root);
+    reconciled = new Set(scanned.map((transcript) => transcript.path));
+    metadataBeside = new Set(scanned.filter((transcript) => transcript.key.subpath !== undefined).map(metadataPathOf));
   } catch {
     reconciled = new Set();
+    metadataBeside = new Set();
   }
 
   const visit = (dir: string, segments: string[]): void => {
@@ -147,6 +156,10 @@ export function carryBackSessionArtifacts(root: string, storeHome: string): Arti
         if (!reconciled.has(source)) report.skipped.push({ ...artifact, reason: "a .jsonl the transcript reconcile does not recognise: the store owns every .jsonl name, so it is never copied as a file" });
         continue;
       }
+      if (name.endsWith(META_JSON)) {
+        if (!metadataBeside.has(source)) report.skipped.push({ ...artifact, reason: "metadata with no reconciled subagent transcript or journal beside it: the store owns every .meta.json name, so it is never copied as a file" });
+        continue;
+      }
       if (path.length < 2 || isStoreOwnedName(name)) continue;
       const destination = join(storeProjects, ...path);
       const offender = linkOnTheWay(storeProjects, dirname(destination));
@@ -176,5 +189,99 @@ export function carryBackSessionArtifacts(root: string, storeHome: string): Arti
     }
   };
   if (existsSync(sourceProjects)) visit(sourceProjects, []);
+  return report;
+}
+
+const META_JSON = ".meta.json";
+
+/** The `.meta.json` claude keeps beside a subagent transcript or a journal (`<stem>.jsonl` → `<stem>.meta.json`). */
+function metadataPathOf(transcript: LocalTranscript): string {
+  return `${transcript.path.slice(0, -".jsonl".length)}${META_JSON}`;
+}
+
+export interface MetadataRepairReport {
+  /** Appended to the store as `{ type: "agent_metadata", …parsed }` — the store had none. */
+  repaired: CarriedArtifact[];
+  /** The store already held exactly this metadata. */
+  identical: CarriedArtifact[];
+  /** Never appended, with why (the store's own metadata is never overwritten). */
+  skipped: Array<CarriedArtifact & { reason: string }>;
+}
+
+/**
+ * Repairs the store's copy of a subagent transcript's or a journal's metadata from the working copy.
+ *
+ * CLAUDE'S IMPORT turns the `.meta.json` beside EVERY `subagents/**.jsonl` — journals included — into an
+ * `{ type: "agent_metadata", …parsed }` entry on that key (`importSessionToStore`, 2.1.250), and its
+ * resume materializer writes it back beside the file. The mirror carries an agent's metadata live, but a
+ * journal is never mirrored, and a failed metadata batch leaves an agent without it; so after the
+ * transcripts are reconciled, each one that came back level (`eligible`) has its `.meta.json` repaired
+ * the same way:
+ *   * the store has none → appended, then re-read to confirm;
+ *   * the store holds the same → left;
+ *   * the store holds a DIFFERENT one → never overwritten, reported skipped;
+ *   * unreadable, not a JSON object, or carrying a `type` of its own other than `agent_metadata` (claude's
+ *     spread would let it replace the entry's type and write it into the transcript) → reported skipped.
+ * Only a REGULAR file is read: a link (or a special file) is the carry-back's to report, never followed.
+ */
+export async function repairTranscriptMetadata(
+  root: string,
+  shared: Pick<SharedSessionStore, "store" | "settle">,
+  eligible: (key: SessionKey) => boolean = () => true,
+): Promise<MetadataRepairReport> {
+  const report: MetadataRepairReport = { repaired: [], identical: [], skipped: [] };
+  let transcripts: LocalTranscript[];
+  try {
+    transcripts = scanLocalWriteRoot(root).filter((transcript) => transcript.key.subpath !== undefined);
+  } catch {
+    return report;
+  }
+  const projects = join(root, PROJECTS_DIR);
+  for (const transcript of transcripts) {
+    const source = metadataPathOf(transcript);
+    const stat = lstatOrUndefined(source);
+    if (stat === undefined || !stat.isFile()) continue;
+    const artifact: CarriedArtifact = { path: relative(projects, source).split(sep).join("/"), source, projectKey: transcript.key.projectKey, sessionId: transcript.key.sessionId };
+    const skip = (reason: string): void => void report.skipped.push({ ...artifact, reason });
+    if (!eligible(transcript.key)) {
+      skip("its transcript or journal was not reconciled, so its metadata is not provable either");
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(source, "utf8"));
+    } catch (error) {
+      skip(`it is not readable JSON (${error instanceof Error ? error.message : String(error)})`);
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      skip("it is not a JSON object");
+      continue;
+    }
+    const fields = parsed as Record<string, unknown>;
+    if (fields["type"] !== undefined && fields["type"] !== "agent_metadata") {
+      skip(`it carries a \`type\` of its own (${JSON.stringify(fields["type"])}), which would replace the metadata entry's`);
+      continue;
+    }
+    const entry = { type: "agent_metadata", ...fields } as SessionStoreEntry;
+    const stored = async (): Promise<SessionStoreEntry | undefined> => {
+      await shared.settle(transcript.key);
+      return ((await shared.store.load(transcript.key)) ?? []).filter((candidate) => candidate["type"] === "agent_metadata").at(-1);
+    };
+    try {
+      const existing = await stored();
+      if (existing !== undefined) {
+        if (isDeepStrictEqual(existing, entry)) report.identical.push(artifact);
+        else skip("the store already holds different metadata for this key; it is never overwritten");
+        continue;
+      }
+      await shared.store.append(transcript.key, [entry]);
+      const after = await stored();
+      if (after !== undefined && isDeepStrictEqual(after, entry)) report.repaired.push(artifact);
+      else skip("the append did not land: the store's metadata still differs after it");
+    } catch (error) {
+      skip(`the store could not be read or written (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
   return report;
 }

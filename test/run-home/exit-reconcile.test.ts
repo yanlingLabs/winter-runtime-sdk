@@ -593,3 +593,97 @@ describe("review N-1: a workflow's run journal and the session journal are recon
     expect(warnings.some((line) => line.includes("odd/unknown.jsonl"))).toBe(true);
   });
 });
+
+describe("final round: a transcript's or journal's `.meta.json` is repaired into the store the way claude's import does", () => {
+  const session = (root: string): string => join(root, "projects", KEY.projectKey, KEY.sessionId);
+  const put = (root: string, relative: string, text: string): string => {
+    const full = join(session(root), relative);
+    mkdirSync(join(full, ".."), { recursive: true });
+    writeFileSync(full, text);
+    return full;
+  };
+  const journalLines = [JSON.stringify({ type: "started", key: "v2:1", agentId: "a1" })];
+  const metaOf = (entries: SessionStoreEntry[] | null): SessionStoreEntry[] => (entries ?? []).filter((entry) => entry["type"] === "agent_metadata");
+
+  async function run(setup: (args: { shared: SharedSessionStore; runFolder: string }) => Promise<void>) {
+    const bed = runHomeBed();
+    const shared = sharedFor(bed.sdk);
+    const main = chain(1);
+    await shared.store.append(KEY, main);
+    await shared.settle();
+    const runFolder = join(bed.home, "cache", "runs", "run-1");
+    workingCopy(runFolder, main);
+    await setup({ shared, runFolder });
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+    const outcomes = new Map<string, RunHomeOutcome>();
+    try {
+      await hook({ shared, home: bed.home, mirrored: 1, outcomes })({ observation: { root: { configDir: runFolder } }, exit });
+    } finally {
+      console.warn = original;
+    }
+    return { bed, shared, runFolder, outcome: outcomes.get("run-1"), warnings };
+  }
+
+  test("a journal's `journal.meta.json` (never mirrored) lands as `{ type: \"agent_metadata\", …parsed }`; the exit is safe", async () => {
+    const journalKey: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_1/journal" };
+    const { shared, outcome, warnings } = await run(async ({ runFolder }) => {
+      put(runFolder, "subagents/workflows/wf_1/journal.jsonl", `${journalLines.join("\n")}\n`);
+      put(runFolder, "subagents/workflows/wf_1/journal.meta.json", JSON.stringify({ agentType: "workflow", description: "wf" }));
+    });
+    expect(outcome).toBe("safe");
+    expect(metaOf(await shared.store.load(journalKey))).toEqual([{ type: "agent_metadata", agentType: "workflow", description: "wf" }]);
+    expect(warnings).toEqual([]);
+  });
+
+  test("an `agent-*` transcript whose metadata the mirror never delivered (a failed batch): repaired", async () => {
+    const agentKey: SessionKey = { ...KEY, subpath: "subagents/agent-a1" };
+    const agent = chain(2).map((entry) => ({ ...entry, isSidechain: true }));
+    const { shared, outcome } = await run(async ({ shared: store, runFolder }) => {
+      await store.store.append(agentKey, agent);
+      await store.settle();
+      put(runFolder, "subagents/agent-a1.jsonl", agent.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+      put(runFolder, "subagents/agent-a1.meta.json", JSON.stringify({ agentType: "general-purpose" }));
+    });
+    expect(outcome).toBe("safe");
+    const loaded = (await shared.store.load(agentKey)) ?? [];
+    expect(metaOf(loaded)).toEqual([{ type: "agent_metadata", agentType: "general-purpose" }]);
+    expect(loaded.filter((entry) => entry["type"] !== "agent_metadata").map((entry) => entry["uuid"])).toEqual(agent.map((entry) => entry["uuid"]));
+  });
+
+  test("metadata the store already holds is never overwritten: identical is left quietly, a different one is reported skipped", async () => {
+    const same: SessionKey = { ...KEY, subpath: "subagents/agent-same" };
+    const other: SessionKey = { ...KEY, subpath: "subagents/agent-other" };
+    const entries = chain(1).map((entry) => ({ ...entry, isSidechain: true }));
+    const { shared, outcome, warnings } = await run(async ({ shared: store, runFolder }) => {
+      for (const key of [same, other]) await store.store.append(key, [...entries, { type: "agent_metadata", agentType: "store's" } as SessionStoreEntry]);
+      await store.settle();
+      for (const stem of ["agent-same", "agent-other"]) put(runFolder, `subagents/${stem}.jsonl`, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+      put(runFolder, "subagents/agent-same.meta.json", JSON.stringify({ agentType: "store's" }));
+      put(runFolder, "subagents/agent-other.meta.json", JSON.stringify({ agentType: "the working copy's" }));
+    });
+    expect(outcome).toBe("safe");
+    expect(metaOf(await shared.store.load(same))).toEqual([{ type: "agent_metadata", agentType: "store's" }]);
+    expect(metaOf(await shared.store.load(other))).toEqual([{ type: "agent_metadata", agentType: "store's" }]);
+    expect(warnings.some((line) => line.includes("agent-other.meta.json") && line.includes("never overwritten"))).toBe(true);
+    expect(warnings.some((line) => line.includes("agent-same.meta.json"))).toBe(false);
+  });
+
+  test("what cannot be repaired is reported skipped, never appended: unparseable, not an object, a foreign `type`, a link, and a `.meta.json` with no reconciled transcript beside it", async () => {
+    const { shared, outcome, warnings } = await run(async ({ runFolder }) => {
+      for (const stem of ["agent-bad", "agent-array", "agent-typed", "agent-linked"]) put(runFolder, `subagents/${stem}.jsonl`, `${JSON.stringify(chain(1)[0])}\n`);
+      put(runFolder, "subagents/agent-bad.meta.json", "{not json");
+      put(runFolder, "subagents/agent-array.meta.json", "[1,2]");
+      put(runFolder, "subagents/agent-typed.meta.json", JSON.stringify({ type: "user", agentType: "x" }));
+      const target = put(runFolder, "elsewhere.json", JSON.stringify({ agentType: "linked" }));
+      symlinkSync(target, join(session(runFolder), "subagents", "agent-linked.meta.json"));
+      put(runFolder, "subagents/agent-orphan.meta.json", JSON.stringify({ agentType: "orphan" }));
+    });
+    expect(outcome).toBe("safe");
+    for (const stem of ["agent-bad", "agent-array", "agent-typed", "agent-linked", "agent-orphan"]) {
+      expect([stem, metaOf(await shared.store.load({ ...KEY, subpath: `subagents/${stem}` }))]).toEqual([stem, []]);
+      expect([stem, warnings.some((line) => line.includes(`${stem}.meta.json`))]).toEqual([stem, true]);
+    }
+  });
+});

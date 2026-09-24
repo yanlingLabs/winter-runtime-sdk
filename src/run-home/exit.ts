@@ -35,7 +35,7 @@ import { basename, dirname, join, relative } from "node:path";
 import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
 import { toClaudeReady, type ContinuityEndpoint, type MessageOrigin } from "@yanlinglabs/winter-provider-runtime";
 
-import { carryBackSessionArtifacts, type ArtifactCarryReport } from "./artifacts.ts";
+import { carryBackSessionArtifacts, repairTranscriptMetadata, type ArtifactCarryReport, type MetadataRepairReport } from "./artifacts.ts";
 import { RunHomeError } from "./errors.ts";
 import type { RunHomeOutcome } from "./types.ts";
 import { compareTranscriptTail, isJournalKey, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge, type TranscriptReconcileOutcome } from "../store/reconcile.ts";
@@ -107,13 +107,16 @@ export function runHomeExitReconciler(input: RunHomeExitReconcilerInput): (args:
       // shared store before the folder can be disposed — never overwriting (see `artifacts.ts`). A
       // destination that differs quarantines that file, and the outcome says so.
       const artifacts = carryBackSessionArtifacts(root, input.shared.identity.storeHome);
+      // A subagent's or a journal's `.meta.json`, into the store the way claude's import does — only
+      // when every transcript came back level (a diverged root is quarantined whole below).
+      const metadata: MetadataRepairReport = report.status === "diverged" ? { repaired: [], identical: [], skipped: [] } : await repairTranscriptMetadata(root, input.shared);
       // NEVER DROPPED SILENTLY (review N-1): what the carry-back could not carry — a link, a special file,
-      // a `.jsonl` the reconcile does not recognise — goes with the folder, so it is named here.
-      if (artifacts.skipped.length > 0) {
+      // a `.jsonl` the reconcile does not recognise, metadata that cannot be repaired — goes with the
+      // folder, so it is named here.
+      const skipped = [...artifacts.skipped, ...metadata.skipped];
+      if (skipped.length > 0) {
         // eslint-disable-next-line no-console
-        console.warn(
-          `winter-runtime-sdk: run home ${input.runId}: ${artifacts.skipped.length} file(s) in its working copy were not carried into the shared store: ${artifacts.skipped.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`,
-        );
+        console.warn(`winter-runtime-sdk: run home ${input.runId}: ${skipped.length} file(s) in its working copy were not carried into the shared store: ${skipped.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`);
       }
       if (report.status === "diverged") return quarantine();
       if (report.transcripts.length === 0 && input.mirrored() > 0) return quarantine();
@@ -157,7 +160,14 @@ export interface RecoveryReport {
    * session dir with no transcript in this root, which no transcript entry can carry. `skipped` are
    * links (never followed) and special files.
    */
-  artifacts?: { copied: number; identical: number; quarantined: string[]; skipped: string[] };
+  artifacts?: {
+    copied: number;
+    identical: number;
+    quarantined: string[];
+    skipped: string[];
+    /** Subagent/journal `.meta.json` files appended to the store as `agent_metadata` (it had none). */
+    metadataRepaired?: number;
+  };
 }
 
 /**
@@ -327,19 +337,31 @@ export async function reconcileRootForRecovery(root: string, input: RecoveryInpu
   const carried = carryBackSessionArtifacts(root, input.storeHome);
   for (const conflict of carried.conflicts) toQuarantine.push(conflict.source);
   attachArtifacts(transcripts, carried);
+  // Metadata only for a transcript that came back level: a quarantined one's is as unprovable as it is.
+  const level = new Set(transcripts.filter((transcript) => transcript.outcome !== "quarantined").map((transcript) => `${transcript.projectKey}/${transcript.sessionId}/${transcript.subpath ?? ""}`));
+  const metadata = await repairTranscriptMetadata(root, input.shared, (key) => level.has(`${key.projectKey}/${key.sessionId}/${key.subpath ?? ""}`));
+  const skipped = [...carried.skipped, ...metadata.skipped];
 
   let quarantine: string | undefined;
   if (toQuarantine.length > 0) quarantine = quarantineTranscripts(root, input.home, basename(root), toQuarantine, now());
   const anyQuarantined = transcripts.some((transcript) => transcript.outcome === "quarantined") || carried.conflicts.length > 0;
   const outcome = anyQuarantined ? "quarantined" : transcripts.some((transcript) => transcript.outcome === "appended") ? "appended" : "clean";
-  const touched = carried.copied.length + carried.identical.length + carried.conflicts.length + carried.skipped.length;
+  const touched = carried.copied.length + carried.identical.length + carried.conflicts.length + skipped.length + metadata.repaired.length;
   return {
     outcome,
     transcripts,
     ...(quarantine === undefined ? {} : { quarantine }),
     ...(touched === 0
       ? {}
-      : { artifacts: { copied: carried.copied.length, identical: carried.identical.length, quarantined: carried.conflicts.map((conflict) => conflict.path), skipped: carried.skipped.map((entry) => entry.path) } }),
+      : {
+          artifacts: {
+            copied: carried.copied.length,
+            identical: carried.identical.length,
+            quarantined: carried.conflicts.map((conflict) => conflict.path),
+            skipped: skipped.map((entry) => entry.path),
+            ...(metadata.repaired.length === 0 ? {} : { metadataRepaired: metadata.repaired.length }),
+          },
+        }),
   };
 }
 
