@@ -23,6 +23,8 @@
 // weakened one, and `bun test --todo` fails the moment the SDK is fixed and the todo can be removed.
 // SV-1..SV-4 were fixed in `ws21/sdk`@267ea34, SV-5 and SV-6 in `ws21/sdk`@57e7fef, SV-7 and SV-8 in
 // `ws21/sdk`@20b623e; all are plain assertions now, named as regression guards.
+// SV-12 (live-gate F2: claude's parallel-call DAG read along one parentUuid chain) is OPEN — its rows
+// are `test.todo`.
 //
 // PLUGIN OUTPUT STYLES AND WORKFLOWS (round 3). The style LIST is observable on claude only
 // (`initializationResult().available_output_styles`, names without descriptions); the Winter Query has
@@ -40,6 +42,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as winterSdk from "@yanlinglabs/winter-agent-sdk";
 import type { SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import { switchFactsFor } from "@yanlinglabs/winter-provider-runtime";
 
 import { buildRunHome, createOfficialInputStream, createRuntimeSdk, escapeRulePath, type RunHome, type RunLeg, type RuntimeSdk, type RuntimeSdkPeers } from "../../src/index.ts";
 import { createInMemoryRuntimeDirectoryStore, type RuntimeDirectoryEntry, type RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
@@ -152,6 +155,25 @@ function put(path: string, content: string): void {
 
 /** One scripted model turn, served to BOTH legs (SSE to the Winter runtime, a plain message to claude). */
 type SameViewTurn = { text: string } | { toolUses: Array<{ id: string; name: string; input: Record<string, unknown> }> };
+
+/**
+ * F2: every `tool_use` in a request that has no `tool_result` for its id anywhere after it — the pairing a
+ * Responses provider enforces ("No tool output found for function call <id>", HTTP 400).
+ */
+function unpairedToolUses(body: Record<string, unknown>): string[] {
+  const messages = (body["messages"] ?? []) as Array<{ content?: unknown }>;
+  const unpaired: string[] = [];
+  messages.forEach((message, index) => {
+    if (!Array.isArray(message.content)) return;
+    for (const block of message.content as Array<Record<string, unknown>>) {
+      if (block["type"] !== "tool_use") continue;
+      const id = String(block["id"]);
+      const answered = messages.slice(index + 1).some((later) => Array.isArray(later.content) && (later.content as Array<Record<string, unknown>>).some((b) => b["type"] === "tool_result" && b["tool_use_id"] === id));
+      if (!answered) unpaired.push(id);
+    }
+  });
+  return unpaired;
+}
 
 /** How many tool results the conversation carries — the script's cursor (the runtimes' side requests carry none). */
 function toolResultsIn(body: Record<string, unknown>): number {
@@ -459,6 +481,8 @@ interface SameViewBed {
    * `mcpServerStatus()`. Cleared when the run ends.
    */
   live: { mcpStatus?: () => Promise<Array<{ name: string; status: string }>> };
+  /** F2: the model requests the loopback has recorded since the current run began — readable when a run THREW (a provider 400 ends the Winter query with an error). */
+  requestsSoFar(): Array<Record<string, unknown>>;
 }
 
 /**
@@ -509,7 +533,16 @@ function mcpStatusProbingSpawn(live: SameViewBed["live"]): (opts: Parameters<typ
 }
 
 async function withSameViewBed<T>(
-  options: { trusted: boolean; installRecord?: boolean; outputStyle?: string; dirName?: string; turns?: (root: string) => readonly SameViewTurn[]; userPermissions?: (root: string) => Record<string, string[]> },
+  options: {
+    trusted: boolean;
+    installRecord?: boolean;
+    outputStyle?: string;
+    dirName?: string;
+    turns?: (root: string) => readonly SameViewTurn[];
+    userPermissions?: (root: string) => Record<string, string[]>;
+    /** F2: answer a request that carries a `tool_use` without its `tool_result` with the provider's HTTP 400, as a Responses provider does. */
+    rejectUnpairedToolUse?: boolean;
+  },
   fn: (bed: SameViewBed) => Promise<T>,
 ): Promise<T> {
   /* c8 ignore next */
@@ -545,6 +578,13 @@ async function withSameViewBed<T>(
               }
               requests.push(body);
               requestTimes.push(Date.now());
+              const unpaired = options.rejectUnpairedToolUse === true ? unpairedToolUses(body) : [];
+              if (unpaired.length > 0) {
+                return new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: `No tool output found for function call ${unpaired[0]}.` } }), {
+                  status: 400,
+                  headers: { "content-type": "application/json" },
+                });
+              }
               // A subagent's own requests (its prompt carries this marker) get a plain answer, so a script
               // indexed by the parent's tool results is never replayed inside the subagent.
               const isSubagent = JSON.stringify(body["messages"] ?? []).includes("SUBAGENT-PROMPT-7f");
@@ -637,6 +677,7 @@ async function withSameViewBed<T>(
         destinations,
         hooks,
         live,
+        requestsSoFar: () => [...requests],
         build: (leg) =>
           buildRunHome({
             home,
@@ -1825,6 +1866,135 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     test("the Winter runtime, the ~3.5 s server: the same as claude — `pending` at init, absent from the first request, \"No such tool available\" on turn 0, offered and callable on turn 1", () => {
       expect(slowRow(observed["winter"])).toEqual(slowRow(observed["claude"]));
+    });
+  });
+
+  describe("F2 (SV-12): a claude turn with parallel Skill, ToolSearch and MCP calls, switched to the Winter runtime (sdk.handoff)", () => {
+    // THE LIVE GATE (R.3, F2): a claude session that had called `Skill`, `ToolSearch` and MCP tools was
+    // switched to `codex-oauth/gpt-5.6-terra`; the first Winter turn failed with the provider's HTTP 400
+    // "No tool output found for function call <the Skill call's id>". The loopback here answers exactly
+    // that 400 whenever a request carries a `tool_use` with no `tool_result` for it.
+    //
+    // THE CAUSE IS THE WINTER RUNTIME'S OWN READING (SV-12, MEASURED here): claude persists a parallel
+    // batch as one ONE-BLOCK `assistant` entry per `tool_use`, chained by `parentUuid`, and parents each
+    // `tool_result` entry on ITS OWN call's entry (`sourceToolAssistantUUID`) — a DAG, whose leaf chain
+    // runs through the LAST call's result only. claude's own reader splices the other results back in;
+    // the Winter runtime's `rebuildProviderMessages` (and the switch review's `switchFactsFor`) walk the
+    // single `parentUuid` chain from the leaf, so every call of the batch but the last reaches the
+    // provider without its output. Nothing here is the router's: the Winter destination resumes the
+    // canonical transcript itself, and step 5's pairing check (whole file) is right to pass it.
+    const SKILL_ID = "toolu_f2_skill";
+    const SEARCH_ID = "toolu_f2_search";
+    const MCP_ID = "toolu_f2_mcp";
+    const CALLS = ["toolu_f2_read", SKILL_ID, SEARCH_ID, MCP_ID];
+    const SV12 = "SV-12: the Winter runtime reads claude's parallel-call DAG along one parentUuid chain (RED at ws21/sdk@38d9940)";
+    let outcome = "";
+    let claudeRun: Run | undefined;
+    let winterRun: Run | undefined;
+    let winterRequests: Array<Record<string, unknown>> = [];
+    let entries: winterSdk.SessionStoreEntry[] = [];
+    const blocksOf = (content: unknown): string[] =>
+      Array.isArray(content) ? (content as Array<Record<string, unknown>>).map((b) => (b["type"] === "tool_use" ? `use:${String(b["id"])}` : b["type"] === "tool_result" ? `result:${String(b["tool_use_id"])}` : String(b["type"]))) : [typeof content];
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          rejectUnpairedToolUse: true,
+          turns: (root) => [
+            // Turn 0 is a plain Read, so the MCP server has connected before the batch names its tool (Touch 2).
+            { toolUses: [{ id: "toolu_f2_read", name: "Read", input: { file_path: join(root, "WINTER.md") } }] },
+            {
+              toolUses: [
+                { id: SKILL_ID, name: "Skill", input: { skill: "sv-user-skill" } },
+                { id: SEARCH_ID, name: "ToolSearch", input: { query: `select:${mcpToolName(MCP_SERVERS.user)}`, max_results: 1 } },
+                { id: MCP_ID, name: mcpToolName(MCP_SERVERS.user), input: { text: "f2" } },
+              ],
+            },
+            { text: "F2-DONE" },
+          ],
+        },
+        async (bed) => {
+          const winterSessionId = "s_sv_f2";
+          claudeRun = await bed.runClaude(await bed.build("official"), winterSessionId, { prompt: "F2-FIRST-PROMPT-3a1" });
+          const backend = String(initOf(claudeRun)?.["session_id"]);
+          const key: SessionKey = { projectKey: bed.projectKey, sessionId: backend };
+          entries = (await new winterSdk.WinterCompatibilitySessionStore({ winterHome: join(bed.session.brandHome, "sdk") }).load(key)) ?? [];
+          const selection: RuntimeSelection = { ...ws21Selection, runtimeKind: "winter-agent", providerId: "anthropic", modelRef: WINTER_MODEL, authFamily: "api-key" };
+          const entry = {
+            address: `session:${winterSessionId}`,
+            parsed: { objectKind: "session", runtimeKind: "claude-agent", winterSessionId, backendSessionId: backend },
+            runtimeKind: "claude-agent",
+            objectKind: "session",
+            transport: "winter-session",
+            status: "idle",
+            mode: "code",
+            generation: 1,
+            selection,
+            backendSessionId: backend,
+            capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+            cwd: bed.fixture.root,
+            updatedAt: new Date().toISOString(),
+          } as unknown as RuntimeDirectoryEntry;
+          await bed.directory.upsert(entry);
+          bed.destinations.set("winter-agent", async () => {
+            const current = (await bed.directory.load()).find((row) => row.address === entry.address) ?? entry;
+            await bed.directory.upsert({ ...current, runtimeKind: "winter-agent", parsed: { ...current.parsed, runtimeKind: "winter-agent" }, updatedAt: new Date().toISOString() } as RuntimeDirectoryEntry);
+            // A provider 400 ends the Winter query by THROWING, so the requests are read off the bed either way.
+            try {
+              winterRun = await bed.runWinter(await bed.build("winter"), { prompt: "F2-SECOND-PROMPT-7d2", resume: backend });
+            } finally {
+              winterRequests = bed.requestsSoFar();
+            }
+            return initOf(winterRun) === undefined ? { ok: false, reason: `no init from the resumed Winter generation: ${winterRun.stderr.slice(0, 400)}` } : { ok: true };
+          });
+          const toWinter = await bed.sdk.handoff(key, "winter-agent");
+          outcome = `${toWinter.kind}: ${String((toWinter as { detail?: string }).detail ?? "")}`;
+          verbose("F2", {
+            outcome,
+            topology: entries.filter((e) => typeof e["uuid"] === "string").map((e) => ({ type: e.type, uuid: e["uuid"], parentUuid: e["parentUuid"], ...(e["isMeta"] === true ? { isMeta: true } : {}), blocks: blocksOf((e["message"] as { content?: unknown } | undefined)?.content) })),
+            winterRequests: winterRequests.map((r) => ({ unpaired: unpairedToolUses(r), messages: ((r["messages"] ?? []) as Array<{ role?: unknown; content?: unknown }>).map((m) => `${String(m.role)}:${blocksOf(m.content).join(",")}`) })),
+          });
+        },
+      );
+    }, TIMEOUT);
+    const firstWinterRequest = (): Record<string, unknown> => winterRequests.find((request) => Array.isArray(request["tools"]) && (request["tools"] as unknown[]).length > 0) ?? {};
+    test("F2, claude (the reference): every request claude built pairs each of its calls, and its turn finished", () => {
+      expect(claudeRun?.requests.map(unpairedToolUses)).toEqual(claudeRun?.requests.map(() => []));
+      const last = claudeRun?.requests.at(-1) ?? {};
+      expect(CALLS.filter((id) => JSON.stringify(last).includes(`"tool_use_id":"${id}"`))).toEqual(CALLS);
+      expect(JSON.stringify(claudeRun?.messages.filter((m) => m["type"] === "result"))).toContain("F2-DONE");
+    });
+    test("F2, claude's writing (MEASURED): the batch is one one-block assistant entry per call, and each result is parented on its OWN call's entry — the leaf chain holds only the last call's result", () => {
+      const byCall = new Map<string, { uuid: unknown; parentUuid: unknown }>();
+      const byResult = new Map<string, unknown>();
+      for (const e of entries) {
+        for (const block of blocksOf((e["message"] as { content?: unknown } | undefined)?.content)) {
+          if (block.startsWith("use:")) byCall.set(block.slice(4), { uuid: e["uuid"], parentUuid: e["parentUuid"] });
+          if (block.startsWith("result:")) byResult.set(block.slice(7), e["parentUuid"]);
+        }
+      }
+      const batch = [SKILL_ID, SEARCH_ID, MCP_ID];
+      // Each call's entry chains on the one before it…
+      expect(batch.slice(1).map((id, index) => byCall.get(id)?.parentUuid === byCall.get(batch[index]!)?.uuid)).toEqual([true, true]);
+      // …and each result names its own call's entry as its parent.
+      expect(batch.map((id) => byResult.get(id) === byCall.get(id)?.uuid)).toEqual([true, true, true]);
+    });
+    test.todo(`F2: the claude → Winter handoff resumed — ${SV12}`, () => {
+      expect(outcome.split(":")[0]).toBe("resumed");
+    });
+    test.todo(`F2: the Winter runtime's first request carries every call with its output — the Skill, ToolSearch and MCP calls included — ${SV12}`, () => {
+      const first = firstWinterRequest();
+      expect(unpairedToolUses(first)).toEqual([]);
+      expect(CALLS.filter((id) => JSON.stringify(first).includes(`"tool_use_id":"${id}"`))).toEqual(CALLS);
+    });
+    test.todo(`F2: the first Winter turn after the switch succeeds (no provider 400) — ${SV12}`, () => {
+      const result = winterRun?.messages.find((m) => m["type"] === "result");
+      expect([result?.["subtype"], result?.["is_error"]]).toEqual(["success", false]);
+      expect(JSON.stringify(result)).toContain("F2-DONE");
+    });
+    test.todo(`F2: the switch review counts every completed tool result the session holds — ${SV12} (\`switchFactsFor\`, the lossy warning's "N completed tool results")`, () => {
+      const facts = switchFactsFor({ entries, sidecarRecords: [], from: { providerId: "anthropic", modelKey: "claude-sonnet-4-5" } as never });
+      expect(facts.completedToolResults).toBe(CALLS.length);
     });
   });
 
