@@ -63,7 +63,7 @@ interface RunHomeInput {
 interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules; droppedImports;
   skippedAgents;                         // an agent the runtime's own YAML parse cannot read (or no Bun.YAML): never copied
   droppedRules }                         // { rule, tier, reason }: an ALLOW re-anchored under an anchor holding `?` (it would widen);
-                                         // on the official leg also a sandbox allow entry ("sandbox.filesystem.allowWrite: out") whose anchor holds `*`/`?`
+                                         // on either leg also a sandbox allow entry ("sandbox.filesystem.allowWrite: out") whose anchor holds `*`/`?`
 interface RunHome { runId; dir; sdkHome; input; effectiveSettings; report; dispose(): Promise<void> }
 const RUN_HOME_CONTRACT_VERSION = 1;
 const RUN_HOME_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"];
@@ -75,9 +75,10 @@ function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, 
                                          // project item dirs at ANY depth: //<root>/**/.winter/<kind>/**, every path part escaped
 function escapeRulePath(path: string): string;                             // a literal path spelled for a rule's content: claude's own rule-content escape c() over the gitignore escape (table below); both legs
 function escapeSandboxGlobPath(path: string): string;                      // a literal path spelled for claude's SANDBOX glob grammar ("[wip] app" → "[[]wip] app"; `]` and everything else as written).
-                                         // For a host's own ABSOLUTE `sandbox.filesystem` paths on the OFFICIAL leg (a denyWrite fence, <cwd>/.winter/agents, …):
-                                         // claude treats an entry holding `* ? [ ]` as a glob, so a raw `[` makes a deny miss the literal path (measured). `*`/`?` have
-                                         // no spelling there. Not for the Winter leg (its sandbox reads these paths literally) and not for rules (escapeRulePath).
+                                         // For a host's own ABSOLUTE `sandbox.filesystem` paths on EITHER leg (a denyWrite fence, <cwd>/.winter/agents, …):
+                                         // claude treats an entry holding `* ? [ ]` as a glob, so a raw `[` makes a deny miss the literal path (measured), and the
+                                         // Winter runtime routes every deny entry through the same glob-shape check (ws21/sdk round 11). `*`/`?` have no spelling
+                                         // there. Not for rules (escapeRulePath).
                                          // On an ALLOW entry (allowWrite/allowRead): a `[` makes it match the EXACT path only — nothing under it (claude renders a glob
                                          // allow as an exact-path match) — and a `*` or `?` widens it to sibling paths. The router drops such allows itself
                                          // (droppedRules); a host calling this directly must too.
@@ -88,11 +89,12 @@ function escapeSandboxGlobPath(path: string): string;                      // a 
 // e.g. "/x/[wip] app" → "/x/\\[wip\\] app", "/x/Project (old)" → "/x/Project \\\(old\\\)". The parens are escaped at BOTH layers: with c() alone a
 // `\` followed by `(` fails to compile on both runtimes ("Invalid regular expression: missing )"). A Winter binary older than 6170adb
 // misreads `\`, `(` and `)` (and the doubled `\\[`) in these rules.
-// A relative `sandbox.filesystem.*` entry is re-anchored too, and on the OFFICIAL leg its anchor part is spelled for claude's
+// A relative `sandbox.filesystem.*` entry is re-anchored too, and ON BOTH LEGS its anchor part is spelled for claude's
 // SANDBOX grammar, which is not the rule grammar (measured, claude 2.1.250): an entry holding `* ? [ ]` is a glob rendered as a
 // seatbelt regex, where a backslash is literal — so `[` → `[[]` ("[wip] app" → "[[]wip] app"), `]` stays, and `*`/`?` cannot be
-// spelled (a deny keeps the wider, stricter form; an allow is dropped into droppedRules). The Winter leg keeps it literal (its
-// sandbox renders `(subpath …)`). `permissions.additionalDirectories` is left literal on both: claude's permission scope reads it
+// spelled (a deny keeps the wider, stricter form; an allow is dropped into droppedRules). The Winter runtime reads the same grammar
+// (every deny entry goes through claude's glob-shape check since ws21/sdk round 11), so a literal `[wip] app` anchor would be a class
+// there too (R.3, C-1). `permissions.additionalDirectories` is left literal on both: claude's permission scope reads it
 // as a path (its sandbox side treats a bracketed one as an exact-path glob, so a write inside it is refused either way).
 type RunHomeOutcome = "safe" | "quarantined" | "pending";
 interface RecoveryTranscriptOutcome {

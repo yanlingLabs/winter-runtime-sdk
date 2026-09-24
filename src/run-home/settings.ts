@@ -34,7 +34,7 @@ import { envName } from "@yanlinglabs/winter-agent-sdk";
 import { ALL_AUTH_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES } from "../official/auth.ts";
 import { isExecutionIndirectionVariable, OFFICIAL_RUNTIME_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../official/env-allowlist.ts";
 import type { RunHomeBuildContext } from "./build.ts";
-import { escapeRulePath, fsRootAnchored, type RunHomeBrand, type RunLeg } from "./types.ts";
+import { escapeRulePath, fsRootAnchored, type RunHomeBrand } from "./types.ts";
 import { isHomeOrAbove } from "./walk.ts";
 
 const PRIVATE_FILE = 0o600;
@@ -263,7 +263,9 @@ function anchorPath(path: unknown, anchor: string): unknown {
 }
 
 /**
- * A path spelled for CLAUDE'S SANDBOX grammar (review N-1 minor), which is not the rule grammar.
+ * A path spelled for CLAUDE'S SANDBOX grammar (review N-1 minor), which is not the rule grammar — the
+ * grammar BOTH runtimes read a `sandbox.filesystem` entry in (the Winter runtime since `ws21/sdk` round
+ * 11, which routes every deny entry through claude's glob-shape check, `Rt`).
  *
  * MEASURED on the pinned runtime (claude 2.1.250, macOS): a `sandbox.filesystem` entry holding any of
  * `* ? [ ]` is a GLOB — the runtime renders it as a seatbelt `(regex …)` instead of `(subpath …)` — and
@@ -288,25 +290,29 @@ export function escapeSandboxGlobPath(path: string): string {
 const SANDBOX_UNESCAPABLE = /[*?]/;
 
 /**
- * One `sandbox.filesystem` entry, re-anchored. On the OFFICIAL leg the ANCHOR's part of the result — the
- * deepest ancestor of the anchor the resolved path still lies under (a `../x` lands above it) — is
- * spelled with `escapeSandboxGlobPath`; the author's own part (`out/**`, `[ab]`) keeps its glob meaning.
- * The WINTER leg is left literal: its sandbox renders these entries as `(subpath …)` (ws21/sdk source),
- * where a class spelling would name a path that does not exist. `undefined` = dropped (an allow whose
- * anchor part holds an unescapable `*`/`?` on the official leg).
+ * One `sandbox.filesystem` entry, re-anchored. The ANCHOR's part of the result — the deepest ancestor of
+ * the anchor the resolved path still lies under (a `../x` lands above it) — is spelled with
+ * `escapeSandboxGlobPath`, ON BOTH LEGS; the author's own part (`out/**`, `[ab]`) keeps its glob meaning.
+ *
+ * WHY BOTH LEGS (R.3, C-1). Both runtimes read these entries in claude's sandbox glob grammar: claude
+ * always has, and the Winter runtime routes every deny entry through claude's own glob-shape check since
+ * `ws21/sdk` round 11 (`splitDenyPathsByGlobShape`, claude's `Rt`). A literal anchor holding `[` is then a
+ * character class on either leg, and a project or home named `[wip] app` defeats the deny.
+ *
+ * `undefined` = dropped: an ALLOW entry whose anchor part holds an unescapable `*`/`?` (it would widen to
+ * sibling paths), on either leg.
  */
-function anchorSandboxPath(path: unknown, anchor: string, leg: RunLeg, allowShaped: boolean): unknown {
+function anchorSandboxPath(path: unknown, anchor: string, allowShaped: boolean): unknown {
   if (typeof path !== "string" || path.length === 0) return path;
   if (isAbsolute(path) || path.startsWith("~")) return path;
   const absolute = resolve(anchor, path);
-  if (leg !== "official") return absolute;
   let base = anchor;
   while (absolute !== base && !absolute.startsWith(base.endsWith(sep) ? base : `${base}${sep}`) && dirname(base) !== base) base = dirname(base);
   if (allowShaped && SANDBOX_UNESCAPABLE.test(base)) return undefined;
   return `${escapeSandboxGlobPath(base)}${absolute.slice(base.length)}`;
 }
 
-function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: (rule: string, reason: string) => void = () => undefined, leg: RunLeg = "official"): Record<string, unknown> {
+function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: (rule: string, reason: string) => void = () => undefined): Record<string, unknown> {
   const out: Record<string, unknown> = { ...settings };
   const permissions = out["permissions"];
   if (isPlainObject(permissions)) {
@@ -341,7 +347,7 @@ function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: 
         // `denyWrite`/`denyRead` narrow; every other list (allowWrite, allowRead, a key added later) widens.
         const allowShaped = !key.startsWith("deny");
         fs[key] = value.flatMap((path) => {
-          const anchored = anchorSandboxPath(path, anchor, leg, allowShaped);
+          const anchored = anchorSandboxPath(path, anchor, allowShaped);
           if (anchored !== undefined) return [anchored];
           dropped(`sandbox.filesystem.${key}: ${String(path)}`, `its re-anchored form would carry the anchor's \`*\`/\`?\` (${anchor}), which claude's sandbox glob grammar cannot escape, and so allow sibling paths too`);
           return [];
@@ -448,7 +454,7 @@ export async function buildEffectiveSettings(context: RunHomeBuildContext): Prom
     const dropped = (rule: string, reason: string): void => {
       context.report.droppedRules.push({ rule, tier, reason });
     };
-    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor, dropped, input.leg));
+    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand), anchor, dropped));
   }
   const settings = stripForMode(merged, input.mode, input.dispatchChild);
   const effective: Record<string, unknown> = {};

@@ -77,7 +77,10 @@ export interface RunHomeReport {
    * the rewrite could not be proved to read back as intended, or this process has no `Bun.YAML`.
    */
   skippedAgents: { path: string; reason: "unparseable" | "no-yaml-parser" }[];
-  /** Re-anchored rules the builder dropped rather than widen (review minor: an ALLOW under an anchor holding `?`). */
+  /**
+   * Re-anchored rules the builder dropped rather than widen (review minor: an ALLOW under an anchor holding `?`;
+   * a sandbox ALLOW entry whose anchor holds `*`/`?`, on either leg).
+   */
   droppedRules: { rule: string; tier: "user" | "project" | "local"; reason: string }[];
 }
 

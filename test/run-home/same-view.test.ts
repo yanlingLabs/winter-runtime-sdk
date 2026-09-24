@@ -1269,10 +1269,14 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
   describe("review N-1 minor: a project's relative sandbox `denyWrite` under a root NAMED `[wip] app`", () => {
     // MEASURED (claude 2.1.250): a `sandbox.filesystem` entry holding `[` is a glob there, so a deny
     // re-anchored RAW under `[wip] app` was a class matching `w app` — the sandboxed write to the literal
-    // `guarded/` went through. The router now spells the anchor `[[]wip] app` on the official leg.
+    // `guarded/` went through. The router now spells the anchor `[[]wip] app` on BOTH legs (R.3, C-1: the
+    // Winter runtime routes every deny entry through claude's glob-shape check since ws21/sdk round 11).
     // (Every write under a bracketed cwd is refused by claude's own default write root, which is the cwd
     // spelled raw — so the bed grants the parent explicitly, the shape in which a deny is the only fence.)
     const written: Record<string, Record<string, boolean>> = {};
+    // C-1 (R.3): what each leg's BUILT run folder carries (`<run>/settings.json`, read back from disk).
+    const built: Record<string, unknown> = {};
+    let fixtureRoot = "";
     beforeAll(async () => {
       await withSameViewBed(
         {
@@ -1291,10 +1295,14 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
             written[leg] = { free: existsSync(join(root, "free", "f")), guarded: existsSync(join(root, "guarded", "f")) };
             for (const d of ["free", "guarded"]) rmSync(join(root, d), { recursive: true, force: true });
           };
+          fixtureRoot = root;
+          const filesystemOf = (runHome: RunHome): unknown => (JSON.parse(readFileSync(join(runHome.dir, "settings.json"), "utf8")) as { sandbox?: { filesystem?: unknown } }).sandbox?.filesystem;
           const winter = await bed.build("winter");
+          built["winter"] = filesystemOf(winter);
           await bed.runWinter(winter, { canUseTool: allow });
           observe("winter");
           const official = await bed.build("official");
+          built["official"] = filesystemOf(official);
           verbose("[wip] sandbox", official.effectiveSettings["sandbox"]);
           await bed.runClaude(official, "s_sv_sandbox_deny", { canUseTool: allow });
           observe("claude");
@@ -1305,12 +1313,19 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     test("official leg: the re-anchored deny stops the sandboxed write to the literal `guarded/`; the sibling write goes through", () => {
       expect(written["claude"]).toEqual({ free: true, guarded: false });
     });
-    test.todo(
-      "Winter leg: the same deny stops the same write — SV-11 (the Winter runtime at ws21/sdk@20b623e does not apply `sandbox.filesystem.denyWrite` from the run home's settings.json at all: measured with a plain root too, the denied write went through)",
-      () => {
-        expect(written["winter"]).toEqual({ free: true, guarded: false });
-      },
-    );
+    test("C-1 (R.3): BOTH legs' built run folders carry the re-anchored deny spelled for the sandbox glob grammar (`[[]wip] app/guarded`) — the Winter runtime reads these entries through claude's glob-shape check too", () => {
+      const parent = dirname(fixtureRoot);
+      const expected = { allowWrite: [parent], denyWrite: [join(parent, "[[]wip] app", "guarded")] };
+      expect(built).toEqual({ winter: expected, official: expected });
+    });
+    // SV-11 was OPEN at ws21/sdk@20b623e (the Winter runtime did not apply the run home's
+    // `sandbox.filesystem.denyWrite` at all). Fixed in the SDK; with the router's C-1 half (the anchor
+    // spelled `[[]wip] app` on this leg too) the shared binary at 5e37898 holds the deny — `bun test --todo`
+    // reported this todo as passing, so it is a named guard now. Without C-1 the literal `[wip] app` anchor
+    // is a class on this leg and the write lands (measured: `guarded: true`).
+    test("Winter leg: the same deny stops the same write (SV-11 guard + C-1: the Winter runtime reads the escaped anchor through claude's glob-shape check; needs a binary at ws21/sdk round 11 or later)", () => {
+      expect(written["winter"]).toEqual({ free: true, guarded: false });
+    });
   });
 
   describe("the escape table: a trusted root NAMED `Project (old)`, and deny targets holding `\\` and `\\(`", () => {
