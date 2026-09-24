@@ -467,7 +467,7 @@ interface SameViewBed {
   projectKey: string;
   build(leg: RunLeg): Promise<RunHome>;
   runWinter(runHome: RunHome, over?: { prompt?: string; resume?: string; permissionMode?: string; canUseTool?: CanUseToolLike; probeMcp?: boolean }): Promise<Run>;
-  runClaude(runHome: RunHome, winterSessionId: string, over?: { prompt?: string; sessionId?: string; canUseTool?: CanUseToolLike; permissionMode?: string }): Promise<Run>;
+  runClaude(runHome: RunHome, winterSessionId: string, over?: { prompt?: string; sessionId?: string; canUseTool?: CanUseToolLike; permissionMode?: string; model?: string; effort?: string }): Promise<Run>;
   /** Set by a test that drives `sdk.handoff`: what each confirming destination opens. */
   destinations: Map<string, (runKind: "claude-agent" | "winter-agent") => Promise<HandoffStepReport>>;
   /**
@@ -739,6 +739,8 @@ async function withSameViewBed<T>(
               cwd: fixture.root,
               canUseTool: over.canUseTool ?? allow,
               ...(over.sessionId === undefined ? {} : { sessionId: over.sessionId }),
+              ...(over.model === undefined ? {} : { model: over.model }),
+              ...(over.effort === undefined ? {} : { effort: over.effort }),
               runtime: {
                 runHome,
                 selection: ws21Selection,
@@ -2060,6 +2062,40 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
     test("row 2: a model-written `<cwd>/.claude/settings.json` still ENDS the turn — no follow-up request, and nothing survives", () => {
       expect({ mainRequests: measured["r2"]?.mainRequests, outputReachedModel: measured["r2"]?.outputReachedModel, vendorDirLeft: measured["r2"]?.vendorDirLeft }).toEqual({ mainRequests: 1, outputReachedModel: false, vendorDirLeft: false });
+    });
+  });
+
+  describe("Touch 4 (F1), official leg: the door forwards `Options.model` and `Options.effort` — the spawned child runs them", () => {
+    // THE LIVE GATE: the official door never forwarded the query's top-level `Options.model` or
+    // `Options.effort` (0.0.11 and the WS-21 build): a daemon session recorded on one model ran claude's own
+    // default, and its effort was dropped. The pinned wrapper turns them into `--model` and `--effort`.
+    const MODEL = "claude-sonnet-5";
+    const EFFORT = "low";
+    const measured: Record<string, { initModel: unknown; requestModels: string[]; requestEffort: unknown[] }> = {};
+    beforeAll(async () => {
+      await withSameViewBed({ trusted: true }, async (bed) => {
+        const measure = async (label: string, over: { model?: string; effort?: string }): Promise<void> => {
+          const run = await bed.runClaude(await bed.build("official"), `s_sv_f1_${label}`, over);
+          const main = run.requests.filter((body) => Array.isArray(body["tools"]) && (body["tools"] as unknown[]).length > 0);
+          measured[label] = {
+            initModel: initOf(run)?.["model"],
+            requestModels: [...new Set(main.map((body) => String(body["model"])))],
+            requestEffort: main.map((body) => (body["output_config"] as { effort?: unknown } | undefined)?.effort ?? null),
+          };
+          verbose(`f1 ${label} body keys`, main.map((body) => Object.keys(body).sort()));
+          verbose(`f1 ${label} output_config/thinking`, main.map((body) => ({ output_config: body["output_config"], thinking: body["thinking"] })));
+        };
+        await measure("forwarded", { model: MODEL, effort: EFFORT });
+        await measure("default", {});
+        verbose("f1", measured);
+      });
+    }, TIMEOUT);
+    test("the child reports the forwarded model at init and sends it on every request, and its requests carry the forwarded effort", () => {
+      expect(measured["forwarded"]).toEqual({ initModel: MODEL, requestModels: [MODEL], requestEffort: [EFFORT] });
+    });
+    test("control: without them the child runs its own default model and sends no effort of ours", () => {
+      expect(measured["default"]?.initModel).not.toBe(MODEL);
+      expect(measured["default"]?.requestEffort).not.toContain(EFFORT);
     });
   });
 
