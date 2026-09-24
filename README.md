@@ -80,7 +80,7 @@ function fsRootAnchored(absPath: string): string;                          // "/
 function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, brand?,
   /** @deprecated ignored */ walk?: { cwd: string; userHome?: string }): string[];
                                          // project item dirs at ANY depth: //<root>/**/.winter/<kind>/**, every path part escaped
-function escapeRulePath(path: string): string;                             // a literal path spelled for a rule's content: claude's own rule-content escape c() over the gitignore escape (table below); both legs
+function escapeRulePath(path: string): string;                             // a literal path spelled for a rule's content: claude's own rule-content escape c() over its own path escaper I_t (table below); both legs
 function escapeSandboxGlobPath(path: string): string;                      // a literal path spelled for claude's SANDBOX glob grammar ("[wip] app" → "[[]wip] app"; `]` and everything else as written).
                                          // For a host's own ABSOLUTE `sandbox.filesystem` paths on EITHER leg (a denyWrite fence, <cwd>/.winter/agents, …):
                                          // claude treats an entry holding `* ? [ ]` as a glob, so a raw `[` makes a deny miss the literal path (measured), and the
@@ -93,6 +93,9 @@ function escapeSandboxGlobPath(path: string): string;                      // a 
 // parse is claude's: the content between the first and last UNESCAPED paren, unescaped once — `\(`→`(`, `\)`→`)`, `\\`→`\` — before the
 // gitignore layer reads it):
 //   `\` → `\\\\` (four)   `[` → `\\[`   `]` → `\\]`   `*` → `\\*`   `(` → `\\\(`   `)` → `\\\)`   `?` → `?` (raw: an escaped `\?` never matches)
+//   `|` → `\\|`   `+` → `\\+`   `^` → `\\^`   `$` → `\\$`   a LEADING `!`/`#` → `\\!`/`\\#`   trailing whitespace → `\\<char>` each
+// The gitignore layer is claude's own path escaper `I_t` (with escapeGlobs), character for character (R.3 M1); node-ignore reads an
+// escaped `| + ^ $` as the literal character, so those four match as they did unescaped.
 // e.g. "/x/[wip] app" → "/x/\\[wip\\] app", "/x/Project (old)" → "/x/Project \\\(old\\\)". The parens are escaped at BOTH layers: with c() alone a
 // `\` followed by `(` fails to compile on both runtimes ("Invalid regular expression: missing )"). A Winter binary older than 6170adb
 // misreads `\`, `(` and `)` (and the doubled `\\[`) in these rules.

@@ -88,6 +88,19 @@ describe("WS-21 Contract A: helpers and constants", () => {
     expect(router.escapeRulePath("/x/in side/y")).toBe("/x/in side/y");
   });
 
+  test("M1 (R.3): the gitignore layer is claude's own path escaper `I_t` (with `escapeGlobs`), character for character — `| + ^ $` are escaped too, and a LEADING `!`/`#` is backslash-prefixed", () => {
+    // 2.1.250, verbatim: I_t(e,r){let t=e.replaceAll("\\","\\\\").replace(/[[\]()|+^$]/g,(n)=>`\\${n}`);
+    //   if(r?.escapeGlobs)t=t.replaceAll("*","\\*");if(t.startsWith("!")||t.startsWith("#"))t=`\\${t}`;
+    //   return t=t.replace(/\s+$/,(n)=>Array.from(n,(s)=>`\\${s}`).join("")),t}
+    // node-ignore reads a backslash-escaped `| + ^ $` as the literal character, so nothing matches differently;
+    // the table is simply claude's own. Each gitignore-layer `\` is doubled by `c()` on top.
+    expect(router.escapeRulePath("/x/a|b+c^d$e")).toBe(String.raw`/x/a\\|b\\+c\\^d\\$e`);
+    expect(router.escapeRulePath("!neg")).toBe(String.raw`\\!neg`);
+    expect(router.escapeRulePath("#hash")).toBe(String.raw`\\#hash`);
+    // Mid-path `!`/`#` (every absolute path starts with `/`) are literal as written.
+    expect(router.escapeRulePath("/x/!a#b")).toBe("/x/!a#b");
+  });
+
   test("escapeRulePath is claude's rule-content escape over the gitignore-layer escape: the read side's one unescape gives back the gitignore pattern, and the rule's own parens stay findable", () => {
     // The read side, as claude 2.1.250 does it (L1a's port, ws21/sdk@6170adb): the tool name ends at the
     // first UNESCAPED `(` and the content at the last unescaped `)` (an even run of backslashes before
@@ -106,9 +119,13 @@ describe("WS-21 Contract A: helpers and constants", () => {
       const content = rule.slice(open + 1, close).replaceAll("\\(", "(").replaceAll("\\)", ")").replaceAll("\\\\", "\\");
       return { tool: rule.slice(0, open), content };
     };
-    const gitignore = (path: string): string => path.replace(/[[\]*\\()]/g, "\\$&");
+    // claude's `I_t` with `escapeGlobs` (see the M1 test): the gitignore layer escapeRulePath must produce.
+    const gitignore = (path: string): string => {
+      const escaped = path.replace(/[[\]*\\()|+^$]/g, "\\$&");
+      return escaped.startsWith("!") || escaped.startsWith("#") ? `\\${escaped}` : escaped;
+    };
     const escapeRulePathFor = (path: string): string => router.escapeRulePath(path);
-    for (const path of ["/x/[wip] app", String.raw`/x/a\b`, "/x/Project (old)", "/x/p (x", "/x/p x)", String.raw`/x/q\(y`, String.raw`/x/q\)`, String.raw`/x/q8\[w] *z`, String.raw`/x/end\\`]) {
+    for (const path of ["/x/[wip] app", String.raw`/x/a\b`, "/x/Project (old)", "/x/p (x", "/x/p x)", String.raw`/x/q\(y`, String.raw`/x/q\)`, String.raw`/x/q8\[w] *z`, String.raw`/x/end\\`, "/x/a|b+c^d$e", String.raw`/x/pipe\|(z)$`]) {
       expect([path, parse(`Edit(${escapeRulePathFor(path)}/**)`)]).toEqual([path, { tool: "Edit", content: `${gitignore(path)}/**` }]);
       // And as the LAST part of the rule, where a trailing backslash or space matters most.
       expect([path, parse(`Edit(${escapeRulePathFor(path)})`)]).toEqual([path, { tool: "Edit", content: gitignore(path) }]);

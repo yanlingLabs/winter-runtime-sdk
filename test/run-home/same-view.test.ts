@@ -1370,6 +1370,9 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
       backslash: ["b\\x", "f.txt"],
       backslashParen: ["q\\(y", "f.txt"],
       trailingSpace: ["sp "],
+      // R.3 M1: claude's `I_t` also escapes `| + ^ $`; node-ignore reads them literally either way, so
+      // this row holds with the old spelling too — the proof that the exact table changes no match.
+      regexSpecials: ["a|b+c^d$e", "f.txt"],
       protectedItem: ["p", ".winter", "skills", "x", "SKILL.md"],
     } as const;
     type Target = keyof typeof TARGETS;
@@ -1381,7 +1384,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
           dirName: "Project (old)",
           // The trailing-space FILE ends its rule. MEASURED unescaped: claude 2.1.250 still denied it, the
           // Winter runtime at 6170adb dropped the space and let the write through; escaped, both deny.
-          userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(join(root, "b\\x"))}/**)`, `Edit(/${escapeRulePath(join(root, "q\\(y"))}/**)`, `Edit(/${escapeRulePath(join(root, "sp "))})`] }),
+          userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(join(root, "b\\x"))}/**)`, `Edit(/${escapeRulePath(join(root, "q\\(y"))}/**)`, `Edit(/${escapeRulePath(join(root, "sp "))})`, `Edit(/${escapeRulePath(join(root, "a|b+c^d$e"))}/**)`] }),
           turns: (root) => [
             ...Object.entries(TARGETS).map(([name, parts]) => ({ toolUses: [{ id: `toolu_${name}`, name: "Write", input: { file_path: join(root, ...parts), content: `${name}\n` } }] })),
             { text: "done" },
@@ -1390,7 +1393,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         async (bed) => {
           const root = bed.fixture.root;
           const pathOf = (name: Target): string => join(root, ...TARGETS[name]);
-          for (const dir of ["b\\x", "q\\(y"]) mkdirSync(join(root, dir), { recursive: true });
+          for (const dir of ["b\\x", "q\\(y", "a|b+c^d$e"]) mkdirSync(join(root, dir), { recursive: true });
           put(join(root, ".winter", "settings.json"), `${JSON.stringify({ permissions: { deny: ["Edit(/denied.txt)"] } })}\n`);
           const measure = async (leg: string, run: (canUseTool: CanUseToolLike) => Promise<Run>): Promise<void> => {
             for (const name of Object.keys(TARGETS) as Target[]) rmSync(pathOf(name), { force: true });
@@ -1414,6 +1417,7 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
         backslash: { asked: false, written: false },
         backslashParen: { asked: false, written: false },
         trailingSpace: { asked: false, written: false },
+        regexSpecials: { asked: false, written: false },
         protectedItem: { asked: true, written: false },
       });
     });
