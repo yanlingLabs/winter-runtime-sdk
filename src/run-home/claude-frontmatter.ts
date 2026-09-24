@@ -99,6 +99,21 @@ export interface ClaudeFrontmatter {
   error?: string;
 }
 
+/**
+ * The pin's own frontmatter SPLIT alone (one BOM strip, then `fR`) — no YAML needed: `head` is everything
+ * the runtime reads as the frontmatter block (the BOM included), `body` is what it reads as content. With
+ * no block, `head` is empty and `body` is the text as given (the pin returns the original text there).
+ * The body is exactly what the runtime scans for `@imports` (`jBe` lexes the split's content), and the
+ * Winter SDK's rule loader splits with the same regex.
+ */
+export function claudeFrontmatterSplit(text: string): { head: string; body: string } {
+  const bom = text.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const match = FRONTMATTER_RE.exec(text.slice(bom));
+  if (match === null) return { head: "", body: text };
+  const end = bom + match[0].length;
+  return { head: text.slice(0, end), body: text.slice(end) };
+}
+
 /** The runtime's reading of a markdown file's frontmatter. `undefined` when no YAML parser is available. */
 export function parseClaudeFrontmatter(text: string): ClaudeFrontmatter | undefined {
   const yaml = bunYaml();

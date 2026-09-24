@@ -221,3 +221,82 @@ describe("project rules' `paths:` (F17: a project rule resolves from its dot-dir
     expect(lstatSync(join(runHome.dir, "rules", "project--pkg--.winter--rules--here.md")).isSymbolicLink()).toBe(true);
   });
 });
+
+describe("project rules' imports (R.3, C1 i): a rule is read at the USER tier in the run folder, so it gets the instructions treatment", () => {
+  // In `<run>/rules` a project rule is a USER-tier rule, and both runtimes follow a user rule's imports
+  // anywhere (claude: `includeExternal` for the user tier; the Winter SDK expands rules under their own
+  // tier, "user"). Linked verbatim, a trusted repository's `.winter/rules/x.md` could import any file on
+  // the machine into every mode's context. So: expand under the PROJECT rule (inside the root only),
+  // drop and report the rest, neutralise every leftover `@`, and COPY any rule that holds an `@`.
+  const ruleName = "project--.winter--rules--x.md";
+
+  test("an import outside the root is dropped, reported and neutralised; the rule is a COPY, never a link", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const secret = join(bed.root, "outside", "secret.md");
+    put(secret, "SECRET-CONTENT\n");
+    put(join(p.root, ".winter", "rules", "x.md"), `rule body @${secret}\n`);
+    for (const mode of ["code", "chat", "dispatch"] as const) {
+      const runHome = await buildRunHome(inputFor(bed, { mode, cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
+      const copied = join(runHome.dir, "rules", ruleName);
+      expect([mode, lstatSync(copied).isSymbolicLink()]).toEqual([mode, false]);
+      expect([mode, readFileSync(copied, "utf8")]).toEqual([mode, `rule body @${ZWSP}${secret}\n`]);
+      expect([mode, statSync(copied).mode & 0o777]).toEqual([mode, 0o600]);
+      expect([mode, runHome.report.droppedImports]).toEqual([mode, [secret]]);
+    }
+  });
+
+  test("an import inside the root is expanded relative to the rule's OWN directory (in the run folder it would resolve against `<run>/rules`)", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    put(join(p.root, "docs", "guide.md"), "GUIDE-CONTENT\n");
+    put(join(p.root, ".winter", "rules", "x.md"), "see @../../docs/guide.md\n");
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
+    const text = readFileSync(join(runHome.dir, "rules", ruleName), "utf8");
+    expect(text).toContain("GUIDE-CONTENT");
+    expect(text).not.toMatch(/(^|\s)@\.\.\/\.\.\/docs/);
+    expect(runHome.report.droppedImports).toEqual([]);
+  });
+
+  test("a leftover token that would resolve against the run folder (`@../settings.json`) is neutralised", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    put(join(p.root, ".winter", "rules", "x.md"), "read @../settings.json and @../.winter.json\n");
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
+    expect(readFileSync(join(runHome.dir, "rules", ruleName), "utf8")).toBe(`read @${ZWSP}../settings.json and @${ZWSP}../.winter.json\n`);
+  });
+
+  test("a rule whose `paths:` is rewritten AND that holds an import gets both: the rewrite does not bring the raw token back", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const secret = join(bed.root, "outside", "secret.md");
+    put(secret, "SECRET-CONTENT\n");
+    put(join(p.root, ".winter", "rules", "x.md"), `---\npaths:\n  - "pkg/lib/**"\n---\n\nbody @${secret}\n`);
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.cwd, trustedProjectRoot: p.root, gitRoot: p.root }));
+    expect(readFileSync(join(runHome.dir, "rules", ruleName), "utf8")).toBe(`---\npaths:\n  - "lib/**"\n---\n\nbody @${ZWSP}${secret}\n`);
+    expect(runHome.report.droppedImports).toEqual([secret]);
+  });
+
+  test("the frontmatter is claude's own split (`fR`), which both runtimes use: a token claude reads as BODY is neutralised even where a line-based split would call it frontmatter; the real frontmatter is left as written", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const secret = join(bed.root, "outside", "secret.md");
+    put(secret, "SECRET-CONTENT\n");
+    // claude's lazy `---` closes the block INSIDE `foo---bar`, so `@<secret>` is body to it.
+    put(join(p.root, ".winter", "rules", "odd.md"), `---\ndescription: foo---bar\n@${secret}\n---\nbody\n`);
+    put(join(p.root, ".winter", "rules", "x.md"), `---\ndescription: "mail @team"\n---\nbody @${secret}\n`);
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
+    expect(readFileSync(join(runHome.dir, "rules", "project--.winter--rules--odd.md"), "utf8")).toBe(`---\ndescription: foo---bar\n@${ZWSP}${secret}\n---\nbody\n`);
+    expect(readFileSync(join(runHome.dir, "rules", ruleName), "utf8")).toBe(`---\ndescription: "mail @team"\n---\nbody @${ZWSP}${secret}\n`);
+  });
+
+  test("a rule with no `@` and nothing to rewrite stays a link; a user rule is never touched", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    put(join(p.root, ".winter", "rules", "x.md"), "plain rule\n");
+    put(join(bed.sdk, "rules", "mine.md"), "user rule @./nope.md\n");
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
+    expect(lstatSync(join(runHome.dir, "rules", ruleName)).isSymbolicLink()).toBe(true);
+    expect(lstatSync(join(runHome.dir, "rules", "mine.md")).isSymbolicLink()).toBe(true);
+  });
+});
