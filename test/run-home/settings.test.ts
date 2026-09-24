@@ -61,13 +61,16 @@ describe("the tiers and claude's merge (F17)", () => {
     ]);
   });
 
-  test("M3 (R.3): `model`, `modelOverrides`, `availableModels` and `advisorModel` never come from a repository tier (reported); the user's own are kept", async () => {
+  test("M3 (R.3): `model`, `modelOverrides`, `availableModels`, `advisorModel` and `enforceAvailableModels` never come from a repository tier (reported); the user's own are kept", async () => {
+    // `enforceAvailableModels` (R.3 touch): the pin's schema text — "if the default model for the user tier
+    // is not in availableModels, Default resolves to the first allowed availableModels entry instead" — so
+    // a repository setting it would switch the model.
     const bed = runHomeBed();
     const { root } = repo(bed);
-    const user = { model: "user-model", modelOverrides: { a: "b" }, availableModels: ["user-a"], advisorModel: "user-advisor" };
+    const user = { model: "user-model", modelOverrides: { a: "b" }, availableModels: ["user-a"], advisorModel: "user-advisor", enforceAvailableModels: true };
     put(join(bed.sdk, "settings.json"), json(user));
-    put(join(root, ".winter", "settings.json"), json({ model: "p", modelOverrides: { a: "p" }, availableModels: ["p"], advisorModel: "p", outputStyle: "p" }));
-    put(join(root, ".winter", "settings.local.json"), json({ model: "l", advisorModel: "l" }));
+    put(join(root, ".winter", "settings.json"), json({ model: "p", modelOverrides: { a: "p" }, availableModels: ["p"], advisorModel: "p", enforceAvailableModels: false, outputStyle: "p" }));
+    put(join(root, ".winter", "settings.local.json"), json({ model: "l", advisorModel: "l", enforceAvailableModels: true }));
     const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
     expect(runHome.effectiveSettings).toEqual({ ...user, outputStyle: "p" });
     const reason = expect.stringContaining("repository never chooses");
@@ -76,8 +79,10 @@ describe("the tiers and claude's merge (F17)", () => {
       { rule: "modelOverrides", tier: "project", reason },
       { rule: "availableModels", tier: "project", reason },
       { rule: "advisorModel", tier: "project", reason },
+      { rule: "enforceAvailableModels", tier: "project", reason },
       { rule: "model", tier: "local", reason },
       { rule: "advisorModel", tier: "local", reason },
+      { rule: "enforceAvailableModels", tier: "local", reason },
     ]);
   });
 
