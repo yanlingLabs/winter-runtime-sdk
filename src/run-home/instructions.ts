@@ -165,13 +165,17 @@ export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
 
 /**
  * Every `@` the pinned runtime's lexer could read as the start of an import: one NOT preceded by an ASCII
- * letter or digit, and followed by something (not whitespace, not an already-inserted zero-width space).
+ * letter or digit, and followed by a character an import path can BEGIN with — claude's own first-character
+ * shape (`cYt`; the SDK's `isValidImportPath` is the same): `./`, `~/`, `/`, or one of [A-Za-z0-9._-]. Any
+ * other next character (a quote, `@`, `[`, `(`, `#`, whitespace, an inserted zero-width space) can never
+ * begin an import, so `"$@"`, `@@ -1 +1 @@` and `${a[@]}` are left as written (R.3 touch).
  */
-const NEUTRALISABLE_AT = /(?<![A-Za-z0-9])@(?=[^\s\u200b])/g;
+const NEUTRALISABLE_AT = /(?<![A-Za-z0-9])@(?=[A-Za-z0-9._~\/-])/g;
 
 /**
  * Neutralises every `@` that could begin an import, ANYWHERE in the text: `@x` becomes `@<ZWSP>x`, which
  * no import grammar accepts (the path would start with the zero-width space) and a reader does not see.
+ * Only an `@` followed by a possible first character of an import path is touched (see `NEUTRALISABLE_AT`).
  *
  * CODE-BLIND, ON PURPOSE (R.3, C1 ii). claude 2.1.250 lexes a memory file with marked (`gfm: false`) and
  * skips only true `code`/`codespan` tokens, then matches `(?:^|\s)@…` against each TEXT TOKEN's own text.
@@ -182,8 +186,9 @@ const NEUTRALISABLE_AT = /(?<![A-Za-z0-9])@(?=[^\s\u200b])/g;
  * `\*@x` — where the source has no whitespace before the `@` at all. So the test is not the import regex
  * but the character before the `@`: a token boundary never falls between an ASCII letter/digit and an `@`
  * (marked's text tokens end only before markup or after a non-local-part character), which is why an
- * e-mail address (`me@example.com`) is left as written. A fuzz of claude's extractor over 1.1M generated
- * markdown strings found 837 per 100k importing after a whitespace-only neutraliser and none after this one.
+ * e-mail address (`me@example.com`) is left as written. A fuzz of claude's extractor over generated
+ * markdown strings found 837 per 100k importing after a whitespace-only neutraliser and none after this one
+ * (1.1M strings with the first rule; the narrowed next-character rule re-fuzzed, lane-L2 report "R.3 touch").
  * Inside a real code block the inserted character is invisible too.
  */
 export function escapeImportTokens(content: string): string {
