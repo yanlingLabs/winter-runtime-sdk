@@ -144,14 +144,25 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
  *
  *   * `fallbackModel` — from EVERY tier, the user's included: claude honours it from settings on
  *     overload, which is exactly a silent switch to another model.
- *   * `model`, `modelOverrides`, `availableModels`, `advisorModel`, `enforceAvailableModels` — from the
- *     project and local tiers. The user tier keeps them: the host's `Options.model` — forwarded to the
- *     official child as `--model` (Touch 4, F1) — outranks any settings `model`, and the rest are the
- *     user's own choices. `enforceAvailableModels` (R.3 touch) is a switch too: the
- *     pin's schema text says that with it "Default resolves to the first allowed availableModels entry".
+ *   * `modelOverrides` — from EVERY tier too (Touch 4 add-on). The pin's schema: "Override mapping from
+ *     Anthropic model ID … to provider-specific model ID"; measured by the daemon reviewer on the real
+ *     child, a USER-tier remap of haiku to opus made claude report haiku at `system/init` while sending
+ *     `claude-opus-5` on the wire — a switch no startup model check can see. It became reachable in WS-21
+ *     through `settingSources: ["user"]`.
+ *   * `model`, `availableModels`, `advisorModel`, `enforceAvailableModels` — from the project and local
+ *     tiers. The user tier keeps them: the host's `Options.model` — forwarded to the official child as
+ *     `--model` (Touch 4, F1) — outranks any settings `model`, and the rest are the user's own choices.
+ *     `enforceAvailableModels` (R.3 touch) is a switch too: the pin's schema text says that with it
+ *     "Default resolves to the first allowed availableModels entry".
  */
-export const EVERY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["fallbackModel"];
-export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "modelOverrides", "availableModels", "advisorModel", "enforceAvailableModels"];
+export const EVERY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["fallbackModel", "modelOverrides"];
+export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "availableModels", "advisorModel", "enforceAvailableModels"];
+
+/** Why each every-tier key is dropped (the report's `reason`). */
+const EVERY_TIER_MODEL_KEY_REASONS: Readonly<Record<string, string>> = {
+  fallbackModel: "Winter never switches model silently: claude falls back to this model on overload, a silent switch away from the session's own model",
+  modelOverrides: "Winter never switches model silently: claude maps the session's model to another id on the wire while reporting the original at init, which no startup model check can see",
+};
 
 /**
  * `permissions.defaultMode` values a repository tier may not set (R.3, I1), dropped and REPORTED.
@@ -410,7 +421,7 @@ function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<R
   for (const key of EVERY_TIER_REFUSED_MODEL_KEYS) {
     if (!Object.hasOwn(out, key)) continue;
     delete out[key];
-    dropped(key, "Winter never switches model silently: claude falls back to this model on overload, a silent switch away from the session's own model");
+    dropped(key, EVERY_TIER_MODEL_KEY_REASONS[key] ?? "Winter never switches model silently");
   }
   if (tier !== "user") {
     for (const key of PROJECT_TIER_REFUSED_KEYS[tier]) delete out[key];
