@@ -78,6 +78,9 @@ function escapeSandboxGlobPath(path: string): string;                      // a 
                                          // For a host's own ABSOLUTE `sandbox.filesystem` paths on the OFFICIAL leg (a denyWrite fence, <cwd>/.winter/agents, …):
                                          // claude treats an entry holding `* ? [ ]` as a glob, so a raw `[` makes a deny miss the literal path (measured). `*`/`?` have
                                          // no spelling there. Not for the Winter leg (its sandbox reads these paths literally) and not for rules (escapeRulePath).
+                                         // On an ALLOW entry (allowWrite/allowRead): a `[` makes it match the EXACT path only — nothing under it (claude renders a glob
+                                         // allow as an exact-path match) — and a `*` or `?` widens it to sibling paths. The router drops such allows itself
+                                         // (droppedRules); a host calling this directly must too.
 // escapeRulePath's table, per character of the path (measured on claude 2.1.250 and on the Winter runtime at ws21/sdk@6170adb, whose rule
 // parse is claude's: the content between the first and last UNESCAPED paren, unescaped once — `\(`→`(`, `\)`→`)`, `\\`→`\` — before the
 // gitignore layer reads it):

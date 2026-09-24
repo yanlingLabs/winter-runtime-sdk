@@ -274,6 +274,12 @@ function anchorPath(path: unknown, anchor: string): unknown {
  * `w app`, not the literal root); spelled `[[]wip] app/…` it did. `*` and `?` have no spelling there
  * (the regex step rewrites every one of them), so they stay raw: a deny is then wider — stricter — and an
  * allow is dropped by the caller.
+ *
+ * ON AN ALLOW ENTRY (`allowWrite`, `allowRead`) — for a host calling this directly: the result is still a
+ * glob, and claude renders a glob allow as an EXACT-path match (its trailing `/**` is stripped first), so
+ * a path holding `[` covers that path itself and NOT what is under it (measured: a write inside it was
+ * refused, raw or escaped); and a `*` or `?` left in the path WIDENS the allow to sibling paths. The router
+ * drops such allows itself (`droppedRules`); a host must decide the same for its own.
  */
 export function escapeSandboxGlobPath(path: string): string {
   return path.replace(/\[/g, "[[]");
