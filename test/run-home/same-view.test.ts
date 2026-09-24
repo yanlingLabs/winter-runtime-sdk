@@ -1010,6 +1010,14 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     } as const;
     type Target = keyof typeof TARGETS;
     const results: Record<string, Record<Target, { asked: boolean; written: boolean }>> = {};
+    // THE TRAILING-SPACE ROW (R.3 touch; the SDK reviewer, from the 2.1.250 dump): a Write to `<root>/sp `
+    // is TRIMMED before any rule is consulted — `validateInput` trims the path through `ht`, the backfill
+    // trims it again, and deny rules are matched only on the trimmed candidates — so the escaped `sp ` deny
+    // can never match a Write: under acceptEdits nothing asks and the file `<root>/sp` is WRITTEN. The Winter
+    // runtime does the same from ws21/sdk@79773aa (at 5e37898 it asked for `sp ` instead, and the test broker
+    // denied it). IF THIS ROW IS EVER RUN IN DEFAULT MODE, compare the asked path against the TRIMMED
+    // `<root>/sp` as well as `sp `.
+    const trailing: Record<string, { askedRaw: boolean; askedTrimmed: boolean; rawWritten: boolean; trimmedWritten: boolean }> = {};
     beforeAll(async () => {
       await withSameViewBed(
         {
@@ -1377,13 +1385,21 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     } as const;
     type Target = keyof typeof TARGETS;
     const results: Record<string, Record<Target, { asked: boolean; written: boolean }>> = {};
+    // THE TRAILING-SPACE ROW (R.3 touch; the SDK reviewer, from the 2.1.250 dump): a Write to `<root>/sp `
+    // is TRIMMED before any rule is consulted — `validateInput` trims the path through `ht`, the backfill
+    // trims it again, and deny rules are matched only on the trimmed candidates — so the escaped `sp ` deny
+    // can never match a Write: under acceptEdits nothing asks and the file `<root>/sp` is WRITTEN. The Winter
+    // runtime does the same from ws21/sdk@79773aa (at 5e37898 it asked for `sp ` instead, and the test broker
+    // denied it). IF THIS ROW IS EVER RUN IN DEFAULT MODE, compare the asked path against the TRIMMED
+    // `<root>/sp` as well as `sp `.
+    const trailing: Record<string, { askedRaw: boolean; askedTrimmed: boolean; rawWritten: boolean; trimmedWritten: boolean }> = {};
     beforeAll(async () => {
       await withSameViewBed(
         {
           trusted: true,
           dirName: "Project (old)",
-          // The trailing-space FILE ends its rule. MEASURED unescaped: claude 2.1.250 still denied it, the
-          // Winter runtime at 6170adb dropped the space and let the write through; escaped, both deny.
+          // The trailing-space FILE ends its rule. The rule is the one a host would spell with `escapeRulePath`,
+          // and it can never match a Write: both runtimes trim the path first (see `trailing` above).
           userPermissions: (root) => ({ deny: [`Edit(/${escapeRulePath(join(root, "b\\x"))}/**)`, `Edit(/${escapeRulePath(join(root, "q\\(y"))}/**)`, `Edit(/${escapeRulePath(join(root, "sp "))})`, `Edit(/${escapeRulePath(join(root, "a|b+c^d$e"))}/**)`] }),
           turns: (root) => [
             ...Object.entries(TARGETS).map(([name, parts]) => ({ toolUses: [{ id: `toolu_${name}`, name: "Write", input: { file_path: join(root, ...parts), content: `${name}\n` } }] })),
@@ -1395,34 +1411,45 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
           const pathOf = (name: Target): string => join(root, ...TARGETS[name]);
           for (const dir of ["b\\x", "q\\(y", "a|b+c^d$e"]) mkdirSync(join(root, dir), { recursive: true });
           put(join(root, ".winter", "settings.json"), `${JSON.stringify({ permissions: { deny: ["Edit(/denied.txt)"] } })}\n`);
+          const trimmedPath = join(root, "sp");
           const measure = async (leg: string, run: (canUseTool: CanUseToolLike) => Promise<Run>): Promise<void> => {
             for (const name of Object.keys(TARGETS) as Target[]) rmSync(pathOf(name), { force: true });
+            rmSync(trimmedPath, { force: true });
             const asked: string[] = [];
             await run(async (_tool, input) => {
               asked.push(String(input["file_path"]));
               return { behavior: "deny", message: "the test broker records and denies" };
             });
             results[leg] = Object.fromEntries((Object.keys(TARGETS) as Target[]).map((name) => [name, { asked: asked.includes(pathOf(name)), written: existsSync(pathOf(name)) }])) as Record<Target, { asked: boolean; written: boolean }>;
+            trailing[leg] = { askedRaw: asked.includes(pathOf("trailingSpace")), askedTrimmed: asked.includes(trimmedPath), rawWritten: existsSync(pathOf("trailingSpace")), trimmedWritten: existsSync(trimmedPath) };
           };
           await measure("claude", async (canUseTool) => bed.runClaude(await bed.build("official"), "s_sv_escape_table", { canUseTool, permissionMode: "acceptEdits" }));
           await measure("winter", async (canUseTool) => bed.runWinter(await bed.build("winter"), { canUseTool, permissionMode: "acceptEdits" }));
-          verbose("escape table", results);
+          verbose("escape table", { results, trailing });
         },
       );
     }, TIMEOUT);
+    /** The deny table: every row but the trailing-space one, which is not a deny row (see `trailing`). */
+    const denyTable = (leg: string): Record<string, unknown> => Object.fromEntries(Object.entries(results[leg] ?? {}).filter(([name]) => name !== "trailingSpace"));
     test("claude (the reference): every deny holds without asking, the protected item dir asks, the free write lands", () => {
-      expect(results["claude"]).toEqual({
+      expect(denyTable("claude")).toEqual({
         free: { asked: false, written: true },
         projectDeny: { asked: false, written: false },
         backslash: { asked: false, written: false },
         backslashParen: { asked: false, written: false },
-        trailingSpace: { asked: false, written: false },
         regexSpecials: { asked: false, written: false },
         protectedItem: { asked: true, written: false },
       });
     });
     test("the Winter runtime reads the same table the same way (needs a binary at ws21/sdk@6170adb or later — L1a's rule-content port)", () => {
-      expect(results["winter"]).toEqual(results["claude"]);
+      expect(denyTable("winter")).toEqual(denyTable("claude"));
+    });
+    const trimmedRow = { askedRaw: false, askedTrimmed: false, rawWritten: false, trimmedWritten: true };
+    test("trailing space, claude (the reference): both trim; the escaped rule can never match a Write — `<root>/sp` is written, `sp ` is not, nothing asked", () => {
+      expect(trailing["claude"]).toEqual(trimmedRow);
+    });
+    test("trailing space, the Winter runtime: both trim; the escaped rule can never match a Write — `<root>/sp` is written, `sp ` is not, nothing asked (needs a binary at ws21/sdk@79773aa or later; 5e37898 asks for `sp `)", () => {
+      expect(trailing["winter"]).toEqual(trimmedRow);
     });
   });
 
