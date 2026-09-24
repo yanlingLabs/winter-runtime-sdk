@@ -241,7 +241,10 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => valu
  * always has (a root named `[wip] app` is a character class unless escaped — MEASURED, a re-anchored
  * project `ask` rule under such a root never fired), and the Winter runtime since `ws21/sdk`@57e7fef
  * (SV-6 — measured the same way on the Winter leg: unescaped, its re-anchored ask and deny rules under a
- * `[wip] app` root never matched). The author's own part of the pattern is passed through as written.
+ * `[wip] app` root never matched). Since the escape-table round the spelling is two layers — claude's
+ * rule-content escape over the gitignore escape (see `escapeRulePath`) — because both legs unescape a
+ * rule's content once before matching (the Winter runtime since `ws21/sdk`@6170adb). The author's own
+ * part of the pattern is already in that grammar and is passed through as written.
  */
 export function anchorRule(rule: string, anchor: string): string {
   const match = /^([A-Za-z]+)\((.*)\)$/s.exec(rule);

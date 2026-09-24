@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
-import { buildRunHome, fsRootAnchored } from "../../src/index.ts";
+import { buildRunHome, escapeRulePath, fsRootAnchored } from "../../src/index.ts";
 import { CLAUDE_SETTINGS_KEYS, PROJECT_TIER_REFUSED_KEYS } from "../../src/run-home/settings.ts";
 import { cleanupRunHomeBeds, inputFor, put, runHomeBed, type RunHomeBed } from "./support.ts";
 
@@ -214,10 +214,13 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
     // Both runtimes read claude's gitignore-style grammar (the Winter runtime since ws21/sdk@57e7fef,
     // SV-6): `[w]` is a character class unless escaped, on either leg.
     const bed = runHomeBed();
-    const root = join(bed.root, "[w] a*b");
+    // Since the escape-table round the anchor is claude's rule-content spelling over the gitignore
+    // escape (`c()` doubles each backslash and escapes the parens), identical on both legs.
+    const root = join(bed.root, "[w] a*b (o)");
     mkdirSync(root, { recursive: true });
     put(join(root, ".winter", "settings.json"), json({ permissions: { deny: ["Read(/secrets)", "Edit(/src/**)"] } }));
-    const escaped = [`Read(/${join(bed.root, "\\[w\\] a\\*b", "secrets")})`, `Edit(/${join(bed.root, "\\[w\\] a\\*b", "src/**")})`];
+    const spelled = String.raw`\\[w\\] a\\*b \\\(o\\\)`;
+    const escaped = [`Read(/${join(escapeRulePath(bed.root), spelled, "secrets")})`, `Edit(/${join(escapeRulePath(bed.root), spelled, "src/**")})`];
     for (const leg of ["official", "winter"] as const) {
       const permissions = (await effective(bed, root, { leg }))["permissions"] as { deny: string[] };
       expect([leg, permissions.deny]).toEqual([leg, escaped]);
