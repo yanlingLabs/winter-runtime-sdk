@@ -162,10 +162,15 @@ export function fsRootAnchored(absPath: string): string {
  * which unescapes to `\\(` — and both runtimes then fail to compile the rule ("Invalid regular
  * expression: missing )"; claude errors every file tool call, the Winter runtime fails the run). With
  * the paren escaped at both layers (claude's own path escaper does the same at the gitignore layer) the
- * rule compiles and matches on both. `{}`, `!`, `#` and spaces are literal as written.
+ * rule compiles and matches on both. `{}`, `!`, `#` and inner spaces are literal as written; TRAILING
+ * whitespace is escaped char by char (each becomes `\\<char>`), as claude's path escaper does (final round).
  */
 export function escapeRulePath(path: string): string {
-  const gitignore = path.replace(/[[\]*\\()]/g, (character) => `\\${character}`);
+  const gitignore = path
+    .replace(/[[\]*\\()]/g, (character) => `\\${character}`)
+    // Trailing whitespace, char by char — claude's own path escaper does the same, because the gitignore
+    // layer drops an unescaped trailing space; so a path that ENDS a rule keeps its last characters.
+    .replace(/\s+$/, (run) => Array.from(run, (character) => `\\${character}`).join(""));
   return gitignore.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
 }
 
