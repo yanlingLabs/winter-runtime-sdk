@@ -10,7 +10,9 @@
 //      an entry in the shared file itself, is;
 //   2. `mcp.disabled` servers and any server named like a reserved capability server (the daemon's,
 //      and the brand's own standing server, which the official leg registers the messaging tools
-//      under) are dropped and reported — this is the guard that used to live in the daemon;
+//      under) are dropped and reported — this is the guard that used to live in the daemon. "Named
+//      like" is compared on the NORMALISED name (R.3, M5): claude spells a tool `mcp__<on(server)>__…`,
+//      so two names that normalise alike carry the same tool names;
 //   3. the `projects` map is deleted, so no other project's local servers can reach this child.
 //
 // `strictMcpConfig` is `false` on both legs once a run home is applied (spec §3.4.5): these are the
@@ -38,6 +40,23 @@ async function readObject(path: string): Promise<Record<string, unknown> | undef
   } catch {
     return undefined;
   }
+}
+
+/**
+ * claude's own MCP server-name normaliser, verbatim (2.1.250, `on()`; its tool names are
+ * `mcp__${on(server)}__${on(tool)}`, and its own reserved-name check compares `on()` forms too):
+ *
+ *   function on(_){let e=_.replace(/[^a-zA-Z0-9_-]/g,"_");
+ *     if(_.startsWith("claude.ai "))e=e.replace(/_+/g,"_").replace(/^_|_$/g,"");return e}
+ *
+ * So a configured `<standing name>..<key>` spells exactly the tool names of the capability server
+ * `<standing name>__<key>`. (The Winter runtime spells tool names from the raw server name, so on that
+ * leg such a name collides with nothing; it is refused on both, since the run folder is one file.)
+ */
+export function normalizeMcpServerName(name: string): string {
+  let normalized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  if (name.startsWith("claude.ai ")) normalized = normalized.replace(/_+/g, "_").replace(/^_|_$/g, "");
+  return normalized;
 }
 
 /** The global config file's name for a brand: `<home dir name>.json` (`.claude.json`'s twin). */
@@ -69,14 +88,14 @@ export async function buildMcpConfig(context: RunHomeBuildContext): Promise<void
 
   const merged: Record<string, unknown> = { ...user, ...project, ...local };
   const disabled = new Set(input.mcpDisabled);
-  const reserved = new Set([...input.reservedMcpServerNames, brand.mcpServerName]);
+  const reserved = new Set([...input.reservedMcpServerNames, brand.mcpServerName].map(normalizeMcpServerName));
   const kept: Record<string, unknown> = {};
   for (const [name, server] of Object.entries(merged)) {
     if (disabled.has(name)) {
       report.droppedMcpServers.push({ name, reason: "disabled" });
       continue;
     }
-    if (reserved.has(name)) {
+    if (reserved.has(normalizeMcpServerName(name))) {
       report.droppedMcpServers.push({ name, reason: "reserved-name" });
       continue;
     }

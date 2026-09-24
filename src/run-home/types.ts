@@ -48,7 +48,10 @@ export interface RunHomeInput {
   gitRoot: string | null;
   /** `mcp.disabled`: servers dropped from the generated `.winter.json`, and reported. */
   mcpDisabled: readonly string[];
-  /** The daemon's capability-server names; a configured server under one is dropped and reported. */
+  /**
+   * The daemon's capability-server names; a configured server under one is dropped and reported — compared
+   * on claude's NORMALISED server name (R.3 M5), so a name spelling the same tool names is dropped too.
+   */
   reservedMcpServerNames: readonly string[];
   /** The auto-memory directory for this incarnation (spec §3.7), pinned on both legs. */
   memoryDir: string;
