@@ -66,7 +66,10 @@ interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; un
                                          // every leftover `@` that could begin an import is neutralised, code blocks included
   skippedAgents;                         // an agent the runtime's own YAML parse cannot read (or no Bun.YAML): never copied
   droppedRules }                         // { rule, tier, reason }: an ALLOW re-anchored under an anchor holding `?` (it would widen);
-                                         // on either leg also a sandbox allow entry ("sandbox.filesystem.allowWrite: out") whose anchor holds `*`/`?`
+                                         // on either leg also a sandbox allow entry ("sandbox.filesystem.allowWrite: out") whose anchor holds `*`/`?`;
+                                         // a repository's escalating mode ("permissions.defaultMode: acceptEdits" — project: bypassPermissions/auto/
+                                         // acceptEdits, local: auto); "fallbackModel" from ANY tier (a silent model switch on overload); and "model",
+                                         // "modelOverrides", "availableModels", "advisorModel" from a repository tier (a repository never chooses models)
 interface RunHome { runId; dir; sdkHome; input; effectiveSettings; report; dispose(): Promise<void> }
 const RUN_HOME_CONTRACT_VERSION = 1;
 const RUN_HOME_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"];

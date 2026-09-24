@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import { buildRunHome, escapeRulePath, fsRootAnchored } from "../../src/index.ts";
-import { CLAUDE_SETTINGS_KEYS, PROJECT_TIER_REFUSED_KEYS } from "../../src/run-home/settings.ts";
+import { CLAUDE_SETTINGS_KEYS, mergeSettings, PROJECT_TIER_REFUSED_KEYS } from "../../src/run-home/settings.ts";
 import { cleanupRunHomeBeds, inputFor, put, runHomeBed, type RunHomeBed } from "./support.ts";
 
 afterAll(cleanupRunHomeBeds);
@@ -40,12 +40,45 @@ describe("the tiers and claude's merge (F17)", () => {
     expect(settings["env"]).toEqual({ A: "user", B: "project", C: "local" });
   });
 
-  test("`fallbackModel` and `modelPicker` are replaced, never concatenated", async () => {
+  test("claude's merge replaces `fallbackModel` and `modelPicker`, never concatenates them (the merge rule itself; neither key reaches it from a tier any more)", () => {
+    expect(mergeSettings({ fallbackModel: ["a", "b"], modelPicker: ["x"] }, { fallbackModel: ["c"], modelPicker: ["y"] })).toEqual({ fallbackModel: ["c"], modelPicker: ["y"] });
+    expect(mergeSettings({ allow: ["a"] }, { allow: ["b", "a"] })).toEqual({ allow: ["a", "b"] });
+  });
+
+  test("M3 (R.3): `fallbackModel` is dropped from EVERY tier, the user's included, and reported — claude honours it on overload, a silent switch to another model", async () => {
     const bed = runHomeBed();
     const { root } = repo(bed);
-    put(join(bed.sdk, "settings.json"), json({ fallbackModel: ["a", "b"] }));
-    put(join(root, ".winter", "settings.json"), json({ fallbackModel: ["c"] }));
-    expect((await effective(bed, root))["fallbackModel"]).toEqual(["c"]);
+    put(join(bed.sdk, "settings.json"), json({ fallbackModel: "user-fallback", outputStyle: "u" }));
+    put(join(root, ".winter", "settings.json"), json({ fallbackModel: "project-fallback" }));
+    put(join(root, ".winter", "settings.local.json"), json({ fallbackModel: "local-fallback" }));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+    expect(runHome.effectiveSettings).toEqual({ outputStyle: "u" });
+    const reason = expect.stringContaining("silent");
+    expect(runHome.report.droppedRules).toEqual([
+      { rule: "fallbackModel", tier: "user", reason },
+      { rule: "fallbackModel", tier: "project", reason },
+      { rule: "fallbackModel", tier: "local", reason },
+    ]);
+  });
+
+  test("M3 (R.3): `model`, `modelOverrides`, `availableModels` and `advisorModel` never come from a repository tier (reported); the user's own are kept", async () => {
+    const bed = runHomeBed();
+    const { root } = repo(bed);
+    const user = { model: "user-model", modelOverrides: { a: "b" }, availableModels: ["user-a"], advisorModel: "user-advisor" };
+    put(join(bed.sdk, "settings.json"), json(user));
+    put(join(root, ".winter", "settings.json"), json({ model: "p", modelOverrides: { a: "p" }, availableModels: ["p"], advisorModel: "p", outputStyle: "p" }));
+    put(join(root, ".winter", "settings.local.json"), json({ model: "l", advisorModel: "l" }));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+    expect(runHome.effectiveSettings).toEqual({ ...user, outputStyle: "p" });
+    const reason = expect.stringContaining("repository never chooses");
+    expect(runHome.report.droppedRules).toEqual([
+      { rule: "model", tier: "project", reason },
+      { rule: "modelOverrides", tier: "project", reason },
+      { rule: "availableModels", tier: "project", reason },
+      { rule: "advisorModel", tier: "project", reason },
+      { rule: "model", tier: "local", reason },
+      { rule: "advisorModel", tier: "local", reason },
+    ]);
   });
 
   test("an untrusted project contributes nothing (neither project nor local)", async () => {

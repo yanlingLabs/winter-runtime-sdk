@@ -11,15 +11,17 @@
 // THE STEPS, in order:
 //   1. read the tiers — project and local only for a trusted project;
 //   2. drop the keys the runtime refuses from that tier (`PROJECT_TIER_REFUSED_KEYS`, from the pinned
-//      runtime: its trusted-source-only readers and its repo-controllable warnings), and a repository's
-//      escalating permission mode (`REFUSED_DEFAULT_MODES`, reported);
+//      runtime: its trusted-source-only readers and its repo-controllable warnings), a repository's
+//      escalating permission mode (`REFUSED_DEFAULT_MODES`) and the model-routing keys Winter refuses
+//      (`EVERY_TIER_REFUSED_MODEL_KEYS`, `REPOSITORY_TIER_REFUSED_MODEL_KEYS`) — the last two reported;
 //   3. filter `env` — the runtime's own per-tier sets, plus `CLAUDE_CONFIG_DIR` and every variable the
 //      ROUTER sets (a settings `env` block would otherwise override the process environment the router
 //      built), plus the router's refused execution-indirection list;
 //   4. re-anchor every path that was relative to the tier's own root (`/x` rules, sandbox paths,
 //      additional directories) — in the run folder they would resolve against the run folder;
 //   5. merge with the runtime's rules (arrays concatenated and deduplicated; `fallbackModel` and
-//      `modelPicker` replaced; `extraKnownMarketplaces` shallow; everything else deep);
+//      `modelPicker` replaced — neither reaches the merge from a tier any more; `extraKnownMarketplaces`
+//      shallow; everything else deep);
 //   6. strip per mode (spec §3.2);
 //   7. keep only the pinned runtime's own `Settings` keys, and write the file (0600).
 //
@@ -135,6 +137,19 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
   const projectOnly = ["skipDangerousModePermissionPrompt", "skipWorkflowUsageWarning", "syncClaudeAiSkills", "syncClaudeAiPlugins"];
   return { project: [...both, ...projectOnly], local: both };
 })();
+
+/**
+ * MODEL ROUTING (R.3, M3 — ruled Important): Winter never switches to another leg, provider or model
+ * silently, and a repository never chooses models. Dropped and REPORTED (`droppedRules`, the key's name).
+ *
+ *   * `fallbackModel` — from EVERY tier, the user's included: claude honours it from settings on
+ *     overload, which is exactly a silent switch to another model.
+ *   * `model`, `modelOverrides`, `availableModels`, `advisorModel` — from the project and local tiers.
+ *     The user tier keeps them: the daemon's `Options.model` wins over `model`, and the rest are the
+ *     user's own choices.
+ */
+export const EVERY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["fallbackModel"];
+export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "modelOverrides", "availableModels", "advisorModel"];
 
 /**
  * `permissions.defaultMode` values a repository tier may not set (R.3, I1), dropped and REPORTED.
@@ -387,8 +402,18 @@ function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: 
 
 function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<RunHomeBrand, "envPrefix">, dropped: (rule: string, reason: string) => void = () => undefined): Record<string, unknown> {
   const out: Record<string, unknown> = { ...settings };
+  for (const key of EVERY_TIER_REFUSED_MODEL_KEYS) {
+    if (!Object.hasOwn(out, key)) continue;
+    delete out[key];
+    dropped(key, "Winter never switches model silently: claude falls back to this model on overload, a silent switch away from the session's own model");
+  }
   if (tier !== "user") {
     for (const key of PROJECT_TIER_REFUSED_KEYS[tier]) delete out[key];
+    for (const key of REPOSITORY_TIER_REFUSED_MODEL_KEYS) {
+      if (!Object.hasOwn(out, key)) continue;
+      delete out[key];
+      dropped(key, "a repository never chooses models: the session's model is the daemon's, and model routing comes from the user's own settings only");
+    }
     const permissions = out["permissions"];
     const mode = isPlainObject(permissions) ? permissions["defaultMode"] : undefined;
     if (isPlainObject(permissions) && typeof mode === "string" && REFUSED_DEFAULT_MODES[tier].has(mode)) {
