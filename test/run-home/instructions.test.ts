@@ -160,6 +160,13 @@ describe("the neutraliser is code-blind (R.3, C1 ii): no `@` claude's lexer coul
     expect(escapeImportTokens("mail me@example.com or a1@x.y\n")).toBe("mail me@example.com or a1@x.y\n");
     expect(escapeImportTokens(`@${ZWSP}done and @ alone and trailing @`)).toBe(`@${ZWSP}done and @ alone and trailing @`);
   });
+
+  test("R.3 touch: only an `@` whose NEXT character can begin an import path (claude's own first-character shape) is touched — shell and diff `@`s are left as written", () => {
+    // claude's `cYt` (and the SDK's `isValidImportPath`) accept a path starting `./`, `~/`, `/` or one of
+    // [A-Za-z0-9._-]; any other first character is never an import.
+    for (const untouched of ['echo "$@"', "@@ -1 +1 @@", "${a[@]}", "a @( b", "@#frag", "x @!y"]) expect([untouched, escapeImportTokens(untouched)]).toEqual([untouched, untouched]);
+    expect(escapeImportTokens("npm i @scope/pkg\n@decorator\n@media screen\n@./a @~/b @/c @-d @_e @.f")).toBe(`npm i @${ZWSP}scope/pkg\n@${ZWSP}decorator\n@${ZWSP}media screen\n@${ZWSP}./a @${ZWSP}~/b @${ZWSP}/c @${ZWSP}-d @${ZWSP}_e @${ZWSP}.f`);
+  });
 });
 
 describe("expandImports (the algorithm, directly)", () => {
