@@ -248,6 +248,45 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
     expect((runHome.effectiveSettings["permissions"] as { deny: string[] }).deny).toEqual([`Read(${fsRootAnchored(join(root, "secrets"))})`]);
   });
 
+  test("review N-1 minor: on the OFFICIAL leg a sandbox path's anchor is spelled for claude's sandbox glob grammar (`[` → `[[]`) — the user's own specifier, absolute paths and additionalDirectories untouched; the Winter leg keeps it literal", async () => {
+    // MEASURED (claude 2.1.250): a `sandbox.filesystem` entry holding `* ? [ ]` is a glob, rendered as a
+    // seatbelt regex; a backslash is taken literally there, so the one escape it honours is a class.
+    const bed = runHomeBed();
+    const root = join(bed.root, "[wip] app");
+    mkdirSync(root, { recursive: true });
+    put(join(root, ".winter", "settings.json"), json({ permissions: { additionalDirectories: ["sub"] }, sandbox: { filesystem: { denyWrite: ["guarded", "/abs/[x]"], denyRead: ["../shared", "secrets/[ab]"], allowWrite: ["out/**", "~/cache"] } } }));
+    const escapedRoot = join(bed.root, "[[]wip] app");
+    const official = await effective(bed, root, { leg: "official" });
+    expect((official["sandbox"] as { filesystem: unknown }).filesystem).toEqual({
+      denyWrite: [join(escapedRoot, "guarded"), "/abs/[x]"],
+      denyRead: [join(bed.root, "shared"), join(escapedRoot, "secrets/[ab]")],
+      allowWrite: [join(escapedRoot, "out/**"), "~/cache"],
+    });
+    expect((official["permissions"] as { additionalDirectories: string[] }).additionalDirectories).toEqual([join(root, "sub")]);
+    const winter = await effective(bed, root, { leg: "winter" });
+    expect((winter["sandbox"] as { filesystem: unknown }).filesystem).toEqual({
+      denyWrite: [join(root, "guarded"), "/abs/[x]"],
+      denyRead: [join(bed.root, "shared"), join(root, "secrets/[ab]")],
+      allowWrite: [join(root, "out/**"), "~/cache"],
+    });
+  });
+
+  test("review N-1 minor: on the official leg an anchor holding `*` or `?` (unescapable in claude's sandbox grammar) never re-anchors a sandbox ALLOW entry — dropped and reported; a deny keeps the wider, stricter form", async () => {
+    const bed = runHomeBed();
+    const root = join(bed.root, "a?b*c");
+    mkdirSync(root, { recursive: true });
+    put(join(root, ".winter", "settings.json"), json({ sandbox: { filesystem: { allowWrite: ["out", "/abs"], allowRead: ["docs"], denyWrite: ["guarded"] } } }));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root, leg: "official" }));
+    expect((runHome.effectiveSettings["sandbox"] as { filesystem: unknown }).filesystem).toEqual({ allowWrite: ["/abs"], allowRead: [], denyWrite: [join(root, "guarded")] });
+    expect(runHome.report.droppedRules).toEqual([
+      { rule: "sandbox.filesystem.allowWrite: out", tier: "project", reason: expect.stringContaining("sandbox") },
+      { rule: "sandbox.filesystem.allowRead: docs", tier: "project", reason: expect.stringContaining("sandbox") },
+    ]);
+    const winter = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root, leg: "winter" }));
+    expect((winter.effectiveSettings["sandbox"] as { filesystem: unknown }).filesystem).toEqual({ allowWrite: [join(root, "out"), "/abs"], allowRead: [join(root, "docs")], denyWrite: [join(root, "guarded")] });
+    expect(winter.report.droppedRules).toEqual([]);
+  });
+
   test("relative sandbox and additional-directory paths are made absolute against the tier's root", async () => {
     const bed = runHomeBed();
     const { root } = repo(bed);

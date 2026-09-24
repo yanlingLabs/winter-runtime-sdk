@@ -1268,6 +1268,53 @@ describeBoth("WS-21 same view: claude and the Winter runtime read one run home t
     });
   });
 
+  describe("review N-1 minor: a project's relative sandbox `denyWrite` under a root NAMED `[wip] app`", () => {
+    // MEASURED (claude 2.1.250): a `sandbox.filesystem` entry holding `[` is a glob there, so a deny
+    // re-anchored RAW under `[wip] app` was a class matching `w app` — the sandboxed write to the literal
+    // `guarded/` went through. The router now spells the anchor `[[]wip] app` on the official leg.
+    // (Every write under a bracketed cwd is refused by claude's own default write root, which is the cwd
+    // spelled raw — so the bed grants the parent explicitly, the shape in which a deny is the only fence.)
+    const written: Record<string, Record<string, boolean>> = {};
+    beforeAll(async () => {
+      await withSameViewBed(
+        {
+          trusted: true,
+          dirName: "[wip] app",
+          turns: (root) => [
+            { toolUses: [{ id: "toolu_sandbox_deny", name: "Bash", input: { command: `cd '${root}' && for d in free guarded; do mkdir -p "$d"; echo x > "$d/f"; done; true`, description: "write two files" } }] },
+            { text: "done" },
+          ],
+        },
+        async (bed) => {
+          const root = bed.fixture.root;
+          put(join(root, ".winter", "settings.json"), `${JSON.stringify({ sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { allowWrite: [join(root, "..")], denyWrite: ["guarded"] } } })}\n`);
+          const allow: CanUseToolLike = async (_tool, input) => ({ behavior: "allow", updatedInput: input });
+          const observe = (leg: string): void => {
+            written[leg] = { free: existsSync(join(root, "free", "f")), guarded: existsSync(join(root, "guarded", "f")) };
+            for (const d of ["free", "guarded"]) rmSync(join(root, d), { recursive: true, force: true });
+          };
+          const winter = await bed.build("winter");
+          await bed.runWinter(winter, { canUseTool: allow });
+          observe("winter");
+          const official = await bed.build("official");
+          verbose("[wip] sandbox", official.effectiveSettings["sandbox"]);
+          await bed.runClaude(official, "s_sv_sandbox_deny", { canUseTool: allow });
+          observe("claude");
+          verbose("[wip] sandbox written", written);
+        },
+      );
+    }, TIMEOUT);
+    test("official leg: the re-anchored deny stops the sandboxed write to the literal `guarded/`; the sibling write goes through", () => {
+      expect(written["claude"]).toEqual({ free: true, guarded: false });
+    });
+    test.todo(
+      "Winter leg: the same deny stops the same write — SV-11 (the Winter runtime at ws21/sdk@20b623e does not apply `sandbox.filesystem.denyWrite` from the run home's settings.json at all: measured with a plain root too, the denied write went through)",
+      () => {
+        expect(written["winter"]).toEqual({ free: true, guarded: false });
+      },
+    );
+  });
+
   describe("untrusted project: every project item is absent on both", () => {
     let claude: SameView;
     let winter: SameView;
