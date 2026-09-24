@@ -28,6 +28,13 @@ describe("WS-21 Contract A: helpers and constants", () => {
     expect(router.sdkHomeOf("/h/")).toBe("/h/sdk");
   });
 
+  test("escapeSandboxGlobPath is exported from the package root: a path spelled for claude's SANDBOX glob grammar (`[` → `[[]`; everything else as written)", () => {
+    // For the host's own absolute sandbox paths on the official leg (its denyWrite fence, <cwd>/.winter/agents, …).
+    expect(router.escapeSandboxGlobPath("/x/[wip] app/.winter/agents")).toBe("/x/[[]wip] app/.winter/agents");
+    expect(router.escapeSandboxGlobPath("/x/a]b (c) d\\e")).toBe("/x/a]b (c) d\\e");
+    expect(router.escapeSandboxGlobPath("/x/plain")).toBe("/x/plain");
+  });
+
   test("fsRootAnchored is claude's absolute rule form: `/` followed by the absolute path", () => {
     expect(router.fsRootAnchored("/Users/x")).toBe("//Users/x");
     expect(router.fsRootAnchored("/Users/x/secrets")).toBe("//Users/x/secrets");

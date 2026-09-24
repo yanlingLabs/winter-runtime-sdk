@@ -74,6 +74,10 @@ function protectedPathRules(sdkHome: string, trustedProjectRoot: string | null, 
   /** @deprecated ignored */ walk?: { cwd: string; userHome?: string }): string[];
                                          // project item dirs at ANY depth: //<root>/**/.winter/<kind>/**, every path part escaped
 function escapeRulePath(path: string): string;                             // a literal path spelled for a rule's content: claude's own rule-content escape c() over the gitignore escape (table below); both legs
+function escapeSandboxGlobPath(path: string): string;                      // a literal path spelled for claude's SANDBOX glob grammar ("[wip] app" → "[[]wip] app"; `]` and everything else as written).
+                                         // For a host's own ABSOLUTE `sandbox.filesystem` paths on the OFFICIAL leg (a denyWrite fence, <cwd>/.winter/agents, …):
+                                         // claude treats an entry holding `* ? [ ]` as a glob, so a raw `[` makes a deny miss the literal path (measured). `*`/`?` have
+                                         // no spelling there. Not for the Winter leg (its sandbox reads these paths literally) and not for rules (escapeRulePath).
 // escapeRulePath's table, per character of the path (measured on claude 2.1.250 and on the Winter runtime at ws21/sdk@6170adb, whose rule
 // parse is claude's: the content between the first and last UNESCAPED paren, unescaped once — `\(`→`(`, `\)`→`)`, `\\`→`\` — before the
 // gitignore layer reads it):
