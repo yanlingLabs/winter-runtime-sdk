@@ -461,3 +461,34 @@ describe("review N-1 on the recovery door: journals are proved byte for byte, ne
     expect(await shared.store.load(journalKey)).toEqual(lines);
   });
 });
+
+describe("final round on the recovery door: `.meta.json` repaired for level transcripts only", () => {
+  test("a behind journal's metadata is appended and counted; a quarantined journal's metadata is not, and is reported skipped", async () => {
+    const bed = runHomeBed();
+    const { sdk, shared } = router(bed);
+    const first = user("q1", null);
+    const good: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_1/journal" };
+    const bad: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_2/journal" };
+    const line = (n: number): SessionStoreEntry => ({ type: "started", key: `v2:${n}`, agentId: `a${n}` });
+    await shared.store.append(KEY, [first]);
+    await shared.store.append(good, [line(1)]);
+    await shared.store.append(bad, [line(9)]);
+    await shared.settle();
+    const root = stagingWith(bed, [JSON.stringify(first)]);
+    const session = join(root, "projects", KEY.projectKey, KEY.sessionId);
+    const put = (path: string, text: string): void => {
+      mkdirSync(join(session, path, ".."), { recursive: true });
+      writeFileSync(join(session, path), text);
+    };
+    put("subagents/workflows/wf_1/journal.jsonl", `${JSON.stringify(line(1))}\n${JSON.stringify(line(2))}\n`);
+    put("subagents/workflows/wf_1/journal.meta.json", JSON.stringify({ agentType: "workflow" }));
+    put("subagents/workflows/wf_2/journal.jsonl", `${JSON.stringify(line(1))}\n`);
+    put("subagents/workflows/wf_2/journal.meta.json", JSON.stringify({ agentType: "departed" }));
+    const report = await sdk.reconcileRootForRecovery(root);
+    expect(report.transcripts.find((transcript) => transcript.subpath === bad.subpath)?.outcome).toBe("quarantined");
+    expect(report.artifacts?.metadataRepaired).toBe(1);
+    expect(report.artifacts?.skipped).toEqual([`${KEY.projectKey}/${KEY.sessionId}/subagents/workflows/wf_2/journal.meta.json`]);
+    expect(((await shared.store.load(good)) ?? []).filter((entry) => entry["type"] === "agent_metadata")).toEqual([{ type: "agent_metadata", agentType: "workflow" }]);
+    expect(((await shared.store.load(bad)) ?? []).filter((entry) => entry["type"] === "agent_metadata")).toEqual([]);
+  });
+});
