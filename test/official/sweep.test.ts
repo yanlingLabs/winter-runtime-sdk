@@ -4,7 +4,7 @@
 // The live half is in `runtime-containment.test.ts`, where a real `Bash` call builds the vendor's name
 // out of fragments the pre-hoc scan cannot read.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -150,5 +150,129 @@ describe("the post-hoc containment sweep", () => {
     expect(await post(sweep, "never-seen")).toEqual({});
     expect(existsSync(join(cwd, "CLAUDE.md"))).toBe(true);
     expect(sweep.breaches).toEqual([]);
+  });
+});
+
+describe("Touch 4 (F3): claude's own `.cc-writes` staging is runtime bookkeeping, never a breach", () => {
+  // claude 2.1.250 (`ensureAtomicWriteStagingDirs`, `QWn`; the name `kF` = ".cc-writes") creates
+  // `<cwd>/.claude/.cc-writes/` and `<home>/.claude/.cc-writes/` (mode 0700) before EVERY sandboxed Bash
+  // call. The sweep saw a new `<cwd>/.claude`, removed it and ENDED THE TURN: the model never saw the
+  // Bash output and no follow-up request was made.
+  const stage = (root: string): void => {
+    mkdirSync(join(root, ".claude", ".cc-writes"), { recursive: true, mode: 0o700 });
+  };
+
+  test("a NEW `<cwd>/.claude` holding only `.cc-writes` (with or without staged files in it): the turn goes on, no breach, and the folder is removed", async () => {
+    const cwd = workspace();
+    const breaches: ContainmentBreach[] = [];
+    const sweep = createContainmentSweep({ cwd, onBreach: (breach) => breaches.push(breach) });
+    await pre(sweep, "bash-1");
+    stage(cwd);
+    expect(await post(sweep, "bash-1")).toEqual({});
+    expect(existsSync(join(cwd, ".claude"))).toBe(false);
+    // …and again on the next call, with a staged file inside (claude re-creates the folder every call).
+    await pre(sweep, "bash-2");
+    stage(cwd);
+    writeFileSync(join(cwd, ".claude", ".cc-writes", "staged-1"), "x");
+    expect(await post(sweep, "bash-2")).toEqual({});
+    expect(existsSync(join(cwd, ".claude"))).toBe(false);
+    expect(breaches).toEqual([]);
+    expect(sweep.breaches).toEqual([]);
+  });
+
+  test("the same under the home: a NEW `<home>/.claude` holding only `.cc-writes` is bookkeeping", async () => {
+    const cwd = workspace();
+    const home = workspace();
+    const sweep = createContainmentSweep({ cwd, home });
+    await pre(sweep, "bash-home");
+    stage(home);
+    expect(await post(sweep, "bash-home")).toEqual({});
+    expect(existsSync(join(home, ".claude"))).toBe(false);
+    expect(sweep.breaches).toEqual([]);
+  });
+
+  test("`.cc-writes` BESIDE anything else is still a breach — a model-written `<cwd>/.claude/settings.json` ends the turn and nothing survives", async () => {
+    const cwd = workspace();
+    const sweep = createContainmentSweep({ cwd });
+    await pre(sweep, "bash-3");
+    stage(cwd);
+    writeFileSync(join(cwd, ".claude", "settings.json"), "{}");
+    const output = await post(sweep, "bash-3");
+    expect(output["continue"]).toBe(false);
+    expect(existsSync(join(cwd, ".claude"))).toBe(false);
+    expect(sweep.breaches).toHaveLength(1);
+  });
+
+  test("only the vendor's own shape counts: a FILE named `.cc-writes`, a `.cc-writes` one level deeper, or a symlinked `.claude`/`.cc-writes` is a breach", async () => {
+    for (const plant of [
+      (cwd: string) => {
+        mkdirSync(join(cwd, ".claude"), { recursive: true });
+        writeFileSync(join(cwd, ".claude", ".cc-writes"), "not a directory");
+      },
+      (cwd: string) => {
+        mkdirSync(join(cwd, ".claude", "x", ".cc-writes"), { recursive: true });
+      },
+      (cwd: string) => {
+        mkdirSync(join(cwd, "elsewhere", ".cc-writes"), { recursive: true });
+        symlinkSync(join(cwd, "elsewhere"), join(cwd, ".claude"));
+      },
+      (cwd: string) => {
+        mkdirSync(join(cwd, "real-staging"), { recursive: true });
+        mkdirSync(join(cwd, ".claude"), { recursive: true });
+        symlinkSync(join(cwd, "real-staging"), join(cwd, ".claude", ".cc-writes"));
+      },
+    ]) {
+      const cwd = workspace();
+      const sweep = createContainmentSweep({ cwd });
+      await pre(sweep, "odd");
+      plant(cwd);
+      expect((await post(sweep, "odd"))["continue"]).toBe(false);
+      expect(sweep.breaches).toHaveLength(1);
+    }
+  });
+
+  test("Touch 5: claude stages under its CURRENT cwd too — after the model's `cd sub`, a new `<cwd>/sub/.claude` holding only `.cc-writes` is bookkeeping (any depth under the cwd walk)", async () => {
+    const cwd = workspace();
+    const sweep = createContainmentSweep({ cwd });
+    await pre(sweep, "after-cd");
+    stage(cwd);
+    stage(join(cwd, "sub"));
+    expect(await post(sweep, "after-cd")).toEqual({});
+    expect([existsSync(join(cwd, ".claude")), existsSync(join(cwd, "sub", ".claude"))]).toEqual([false, false]);
+    expect(sweep.breaches).toEqual([]);
+  });
+
+  test("Touch 5: claude stages under the PROJECT ROOT too — with the cwd below it, a new `<root>/.claude` holding only `.cc-writes` above the cwd is removed; a pre-existing one, or one with other content, is left alone (outside the sweep's scope)", async () => {
+    const root = workspace();
+    const cwd = join(root, "pkg", "app");
+    mkdirSync(cwd, { recursive: true });
+    const sweep = createContainmentSweep({ cwd });
+    await pre(sweep, "root-staging");
+    stage(root);
+    stage(cwd);
+    expect(await post(sweep, "root-staging")).toEqual({});
+    expect([existsSync(join(root, ".claude")), existsSync(join(cwd, ".claude"))]).toEqual([false, false]);
+    // Above the cwd the sweep only ever cleans claude's own staging: other content there is not its to judge.
+    await pre(sweep, "root-other");
+    mkdirSync(join(root, ".claude"), { recursive: true });
+    writeFileSync(join(root, ".claude", "notes.md"), "x");
+    expect(await post(sweep, "root-other")).toEqual({});
+    expect(existsSync(join(root, ".claude", "notes.md"))).toBe(true);
+    expect(sweep.breaches).toEqual([]);
+  });
+
+  test("the home is checked at its TOP level only — never walked (it is the user's real home in production)", async () => {
+    const cwd = workspace();
+    const home = workspace();
+    const sweep = createContainmentSweep({ cwd, home });
+    await pre(sweep, "deep");
+    mkdirSync(join(home, "projects", "other", ".claude"), { recursive: true });
+    expect(await post(sweep, "deep")).toEqual({});
+    expect(existsSync(join(home, "projects", "other", ".claude"))).toBe(true);
+    // …while a new top-level `<home>/.claude` with real content is still row 14's breach.
+    await pre(sweep, "top");
+    mkdirSync(join(home, ".claude", "plans"), { recursive: true });
+    expect((await post(sweep, "top"))["continue"]).toBe(false);
+    expect(existsSync(join(home, ".claude"))).toBe(false);
   });
 });

@@ -83,6 +83,34 @@ function registry(): ProviderRegistry {
 }
 
 /**
+ * provider-runtime's `createEndpointResolver`, memoised on the WHOLE origin (R.3 touch 3 add-on).
+ *
+ * THE DEFECT IT COMPENSATES FOR: `createEndpointResolver` caches each answer by `origin.modelKey`
+ * ALONE, yet the answer carries the caller's own `family` (and, on a registry miss, the caller's whole
+ * origin — provider, family, continuation domain). Behind this module's once-per-process memo, the
+ * FIRST caller of a model key therefore decided every later caller's family. MEASURED in the full
+ * router run: a Winter-written turn's origin record resolved `anthropic/claude-sonnet-5` with family
+ * `"anthropic"`, and a later, unrelated Sonnet -> Opus review in the same process read Sonnet as
+ * `"anthropic"` beside Opus's `"claude"` — not same-family, a spurious lossy prompt.
+ *
+ * So the memo here is keyed by `providerId`, `modelKey`, `family` and `continuationDomain`, and each
+ * miss is answered by a FRESH provider-runtime resolver (its own cache then holds exactly one origin).
+ * The registry itself — the expensive part — is still built once.
+ */
+function memoisedPerOrigin(built: ProviderRegistry): (origin: MessageOrigin) => ContinuityEndpoint {
+  const memo = new Map<string, ContinuityEndpoint>();
+  return (origin) => {
+    const key = JSON.stringify([origin.providerId, origin.modelKey, origin.family, origin.continuationDomain ?? null]);
+    let endpoint = memo.get(key);
+    if (endpoint === undefined) {
+      endpoint = createEndpointResolver(built)(origin);
+      memo.set(key, endpoint);
+    }
+    return endpoint;
+  };
+}
+
+/**
  * The router's DEFAULT `resolveEndpoint`, used at both call sites (`store/handoff-barrier.ts`'s
  * `computeSwitchReview`, `door.ts`'s Claude-ready wrap) whenever a host injects none.
  *
@@ -94,7 +122,7 @@ function registry(): ProviderRegistry {
 export function defaultEndpointResolver(): (origin: MessageOrigin) => ContinuityEndpoint {
   if (cached !== undefined) return cached;
   try {
-    cached = createEndpointResolver(registry());
+    cached = memoisedPerOrigin(registry());
   } catch (error) {
     if (!loggedFailureOnce) {
       loggedFailureOnce = true;

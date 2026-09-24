@@ -135,6 +135,9 @@ export const DEFAULT_MIRROR_POLICY: MirrorPolicy = Object.freeze({
 
 export type TranscriptHealth = "ok" | "repair-required";
 
+/** How many recent uuids per key the append idempotence guard remembers (WS-21 §3.8). */
+export const RECENT_UUIDS_PER_KEY = 4096;
+
 /** What a failed mirror records. COUNTS AND A CAUSE — never entry content (WS-05 §13). */
 export interface MirrorErrorRecord {
   projectKey: string;
@@ -173,7 +176,15 @@ export interface SharedStoreIdentity {
   packageVersion: string;
   /** Unique per `createSharedSessionStore` call, so "the same store" is provable by value. */
   instanceId: string;
+  /** The daemon's home, as the host named it. The handoff leases live under it. */
   winterHome: string;
+  /**
+   * WS-21: where the canonical store actually lives — `<winterHome>/sdk` (the shared runtime home)
+   * for a router created with `requireRunHome`, `winterHome` itself on the pre-WS-21 layout. Every
+   * canonical-path consumer (transcripts, the provider-state sidecar, the default memory dir) reads
+   * THIS, never `winterHome`.
+   */
+  storeHome: string;
 }
 
 /** Options members WS-14 §5.1 rules on. Structural, so both branches' option objects fit. */
@@ -389,6 +400,8 @@ export function assertOneSharedStore(shared: SharedSessionStore, ...options: Rea
 export interface SharedSessionStoreInput {
   peers: RuntimeSdkPeers;
   winterHome: string;
+  /** WS-21: the directory the canonical store is rooted at. Absent = `winterHome` (the pre-WS-21 layout). */
+  storeHome?: string;
   policy?: Partial<MirrorPolicy>;
   /** Injectable clock for the records' timestamps. */
   now?: () => Date;
@@ -406,7 +419,10 @@ export interface SharedSessionStoreInput {
 export function createSharedSessionStore(input: SharedSessionStoreInput): SharedSessionStore {
   const Store = (input.peers.winter as unknown as { WinterCompatibilitySessionStore?: CanonicalSessionStoreConstructor }).WinterCompatibilitySessionStore;
   if (typeof Store !== "function") throw new SharedStoreUnavailableError();
-  const canonical = new Store({ winterHome: input.winterHome });
+  const storeHome = input.storeHome ?? input.winterHome;
+  // The concrete store's option is still called `winterHome`: it is the ROOT it resolves `projects/`
+  // under, which for WS-21 is the shared runtime home rather than the daemon's own.
+  const canonical = new Store({ winterHome: storeHome });
   const policy: MirrorPolicy = { ...DEFAULT_MIRROR_POLICY, ...input.policy };
   const now = input.now ?? (() => new Date());
   const identity: SharedStoreIdentity = {
@@ -414,10 +430,53 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
     packageVersion: readPeerVersion(input.peers),
     instanceId: randomUUID(),
     winterHome: input.winterHome,
+    storeHome,
   };
 
   const decorations = input.decorations ?? createDecorationRegistry();
   const batches = new Map<string, PendingBatch>();
+  /**
+   * The most recent uuids appended through this facade, per exact key (subpath included) — the
+   * idempotence guard above. A uuid is held from the moment its batch is queued; a batch that ends
+   * `append-failed` is FORGOTTEN (it never landed, so a later append of it is a repair, not a duplicate),
+   * while a `timed-out` one is kept (it may still land). BOUNDED, because a late duplicate is always a recent record: the last
+   * `RECENT_UUIDS_PER_KEY` are enough to catch a wrapper's final batch, and a daemon's lifetime of
+   * sessions must not grow this without limit.
+   */
+  const recentUuids = new Map<string, { set: Set<string>; order: string[] }>();
+  const dropAlreadyAppended = (key: SessionKey, entries: SessionStoreEntry[]): SessionStoreEntry[] => {
+    const id = keyOf(key);
+    let recent = recentUuids.get(id);
+    if (recent === undefined) {
+      recent = { set: new Set(), order: [] };
+      recentUuids.set(id, recent);
+    }
+    const out: SessionStoreEntry[] = [];
+    for (const entry of entries) {
+      const uuid = entry["uuid"];
+      if (typeof uuid !== "string") {
+        out.push(entry);
+        continue;
+      }
+      if (recent.set.has(uuid)) continue;
+      recent.set.add(uuid);
+      recent.order.push(uuid);
+      if (recent.order.length > RECENT_UUIDS_PER_KEY) recent.set.delete(recent.order.shift() as string);
+      out.push(entry);
+    }
+    return out;
+  };
+  /** Removes a failed batch's uuids from the idempotence guard (they never reached the file). */
+  const forgetAppended = (key: SessionKey, entries: readonly SessionStoreEntry[]): void => {
+    const recent = recentUuids.get(keyOf(key));
+    if (recent === undefined) return;
+    for (const entry of entries) {
+      const uuid = entry["uuid"];
+      if (typeof uuid !== "string" || !recent.set.delete(uuid)) continue;
+      const index = recent.order.indexOf(uuid);
+      if (index >= 0) recent.order.splice(index, 1);
+    }
+  };
   const sessions = new Map<string, SessionState>();
 
   const stateFor = (key: SessionKey): SessionState => {
@@ -486,6 +545,11 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
             cause: "append-failed",
             detail: error instanceof Error ? error.message : String(error),
           });
+          // FIX ROUND 1, I3: THESE RECORDS DID NOT LAND, so they are not "already appended": forget them,
+          // or the idempotence guard would drop the very repair the exit reconcile makes from the working
+          // copy. (A TIMED-OUT attempt keeps them — that write may still land, and a second copy of it is
+          // exactly what the guard is for.)
+          forgetAppended(key, entries);
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, policy.backoffMs));
@@ -582,8 +646,16 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
       // write to the canonical store passes through — the destination runtime's mirrored turns AND
       // the reconciler's suffix appends — so "the canonical file stays byte-pure" is enforced once.
       const stripped = stripDecorations(key, entries, decorations);
-      if (stripped.entries.length === 0) return;
-      enqueue(key, stripped.entries);
+      // WS-21 §3.8: A RECORD IS APPENDED ONCE. The exit reconcile runs inside the spawn proxy's gate,
+      // BEFORE the wrapper observes the exit — and the wrapper may still hold a final mirror batch it
+      // flushes on close. Without this, a tail the reconciler appended from the working copy would be
+      // appended again by that flush: the same uuid twice in an append-only file, which the next
+      // handoff's step 5 refuses and a resumed model reads as a repeated turn. The uuid IS the record's
+      // identity (WS-05 §5.2), so a second append of one this facade already took is dropped, whichever
+      // writer came second.
+      const fresh = dropAlreadyAppended(key, stripped.entries);
+      if (fresh.length === 0) return;
+      enqueue(key, fresh);
     },
     async load(key) {
       await settle(key);
@@ -663,6 +735,8 @@ export function createSharedSessionStore(input: SharedSessionStoreInput): Shared
 export function lazySharedSessionStore(input: {
   peers: RuntimeSdkPeers;
   winterHome?: string;
+  /** WS-21: the store's root when it is not the home itself (`sdkHomeOf(winterHome)`). */
+  storeHome?: string;
   /**
    * The RESOLVED profile. NOT optional in practice: `resolveWinterHome()` defaults to `WINTER_BRAND`,
    * so a call without it would send a rebranded host's sessions to Winter's own home directory — the
@@ -687,7 +761,7 @@ export function lazySharedSessionStore(input: {
         }
         return resolveWinterHome(undefined, input.brand);
       })();
-    resolved = createSharedSessionStore({ peers: input.peers, winterHome, ...(input.policy === undefined ? {} : { policy: input.policy }) });
+    resolved = createSharedSessionStore({ peers: input.peers, winterHome, ...(input.storeHome === undefined ? {} : { storeHome: input.storeHome }), ...(input.policy === undefined ? {} : { policy: input.policy }) });
     return resolved;
   };
 }

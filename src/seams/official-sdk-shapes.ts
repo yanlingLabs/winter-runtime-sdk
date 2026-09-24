@@ -198,6 +198,10 @@ export interface OfficialOptions {
   /** WS-14 §5.1: the VENDORED runtime — never the user's installed binary. */
   pathToClaudeCodeExecutable?: string;
   cwd?: string;
+  /** The pinned `Options.model` (`--model`). */
+  model?: string;
+  /** The pinned `Options.effort` (`--effort`): `EffortLevel`. */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   /**
    * WS-14 §3: a REPLACEMENT built from an allowlist; nothing is inherited.
    *

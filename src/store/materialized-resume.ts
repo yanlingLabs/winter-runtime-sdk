@@ -191,7 +191,7 @@ export function createMaterializedResumeDecorator(context: SeamContext, deps: Ma
   const decorate = async (input: MaterializedResumeInput): Promise<StagedResumeResult> => {
     const shared = sharedOf();
     const key = input.session;
-    const canonicalPath = canonicalTranscriptPath(shared.identity.winterHome, key);
+    const canonicalPath = canonicalTranscriptPath(shared.identity.storeHome ?? shared.identity.winterHome, key);
     const door = doorOf();
     // Captured BEFORE anything this call might write, so `canonicalUntouched` is a measurement of
     // THIS call rather than of the lines that follow it.

@@ -61,6 +61,42 @@ export type OfficialLaunchProfile = "fresh-spool" | "store-backed-resume";
  */
 export type RemoteConfigPolicy = "deny" | "allow";
 
+/**
+ * WS-21: the part of a run home the official leg's template, launch and spawn proxy need — built by the
+ * door from the host's `RunHome`, never by hand. Its presence is what switches the template from the
+ * pre-WS-21 profile (`settingSources: []`, strict MCP) to the run-home profile (`["user"]`, MCP from
+ * the run folder's config), and what the spawn proxy checks the child's config dir against.
+ */
+export interface OfficialRunHomeBinding {
+  runId: string;
+  /** The run folder: a fresh generation's `CLAUDE_CONFIG_DIR`, and what a resume's staging dir links to. */
+  dir: string;
+  /** The shared runtime home (`<home>/sdk`). */
+  sdkHome: string;
+  /** The daemon's home — where quarantined working copies are kept (`<home>/cache/quarantine/`). */
+  home: string;
+  /** The trusted project root, for the protected-path ask rules. */
+  trustedProjectRoot: string | null;
+  /** The auto-memory directory pinned in the flag layer (spec §3.7). */
+  memoryDir: string;
+  /** `autoMemoryEnabled`, from the run home's effective settings (spec §3.4.4). */
+  autoMemoryEnabled: boolean;
+  /**
+   * V19: the user's own `skillOverrides` (the run home's effective value), pinned in the flag layer. The
+   * pinned runtime reads a repository's `.claude/settings.json` `skillOverrides` per-source, whatever
+   * the setting sources are, and consults it BEFORE the user's — but after the flag layer's.
+   */
+  skillOverrides?: Readonly<Record<string, unknown>>;
+  /**
+   * The protected-path ask rules (spec §7.2), precomputed by the door for the given AND the real
+   * (symlink-resolved) spelling of each root. Measured on 0.3.250: a rule in the given spelling already
+   * fires for a root reached through a link (`/var` → `/private/var`); the real-path twin is kept so the
+   * rule cannot depend on which of the two spellings a future pin compares. Absent, the template
+   * computes them from `sdkHome`/`trustedProjectRoot` as given.
+   */
+  protectedAsk?: readonly string[];
+}
+
 /** What `buildOptions` is given. Every field is something WS-14 §2/§5 pins as normative. */
 export interface OptionsTemplateInput {
   mode: "code" | "dispatch" | "chat";
@@ -78,6 +114,8 @@ export interface OptionsTemplateInput {
   profile: OfficialLaunchProfile;
   /** The value this generation is CONFIGURED with; §6's observed value is what gets recorded. */
   configDir: string;
+  /** WS-21: the run home this generation runs on. Absent = the pre-WS-21 profile. */
+  runHome?: OfficialRunHomeBinding;
 }
 
 /** What `buildChildEnv` is given. WS-14 §3: the child env is a REPLACEMENT built from an allowlist. */
@@ -125,6 +163,19 @@ export interface OfficialLaunchPlan {
    * built with the same answer, so the two cannot drift apart without the plan saying so.
    */
   remoteConfig?: RemoteConfigPolicy;
+  /**
+   * WS-21: the run home this generation runs on. The adapter checks the options against it, and hands
+   * it to the generation's spawn proxy, which refuses a `user` setting source on any config dir that
+   * is not this run folder (or a resume staging dir it has just linked the run folder into).
+   */
+  runHome?: OfficialRunHomeBinding;
+  /**
+   * WS-21 §3.8: THIS generation's exit reconcile, run by its spawn proxy inside the exit gate — before
+   * the exit is revealed, so before a resume's staging dir is deleted. Declared structurally (the
+   * proxy's own `TranscriptReconcile` is written in Node's types, which stay off this seam). Runs
+   * before the adapter's deployment-wide `reconcile`, if both are set.
+   */
+  reconcile?: (input: { observation: { root: { configDir: string } }; exit: { code: number | null; signal: string | null } }) => Promise<void> | void;
 }
 
 export interface OfficialResumePlan extends OfficialLaunchPlan {

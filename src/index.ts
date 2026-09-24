@@ -31,7 +31,21 @@ export * from "@yanlinglabs/winter-agent-sdk";
 
 // --- the constructor, the handle, the door ---------------------------------------------------------
 export { createRuntimeSdk, forwardableOptions, runtimeSdkInternals, ROUTER_ONLY_OPTION_KEYS } from "./sdk.ts";
-export type { RouterOnlyOptionKey, RouterOptions, RouterRuntimeInput, RuntimeSdk, RuntimeSdkInternals, RuntimeSdkOptions, RuntimeSdkPeers } from "./sdk.ts";
+export type { RouterOnlyOptionKey, RouterOptions, RouterRuntimeInput, RuntimeSdk, RuntimeSdkInternals, RuntimeSdkOptions, RuntimeSdkPeers, WinterLegRuntimeInput } from "./sdk.ts";
+
+// --- WS-21 Contract A: the run home (the daemon builds one per generation; the router applies it) ---
+export { buildRunHome } from "./run-home/build.ts";
+export { escapeRulePath, fsRootAnchored, protectedPathRules, PROTECTED_ITEM_DIRS, RUN_HOME_CONTRACT_VERSION, RUN_HOME_PERSISTENT_ENTRIES, sdkHomeOf } from "./run-home/types.ts";
+export { escapeSandboxGlobPath } from "./run-home/settings.ts";
+export type { RunHome, RunHomeBrand, RunHomeFor, RunHomeForContext, RunHomeInput, RunHomeOutcome, RunHomeReport, RunLeg, RunMode } from "./run-home/types.ts";
+export type { RecoveryReport, RecoveryTranscriptOutcome } from "./run-home/exit.ts";
+export { RunHomeError } from "./run-home/errors.ts";
+export type { RunHomeErrorCode } from "./run-home/errors.ts";
+// The ONE reconcile (spec §3.8): exported so a reader can see the function every exit and recovery
+// reconcile goes through. The daemon never calls it itself — it goes through the handle's
+// `runHomeOutcome`/`reconcileRootForRecovery`, which run it with the router's own live store.
+export { reconcileLocalWriteRoot } from "./store/reconcile.ts";
+export type { ReconcileReport, TailComparison, TranscriptReconcileOutcome } from "./store/reconcile.ts";
 
 // --- D19a: the version matrix ----------------------------------------------------------------------
 export { assertVersionMatrix, parseVersion, readExportedVersion, readResolvedManifestVersion, satisfiesRange, SUPPORTED, SUPPORTED_PROTOCOL_VERSIONS, VERSION_EXPORT_NAMES } from "./version-matrix.ts";

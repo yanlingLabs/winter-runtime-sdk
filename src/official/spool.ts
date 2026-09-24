@@ -45,8 +45,13 @@ import { isResumeStagingRoot } from "../vendor-paths.ts";
  */
 export const SPOOL_SEGMENTS = ["runtimes", "official-agent-spool"] as const;
 
-/** WS-16's `activeLocalWriteRoot` kinds — one per launch profile. */
-export type LocalWriteRootKind = "official-spool" | "sdk-resume-staging";
+/**
+ * WS-16's `activeLocalWriteRoot` kinds. `run-folder` is WS-21's: a fresh generation's config dir is
+ * its router-built run folder (`<home>/cache/runs/<runId>`), unique per generation like a staging root
+ * and unlike the shared spool. A resume on a run home is still `sdk-resume-staging` — the wrapper's
+ * staging dir, into which the proxy has linked the run folder.
+ */
+export type LocalWriteRootKind = "official-spool" | "sdk-resume-staging" | "run-folder";
 
 /**
  * The durable record §6 rule 2 demands: WHICH root this generation actually got, and of which kind.
@@ -75,10 +80,11 @@ export function officialSpoolRoot(home: string): string {
  * the store is handed a staging root by the wrapper, and the record has to say `sdk-resume-staging`
  * or the reconciler will look in the wrong place after a crash.
  */
-export function classifyLocalWriteRoot(configDir: string): ObservedLocalWriteRoot {
-  return isResumeStagingRoot(configDir)
-    ? { configDir, kind: "sdk-resume-staging", profile: "store-backed-resume" }
-    : { configDir, kind: "official-spool", profile: "fresh-spool" };
+export function classifyLocalWriteRoot(configDir: string, runHomeDir?: string): ObservedLocalWriteRoot {
+  if (isResumeStagingRoot(configDir)) return { configDir, kind: "sdk-resume-staging", profile: "store-backed-resume" };
+  // BY IDENTITY, never by shape (WS-21): a run folder is the one directory this generation was built.
+  if (runHomeDir !== undefined && configDir === runHomeDir) return { configDir, kind: "run-folder", profile: "fresh-spool" };
+  return { configDir, kind: "official-spool", profile: "fresh-spool" };
 }
 
 /**
@@ -102,6 +108,8 @@ export function validateObservedConfigDir(args: {
   configured: string;
   profile: OfficialLaunchProfile;
   brand: Pick<BrandProfile, "processLabel">;
+  /** WS-21: the run folder this generation was built with, when it runs on one. */
+  runHomeDir?: string;
 }): ObservedLocalWriteRoot {
   const branchLabel = officialBranchLabel(args.brand);
   if (args.observed === undefined || args.observed.length === 0) {
@@ -123,7 +131,7 @@ export function validateObservedConfigDir(args: {
       branchLabel,
     });
   }
-  const observed = classifyLocalWriteRoot(args.observed);
+  const observed = classifyLocalWriteRoot(args.observed, args.runHomeDir);
   // REVIEW r1, m1 — THE PROFILE-2 CHECK THIS FUNCTION'S OWN DOC ALREADY CLAIMED. Both refusals used to
   // be gated on `fresh-spool`, so a store-backed resume accepted ANY path at all. With `sessionStore`
   // set — which this branch always requires — a resume is materialized into the wrapper's own staging
@@ -135,7 +143,16 @@ export function validateObservedConfigDir(args: {
       branchLabel,
     });
   }
-  if (args.profile === "fresh-spool" && observed.kind !== "official-spool") {
+  // WS-21: a fresh generation on a run home is handed EXACTLY its run folder — not the spool, not any
+  // other folder that happens to look like one.
+  if (args.profile === "fresh-spool" && args.runHomeDir !== undefined && observed.kind !== "run-folder") {
+    throw new OfficialConfigurationError({
+      option: "env.CLAUDE_CONFIG_DIR",
+      reason: `a fresh generation on a run home was handed ${args.observed}; its config dir is its run folder ${args.runHomeDir} (WS-21 §3.1)`,
+      branchLabel,
+    });
+  }
+  if (args.profile === "fresh-spool" && args.runHomeDir === undefined && observed.kind !== "official-spool") {
     throw new OfficialConfigurationError({
       option: "env.CLAUDE_CONFIG_DIR",
       reason: `a fresh/spool-resident generation was handed a resume staging root (${args.observed}); the configured spool was ${args.configured}`,

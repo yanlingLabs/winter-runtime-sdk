@@ -20,6 +20,10 @@ import { WINTER_BRAND, envName } from "@yanlinglabs/winter-agent-sdk";
 import { createHandoffBarrier, providerStateSidecarPath, resolveEngineTempLayout, type HandoffBarrierDeps } from "../../src/store/index.ts";
 import type { RuntimeSelection, SelectionInput } from "../../src/selection/runtime-selection.ts";
 import { withStoreBed, type StoreBed } from "./support.ts";
+import { createRuntimeSdk, runtimeSdkInternals, sdkHomeOf } from "../../src/index.ts";
+import type { HandoffBarrier } from "../../src/seams/handoff.ts";
+import type { SharedSessionStore } from "../../src/store/wiring.ts";
+import { createFakeKeychain } from "../../src/testing/index.ts";
 import { credentials, listing, VERSIONS } from "../selection/fixtures.ts";
 
 const NOW = "2026-09-13T12:00:00.000Z";
@@ -537,6 +541,49 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GPT));
       expect(review.skipped).toBeUndefined();
       expect(review.prompt).toBe(true);
+    });
+  });
+});
+
+describe("integration Important: under WS-21 (`requireRunHome`) the review reads the sidecar from the STORE home, where the child writes it", () => {
+  /** The ROUTER's own barrier over the shared runtime home `<home>/sdk` — not a barrier built on the bed's pre-WS-21 store. */
+  function routerOf(bed: StoreBed): { barrier: HandoffBarrier; shared: SharedSessionStore; storeHome: string } {
+    mkdirSync(bed.home, { recursive: true, mode: 0o700 }); // the daemon's home always exists; the store creates `sdk/` under it
+    const sdk = createRuntimeSdk({ peers: bed.peers, keychain: createFakeKeychain(), directoryStore: bed.directoryStore, requireRunHome: true, handoff: { winterHome: bed.home, resolveEndpoint: fixtureResolveEndpoint } });
+    const barrier = runtimeSdkInternals(sdk)!.barrier as unknown as HandoffBarrier & { shared: SharedSessionStore };
+    return { barrier, shared: barrier.shared, storeHome: sdkHomeOf(bed.home) };
+  }
+
+  test("GPT (summary) -> Claude with the summary under `<home>/sdk`: prompt, warned-lossy (the S7 row, on the WS-21 layout)", async () => {
+    await withStoreBed(async (bed) => {
+      const { barrier, shared, storeHome } = routerOf(bed);
+      expect(shared.identity.storeHome).toBe(storeHome);
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
+      const t = turn(bed.key, null, "gpt's reasoning summary");
+      await shared.store.append(bed.key, t.entries);
+      await shared.settle(bed.key);
+      writeSummary(storeHome, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
+
+      const review = await barrier.reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      expect(review.prompt).toBe(true);
+      expect(review.classification?.lossClass).toBe("warned-lossy");
+    });
+  });
+
+  // THE ONE THAT FAILS ON THE OLD READ (`homeOf()`): with no sidecar found, the review cannot know the
+  // trace was complete, so it prompts "part of this turn's trace was not captured" (warned-lossy).
+  test("DeepSeek (complete exposed) -> GLM: the sidecar under `<home>/sdk` keeps the switch silent, lossless-portable", async () => {
+    await withStoreBed(async (bed) => {
+      const { barrier, shared, storeHome } = routerOf(bed);
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(DEEPSEEK) });
+      const t = turn(bed.key, null, "deepseek's full reasoning trace");
+      await shared.store.append(bed.key, t.entries);
+      await shared.settle(bed.key);
+      writeSummary(storeHome, bed.key, t.assistantUuid, DEEPSEEK, { text: "deepseek's full reasoning trace", material: "exposed", complete: true });
+
+      const review = await barrier.reviewSwitch(bed.key, selection(GLM));
+      expect(review.prompt).toBe(false);
+      expect(review.classification?.lossClass).toBe("lossless-portable");
     });
   });
 });

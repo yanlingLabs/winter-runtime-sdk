@@ -27,8 +27,8 @@
 // THE SWEEP IS BOUNDED. It walks a small, fixed set of roots to a fixed depth, skipping the two
 // directories that make a walk expensive (`.git`, `node_modules`). A containment mechanism that made
 // every `Bash` call O(repository) would be turned off by the first host that noticed.
-import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readdirSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { FORBIDDEN_TARGETS, targetsForbiddenPath } from "./containment.ts";
 import { OfficialContainmentBreachError } from "./errors.ts";
@@ -59,6 +59,25 @@ export const POST_TOOL_EVENTS: readonly string[] = ["PostToolUse", "PostToolUseF
 
 /** How deep the walk goes below a root, and what it never descends into. */
 const MAX_DEPTH = 6;
+
+/**
+ * THE VENDOR RUNTIME'S OWN ATOMIC-WRITE STAGING DIRECTORY (Touch 4, F3; corrected in Touch 5). claude
+ * 2.1.250 (`kF` = this name; `Kp(e) = join(e, ".claude", kF)`; `ensureAtomicWriteStagingDirs`, `QWn`)
+ * creates, before EVERY sandboxed Bash call, mode 0700 and recursively (so a missing `.claude` is created
+ * with it), the `j0` set:
+ *
+ *   * `<original cwd>/.claude/.cc-writes`   (`ve()`)
+ *   * `<CURRENT cwd>/.claude/.cc-writes`    (`qS()` — `project.cwd`, which follows the model's own `cd`)
+ *   * `<project root>/.claude/.cc-writes`   (`an()` — ABOVE the cwd when the cwd is below the root)
+ *   * `<config dir>/.cc-writes`             (the one copy that follows `CLAUDE_CONFIG_DIR`)
+ *   * the local-settings directory's copy
+ *
+ * The home is in that set only when it IS the project root. A vendor folder that a call created holding
+ * ONLY this directory is the runtime's bookkeeping, not anything the model wrote: it never ends the turn
+ * and is never a breach. It is still removed — claude re-creates it on its next sandboxed call, and a
+ * repository keeps no vendor folder (WS-21: claude never reads a repository's own vendor directory).
+ */
+export const VENDOR_WRITE_STAGING_DIR = ".cc-writes";
 const SKIPPED_DIRECTORIES: readonly string[] = [".git", "node_modules"];
 
 /** One breach: what appeared, from which call, and whether the sweep managed to remove it. */
@@ -71,6 +90,16 @@ export interface ContainmentBreach {
   removed: readonly string[];
   retained: readonly string[];
   at: string;
+}
+
+/** Whether a path exists, never following a link at its last segment. */
+function existsWithoutFollowing(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Every forbidden-named path under `root`, folded-compared, bounded. */
@@ -90,6 +119,7 @@ export function forbiddenArtifactsUnder(root: string, depth = 0, maxDepth: numbe
       continue; // no need to descend: the whole subtree is inside a forbidden target
     }
     if (SKIPPED_DIRECTORIES.includes(entry)) continue;
+    if (depth + 1 > maxDepth) continue; // nothing below this level is walked, so do not even stat it
     let isDirectory = false;
     try {
       isDirectory = statSync(full).isDirectory();
@@ -108,7 +138,11 @@ export interface ContainmentSweepOptions {
   branchLabel?: string;
   /** How deep below each root the walk goes. Default 6; see `MAX_DEPTH`'s own note. */
   maxDepth?: number;
-  /** The session's home, so `~/.claude/plans` is covered as well as the project (WS-17 row 14). */
+  /**
+   * The session's home, so `~/.claude/plans` is covered as well as the project (WS-17 row 14). Checked at
+   * its TOP LEVEL only (Touch 4): in production it is the user's real home, and a six-level walk of it on
+   * every swept call was both slow and outside this session's own roots.
+   */
   home?: string;
   /** Where a breach is reported. The adapter forwards it to the host and keeps it on the session. */
   onBreach?: (breach: ContainmentBreach, error: OfficialContainmentBreachError) => void;
@@ -133,14 +167,42 @@ interface SweepHookInput {
 /** Builds the sweep's two hooks. One sweep per SESSION: the snapshots are keyed by tool-use id. */
 export function createContainmentSweep(options: ContainmentSweepOptions): ContainmentSweep {
   const now = options.now ?? (() => new Date());
-  const roots = [options.cwd, ...(options.home === undefined ? [] : [options.home])];
+  // The project is walked to `maxDepth`; the home only at its top level (Touch 4).
+  const scans: ReadonlyArray<{ root: string; depth: number }> = [{ root: options.cwd, depth: options.maxDepth ?? MAX_DEPTH }, ...(options.home === undefined ? [] : [{ root: options.home, depth: 0 }])];
+  /**
+   * Touch 5: the vendor folders ABOVE the cwd claude may stage in — its project root is an ancestor when
+   * the cwd is below it. Each is only ever cleaned of claude's own staging (see `post`); anything else
+   * there stays outside this sweep's scope, as before.
+   */
+  const ancestorVendorDirs: readonly string[] = (() => {
+    const out: string[] = [];
+    let current = resolve(options.cwd);
+    for (let parent = dirname(current); parent !== current; current = parent, parent = dirname(current)) out.push(join(parent, ".claude"));
+    return out;
+  })();
+  const ancestorSnapshot = (): Set<string> => new Set(ancestorVendorDirs.filter((path) => existsWithoutFollowing(path)));
   // Two maps: one records that a call was SEEN (so it can be retired), the other its snapshot.
   const before = new Set<string>();
-  const beforeSnapshots = new Map<string, Set<string>>();
+  const beforeSnapshots = new Map<string, { inScope: Set<string>; above: Set<string> }>();
   const breaches: ContainmentBreach[] = [];
 
-  const maxDepth = options.maxDepth ?? MAX_DEPTH;
-  const snapshot = (): Set<string> => new Set(roots.flatMap((root) => forbiddenArtifactsUnder(root, 0, maxDepth)));
+  const snapshot = (): Set<string> => new Set(scans.flatMap(({ root, depth }) => forbiddenArtifactsUnder(root, 0, depth)));
+
+  /**
+   * A path the call created that is ONLY the vendor runtime's own staging: a `.claude` at ANY depth (claude
+   * stages under its current cwd, which follows the model's `cd`, and under its project root), a real
+   * directory — never a link — whose sole entry is a real `.cc-writes` directory (whatever is staged in it).
+   */
+  const isVendorStagingOnly = (path: string): boolean => {
+    if (basename(path) !== ".claude") return false;
+    try {
+      if (!lstatSync(path).isDirectory()) return false;
+      const entries = readdirSync(path);
+      return entries.length === 1 && entries[0] === VENDOR_WRITE_STAGING_DIR && lstatSync(join(path, VENDOR_WRITE_STAGING_DIR)).isDirectory();
+    } catch {
+      return false;
+    }
+  };
 
   const pre = async (raw: unknown): Promise<Record<string, never>> => {
     const input = (raw ?? {}) as SweepHookInput;
@@ -148,7 +210,7 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
     const toolUseId = input.tool_use_id ?? "";
     if (!SWEPT_TOOLS.includes(toolName) || toolUseId === "") return {};
     before.add(toolUseId);
-    beforeSnapshots.set(toolUseId, snapshot());
+    beforeSnapshots.set(toolUseId, { inScope: snapshot(), above: ancestorSnapshot() });
     return {};
   };
 
@@ -173,7 +235,14 @@ export function createContainmentSweep(options: ContainmentSweepOptions): Contai
     // `HOME` as newly created and `rmSync`'d it recursively. In production `HOME` is the user's real
     // home, whose vendor directory holds their own credentials. No snapshot means no deletion.
     if (baseline === undefined) return {};
-    const created = [...snapshot()].filter((path) => !baseline.has(path));
+    const appeared = [...snapshot()].filter((path) => !baseline.inScope.has(path));
+    // Touch 4 (F3): the vendor runtime's own staging is bookkeeping — removed quietly, never a breach and
+    // never the end of the turn (it was ending EVERY sandboxed Bash turn in a project with no vendor folder).
+    const bookkeeping = appeared.filter(isVendorStagingOnly);
+    for (const path of bookkeeping) rmSync(path, { recursive: true, force: true });
+    // Touch 5: …and above the cwd (the project root's copy), where ONLY claude's own staging is removed.
+    for (const path of ancestorSnapshot()) if (!baseline.above.has(path) && isVendorStagingOnly(path)) rmSync(path, { recursive: true, force: true });
+    const created = appeared.filter((path) => !bookkeeping.includes(path));
     if (created.length === 0) return {};
 
     const removed: string[] = [];

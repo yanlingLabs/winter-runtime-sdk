@@ -1,0 +1,27 @@
+{
+  "pinnedRuntime": "0.3.250",
+  "note": "Every key the pinned runtime reads DIRECTLY from the project or local settings source (whatever the enabled setting sources are), each with its closure: flag-pinned (the router's flag layer beats it), env-neutralised:<VARIABLE> (a variable the router sets on every run-home launch disables it), or harmless:<reason>. Enumerated live by test/official/v19-direct-settings-reads.test.ts; a key missing here fails that test.",
+  "keys": {
+    "<dynamic>": "harmless:computed lookups only - `skillOverrides[name]` (see skillOverrides) and a feature-disable check that honours only `=== false` from the local source, so it can only turn a feature off",
+    "apiKeyHelper": "env-neutralised:CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+    "autoMemoryDirectory": "flag-pinned",
+    "autoMode": "harmless:read only to warn that a repository's classifier rules are ignored",
+    "awsAuthRefresh": "env-neutralised:CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+    "awsCredentialExport": "env-neutralised:CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+    "crossSessionInbound": "harmless:a repository may only tighten it; the runtime keeps the stricter value",
+    "disabledMcpjsonServers": "harmless:read only by the `claude mcp reset-project-choices` CLI command, never in an SDK session",
+    "enableAllProjectMcpServers": "harmless:read only by the `claude mcp reset-project-choices` CLI command, never in an SDK session",
+    "enabledMcpjsonServers": "harmless:read only by the `claude mcp reset-project-choices` CLI command, never in an SDK session",
+    "enabledPlugins": "harmless:read only by the interactive plugin-uninstall flow to ask before removing a project-enabled plugin",
+    "env": "harmless:read only to list files for a trust warning, and by the /login command to compare CLAUDE_CONFIG_DIR",
+    "gcpAuthRefresh": "harmless:trust check only - compared with the effective helper to mark it untrusted, which can only restrict",
+    "otelHeadersHelper": "harmless:trust check only - compared with the effective helper to mark it untrusted, which can only restrict",
+    "proxyAuthHelper": "harmless:trust check only - compared with the effective helper to mark it untrusted, which can only restrict",
+    "remote": "harmless:read only by the interactive remote-environment picker",
+    "sandbox": "harmless:gated - read only when its source is enabled, and under [\"user\"] the project and local sources are not",
+    "skillOverrides": "flag-pinned",
+    "skipDangerousModePermissionPrompt": "harmless:the router refuses bypassPermissions, so the prompt this skips is never reached",
+    "skipWorkflowUsageWarning": "harmless:suppresses a UI usage warning only",
+    "spellcheck": "harmless:read only to warn that a repository's spellcheck block is ignored"
+  }
+}

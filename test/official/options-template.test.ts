@@ -142,7 +142,8 @@ describe("WS-14 §2 — the Options template", () => {
 
   test("§8's floor is installed as a PreToolUse hook ALWAYS, ahead of the host's own (review r1, M2)", () => {
     const bare = buildOfficialOptions(input("code"));
-    expect(Object.keys(bare.hooks as Record<string, unknown>)).toEqual(["PreToolUse"]);
+    // Review I-2: the floor's WorktreeCreate refusal rides with it while worktrees are denied.
+    expect(Object.keys(bare.hooks as Record<string, unknown>)).toEqual(["PreToolUse", "WorktreeCreate"]);
     expect((bare.hooks as { PreToolUse: unknown[] }).PreToolUse).toHaveLength(1);
     // The host's own matchers survive, and ours run first.
     const hostHook = { matcher: "Write", hooks: [async () => ({})] };
@@ -184,147 +185,31 @@ describe("WS-14 §2 — the Options template", () => {
   });
 });
 
-// 0.0.11 — THE ROUTER NAMES NO PLUGIN OF ITS OWN.
+// WS-21 — `Options.plugins` IS NOT A DOOR ANY MORE.
 //
-// Up to 0.0.10 the template hard-coded `plugins: [{ type: "local", path: "<cwd>/<projectDirName>" }]`
-// with no trust decision anywhere. The pinned runtime loads a local plugin's `hooks/hooks.json` (and
-// its skills, agents, commands, …) by default, so a cloned repository's own project directory ran its
-// shell hooks the moment a Code session opened on it — measured against the pinned 0.3.250 in
-// `runtime-plugins.test.ts`. Which plugins a session gets is a TRUST decision, and only the host has
-// the information to make one; the router forwards what the host names and nothing else.
-describe("0.0.11 — plugins are the host's decision, never the router's", () => {
-  test.each(["code", "dispatch", "chat"] as const)("the %s template carries NO `plugins` key when the host names none", (mode) => {
+// 0.0.11 made the plugin list the host's decision (`OptionsTemplatePolicy.plugins`), because the
+// template used to name the session's own project directory as a plugin root and the pinned runtime ran
+// its hooks. WS-21 removes the door itself: the plugins a session loads are its run home's
+// `enabledPlugins`, installed under the shared plugin root the router points the runtime at (spec §5.3).
+// A session-scoped plugin directory — however it is spelled — is refused on every launch.
+describe("WS-21 — plugins come only from the run home; `Options.plugins` is refused", () => {
+  test.each(["code", "dispatch", "chat"] as const)("the %s template carries NO `plugins` key", (mode) => {
     expect("plugins" in buildOfficialOptions(input(mode))).toBe(false);
     expect("plugins" in buildOfficialOptions(input(mode, WINTER_BRAND))).toBe(false);
   });
 
-  test("a policy carrying `plugins` reaches the built options unchanged -- order and every field", () => {
-    const first = { type: "local" as const, path: "/home/.acme/runtimes/plugin-views/battery/", skipMcpDiscovery: true as const };
-    const second = { type: "local" as const, path: "/home/.acme/runtimes/plugin-views/notes", skipMcpDiscovery: true as const };
-    const plugins = [first, second];
-    const options = buildOfficialOptions(input("code"), { plugins });
-    expect(options.plugins).toEqual(plugins);
-    // COPIED, so a host mutating its own array after the invariants ran cannot change what launches.
-    expect(options.plugins).not.toBe(plugins);
-    expect(options.plugins?.[0]).not.toBe(first);
+  test("the policy has no `plugins` field at all (enforced by `bun run typecheck`)", () => {
+    // @ts-expect-error — `plugins` is not an `OptionsTemplatePolicy` member since WS-21.
+    const policy: OptionsTemplatePolicy = { plugins: [{ type: "local", path: "/home/views/x", skipMcpDiscovery: true }] };
+    expect(() => buildOfficialOptions(input("code"), policy)).not.toThrow();
+    expect("plugins" in buildOfficialOptions(input("code"), policy)).toBe(false);
   });
 
-  test("`skipMcpDiscovery: true` is required at the TYPE level too (enforced by `bun run typecheck`)", () => {
-    // @ts-expect-error — an entry without `skipMcpDiscovery: true` is not an `OptionsTemplatePolicy` plugin.
-    const missing: OptionsTemplatePolicy["plugins"] = [{ type: "local", path: "/home/views/x" }];
-    // @ts-expect-error — `false` is not `true`.
-    const disabled: OptionsTemplatePolicy["plugins"] = [{ type: "local", path: "/home/views/x", skipMcpDiscovery: false }];
-    const fine: OptionsTemplatePolicy["plugins"] = [{ type: "local", path: "/home/views/x", skipMcpDiscovery: true }];
-    expect([missing, disabled, fine].map((plugins) => plugins?.length)).toEqual([1, 1, 1]);
-  });
-
-  test("an empty `plugins` array is forwarded as empty (the host said \"none\"), distinct from absent", () => {
-    expect(buildOfficialOptions(input("code"), { plugins: [] }).plugins).toEqual([]);
-  });
-
-  const refusedPlugins = (plugins: unknown): string => {
-    try {
-      buildOfficialOptions(input("code"), { plugins: plugins as never });
-    } catch (error) {
-      expect(error).toBeInstanceOf(OfficialConfigurationError);
-      return `${(error as OfficialConfigurationError).option}: ${(error as Error).message}`;
+  test("hand-built options carrying `plugins` are refused by the invariants, whatever the entry", () => {
+    const built = buildOfficialOptions(input("code"));
+    for (const plugins of [[], [{ type: "local", path: "/home/views/x", skipMcpDiscovery: true }], [{ type: "local", path: "/work/repo/.acme" }], "not-an-array"]) {
+      expect(() => assertOptionsInvariants({ ...built, plugins: plugins as never }, "acme-claude-agent")).toThrow(/^.*plugins/);
     }
-    return "accepted";
-  };
-
-  test("a relative or empty path is refused -- a relative plugin root resolves against the child's cwd, i.e. the project", () => {
-    expect(refusedPlugins([{ type: "local", path: ".acme", skipMcpDiscovery: true }])).toMatch(/^plugins: .*absolute/);
-    expect(refusedPlugins([{ type: "local", path: "views/battery", skipMcpDiscovery: true }])).toMatch(/^plugins: .*absolute/);
-    expect(refusedPlugins([{ type: "local", path: "", skipMcpDiscovery: true }])).toMatch(/^plugins: .*absolute/);
-  });
-
-  test("a `..` segment is refused, however it is spelled", () => {
-    expect(refusedPlugins([{ type: "local", path: "/home/.acme/runtimes/plugin-views/../../../work/repo/.acme", skipMcpDiscovery: true }])).toMatch(/^plugins: .*`\.\.`/);
-    expect(refusedPlugins([{ type: "local", path: "/home/..", skipMcpDiscovery: true }])).toMatch(/^plugins: .*`\.\.`/);
-    // A NAME that merely contains two dots is not a traversal.
-    expect(refusedPlugins([{ type: "local", path: "/home/.acme/views/v1..2", skipMcpDiscovery: true }])).toBe("accepted");
-  });
-
-  test("a NUL byte in the path is refused", () => {
-    expect(refusedPlugins([{ type: "local", path: "/home/views/a\u0000b", skipMcpDiscovery: true }])).toMatch(/^plugins: .*NUL/);
-  });
-
-  test("only the pinned runtime's `local` type is accepted", () => {
-    expect(refusedPlugins([{ type: "git", path: "/home/views/x", skipMcpDiscovery: true }])).toMatch(/^plugins: .*`local`/);
-    expect(refusedPlugins([{ path: "/home/views/x", skipMcpDiscovery: true }])).toMatch(/^plugins: .*`local`/);
-  });
-
-  test("§11: an entry that would let the plugin bring its own MCP servers is refused", () => {
-    expect(refusedPlugins([{ type: "local", path: "/home/views/x" }])).toMatch(/^plugins: .*skipMcpDiscovery/);
-    expect(refusedPlugins([{ type: "local", path: "/home/views/x", skipMcpDiscovery: false }])).toMatch(/^plugins: .*skipMcpDiscovery/);
-  });
-
-  test("a non-array, or a non-object entry, is refused", () => {
-    expect(refusedPlugins({ type: "local", path: "/home/views/x", skipMcpDiscovery: true })).toMatch(/^plugins: .*array/);
-    expect(refusedPlugins(["/home/views/x"])).toMatch(/^plugins: /);
-    expect(refusedPlugins([null])).toMatch(/^plugins: /);
-  });
-
-  // FIX ROUND (review): the 0.0.10 bug path, spelled so that the lexical rules above let it through.
-  // The session's own working directory, its project directory and the vendor's project directory are
-  // refused however they are spelled; anything else under the working directory is NOT (a session in
-  // `$HOME` legitimately names `~/<projectDirName>/cache/…`).
-  const caseInsensitiveFs = process.platform === "darwin" || process.platform === "win32";
-  test.each([
-    ["the project directory", "/work/repo/.acme"],
-    ["a trailing slash", "/work/repo/.acme/"],
-    ["a `/./` segment", "/work/repo/./.acme"],
-    ["a doubled separator", "/work//repo/.acme"],
-    ["a doubled leading separator", "//work/repo/.acme"],
-    ["a trailing `/.`", "/work/repo/.acme/."],
-    ["the working directory itself", "/work/repo"],
-    ["the working directory with a trailing slash", "/work/repo/"],
-    ["the working directory spelled `/.`", "/work/repo/."],
-    ["the vendor's project directory", "/work/repo/.claude"],
-    ["the vendor's project directory, slash-terminated", "/work/repo/.claude//"],
-  ])("%s is refused as a plugin root (%s)", (_label, path) => {
-    expect(refusedPlugins([{ type: "local", path, skipMcpDiscovery: true }])).toMatch(/^plugins: .*working directory|^plugins: .*project directory/);
-  });
-
-  test.each([
-    ["/work/repo/.ACME"],
-    ["/WORK/repo/.acme"],
-    ["/work/repo/.Claude"],
-    ["/Work/Repo"],
-  ])("a case variant (%s) is refused where the filesystem folds case, accepted where it does not", (path) => {
-    const outcome = refusedPlugins([{ type: "local", path, skipMcpDiscovery: true }]);
-    if (caseInsensitiveFs) expect(outcome).toMatch(/^plugins: /);
-    else expect(outcome).toBe("accepted");
-  });
-
-  test("a directory merely UNDER the working directory is the host's call, not refused", () => {
-    expect(refusedPlugins([{ type: "local", path: "/work/repo/.acme/views/battery", skipMcpDiscovery: true }])).toBe("accepted");
-    expect(refusedPlugins([{ type: "local", path: "/work/repo/tools/plugin", skipMcpDiscovery: true }])).toBe("accepted");
-    // A `$HOME` session: the product's own cache under the home directory is a legitimate host view.
-    const home = { ...input("code"), cwd: "/home" };
-    expect(buildOfficialOptions(home, { plugins: [{ type: "local", path: "/home/.acme/cache/skill-plugins", skipMcpDiscovery: true }] }).plugins).toHaveLength(1);
-    expect(() => buildOfficialOptions(home, { plugins: [{ type: "local", path: "/home/.acme", skipMcpDiscovery: true }] })).toThrow(OfficialConfigurationError);
-    expect(() => buildOfficialOptions(home, { plugins: [{ type: "local", path: "/home/", skipMcpDiscovery: true }] })).toThrow(OfficialConfigurationError);
-  });
-
-  test("`assertOptionsInvariants` refuses the project directory by the context's name, and the vendor's and the cwd without it", () => {
-    const built = buildOfficialOptions(input("code"));
-    const withPlugin = (path: string) => ({ ...built, plugins: [{ type: "local" as const, path, skipMcpDiscovery: true as const }] });
-    expect(() => assertOptionsInvariants(withPlugin("/work/repo/.acme/"), "acme-claude-agent", { projectDirName: ".acme" })).toThrow(/project directory/);
-    expect(() => assertOptionsInvariants(withPlugin("/work/repo/.claude"), "acme-claude-agent")).toThrow(/project directory/);
-    expect(() => assertOptionsInvariants(withPlugin("/work/repo"), "acme-claude-agent")).toThrow(/working directory/);
-    // `options.cwd` absent (a hand-built launch): the context's cwd is what the check uses…
-    const { cwd: _dropped, ...cwdless } = withPlugin("/elsewhere/.acme");
-    expect(() => assertOptionsInvariants(cwdless, "acme-claude-agent", { projectDirName: ".acme", cwd: "/elsewhere" })).toThrow(/project directory/);
-    // …and with no working directory known at all, a plugin cannot be checked, so it is refused.
-    expect(() => assertOptionsInvariants(cwdless, "acme-claude-agent", { projectDirName: ".acme" })).toThrow(/working directory/);
-  });
-
-  test("the same rule holds at `assertOptionsInvariants`, for options a caller built by hand", () => {
-    const built = buildOfficialOptions(input("code"));
-    expect(() => assertOptionsInvariants({ ...built, plugins: [{ type: "local", path: "/work/repo/.acme/../.acme", skipMcpDiscovery: true }] }, "acme-claude-agent")).toThrow(OfficialConfigurationError);
-    expect(() => assertOptionsInvariants({ ...built, plugins: [{ type: "local", path: ".acme", skipMcpDiscovery: true }] }, "acme-claude-agent")).toThrow(/absolute/);
-    expect(() => assertOptionsInvariants({ ...built, plugins: [{ type: "local", path: "/home/views/x", skipMcpDiscovery: true }] }, "acme-claude-agent")).not.toThrow();
   });
 });
 

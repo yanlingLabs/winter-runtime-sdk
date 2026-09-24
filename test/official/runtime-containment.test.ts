@@ -284,11 +284,11 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
       // …and the vendor's worktree directory, which the same call created before this fix, is absent.
       expect(existsSync(join(session.cwd, ".claude", "worktrees"))).toBe(false);
 
-      // 5. THE SAVED APPROVAL — the durable rule update is STRIPPED at the bridge and the
-      //    session-scoped one survives, which is §16 q2's `disable` disposition doing its work.
+      // 5. THE SAVED APPROVAL — the durable rule update is REWRITTEN TO `session` at the bridge
+      //    (WS-21 §4.3; it used to be stripped), so no settings file is written by the runtime.
       const webfetch = decisions.find((decision) => decision.tool === "WebFetch");
-      expect([webfetch?.source, webfetch?.behavior]).toEqual(["broker-approval-stripped", "allow"]);
-      tally["WebFetch(saved approval)"] = "approval-stripped";
+      expect([webfetch?.source, webfetch?.behavior]).toEqual(["broker-destination-rewritten", "allow"]);
+      tally["WebFetch(saved approval)"] = "approval-session-only";
 
       // 6. PLAN MODE — `plansDirectory` is set through the settings layer and the vendor's own
       //    user-level plans directory is never created. MEASURED AND NAMED: this runtime's SDK path
@@ -408,7 +408,7 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
   );
 
   test(
-    "review r3, NEW-11: the saved-approval path, for real — the durable update is stripped and no vendor settings file appears",
+    "review r3, NEW-11 / WS-21 §4.3: the saved-approval path, for real — the durable update is kept for the session only and no vendor settings file appears",
     async () => {
       const session = hermeticSession("containment-approval");
       const { decisions } = await runContainment({
@@ -427,7 +427,7 @@ describeRuntime("WS-17 row 14 — nothing can create a vendor-named path, agains
         turns: [{ toolUses: [{ id: "w1", name: "WebFetch", input: { url: "https://example.com/", prompt: "read it" } }] }, { text: "done" }],
       });
       const webfetch = decisions.find((decision) => decision.tool === "WebFetch");
-      expect([webfetch?.source, webfetch?.behavior]).toEqual(["broker-approval-stripped", "allow"]);
+      expect([webfetch?.source, webfetch?.behavior]).toEqual(["broker-destination-rewritten", "allow"]);
       // The file the runtime writes for a durable approval — measured being created when the update
       // passes through — is absent, and so is the product's own (nothing routes one).
       expect(existsSync(join(session.cwd, ".claude", "settings.local.json"))).toBe(false);

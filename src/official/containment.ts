@@ -63,10 +63,11 @@ export interface ContainmentDisposition {
    * The distinction is the finding: a row can say `redirect` while the router — which implements no
    * tools — has nothing to redirect to, and a reader of the table alone would believe the writer was
    * handled. `floor-deny` means the permission floor refuses the call; `deny-list` means the name is
-   * in `disallowedTools`; `approval-stripped` means the durable permission update is dropped at the
+   * in `disallowedTools`; `approval-session-only` means the durable permission update is rewritten to
+   * `session` at the bridge (WS-21 §4.3; `approval-stripped` was the pre-WS-21 drop, kept in the union); the
    * bridge; `host-implementation` means the host installed the replacement and owns it from there.
    */
-  enforcement: "floor-deny" | "deny-list" | "approval-stripped" | "host-implementation" | "host-ui";
+  enforcement: "floor-deny" | "deny-list" | "approval-stripped" | "approval-session-only" | "host-implementation" | "host-ui" | "run-home";
   note: string;
 }
 
@@ -105,7 +106,18 @@ export interface ContainmentPolicy {
    * vendor's own writer become the host's problem rather than a vendor-named write.
    */
   worktrees?: "deny" | "host-replacement";
-  workflows?: "deny" | "host-replacement";
+  /**
+   * `"run-home"` (R-1 ruling, WS-21): the template's default when a run home is applied. Under a run
+   * home the D8 reason no longer holds — MEASURED on the pinned runtime: named resolution reads the run
+   * folder's `workflows/` (→ `sdk/workflows`), plugin workflows and the built-ins, and a repository's
+   * `.claude/workflows/` name is NOT found; an inline script persists under the run folder's own
+   * `projects/<key>/<session>/workflows/` and wrote nothing into the repository or `$TMPDIR`. So a
+   * NAMED or INLINE `Workflow` call is allowed, and ONLY that (R.3 M2: an allowlist of `name`,
+   * `script`, `args`, `description`, `title`): a `scriptPath` (runs any file on disk, "takes precedence
+   * over script and name"), a `resumeFromRunId`, the schema's hidden `runId` and its gated `remote`/
+   * run-op fields — every other field — were not measured and are refused.
+   */
+  workflows?: "deny" | "host-replacement" | "run-home";
   /** The product's project directory, so a refusal can NAME where the replacement lives. */
   projectDirName?: string;
   /**
@@ -148,7 +160,7 @@ export function containmentDispositions(brand: Pick<BrandProfile, "projectDirNam
       disposition: "redirect",
       target: paths.worktrees,
       enforcement: (policy.worktrees ?? "deny") === "deny" ? "floor-deny" : "host-implementation",
-      note: "the router implements no tools, so until the host installs the schema-compatible replacement the vendor's own writer is denied at the floor",
+      note: "the router implements no tools, so until the host installs the schema-compatible replacement the vendor's own writer is denied at the floor — the tool calls by the PreToolUse guard, a workflow agent's `isolation: \"worktree\"` by a refusing `WorktreeCreate` hook. That hook is NOT A VETO: the runtime asks every configured `WorktreeCreate` hook, and a user, project or plugin command hook that returns a path wins (the worktree is then that hook's)",
     },
     {
       writer: "CronCreate with durable: true",
@@ -162,7 +174,7 @@ export function containmentDispositions(brand: Pick<BrandProfile, "projectDirNam
       claudeNamedTarget: `${FORBIDDEN_TARGETS.projectDir}/workflows/`,
       disposition: "redirect",
       target: paths.workflows,
-      enforcement: (policy.workflows ?? "deny") === "deny" ? "floor-deny" : "host-implementation",
+      enforcement: (policy.workflows ?? "deny") === "deny" ? "floor-deny" : policy.workflows === "run-home" ? "run-home" : "host-implementation",
       note: "named resolution reads the vendor's own directory; denied at the floor until the host's replacement resolves under the product's own",
     },
     {
@@ -170,7 +182,7 @@ export function containmentDispositions(brand: Pick<BrandProfile, "projectDirNam
       claudeNamedTarget: `${FORBIDDEN_TARGETS.projectDir}/settings.local.json`,
       disposition: savedApprovals,
       ...(savedApprovals === "redirect" ? { target: paths.localSettings } : {}),
-      enforcement: savedApprovals === "disable" ? "approval-stripped" : "host-implementation",
+      enforcement: savedApprovals === "disable" ? "approval-session-only" : "host-implementation",
       note:
         savedApprovals === "disable"
           ? "saving is disabled on this branch: the approval still applies for the session, and WS-07 keeps its open question (WS-14 §16 q2)"
@@ -335,6 +347,27 @@ const WORKTREE_TOOLS = ["EnterWorktree", "ExitWorktree", "WorktreeCreate"] as co
 const AGENT_TOOLS = ["Task", "Agent"] as const;
 const WORKFLOW_TOOLS = ["Workflow"] as const;
 
+/**
+ * R-1 + R.3 M2: the ONLY `Workflow` input fields a run home lets through — an ALLOWLIST, never a list of
+ * refusals. The measured forms are a named or an inline workflow (`name` or `script`, with `args`;
+ * `description`/`title` are ignored by the runtime). The pinned schema takes more than its declaration
+ * shows — `scriptPath`, `resumeFromRunId`, a hidden `runId` (a run operation on a prior run: "runId is
+ * not a field of this tool here" outside its gate), and gated `remote`/run-op fields — none measured.
+ */
+const RUN_HOME_WORKFLOW_FIELDS: ReadonlySet<string> = new Set(["name", "script", "args", "description", "title"]);
+
+/**
+ * R-1 ruling: the containment policy a launch actually applies. Under a run home, an UNSET workflow
+ * disposition becomes `"run-home"` (named and inline workflows run); a host's explicit choice always
+ * wins, and without a run home nothing changes. ONE helper for the three places a floor is built — the
+ * template, the door's host-broker bridge and the adapter's per-launch floor — because any one of them
+ * still denying would deny the call (every floor copy runs, and any deny wins).
+ */
+export function effectiveContainmentPolicy<T extends ContainmentPolicy | undefined>(policy: T, runHomeApplied: boolean): T | ContainmentPolicy {
+  if (!runHomeApplied || policy?.workflows !== undefined) return policy;
+  return { ...(policy ?? {}), workflows: "run-home" };
+}
+
 export function containmentDecisionFor(toolName: string, input: Record<string, unknown>, policy: ContainmentPolicy = {}): ContainmentDecision {
   const deny = (target: string, what: string): ContainmentDecision => ({
     allow: false,
@@ -392,6 +425,31 @@ export function containmentDecisionFor(toolName: string, input: Record<string, u
       target: `${FORBIDDEN_TARGETS.projectDir}/workflows/`,
       reason: `named workflow resolution reads the vendor's own workflows directory; on this branch workflows resolve under ${paths.workflows || "the product's project directory"} (WS-14 §8, D8)`,
     };
+  }
+  if (policy.workflows === "run-home" && (WORKFLOW_TOOLS as readonly string[]).includes(toolName)) {
+    // R-1: named and inline workflows run under a run home; the two unmeasured forms do not.
+    if (input["scriptPath"] !== undefined) {
+      return {
+        allow: false,
+        target: String(input["scriptPath"]),
+        reason: "a Workflow scriptPath runs a script file from anywhere on disk and takes precedence over script and name; under a run home only a named workflow or an inline script runs here (WS-21, R-1)",
+      };
+    }
+    if (input["resumeFromRunId"] !== undefined) {
+      return {
+        allow: false,
+        target: `${FORBIDDEN_TARGETS.projectDir}/workflows/`,
+        reason: "resuming a prior Workflow run (resumeFromRunId) is not available on this branch yet; start the workflow again by name or with an inline script (WS-21, R-1)",
+      };
+    }
+    const unmeasured = Object.keys(input).filter((key) => input[key] !== undefined && !RUN_HOME_WORKFLOW_FIELDS.has(key));
+    if (unmeasured.length > 0) {
+      return {
+        allow: false,
+        target: `${FORBIDDEN_TARGETS.projectDir}/workflows/`,
+        reason: `under a run home a Workflow call takes only ${[...RUN_HOME_WORKFLOW_FIELDS].join(", ")}; ${unmeasured.join(", ")} ${unmeasured.length === 1 ? "is" : "are"} not measured on this branch (a run operation, a remote launch or a newer field), so the call is refused rather than passed through — start the workflow by name or with an inline script (WS-21, R-1, R.3 M2)`,
+      };
+    }
   }
   // A durable Cron is a vendor-named write with no path argument at all — the disposition table's
   // "disable" is enforced here, where the call actually arrives.

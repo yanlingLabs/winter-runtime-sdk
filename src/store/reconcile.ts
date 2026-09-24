@@ -34,6 +34,10 @@ import type { SharedSessionStore } from "./wiring.ts";
 const PROJECTS_DIR = "projects";
 const SUBAGENTS_DIR = "subagents";
 const JSONL = ".jsonl";
+/** A workflow run's journal, under `subagents/<rel>/` (claude's `journal` key: `subagents/<rel>/journal`). */
+const RUN_JOURNAL_STEM = "journal";
+/** The session's own journals, directly under `<sessionId>/` (claude's `sessionJournal` names). */
+const SESSION_JOURNAL_STEMS: readonly string[] = ["world"];
 
 /** One transcript found under a local-write root, with the store key it mirrors to. */
 export interface LocalTranscript {
@@ -44,9 +48,16 @@ export interface LocalTranscript {
 /**
  * Every transcript under a recorded local-write root.
  *
- * NOT A GLOB AND NOT A RECURSIVE WALK: exactly two shapes are transcripts (the session's own file and
- * its `subagents/` children), and everything else in that tree — the vendor's settings, its caches,
- * its lock files — is out of scope by construction rather than by a filter someone has to maintain.
+ * NOT A GLOB: exactly these shapes are reconciled, each under the store key claude's own import gives it
+ * (`importSessionToStore`; the resume materialization writes every subkey back to the same path), and
+ * everything else in that tree — the vendor's settings, its caches, its lock files — is out of scope by
+ * construction rather than by a filter someone has to maintain:
+ *   * `<key>/<uuid>.jsonl` — the session's own transcript;
+ *   * `<key>/<sid>/subagents/<any depth>/agent-<id>.jsonl` — a subagent's (nested for a workflow's agents);
+ *   * `<key>/<sid>/subagents/<rel>/journal.jsonl`, `<rel>` non-empty — a workflow run's journal (review
+ *     N-1; claude's `journal` key, subpath `subagents/<rel>/journal`);
+ *   * `<key>/<sid>/world.jsonl` — the session's own journal (claude's `sessionJournal` key, name `world`).
+ * The two journals are plain appends of uuid-less lines, so they are compared byte for byte (`sameRecord`).
  * A missing root is an empty list, not an error: a session that never spawned has nothing to mirror.
  */
 export function scanLocalWriteRoot(root: string): LocalTranscript[] {
@@ -64,17 +75,28 @@ export function scanLocalWriteRoot(root: string): LocalTranscript[] {
       const sessionId = name.slice(0, -JSONL.length);
       found.push({ path: join(projectDir, name), key: { projectKey, sessionId } });
     }
-    // `<sessionId>/subagents/agent-*.jsonl` — WS-05 §6's subkey shape, and the only nested level
-    // this scan recognises.
+    // `<sessionId>/subagents/**/agent-*.jsonl` — WS-05 §6's subkey shape, and (review I-1) claude's
+    // NESTED one: a workflow's agents write `subagents/workflows/<run>/agent-*.jsonl`, which claude
+    // mirrors as the subkey `subagents/workflows/<run>/agent-<id>`. Beside them (review N-1), the run's
+    // own `journal.jsonl`. Reconciled through the store like any transcript — never copied as a file.
+    // Directories only, at ANY depth (review N-1's minor: a depth limit silently dropped a deeper
+    // transcript): `readDirNames` never follows a link, so the walk is bounded by the real tree.
     for (const sessionId of readDirNames(projectDir, "dir")) {
-      const subagents = join(projectDir, sessionId, SUBAGENTS_DIR);
-      for (const name of readDirNames(subagents, "file")) {
-        if (!isTranscriptPath(join(subagents, name), "subagent")) continue; // a child has its own sidecar too
-        found.push({
-          path: join(subagents, name),
-          key: { projectKey, sessionId, subpath: `${SUBAGENTS_DIR}/${name.slice(0, -JSONL.length)}` },
-        });
+      const sessionDir = join(projectDir, sessionId);
+      for (const name of readDirNames(sessionDir, "file")) {
+        if (!isSessionJournalName(name)) continue;
+        found.push({ path: join(sessionDir, name), key: { projectKey, sessionId, subpath: name.slice(0, -JSONL.length) } });
       }
+      const walk = (dir: string, subpath: string): void => {
+        for (const name of readDirNames(dir, "file")) {
+          // A child has its own sidecar too: the stem is matched positively, never by extension.
+          const isRunJournal = subpath !== SUBAGENTS_DIR && name === `${RUN_JOURNAL_STEM}${JSONL}`;
+          if (!isRunJournal && !isTranscriptPath(join(dir, name), "subagent")) continue;
+          found.push({ path: join(dir, name), key: { projectKey, sessionId, subpath: `${subpath}/${name.slice(0, -JSONL.length)}` } });
+        }
+        for (const child of readDirNames(dir, "dir")) walk(join(dir, child), `${subpath}/${child}`);
+      };
+      walk(join(sessionDir, SUBAGENTS_DIR), SUBAGENTS_DIR);
     }
   }
   return found;
@@ -196,6 +218,20 @@ export function compareTranscriptTail(args: { localPath: string; canonicalLines:
   return { kind: "canonical-behind", lines: canonical.length, missing };
 }
 
+/**
+ * I6: is the local copy a record-for-record PREFIX of the canonical lines? The one question
+ * `canonical-ahead` leaves open (`compareTranscriptTail` answers it before comparing a single line):
+ * a local copy that is a prefix holds nothing the canonical file lacks — the canonical history simply
+ * moved on after it (a resume through staging, a continuation on the other leg) — while one that is
+ * not holds a line no append can place.
+ */
+export function localIsCanonicalPrefix(args: { localPath: string; canonicalLines: readonly string[]; isDecoration?: (uuid: string) => boolean }): boolean {
+  const local = withoutDecorations(completeLines(args.localPath), args.isDecoration);
+  if (local.length > args.canonicalLines.length) return false;
+  for (let i = 0; i < local.length; i++) if (!sameRecord(args.canonicalLines[i]!, local[i]!)) return false;
+  return true;
+}
+
 // --- reconciliation --------------------------------------------------------------------------------
 
 export interface TranscriptReconcileOutcome {
@@ -203,6 +239,12 @@ export interface TranscriptReconcileOutcome {
   localPath: string;
   comparison: TailComparison;
   appended: number;
+  /** Set when a `judge` decided this transcript's fate instead of the comparison (I6). */
+  verdict?: "level" | "excluded";
+  /** Why a judged transcript was excluded. */
+  reason?: string;
+  /** Set when a tail WAS appended and the re-read still disagreed: how many entries the append carried. */
+  attempted?: number;
 }
 
 export interface ReconcileReport {
@@ -224,10 +266,20 @@ export class TranscriptReconcileError extends RuntimeSdkError {
   }
 }
 
+/**
+ * I6: a per-transcript verdict, asked BEFORE anything is appended. `reconcile` — the ordinary path
+ * (append a behind tail; a match is level); `level` — nothing to append and nothing lost (a proven
+ * canonical-ahead prefix); `{ exclude }` — unprovable: never appended, never level, the session's flag
+ * stays. A judge that throws excludes that transcript.
+ */
+export type TranscriptJudge = (transcript: LocalTranscript, comparison: TailComparison) => Promise<"reconcile" | "level" | { exclude: string }>;
+
 export interface TranscriptReconcilerInput {
   shared: SharedSessionStore;
   /** Restricts reconciliation to one session; omitted = every transcript under the root. */
   only?: { projectKey: string; sessionId: string };
+  /** Recovery's per-transcript proof (WS-21 §3.8, I6). Absent = every transcript takes the ordinary path. */
+  judge?: TranscriptJudge;
 }
 
 /**
@@ -259,36 +311,60 @@ export async function reconcileLocalWriteRoot(root: string, input: TranscriptRec
   const cleared: SessionKey[] = [];
   let appended = 0;
   let diverged = false;
+  /** The sessions (by `sessionKeyString`) with at least one transcript that did not come back level. */
+  const unlevel = new Set<string>();
 
   for (const transcript of transcripts) {
     await shared.settle(transcript.key);
     const isDecoration = (uuid: string): boolean => shared.decorations.has(transcript.key, uuid);
     const comparison = compareTranscriptTail({ localPath: transcript.path, canonicalLines: await canonicalLines(shared, transcript.key), isDecoration });
+    if (input.judge !== undefined) {
+      let verdict: Awaited<ReturnType<TranscriptJudge>>;
+      try {
+        verdict = await input.judge(transcript, comparison);
+      } catch (error) {
+        verdict = { exclude: `the proof itself failed: ${error instanceof Error ? error.message : String(error)}` };
+      }
+      if (verdict === "level") {
+        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: 0, verdict: "level" });
+        continue;
+      }
+      if (verdict !== "reconcile") {
+        diverged = true;
+        unlevel.add(sessionKeyString(transcript.key));
+        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: 0, verdict: "excluded", reason: verdict.exclude });
+        continue;
+      }
+    }
     if (comparison.kind === "canonical-behind" && comparison.missing.length > 0) {
       await shared.store.append(transcript.key, comparison.missing);
       await shared.settle(transcript.key);
       const after = compareTranscriptTail({ localPath: transcript.path, canonicalLines: await canonicalLines(shared, transcript.key), isDecoration });
       if (after.kind !== "match") {
         diverged = true;
-        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison: after, appended: 0 });
+        unlevel.add(sessionKeyString(transcript.key));
+        outcomes.push({ key: transcript.key, localPath: transcript.path, comparison: after, appended: 0, attempted: comparison.missing.length });
         continue;
       }
       appended += comparison.missing.length;
       outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: comparison.missing.length });
       continue;
     }
-    if (comparison.kind === "diverged" || comparison.kind === "canonical-ahead") diverged = true;
+    if (comparison.kind === "diverged" || comparison.kind === "canonical-ahead") {
+      diverged = true;
+      unlevel.add(sessionKeyString(transcript.key));
+    }
     outcomes.push({ key: transcript.key, localPath: transcript.path, comparison, appended: 0 });
   }
 
-  if (!diverged) {
-    // The flag exists to block a handoff until the canonical store is reconciled (WS-14 §5). It is
-    // cleared per SESSION, and only when every one of that session's transcripts — its own and its
-    // subagents' — came back level.
-    for (const key of uniqueSessions(transcripts.map((t) => t.key))) {
-      shared.markReconciled(key, `reconciled against ${root}`);
-      cleared.push(key);
-    }
+  // The flag exists to block a handoff until the canonical store is reconciled (WS-14 §5). It is
+  // cleared per SESSION, and only when every one of that session's transcripts — its own and its
+  // subagents' — came back level (I6: another session's divergence in the same root no longer holds a
+  // level session's flag).
+  for (const key of uniqueSessions(transcripts.map((t) => t.key))) {
+    if (unlevel.has(sessionKeyString(key))) continue;
+    shared.markReconciled(key, `reconciled against ${root}`);
+    cleared.push(key);
   }
 
   return {
@@ -316,9 +392,12 @@ async function canonicalLines(shared: SharedSessionStore, key: SessionKey): Prom
   return entries.filter((entry) => entry["type"] !== "agent_metadata").map((entry) => JSON.stringify(entry));
 }
 
+/** A SESSION's identity (a subagent transcript belongs to its session). */
+const sessionKeyString = (key: SessionKey): string => `${key.projectKey}/${key.sessionId}`;
+
 function uniqueSessions(keys: SessionKey[]): SessionKey[] {
   const seen = new Map<string, SessionKey>();
-  for (const key of keys) seen.set(`${key.projectKey}/${key.sessionId}`, { projectKey: key.projectKey, sessionId: key.sessionId });
+  for (const key of keys) seen.set(sessionKeyString(key), { projectKey: key.projectKey, sessionId: key.sessionId });
   return [...seen.values()];
 }
 
@@ -442,6 +521,22 @@ const BACKEND_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 // NO DOT in the stem: `agent-a1.provider-state` would otherwise match, and the child's own sidecar is
 // exactly the file this predicate exists to keep out (review r1, F6 — caught by its own test).
 const SUBAGENT_STEM_RE = /^agent-[A-Za-z0-9_-]+$/;
+
+function isSessionJournalName(name: string): boolean {
+  return name.endsWith(JSONL) && SESSION_JOURNAL_STEMS.includes(name.slice(0, -JSONL.length));
+}
+
+/**
+ * Is this key one of claude's JOURNALS (a workflow run's `subagents/<rel>/journal`, or the session's own
+ * `world`) rather than a transcript? A journal is written verbatim — never through the claude-ready fold
+ * — so it is proved against the canonical lines themselves, byte for byte.
+ */
+export function isJournalKey(key: SessionKey): boolean {
+  if (key.subpath === undefined) return false;
+  if (SESSION_JOURNAL_STEMS.includes(key.subpath)) return true;
+  const segments = key.subpath.split("/");
+  return segments.length >= 3 && segments[0] === SUBAGENTS_DIR && segments[segments.length - 1] === RUN_JOURNAL_STEM;
+}
 
 export function isTranscriptPath(path: string, kind: "session" | "subagent" = "session"): boolean {
   if (!path.endsWith(JSONL)) return false;

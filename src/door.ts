@@ -36,18 +36,20 @@
 //      own variables, because only the host knows them.
 //   5. NOTHING HERE CACHES A CREDENTIAL. `fetchAuthCredentials` returns material to one caller, this
 //      module puts it in the child environment, and the object is dropped when the launch returns.
+import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import type { BrandProfile, CredentialRef, Options, ProviderSelection, Query } from "@yanlinglabs/winter-agent-sdk";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 
 import { RuntimeHandoffRequiredError, RuntimeLaunchInputError } from "./errors.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
 import { transcriptSourceForSessionKey, type ReviewerResolver, type TranscriptEntry, type TranscriptSource, type WinterToolCaller } from "@yanlinglabs/winter-agent-sdk/tools";
-import type { ContainmentPolicy } from "./official/containment.ts";
+import { effectiveContainmentPolicy, type ContainmentPolicy } from "./official/containment.ts";
 import { officialBranchLabel } from "./official/branding.ts";
 import { createApprovalBridge, type OfficialApprovalBridge, type OfficialPermissionMode } from "./official/callbacks.ts";
 import { buildOfficialChildEnv, type OfficialEnvPolicy } from "./official/env-allowlist.ts";
 import { fetchAuthCredentials, authVariableSetKey, type AuthCredentialPlan } from "./official/auth.ts";
-import { assertPermissionModeAllowed, buildOfficialOptions, type OptionsTemplatePolicy } from "./official/options-template.ts";
+import { assertPermissionModeAllowed, buildOfficialOptions, RUN_HOME_ABSENT_SEGMENT, type OptionsTemplatePolicy } from "./official/options-template.ts";
 import { capabilityNameCollisionError, officialMcpServers, winterMcpServerDescriptor, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
 import { officialSpoolRoot } from "./official/spool.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
@@ -63,6 +65,11 @@ import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { hasConversationalEntry, readProviderStateSidecar } from "./store/materialized-resume.ts";
 import type { SharedSessionStore } from "./store/wiring.ts";
 import { resumeStagingRoot } from "./vendor-paths.ts";
+import { protectedPathRules, runHomeBrandOf, type RunHome, type RunHomeOutcome } from "./run-home/types.ts";
+import { runHomeExitReconciler } from "./run-home/exit.ts";
+import { RunHomeError } from "./run-home/errors.ts";
+import { runHomeAutoMemoryEnabled } from "./run-home/apply.ts";
+import type { OfficialRunHomeBinding } from "./seams/official-adapter.ts";
 
 /**
  * What the door returns.
@@ -311,6 +318,12 @@ export interface OfficialLegDeps {
    * truth it just read rather than keeping a guess.
    */
   onOpened?: (runtimeKind: RuntimeKind) => void;
+  /**
+   * WS-21 §3.8: where this handle's `runHomeOutcome` reads from. The leg records `pending` at launch,
+   * then `safe`/`quarantined` from the generation's exit reconcile — or `safe` for a generation that
+   * ended without a child ever having been spawned (nothing was written, nothing can be lost).
+   */
+  recordRunHomeOutcome?: (runId: string, outcome: RunHomeOutcome) => void;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -336,6 +349,19 @@ export interface OfficialInputStream extends AsyncIterable<string> {
  * throw into `delivery_uncertain`, and "the session's input ended" is at least an answer the sender's
  * ledger can record.
  */
+/**
+ * WS-21 §7.3 (d): `/loop` IS NOT A WINTER SURFACE. The pinned runtime's `/loop` reads the repository's
+ * own `.claude/loop.md` whatever the setting sources are (F19d), so the official prompt path refuses the
+ * command — TYPED (`loop_refused`), never by dropping the turn in silence.
+ */
+export function isLoopCommand(text: string): boolean {
+  return /^\s*\/loop(?:\s|$)/.test(text);
+}
+
+function loopRefused(): RunHomeError {
+  return new RunHomeError("loop_refused", "`/loop` is not available on the official leg: the runtime would read the repository's own `.claude/loop.md`, which this branch never reads (WS-21 §7.3)");
+}
+
 export function createOfficialInputStream(): OfficialInputStream {
   const waiting: Array<(result: IteratorResult<string>) => void> = [];
   const pending: Array<{ text: string; taken: () => void }> = [];
@@ -346,6 +372,8 @@ export function createOfficialInputStream(): OfficialInputStream {
     },
     push(text) {
       if (closed) return Promise.reject(new RuntimeLaunchInputError({ field: "push", reason: "this session's input stream has ended, so there is nothing to push into" }));
+      // Refused BEFORE it is queued: the session goes on, and the host renders the typed refusal.
+      if (isLoopCommand(text)) return Promise.reject(loopRefused());
       const consumer = waiting.shift();
       if (consumer !== undefined) {
         consumer({ value: text, done: false });
@@ -462,7 +490,45 @@ export interface OfficialLegRequest {
   options: Options;
   input: RouterOfficialInput;
   selection: RuntimeSelection;
+  /**
+   * WS-21: the run home this generation runs on, already checked by the door's caller
+   * (`assertRunHomeApplicable`). Absent = the pre-WS-21 profile (the spool, no setting source).
+   */
+  runHome?: RunHome;
 }
+
+/** The official leg's view of a run home: what the template, the launch and the proxy need. */
+export function officialRunHomeBinding(runHome: RunHome): OfficialRunHomeBinding {
+  return {
+    runId: runHome.runId,
+    dir: runHome.dir,
+    sdkHome: runHome.sdkHome,
+    home: runHome.input.home,
+    trustedProjectRoot: runHome.input.trustedProjectRoot,
+    memoryDir: runHome.input.memoryDir,
+    autoMemoryEnabled: runHomeAutoMemoryEnabled(runHome),
+    ...(isPlainRecord(runHome.effectiveSettings["skillOverrides"]) ? { skillOverrides: runHome.effectiveSettings["skillOverrides"] } : {}),
+    protectedAsk: protectedAskRulesFor(runHome),
+  };
+}
+
+/** Spec §7.2's ask rules for the given and the real spelling of the shared home and the trusted root. */
+function protectedAskRulesFor(runHome: RunHome): string[] {
+  const real = (path: string): string => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
+  const brand = runHomeBrandOf(runHome.input);
+  const root = runHome.input.trustedProjectRoot;
+  // The trusted project's item dirs at ANY depth under the root (C1), in both spellings.
+  const rules = [...protectedPathRules(runHome.sdkHome, root, brand), ...protectedPathRules(real(runHome.sdkHome), root === null ? null : real(root), brand)];
+  return [...new Set(rules)];
+}
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
 /**
  * §11's `mcpServers` for this session, built by the ROUTER rather than by the host (R-8 / R-8-1).
@@ -525,6 +591,9 @@ function officialCapabilityServers(
  */
 export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegRequest): OfficialQuery {
   const branchLabel = officialBranchLabel(deps.brand);
+  // WS-21 §7.3 (d): a one-shot `/loop` prompt is refused synchronously, before anything exists. A
+  // streamed one is refused by the input stream's `push` (see `createOfficialInputStream`).
+  if (typeof request.prompt === "string" && isLoopCommand(request.prompt)) throw loopRefused();
   // BEFORE ANYTHING ELSE HAPPENS. This is an input refusal, and an input refusal that arrived after a
   // directory row, a credential read or a child process would be a refusal the host pays for.
   // THE CALLER IS THE ADDRESS THE ROW WAS RECORDED UNDER (interim review C-1). A door-opened CHILD is
@@ -574,6 +643,8 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   // OWNED ONLY WHEN THE CALLER GAVE US A STREAM TO OWN (header note 3).
   const stream = typeof request.prompt === "string" ? undefined : createOfficialInputStream();
   let detach: (() => void) | undefined;
+  /** The launched generation, once `launch()`/`resume()` returned it (WS-21: its proxy knows whether a child ever spawned). */
+  let launched: OfficialSession | undefined;
   let sawInit = false;
   let live = false;
   let ended = false;
@@ -612,6 +683,11 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
   const markEnded = async (status: "exited" | "unavailable"): Promise<void> => {
     if (ended) return;
     ended = true;
+    // WS-21 §3.8: a run-home generation whose child was never spawned has no working copy and no exit
+    // reconcile will ever run for it — so it is safe, now. One that did spawn is recorded by its
+    // reconcile, inside the proxy's gate, before this end was revealed.
+    const neverSpawned = launched === undefined || (launched as { supervisor?: { observation?: unknown } }).supervisor?.observation === undefined;
+    if (request.runHome !== undefined && neverSpawned) deps.recordRunHomeOutcome?.(request.runHome.runId, "safe");
     live = false;
     detach?.();
     detach = undefined;
@@ -664,6 +740,32 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     }
     const shared = deps.shared();
     const home = shared.identity.winterHome;
+    // WS-21: every CANONICAL path — the provider-state sidecar, the default memory dir — is under the
+    // store's own root (`<home>/sdk` on the WS-21 layout); `home` itself is left for the pre-WS-21 spool.
+    const storeHome = shared.identity.storeHome ?? home;
+    const runHome = request.runHome;
+    const runHomeBinding = runHome === undefined ? undefined : officialRunHomeBinding(runHome);
+    if (runHome !== undefined && request.input.stagingRoot !== undefined) {
+      throw new RuntimeLaunchInputError({
+        leg: "official",
+        field: "runtime.official.stagingRoot",
+        reason: "a run home replaces the configured staging placeholder: a resume is configured on `<run folder>/.absent`, which is unpredictable and never created, so the wrapper stages nothing but the transcript (WS-21 §3.6)",
+      });
+    }
+    // FIX ROUND 1, M1: a host policy's `agents` beside a run home is refused, not silently dropped.
+    if (runHome !== undefined && (deps.policy?.options?.agents !== undefined || request.input.options?.agents !== undefined)) {
+      throw new RunHomeError(
+        "run_home_option_refused",
+        "the official policy names `agents` beside a run home; a run home's agents are its run folder's rewritten definitions (WS-21 §3.3, F19c)",
+      );
+    }
+    if (runHome !== undefined && request.input.spool !== undefined) {
+      throw new RuntimeLaunchInputError({
+        leg: "official",
+        field: "runtime.official.spool",
+        reason: "a run home replaces the spool: a fresh generation's config dir is its run folder (WS-21 §3.1), so naming a spool as well would describe a directory the child never uses",
+      });
+    }
     const cwd = request.options.cwd;
     if (cwd === undefined || cwd.length === 0) {
       throw new RuntimeLaunchInputError({ field: "options.cwd", reason: "the official branch's containment floor and its post-hoc sweep are both anchored on this session's working directory (WS-14 §8)" });
@@ -690,7 +792,19 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // request naming NEITHER field still means "let the vendor allocate one", which stays `undefined`.
     const freshSessionId = resume === undefined ? requestedBackendId : undefined;
     const profile: OfficialLaunchProfile = resume === undefined ? "fresh-spool" : "store-backed-resume";
-    const configDir = resume === undefined ? (request.input.spool ?? officialSpoolRoot(home)) : (request.input.stagingRoot ?? resumeStagingRoot(resume));
+    // WS-21: a fresh generation on a run home runs IN its run folder, and a resume is CONFIGURED on the
+    // unpredictable placeholder inside it (§3.6: never created, under the daemon's write-fenced cache,
+    // so the wrapper's staging step finds nothing to copy — the predictable `<tmp>/claude-resume-<id>`
+    // placeholder this replaces could be planted, F11). The pre-WS-21 profile keeps the spool and that
+    // placeholder.
+    const configDir =
+      resume === undefined
+        ? runHome !== undefined
+          ? runHome.dir
+          : (request.input.spool ?? officialSpoolRoot(home))
+        : runHome !== undefined
+          ? join(runHome.dir, RUN_HOME_ABSENT_SEGMENT)
+          : (request.input.stagingRoot ?? resumeStagingRoot(resume));
     // §3's child env is a REPLACEMENT, and a replacement without `HOME` is not one (review r1's nit).
     // The runtime derives paths from `os.homedir()`, whose OS-level fallback is the user database —
     // invisible to `CLAUDE_CONFIG_DIR` scoping, and on a developer machine it is the real vendor home
@@ -735,6 +849,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         ...(request.input.base === undefined ? {} : { base: request.input.base }),
         projectKey,
         ...(request.input.sharedTempRoot === undefined ? {} : { sharedTempRoot: request.input.sharedTempRoot }),
+        ...(runHome === undefined ? {} : { runHome: { sdkHome: runHome.sdkHome } }),
       },
       { ...(deps.policy?.env ?? {}), remoteConfig },
     );
@@ -742,6 +857,8 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // WS-14 §10: a host's own broker becomes the BROKER BEHIND our bridge, never the bridge itself —
     // the containment floor decides first, and their answer decides everything the floor allows.
     const hostBroker = request.options.canUseTool;
+    // R-1: the same run-home-aware floor the template and the adapter apply (`effectiveContainmentPolicy`).
+    const bridgeContainment = effectiveContainmentPolicy(deps.policy?.containment, runHome !== undefined);
     const bridge: OfficialApprovalBridge | undefined =
       hostBroker === undefined
         ? undefined
@@ -749,7 +866,7 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
             brand: deps.brand,
             // READ PER DECISION, never captured (see `currentMode`): a live `setPermissionMode` moved it.
             mode: () => currentMode,
-            ...(deps.policy?.containment === undefined ? {} : { containment: deps.policy.containment }),
+            ...(bridgeContainment === undefined ? {} : { containment: bridgeContainment }),
             broker: async (approval) => {
               const answer = await hostBroker(approval.toolName, approval.input, approval as never);
               return answer ?? { behavior: "deny", message: "the host callback returned no decision; this bridge never uses the `null` transport escape (WS-14 §10)", toolUseID: approval.toolUseID };
@@ -772,6 +889,10 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       ...(routerBuiltMcpServers === undefined && request.input.mcpServers === undefined ? {} : { mcpServers: { ...routerBuiltMcpServers, ...request.input.mcpServers } }),
       ...(bridge === undefined ? {} : { canUseTool: bridge }),
       ...(request.options.permissionMode === undefined ? {} : { permissionMode: request.options.permissionMode as OfficialPermissionMode }),
+      // Touch 4 (F1): the query's own model and effort reach the child (`--model`, `--effort`). Never
+      // forwarded before, so a session recorded on one model ran claude's default instead.
+      ...(request.options.model === undefined ? {} : { model: request.options.model }),
+      ...(request.options.effort === undefined ? {} : { effort: request.options.effort }),
       // W18-8/P10b-4: `freshSessionId`/`resume` are THIS door's own decision (above), never the raw
       // `request.options` fields — the two are never passed together (the pinned runtime refuses that
       // combination), and which one applies is exactly what the canonical-transcript check decided.
@@ -788,11 +909,25 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // could ever be loading for.
     const resolveEndpoint = deps.resolveEndpoint ?? defaultEndpointResolver();
     const target = resolveEndpoint({ providerId: request.selection.providerId, modelKey: request.selection.modelRef, family: request.selection.family });
-    const readyStore = claudeReadyStore(shared.store, {
-      readSidecar: (key) => readProviderStateSidecar(home, key),
+    const claudeReady = claudeReadyStore(shared.store, {
+      readSidecar: (key) => readProviderStateSidecar(storeHome, key),
       resolveEndpoint,
       target,
     });
+    // WS-21 §3.8: how many transcript entries THIS generation mirrored — the exit reconcile's evidence
+    // that "no working copy found" is a loss (unknown → quarantine) rather than a generation that never
+    // wrote. Counted at the one door the wrapper's mirror writes through.
+    let mirroredEntries = 0;
+    const readyStore: typeof claudeReady =
+      runHome === undefined
+        ? claudeReady
+        : {
+            ...claudeReady,
+            append: (key, entries) => {
+              mirroredEntries += entries.length;
+              return claudeReady.append(key, entries);
+            },
+          };
     const officialOptions: OfficialOptions = buildOfficialOptions(
       {
         // D4/D28: the official runtime serves CODE only — every other mode is refused by the selector
@@ -802,12 +937,14 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
         selection: request.selection,
         cwd,
         sessionStore: readyStore,
-        autoMemoryDirectory: request.input.autoMemoryDirectory ?? `${home}/projects/${projectKey}/memory`,
+        // WS-21 §3.7: the run home pins the memory dir; without one, the host's or the store's default.
+        autoMemoryDirectory: runHome?.input.memoryDir ?? request.input.autoMemoryDirectory ?? `${storeHome}/projects/${projectKey}/memory`,
         brand: deps.brand,
         pathToClaudeCodeExecutable: executable,
         spawnProxy: deps.official.spawnProxy,
         profile,
         configDir,
+        ...(runHomeBinding === undefined ? {} : { runHome: runHomeBinding }),
       },
       templatePolicy,
     );
@@ -821,6 +958,19 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
       configDir,
       cwd,
       remoteConfig,
+      ...(runHomeBinding === undefined ? {} : { runHome: runHomeBinding }),
+      // WS-21 §3.8: the run home's exit reconcile, inside the proxy's gate, with the ROUTER'S OWN store.
+      ...(runHome === undefined
+        ? {}
+        : {
+            reconcile: runHomeExitReconciler({
+              shared,
+              runId: runHome.runId,
+              home: runHome.input.home,
+              mirrored: () => mirroredEntries,
+              record: (runId, outcome) => deps.recordRunHomeOutcome?.(runId, outcome),
+            }),
+          }),
     };
 
     // THE ROW EXISTS BEFORE THE CHILD DOES. The record sink writes `configDir`/`processIdentity` at the
@@ -848,9 +998,13 @@ export function openOfficialLeg(deps: OfficialLegDeps, request: OfficialLegReque
     // takes its own message shape), but not one element earlier than the session that consumes it.
     if (stream !== undefined) pumpCallerPrompt(request.prompt as AsyncIterable<string>, stream, () => void markEnded("unavailable").catch(() => undefined));
     let session: OfficialSession;
+    if (runHome !== undefined) deps.recordRunHomeOutcome?.(runHome.runId, "pending");
     try {
       session = resume === undefined ? deps.official.launch(plan) : deps.official.resume({ ...plan, resume, ...(request.options.forkSession === undefined ? {} : { forkSession: request.options.forkSession }) });
+      launched = session;
     } catch (error) {
+      // A GENERATION THAT NEVER LAUNCHED WROTE NOTHING: its run home is safe to dispose.
+      if (runHome !== undefined) deps.recordRunHomeOutcome?.(runHome.runId, "safe");
       // A GENERATION THAT NEVER EXISTED LEAVES NO ROW (I-3c). The row is written before the launch on
       // purpose — a host asking `listReachable()` between the launch and the first message must not be
       // told the session does not exist — but a launch that refuses synchronously (no official peer

@@ -30,7 +30,9 @@
 // the 0.3.250 artifact, not inferred. This proxy therefore reports `exitCode: null`, `signalCode:
 // null` and `killed: false` until the reconciliation gate opens, and reveals all three in the same
 // tick it emits `exit` and ends stdout.
+import { lstatSync, readdirSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { Readable, Writable } from "node:stream";
 import type { BrandProfile } from "@yanlinglabs/winter-agent-sdk";
@@ -42,6 +44,7 @@ import type { OfficialSpawnClaudeCodeProcess, OfficialSpawnOptions, OfficialSpaw
 import { officialBranchLabel } from "./branding.ts";
 import { OfficialConnectionError, OfficialExecutableNotFoundError, OfficialKilledError, OfficialNonzeroExitError, OfficialStdoutUnterminatedError, type OfficialBranchError } from "./errors.ts";
 import { validateObservedConfigDir, type ObservedLocalWriteRoot } from "./spool.ts";
+import { RunHomeError } from "../run-home/errors.ts";
 
 /** WS-14 §9: "PID **plus process start identity** (never bare PID)" — an OS recycles pids. */
 export interface ProcessIdentity {
@@ -120,6 +123,13 @@ export interface SupervisedSpawnProxyOptions {
   /** Which profile this generation was launched as, and what config dir it was configured with (§1). */
   profile: OfficialLaunchProfile;
   configuredConfigDir: string;
+  /**
+   * WS-21: the run folder this generation was built with. Present, the proxy classifies a fresh root by
+   * IDENTITY (`run-folder`) and makes spec §3.5's check against the FINAL spawn arguments: the `user`
+   * setting source only, and only on the run folder (or a resume staging dir it has linked the run
+   * folder into). Absent, the pre-WS-21 profile, where no setting source is legal.
+   */
+  runHome?: { dir: string };
   sink: SpawnRecordSink;
   reconcile?: TranscriptReconcile;
   spawnChild?: SpawnChild;
@@ -273,7 +283,21 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
       configured: options.configuredConfigDir,
       profile: options.profile,
       brand: options.brand,
+      ...(options.runHome === undefined ? {} : { runHomeDir: options.runHome.dir }),
     });
+    // WS-21 §3.5 — THE SETTING SOURCES, CHECKED WHERE THE FINAL ENV IS VISIBLE. The template and the
+    // invariants already agree on `["user"]` for a run home; this is the one place that sees what the
+    // wrapper actually hands the child, after every merge, so it is where "the user source only on a
+    // router-built run folder" is enforced rather than assumed. Checked BEFORE the resume linking below,
+    // so a refused spawn has touched nothing.
+    assertSpawnSettingSources(spawnOptions.args, root, options.runHome);
+    // WS-21 §3.6 — A RESUME RUNS ON ITS STAGING DIR, WITH THE RUN FOLDER LINKED IN. The wrapper staged the
+    // transcript into `<tmp>/claude-resume-<uuid>/projects/` (the child MUST run on exactly that dir: the
+    // mirror is keyed on it, F12), and because the configured dir was the unpredictable `<run>/.absent`
+    // it copied nothing else there (F2, F11). So the staging dir must hold `projects/` and NOTHING else —
+    // anything more is a planted file the child would read as its own config — and then every other
+    // entry of the run folder is linked in, synchronously, before the child exists.
+    if (options.runHome !== undefined && root.kind === "sdk-resume-staging") linkRunHomeIntoStaging(root.configDir, options.runHome.dir);
 
     settleGate = deferred();
     settled = settleGate.promise;
@@ -527,6 +551,83 @@ export function createSupervisedSpawnProxy(options: SupervisedSpawnProxyOptions)
       return stderrTail;
     },
   };
+}
+
+/**
+ * WS-21 §3.6's proxy step: `staging` must hold exactly a real `projects/` directory; then every entry of
+ * the run folder except `projects` is symlinked into it (absolute targets). Throws
+ * `RunHomeError("run_home_staging_not_bare")` on anything else, before a link is made.
+ */
+export function linkRunHomeIntoStaging(staging: string, runHomeDir: string): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(staging).sort();
+  } catch (error) {
+    throw new RunHomeError("run_home_staging_not_bare", `the resume staging dir ${staging} cannot be read, so it cannot be proved bare`, { cause: error });
+  }
+  const projectsIsRealDir = (() => {
+    try {
+      const info = lstatSync(join(staging, "projects"));
+      return info.isDirectory() && !info.isSymbolicLink();
+    } catch {
+      return false;
+    }
+  })();
+  if (entries.length !== 1 || entries[0] !== "projects" || !projectsIsRealDir) {
+    throw new RunHomeError(
+      "run_home_staging_not_bare",
+      `the resume staging dir ${staging} holds ${JSON.stringify(entries)}; after a resume configured on the run folder's placeholder it must hold a real \`projects/\` and nothing else — anything more was put there by something other than the wrapper, and the child would read it as its own config (WS-21 §3.6)`,
+    );
+  }
+  for (const name of readdirSync(runHomeDir).sort()) {
+    if (name === "projects") continue;
+    symlinkSync(join(runHomeDir, name), join(staging, name));
+  }
+}
+
+/**
+ * The setting sources a spawn's argv asks for: `--setting-sources=a,b` (the pinned wrapper's spelling)
+ * or `--setting-sources a,b`. `undefined` when the flag is absent.
+ */
+export function settingSourcesFromArgs(args: readonly string[]): string[] | undefined {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    if (arg.startsWith("--setting-sources=")) return splitSources(arg.slice("--setting-sources=".length));
+    if (arg === "--setting-sources") return splitSources(args[i + 1] ?? "");
+  }
+  return undefined;
+}
+
+const splitSources = (value: string): string[] =>
+  value
+    .split(",")
+    .map((source) => source.trim())
+    .filter((source) => source.length > 0);
+
+/**
+ * WS-21 §3.5 on the spawn itself. With a run home: the flag must be present and name exactly `user`, and
+ * the root must be the run folder (fresh) or a resume staging root (which the proxy links the run folder
+ * into before this runs). Without one: `project`/`local`/`user` are all refused — the pre-WS-21 profile
+ * reads no source.
+ */
+function assertSpawnSettingSources(args: readonly string[], root: ObservedLocalWriteRoot, runHome: { dir: string } | undefined): void {
+  const sources = settingSourcesFromArgs(args);
+  const refused = (sources ?? []).filter((source) => source !== "user");
+  if (refused.length > 0) {
+    throw new RunHomeError("setting_sources_refused", `the spawn asks for the ${refused.join(", ")} setting source(s); the official child reads the repository's own files through neither (WS-21 §3.5, ruling Q1)`);
+  }
+  if (runHome === undefined) {
+    if ((sources ?? []).includes("user")) {
+      throw new RunHomeError("setting_sources_refused", "the spawn asks for the user setting source with no run home: the child's config dir is not a router-built run folder (WS-21 §3.5)");
+    }
+    return;
+  }
+  if (sources === undefined || sources.length !== 1 || sources[0] !== "user") {
+    throw new RunHomeError("setting_sources_refused", `a run-home spawn must name exactly the user setting source; it named ${JSON.stringify(sources ?? "none")} (WS-21 §3.5)`);
+  }
+  if (root.kind !== "run-folder" && root.kind !== "sdk-resume-staging") {
+    throw new RunHomeError("setting_sources_refused", `the user setting source is legal only on a router-built run folder, and ${root.configDir} is not one (WS-21 §3.5)`);
+  }
 }
 
 /**

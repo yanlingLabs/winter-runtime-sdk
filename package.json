@@ -61,6 +61,7 @@
       "npm": true
     }
   },
+  "//": "TODO(R.4): raise the @yanlinglabs/winter-agent-sdk peer range below (and SUPPORTED.winterAgentSdk in src/version-matrix.ts) to the SDK release that carries ws21/sdk@6170adb -- L1a's port of claude's rule-content grammar, which escapeRulePath's two-layer spelling needs on the Winter leg -- once that version exists.",
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.250",
     "@yanlinglabs/winter-agent-sdk": ">=0.0.13 <0.1.0",
@@ -84,7 +85,7 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.250",
     "@types/bun": "^1.3.0",
     "@types/node": "^26.4.0",
-    "@yanlinglabs/winter-agent-sdk": "^0.0.16",
+    "@yanlinglabs/winter-agent-sdk": "^0.0.20",
     "@yanlinglabs/winter-conformance": "^0.0.3",
     "@yanlinglabs/winter-provider-catalog": "^0.0.10",
     "@yanlinglabs/winter-provider-conformance": "^0.0.3",
