@@ -56,7 +56,8 @@ interface RunHomeInput {
                                          // (the local MCP scope in <home>/sdk/.winter.json still applies)
   gitRoot: string | null;                // the canonical git root (the local settings tier)
   mcpDisabled: readonly string[];
-  reservedMcpServerNames: readonly string[];
+  reservedMcpServerNames: readonly string[]; // a configured server whose claude-NORMALISED name (`on()`: [^A-Za-z0-9_-] → `_`) equals a
+                                         // reserved one's is dropped (reason "reserved-name") — `x..y` spells the same tool names as `x__y`
   memoryDir: string;                     // the auto-memory directory for this incarnation
   brand?: RunHomeBrand;                  // optional; absent = the Winter SDK's own profile
 }

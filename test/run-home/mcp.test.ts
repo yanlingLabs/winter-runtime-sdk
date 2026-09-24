@@ -6,6 +6,7 @@ import { lstatSync, mkdirSync, readFileSync, readlinkSync, statSync } from "node
 import { join } from "node:path";
 
 import { buildRunHome } from "../../src/index.ts";
+import { normalizeMcpServerName } from "../../src/run-home/mcp.ts";
 import type { RunMode } from "../../src/run-home/types.ts";
 import { cleanupRunHomeBeds, inputFor, put, runHomeBed, type RunHomeBed } from "./support.ts";
 
@@ -97,6 +98,28 @@ describe("the generated .winter.json", () => {
       { name: "winter__computer", reason: "reserved-name" },
       { name: "winter", reason: "reserved-name" },
     ]);
+  });
+
+  test("M5 (R.3): a name that NORMALISES to a reserved one is refused too — claude spells tool names from the normalised server name (`on()`: every char outside [A-Za-z0-9_-] becomes `_`), so `winter..computer` would carry the capability server's own tool names", async () => {
+    const bed = runHomeBed();
+    const root = repo(bed);
+    put(join(bed.sdk, ".winter.json"), json({ mcpServers: { "winter..computer": server("a"), "winter.computer ": server("b"), "winter__computer-x": server("k") } }));
+    put(join(root, ".winter", "mcp.json"), json({ mcpServers: { "winter::computer": server("p"), "winter:computer": server("s"), "winter/": server("q"), "winter-": server("r") } }));
+    const { file, dropped } = await config(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root, reservedMcpServerNames: ["winter__computer"] });
+    // Controls: `winter:computer` is `winter_computer` (one `_`), `winter.computer ` gains a trailing `_`,
+    // `winter/` is `winter_` (not the standing name `winter`), and `winter-` stays itself.
+    expect(file["mcpServers"]).toEqual({ "winter.computer ": server("b"), "winter__computer-x": server("k"), "winter:computer": server("s"), "winter/": server("q"), "winter-": server("r") });
+    expect(dropped).toEqual([
+      { name: "winter..computer", reason: "reserved-name" },
+      { name: "winter::computer", reason: "reserved-name" },
+    ]);
+  });
+
+  test("M5 (R.3): claude's normaliser, verbatim — a `claude.ai ` name also collapses runs of `_` and trims them", async () => {
+    expect(normalizeMcpServerName("winter..browser")).toBe("winter__browser");
+    expect(normalizeMcpServerName("a b/c")).toBe("a_b_c");
+    expect(normalizeMcpServerName("claude.ai  My Server!")).toBe("claude_ai_My_Server");
+    expect(normalizeMcpServerName("ok_name-1")).toBe("ok_name-1");
   });
 
   test("0600, with a relative `.claude.json` link to it", async () => {
