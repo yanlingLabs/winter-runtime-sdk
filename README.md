@@ -35,7 +35,7 @@ interfaces and how this package consumes the Winter SDK.
 
 ## Run home (WS-21)
 
-**Unreleased (0.0.12).** Both agent runtimes read ONE shared home, `<home>/sdk`, in the official
+**Shipped in `0.0.12`.** Both agent runtimes read ONE shared home, `<home>/sdk`, in the official
 runtime's config-dir formats with the brand's names. Neither reads it directly: before every
 generation a per-run folder is built, `<home>/cache/runs/<runId>`, and the child is pointed at it.
 This section is the contract a host builds against (Contract A); `src/run-home/types.ts` is its source.
@@ -167,6 +167,26 @@ home; a router created with `requireRunHome` (which must name it) roots its stor
 | `door.ts` — the spool (`officialSpoolRoot(home)`) | pre-WS-21 profile only; a fresh generation on a run home runs in its run folder, and naming `runtime.official.spool` beside a run home is refused |
 | `messaging/winter-adapter.ts` — the cold resume | awaits the host's `runHomeFor` first and applies the result with the same check-and-apply as `query()`; without `runHomeFor` under `requireRunHome` it answers a non-retryable `unavailable`; the router disposes that run home when the resume ends |
 | the peer's `resolveWinterHome()` fallback | never used under `requireRunHome` (the home must be explicit — the agent SDK's WS-21 default moves to `~/.winter/sdk`, so `sdkHomeOf` of it would double up) |
+
+**What `0.0.12` changes** (WS-21's run home lands, Contract A; peer floor:
+`@yanlinglabs/winter-agent-sdk >=0.0.21 <0.1.0`, and the sibling `winter-provider-catalog`/
+`winter-provider-runtime`/`winter-provider-conformance` ranges move to the same `>=0.0.21 <0.1.0` —
+this router must never run against an older SDK than the one carrying the two-layer escape table,
+the sandbox spelling, the MCP rows and the parallel-batch splice):
+
+| | |
+|---|---|
+| `escapeSandboxGlobPath` now applies on BOTH legs | The Winter runtime reads glob-shaped `sandbox.filesystem` deny entries the same way claude does, since SDK 0.0.21 (`ws21/sdk` round 11): a raw `[`/`]`/`*`/`?` anchor is treated as a glob on the Winter leg too, not only claude's. A deny entry written for one leg now denies on the other. |
+| `escapeRulePath` mirrors claude's full escaper | The path-in-a-rule escape table (`\`, `(`, `)`, the doubled `\\[`, `\|`, `+`, `^`, `$`, leading `!`/`#`, trailing whitespace) is now claude's own two-layer spelling (`c()` over `I_t`) on both runtimes — the R.4 gap this bump closes: a Winter runtime older than 0.0.21 misreads exactly those characters in every router-written rule. |
+| `droppedRules`/`droppedImports` carry more kinds of drop | Beyond an ALLOW re-anchored under a widening anchor: a repository tier's escalating `defaultMode`, `fallbackModel` at every tier, `modelOverrides` at every tier, and `model`/`availableModels`/`advisorModel`/`enforceAvailableModels` from a repository tier (a repository never chooses models) are now dropped and reported the same way. `droppedImports` also reports an out-of-root rule import. |
+| every project rule is a copy | The run home now snapshots each project rule into `<run>/rules` at build time rather than reading it live from the repository, so a later edit in the repository never reaches an already-built run home. |
+| the `WorktreeCreate` refusal is not a veto | A refused worktree create no longer blocks the rest of the turn. |
+| the official door forwards `model`/`effort` | The query's `Options.model` and `Options.effort` now reach the claude child through the official door, where before only a subset of the query reached it. |
+| claude's `.cc-writes` staging is bookkeeping | The official sweep no longer treats claude's own `.cc-writes` staging file as ending a sandboxed Bash turn, and the sweep stops walking above the user's home. |
+| the endpoint-resolver memo is keyed by the whole origin | `src/default-endpoint-resolver.ts`'s memo previously risked keying on the model alone; it is now keyed by the whole resolved origin. |
+| the run-home Workflow floor is an allowlist | Previously two named refusals; now an allowlist, so a new Workflow tool is refused by default rather than by omission. |
+| the same-view suite (`test/run-home/same-view.test.ts`) | Now asserts both legs OFFER the folded MCP servers' tools (not merely start them), and asserts claude's 2 s pre-first-turn MCP wait. |
+| operator note: `switchFactsFor`'s SV-12 row | The same-view suite's F2 (SV-12) row — claude's parallel-call DAG read along one `parentUuid` chain — is `test.todo` and stays `test.todo` until `@yanlinglabs/winter-provider-runtime` reaches the fix at `ws21/sdk@38d9940`; the row only flips green once `winter-provider-runtime` is `>=0.0.21` (this bump's floor) **and** carries that specific fix, so a floor bump alone does not guarantee it. |
 
 **What `0.0.11` changes** (a security fix: the official leg no longer loads the session's
 own project directory as a plugin; no peer floor change, no devDependency change):

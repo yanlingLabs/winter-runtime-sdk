@@ -10,8 +10,12 @@
 // against REAL rows from the compiled catalog (`@yanlinglabs/winter-provider-catalog`'s
 // `loadCatalog()` — the same data `defaultEndpointResolver()` builds its registry from).
 //
-// THE CATALOG ROWS USED, measured directly (see the fix commit's report for the full survey):
-//   - DeepSeek: `deepseek/deepseek-reasoner` — `readableState: "full-exposed"` (declared, official-doc).
+// THE CATALOG ROWS USED, measured directly (see the fix commit's report for the full survey).
+// RE-MEASURED at `@yanlinglabs/winter-provider-catalog` 0.0.22 (router 0.0.12's floor): the upstream
+// catalog renamed `deepseek/deepseek-reasoner` to `deepseek/deepseek-flash` (and added a sibling
+// `deepseek/deepseek-v4-pro`) — both still declare the identical `readableState: "full-exposed"` this
+// row is chosen for, so the row reference moved but the fact being tested did not.
+//   - DeepSeek: `deepseek/deepseek-flash` — `readableState: "full-exposed"` (declared, official-doc).
 //   - GLM: `zai/glm-5` — the catalog carries NO reasoning evidence for GLM at all today (`reasoning:
 //     null` on every zai/* row), so this is the closest real row; `readableState` resolves to "none"
 //     for it. That does NOT affect this test: `classifySwitch`'s "lossless-portable" class is a fact
@@ -32,7 +36,7 @@ import { withStoreBed, type StoreBed } from "./support.ts";
 
 const NOW = "2026-09-13T12:00:00.000Z";
 
-const DEEPSEEK = { providerId: "deepseek", modelRef: "deepseek/deepseek-reasoner", family: "deepseek" };
+const DEEPSEEK = { providerId: "deepseek", modelRef: "deepseek/deepseek-flash", family: "deepseek" };
 const GLM = { providerId: "zai", modelRef: "zai/glm-5", family: "glm" };
 const GPT = { providerId: "openai", modelRef: "openai/gpt-5.6-luna", family: "gpt" };
 const CLAUDE_OPUS = { providerId: "anthropic", modelRef: "anthropic/claude-opus-5", family: "claude" };
@@ -87,7 +91,7 @@ function barrierFor(bed: StoreBed, deps: Partial<HandoffBarrierDeps> = {}): Retu
 }
 
 describe("WS-18 W18-20 fix round 1 — reviewSwitch's DEFAULT path (no injected resolveEndpoint), real catalog rows", () => {
-  test("DeepSeek (complete exposed, deepseek/deepseek-reasoner) -> GLM (zai/glm-5): silent, lossless-portable", async () => {
+  test("DeepSeek (complete exposed, deepseek/deepseek-flash) -> GLM (zai/glm-5): silent, lossless-portable", async () => {
     await withStoreBed(async (bed) => {
       await bed.record({ runtimeKind: "winter-agent", selection: selection(DEEPSEEK) });
       const t = turn(bed.key, null, "deepseek's full reasoning trace");
