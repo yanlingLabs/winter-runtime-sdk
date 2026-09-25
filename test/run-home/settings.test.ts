@@ -416,22 +416,19 @@ describe("per-mode stripping (spec §3.2) and the schema cut", () => {
   });
 });
 
-describe("the claude schema list is the pinned runtime's own (drift gate)", () => {
-  test("CLAUDE_SETTINGS_KEYS equals the top-level keys of the installed sdk.d.ts `Settings` interface", () => {
-    const require = createRequire(import.meta.url);
-    const declaration = readFileSync(join(require.resolve("@anthropic-ai/claude-agent-sdk/package.json"), "..", "sdk.d.ts"), "utf8");
-    const start = declaration.indexOf("export declare interface Settings {");
-    expect(start).toBeGreaterThan(0);
-    const keys: string[] = [];
-    let depth = 0;
-    for (const line of declaration.slice(start).split("\n")) {
-      if (depth === 1) {
-        const key = /^ {4}([A-Za-z$_][A-Za-z0-9_$]*)\??:/.exec(line)?.[1];
-        if (key !== undefined) keys.push(key);
-      }
-      depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
-      if (depth === 0 && keys.length > 0) break;
+describe("the claude schema list (WS-23: frozen at the last official pin)", () => {
+  // THIS WAS A DRIFT GATE against the installed `@anthropic-ai/claude-agent-sdk`'s own `Settings`
+  // declaration. WS-23 removed that dependency, so the list is now a SNAPSHOT of the 0.3.250 schema —
+  // still the format the Winter runtime reads from a run home — and the test pins its shape: no
+  // duplicates, the keys a run home actually writes, and none of the Winter-only keys it must drop.
+  test("CLAUDE_SETTINGS_KEYS is a duplicate-free snapshot carrying the keys a run home writes", () => {
+    expect(new Set(CLAUDE_SETTINGS_KEYS).size).toBe(CLAUDE_SETTINGS_KEYS.length);
+    expect(CLAUDE_SETTINGS_KEYS.length).toBeGreaterThan(20);
+    for (const key of ["permissions", "env", "model", "hooks", "sandbox", "outputStyle", "autoMemoryEnabled", "enabledPlugins"]) {
+      expect({ key, present: CLAUDE_SETTINGS_KEYS.includes(key) }).toEqual({ key, present: true });
     }
-    expect([...CLAUDE_SETTINGS_KEYS].sort()).toEqual(keys.sort());
+    for (const key of ["lsp", "mcpServers", "modelSlots", "providers", "advisor"]) {
+      expect({ key, present: CLAUDE_SETTINGS_KEYS.includes(key) }).toEqual({ key, present: false });
+    }
   });
 });
