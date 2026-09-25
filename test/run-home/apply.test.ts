@@ -1,25 +1,17 @@
-// WS-21 §3.1, §3.4.4, §3.5, §3.7: applying a run home on both legs.
+// WS-21 §3.1, §3.4.4, §3.5, §3.7: applying a run home.
 //
-// Winter leg: the router lays the run home's env, `settingSources: ["user"]` and the memory pin over
-// the caller's options, synchronously, and refuses a run home that is foreign, disposed, for the other
-// leg, another cwd, another brand or another store. Official leg: the template's run-home profile, the
-// env builder's three variables, the invariants and the spawn proxy's setting-source check.
+// The router lays the run home's env, `settingSources: ["user"]` and the memory pin over the caller's
+// options, synchronously, and refuses a run home that is foreign, disposed, another cwd, another brand
+// or another store. WS-23: the official leg's half of this file (its template's run-home profile, env
+// builder, invariants and spawn-proxy check) went with the official runtime; a run home is never built
+// for that leg any more (`buildRunHome` refuses it typed).
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import { WINTER_BRAND, WinterCompatibilitySessionStore, resolveBrand, type SessionStore } from "@yanlinglabs/winter-agent-sdk";
 
 import { buildRunHome, createRuntimeSdk, protectedPathRules, RunHomeError, type RunHome, type RuntimeSdkPeers } from "../../src/index.ts";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
-import { assertOptionsInvariants, buildOfficialOptions } from "../../src/official/options-template.ts";
-import { buildOfficialChildEnv } from "../../src/official/env-allowlist.ts";
-import { createSupervisedSpawnProxy } from "../../src/official/spawn-proxy.ts";
-import { officialRunHomeBinding } from "../../src/door.ts";
-import type { OptionsTemplateInput } from "../../src/seams/official-adapter.ts";
-import type { OfficialOptions, OfficialQuery, OfficialSdkModule } from "../../src/seams/official-sdk-shapes.ts";
-import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import { OfficialConfigurationError } from "../../src/official/errors.ts";
 import { cleanupRunHomeBeds, inputFor, put, runHomeBed, type RunHomeBed } from "./support.ts";
 import { declaredClasses, sessionAddress, sessionEntry } from "../messaging/support.ts";
 
@@ -181,8 +173,8 @@ describe("the Winter leg", () => {
     expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, env: { winter_store_home: "/x" }, runtime: { runHome } } }))).toBe("router_owned_variable");
     expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, settingSources: ["user", "local"], runtime: { runHome } } }))).toBe("setting_sources_refused");
 
-    const official = await buildRunHome(inputFor(bed, { leg: "official" }));
-    expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome: official } } }))).toBe("run_home_leg_mismatch");
+    // WS-23: a run home for the retired official leg cannot even be built.
+    await expect(buildRunHome(inputFor(bed, { leg: "official" as "winter" }))).rejects.toThrow(/official leg is retired/);
 
     mkdirSync(join(bed.root, "other"), { recursive: true });
     expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: join(bed.root, "other"), runtime: { runHome } } }))).toBe("run_home_cwd_mismatch");
@@ -235,318 +227,6 @@ describe("the Winter leg", () => {
 });
 
 // ------------------------------------------------------------------------------------------------
-// The official leg, piece by piece.
-// ------------------------------------------------------------------------------------------------
-
-const selection: RuntimeSelection = {
-  runtimeKind: "claude-agent",
-  providerId: "loopback",
-  modelRef: "claude-sonnet-4-5",
-  family: "claude",
-  authFamily: "custom",
-  sdkVersion: "0.0.2",
-  reason: "the apply bed",
-  decidedAt: new Date(0).toISOString(),
-};
-
-class PassthroughStore {
-  async append(): Promise<void> {}
-  async load(): Promise<never[]> {
-    return [];
-  }
-}
-
-const templateInput = (runHome: RunHome | undefined, over: Partial<OptionsTemplateInput> = {}): OptionsTemplateInput => ({
-  mode: "code",
-  selection,
-  cwd: runHome?.input.cwd ?? "/work/repo",
-  sessionStore: new PassthroughStore() as unknown as SessionStore,
-  autoMemoryDirectory: "/home/.winter/projects/k/memory",
-  brand: WINTER_BRAND,
-  pathToClaudeCodeExecutable: "/vendored/claude",
-  spawnProxy: () => {
-    throw new Error("not spawned");
-  },
-  profile: "fresh-spool",
-  configDir: runHome?.dir ?? "/home/.winter/runtimes/official-agent-spool",
-  ...(runHome === undefined ? {} : { runHome: officialRunHomeBinding(runHome) }),
-  ...over,
-});
-
-describe("the official template on a run home", () => {
-  test("the user source, strict MCP off, and the flag layer's pins — merged OVER the host's own flag settings", async () => {
-    const bed = runHomeBed();
-    const root = join(bed.root, "repo");
-    mkdirSync(root, { recursive: true });
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official", cwd: root, trustedProjectRoot: root, gitRoot: root }));
-    const options = buildOfficialOptions(templateInput(runHome), { settings: { permissions: { deny: ["Read(./secrets)"], ask: ["Bash(git push:*)"] }, autoMemoryDirectory: "/host/tries/to/move/it" } });
-    expect(options.settingSources).toEqual(["user"]);
-    expect(options.strictMcpConfig).toBe(false);
-    expect(options.settings).toEqual({
-      permissions: { deny: ["Read(./secrets)"], ask: ["Bash(git push:*)", ...protectedPathRules(bed.sdk, root)] },
-      plansDirectory: ".winter/plans",
-      autoMemoryEnabled: true,
-      autoMemoryDirectory: runHome.input.memoryDir,
-    });
-  });
-
-  test("autoMemoryEnabled comes from the effective settings, not a constant", async () => {
-    const bed = runHomeBed();
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official", mode: "chat" }));
-    expect((buildOfficialOptions(templateInput(runHome)).settings as Record<string, unknown>)["autoMemoryEnabled"]).toBe(false);
-  });
-
-  test("R-1 ruling: under a run home the containment floor lets a NAMED or INLINE Workflow through (hook and bridge); a scriptPath or resume is still refused; without a run home every Workflow call is refused as before", async () => {
-    const bed = runHomeBed();
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
-    const hookVerdict = async (options: ReturnType<typeof buildOfficialOptions>, input: Record<string, unknown>): Promise<string> => {
-      const matchers = ((options.hooks as Record<string, Array<{ hooks: Array<(raw: unknown) => Promise<Record<string, unknown>>> }>>)["PreToolUse"] ?? []);
-      for (const matcher of matchers) {
-        for (const hook of matcher.hooks) {
-          const out = await hook({ tool_name: "Workflow", tool_input: input });
-          const decision = (out["hookSpecificOutput"] as { permissionDecision?: string; permissionDecisionReason?: string } | undefined);
-          if (decision?.permissionDecision === "deny") return `deny: ${decision.permissionDecisionReason ?? ""}`;
-        }
-      }
-      return "allow";
-    };
-    const bridgeVerdict = async (options: ReturnType<typeof buildOfficialOptions>, input: Record<string, unknown>): Promise<string> => {
-      const result = (await (options.canUseTool as unknown as (tool: string, input: Record<string, unknown>, rest: Record<string, unknown>) => Promise<{ behavior: string; message?: string }>)("Workflow", input, { signal: new AbortController().signal, toolUseID: "t1" })) as { behavior: string; message?: string };
-      // No broker is configured, so the fail-closed one denies — but only the FLOOR names workflow resolution.
-      return result.behavior === "deny" && (result.message ?? "").includes("workflow") ? `deny: ${result.message}` : result.behavior;
-    };
-    const onRunHome = buildOfficialOptions(templateInput(runHome));
-    const pre = buildOfficialOptions(templateInput(undefined));
-    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow" })).toBe("allow");
-    expect(await hookVerdict(onRunHome, { script: 'export const meta = { name: "x", description: "x" };\n' })).toBe("allow");
-    expect(await hookVerdict(onRunHome, { scriptPath: "/repo/.claude/workflows/x.js" })).toMatch(/^deny: .*scriptPath/);
-    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", resumeFromRunId: "wf_1" })).toMatch(/^deny: .*resume/);
-    // M2 (R.3): an ALLOWLIST, not two named refusals — the pinned runtime's schema also takes a hidden
-    // `runId` (a run operation on a prior run) and gated `remote`/run-op fields, none of them measured.
-    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", args: { q: 1 }, description: "d", title: "t" })).toBe("allow");
-    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", runId: "wf_1" })).toMatch(/^deny: .*runId/);
-    expect(await hookVerdict(onRunHome, { script: 'export const meta = { name: "x", description: "x" };\n', remote: true })).toMatch(/^deny: .*remote/);
-    expect(await hookVerdict(onRunHome, { name: "sv-plugin:sv-flow", runOp: "stop" })).toMatch(/^deny: .*runOp/);
-    expect(await bridgeVerdict(onRunHome, { name: "sv-plugin:sv-flow", runId: "wf_1" })).toMatch(/^deny: .*runId/);
-    expect(await hookVerdict(pre, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
-    expect(await bridgeVerdict(pre, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
-    expect(await bridgeVerdict(onRunHome, { name: "sv-plugin:sv-flow" })).not.toMatch(/named workflow resolution/);
-    // A host that CHOSE the floor keeps it, run home or not.
-    const hostDeny = buildOfficialOptions(templateInput(runHome), { containment: { workflows: "deny" } });
-    expect(await hookVerdict(hostDeny, { name: "sv-plugin:sv-flow" })).toMatch(/^deny: named workflow resolution/);
-  });
-
-  test("without a run home the pre-WS-21 profile is unchanged", () => {
-    const options = buildOfficialOptions(templateInput(undefined));
-    expect(options.settingSources).toEqual([]);
-    expect(options.strictMcpConfig).toBe(true);
-    expect((options.settings as Record<string, unknown>)["autoMemoryEnabled"]).toBe(true);
-    expect((options.settings as Record<string, unknown>)["permissions"]).toBeUndefined();
-  });
-
-  test("the invariants tie `[\"user\"]` and strict-MCP-off to the run home, and pin the config dir", async () => {
-    const bed = runHomeBed();
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
-    const good = buildOfficialOptions(templateInput(runHome));
-    const legacy = buildOfficialOptions(templateInput(undefined));
-    const refused = (options: OfficialOptions, context: Parameters<typeof assertOptionsInvariants>[2]): string => {
-      try {
-        assertOptionsInvariants(options, "winter-claude-agent", context);
-        return "ok";
-      } catch (error) {
-        expect(error).toBeInstanceOf(OfficialConfigurationError);
-        return (error as OfficialConfigurationError).option;
-      }
-    };
-    const binding = { runHome: { dir: runHome.dir } };
-    expect(refused(good, binding)).toBe("ok");
-    expect(refused({ ...good, env: { CLAUDE_CONFIG_DIR: runHome.dir } }, binding)).toBe("ok");
-    expect(refused({ ...good, env: { CLAUDE_CONFIG_DIR: join(runHome.dir, ".absent") } }, binding)).toBe("ok");
-    expect(refused({ ...good, env: { CLAUDE_CONFIG_DIR: bed.sdk } }, binding)).toBe("env.CLAUDE_CONFIG_DIR");
-    expect(refused(good, {})).toBe("settingSources");
-    expect(refused({ ...legacy, settingSources: ["user"] }, {})).toBe("settingSources");
-    expect(refused({ ...good, settingSources: [] }, binding)).toBe("settingSources");
-    expect(refused({ ...good, settingSources: ["user", "project"] }, binding)).toBe("settingSources");
-    expect(refused({ ...good, strictMcpConfig: true }, binding)).toBe("strictMcpConfig");
-    expect(refused({ ...legacy, strictMcpConfig: false }, {})).toBe("strictMcpConfig");
-  });
-});
-
-describe("the official child env on a run home", () => {
-  const envInput = (configDir: string, runHome?: { sdkHome: string }) => ({
-    selection,
-    configDir,
-    brand: WINTER_BRAND,
-    credentials: { ANTHROPIC_API_KEY: "sk-x" },
-    base: { HOME: "/home/u", PATH: "/usr/bin" },
-    ...(runHome === undefined ? {} : { runHome }),
-  });
-
-  test("the config dir is the run folder, and the builder sets the plugin root and the two host switches", () => {
-    const env = buildOfficialChildEnv(envInput("/h/cache/runs/r", { sdkHome: "/h/sdk" }));
-    expect(env["CLAUDE_CONFIG_DIR"]).toBe("/h/cache/runs/r");
-    expect(env["CLAUDE_CODE_PLUGIN_CACHE_DIR"]).toBe("/h/sdk/plugins");
-    expect(env["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"]).toBe("1");
-    expect(env["CLAUDE_CODE_DISABLE_CRON"]).toBe("1");
-  });
-
-  test("none of the four is set without a run home", () => {
-    const env = buildOfficialChildEnv(envInput("/h/runtimes/official-agent-spool"));
-    for (const name of ["CLAUDE_CODE_PLUGIN_CACHE_DIR", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_DISABLE_CRON"]) expect(env[name]).toBeUndefined();
-  });
-
-  test("`configuredExtras` can set none of the router-set variables, with or without a run home", () => {
-    for (const name of ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PLUGIN_CACHE_DIR", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_DISABLE_CRON"]) {
-      for (const runHome of [undefined, { sdkHome: "/h/sdk" }]) {
-        expect(() => buildOfficialChildEnv(envInput("/h/cache/runs/r", runHome), { configuredExtras: { [name]: "/elsewhere" } })).toThrow(OfficialConfigurationError);
-      }
-    }
-  });
-});
-
-describe("the spawn proxy's setting-source check (spec §3.5)", () => {
-  const fakeChild = () => {
-    const stdout = new PassThrough();
-    return {
-      pid: 4242,
-      stdin: new PassThrough(),
-      stdout,
-      stderr: new PassThrough(),
-      kill: () => true,
-      on: () => undefined,
-    };
-  };
-  const spawnWith = (args: string[], configDir: string, runHome?: { dir: string }) => {
-    const proxy = createSupervisedSpawnProxy({
-      brand: WINTER_BRAND,
-      profile: "fresh-spool",
-      configuredConfigDir: configDir,
-      ...(runHome === undefined ? {} : { runHome }),
-      sink: { record: () => undefined },
-      spawnChild: () => fakeChild() as never,
-    });
-    try {
-      proxy.spawn({ command: "/vendored/claude", args, cwd: "/work", env: { CLAUDE_CONFIG_DIR: configDir }, signal: new AbortController().signal });
-      return proxy.observation?.root.kind ?? "spawned";
-    } catch (error) {
-      if (error instanceof RunHomeError) return error.code;
-      if (error instanceof OfficialConfigurationError) return `config:${error.option}`;
-      throw error;
-    }
-  };
-
-  test("the user source on the run folder spawns, recorded as a `run-folder` root", () => {
-    expect(spawnWith(["--setting-sources=user"], "/h/cache/runs/r", { dir: "/h/cache/runs/r" })).toBe("run-folder");
-  });
-
-  test("project/local are refused; `user` without a run home is refused; a run home with no source is refused", () => {
-    expect(spawnWith(["--setting-sources=user,project"], "/h/cache/runs/r", { dir: "/h/cache/runs/r" })).toBe("setting_sources_refused");
-    expect(spawnWith(["--setting-sources", "local"], "/h/cache/runs/r", { dir: "/h/cache/runs/r" })).toBe("setting_sources_refused");
-    expect(spawnWith(["--setting-sources=user"], "/h/runtimes/official-agent-spool")).toBe("setting_sources_refused");
-    expect(spawnWith(["--setting-sources="], "/h/cache/runs/r", { dir: "/h/cache/runs/r" })).toBe("setting_sources_refused");
-    expect(spawnWith([], "/h/cache/runs/r", { dir: "/h/cache/runs/r" })).toBe("setting_sources_refused");
-  });
-
-  test("a fresh run-home spawn handed any other config dir is refused before a child exists", () => {
-    expect(spawnWith(["--setting-sources=user"], "/h/cache/runs/other", { dir: "/h/cache/runs/r" })).toBe("config:env.CLAUDE_CONFIG_DIR");
-  });
-
-  test("the pre-WS-21 profile is unchanged: no source, the spool", () => {
-    expect(spawnWith(["--setting-sources="], "/h/runtimes/official-agent-spool")).toBe("official-spool");
-  });
-});
-
-// ------------------------------------------------------------------------------------------------
-// The official leg THROUGH THE DOOR, against a fake runtime that records what it was launched with.
-// ------------------------------------------------------------------------------------------------
-
-function fakeOfficial(): { module: OfficialSdkModule & { version: string }; launched: OfficialOptions[] } {
-  const launched: OfficialOptions[] = [];
-  const module = {
-    version: "0.3.250",
-    query(params: { prompt: unknown; options?: OfficialOptions }): OfficialQuery {
-      launched.push(params.options as OfficialOptions);
-      return {
-        async *[Symbol.asyncIterator]() {
-          yield { type: "system", subtype: "init", session_id: "00000000-0000-4000-8000-000000000001" };
-          yield { type: "result", subtype: "success" };
-        },
-        interrupt: async () => undefined,
-        setPermissionMode: async () => undefined,
-      } as unknown as OfficialQuery;
-    },
-  };
-  return { module, launched };
-}
-
-describe("the official leg through the door", () => {
-  test("a fresh generation runs in its run folder with the run-home profile", async () => {
-    const bed = runHomeBed();
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
-    const { peer } = storePeer();
-    const { module, launched } = fakeOfficial();
-    const ref = { kind: "keychain", account: "loopback", service: "com.example.apply" } as const;
-    const sdk = createRuntimeSdk({ peers: { winter: peer, claude: module }, keychain, vendoredOfficialRuntime: "/vendored/claude", requireRunHome: true, handoff: { winterHome: bed.home } });
-    const query = sdk.query({
-      prompt: "hi",
-      options: {
-        cwd: bed.cwd,
-        canUseTool: async (_name: string, input: Record<string, unknown>) => ({ behavior: "allow", updatedInput: input }),
-        runtime: {
-          runHome,
-          selection,
-          official: { sessionId: "s-apply", credentials: [{ variable: "ANTHROPIC_API_KEY", ref }], connectionEnv: { ANTHROPIC_BASE_URL: "http://127.0.0.1:9" }, base: { HOME: bed.root, PATH: "/usr/bin" } },
-        },
-      },
-    });
-    for await (const _message of query as AsyncIterable<unknown>) void _message;
-    expect(launched).toHaveLength(1);
-    const options = launched[0]!;
-    expect(options.env?.["CLAUDE_CONFIG_DIR"]).toBe(runHome.dir);
-    expect(options.env?.["CLAUDE_CODE_PLUGIN_CACHE_DIR"]).toBe(join(bed.sdk, "plugins"));
-    expect(options.env?.["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"]).toBe("1");
-    expect(options.env?.["CLAUDE_CODE_DISABLE_CRON"]).toBe("1");
-    expect(options.settingSources).toEqual(["user"]);
-    expect(options.strictMcpConfig).toBe(false);
-    expect((options.settings as Record<string, unknown>)["autoMemoryDirectory"]).toBe(runHome.input.memoryDir);
-    expect("plugins" in options).toBe(false);
-  });
-
-  test("fix round 1, M1: an official policy's `agents` beside a run home is refused; the template never forwards it; the invariants refuse it", async () => {
-    const bed = runHomeBed();
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
-    const { peer } = storePeer();
-    const { module, launched } = fakeOfficial();
-    const sdk = createRuntimeSdk({ peers: { winter: peer, claude: module }, keychain, vendoredOfficialRuntime: "/vendored/claude", requireRunHome: true, handoff: { winterHome: bed.home } });
-    const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome, selection, official: { sessionId: "s-agents", base: { HOME: bed.root }, options: { agents: { x: { description: "x" } } } } } } });
-    await expect((async () => {
-      for await (const _message of query as AsyncIterable<unknown>) void _message;
-    })()).rejects.toThrow(/run_home_option_refused/);
-    expect(launched).toHaveLength(0);
-    // The template on a run home drops a policy's agents…
-    const built = buildOfficialOptions(templateInput(runHome), { agents: { x: { description: "x" } } });
-    expect("agents" in built).toBe(false);
-    // …and hand-built options carrying them are refused.
-    expect(() => assertOptionsInvariants({ ...built, agents: { x: {} } }, "winter-claude-agent", { runHome: { dir: runHome.dir } })).toThrow(OfficialConfigurationError);
-    // The Winter-shaped `Options` of an official query are fenced the same way.
-    expect(refusal(() => sdk.query({ prompt: "hi", options: { cwd: bed.cwd, outputStyle: "terse", runtime: { runHome, selection, official: { sessionId: "s-style", base: { HOME: bed.root } } } } }))).toBe("run_home_option_refused");
-  });
-
-  test("a spool named beside a run home is refused (the run folder replaces it)", async () => {
-    const bed = runHomeBed();
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
-    const { peer } = storePeer();
-    const { module, launched } = fakeOfficial();
-    const sdk = createRuntimeSdk({ peers: { winter: peer, claude: module }, keychain, vendoredOfficialRuntime: "/vendored/claude", requireRunHome: true, handoff: { winterHome: bed.home } });
-    const query = sdk.query({ prompt: "hi", options: { cwd: bed.cwd, runtime: { runHome, selection, official: { sessionId: "s-spool", spool: join(bed.home, "spool"), base: { HOME: bed.root } } } } });
-    await expect((async () => {
-      for await (const _message of query as AsyncIterable<unknown>) void _message;
-    })()).rejects.toThrow(/replaces the spool/);
-    expect(launched).toHaveLength(0);
-  });
-});
-
-// ------------------------------------------------------------------------------------------------
 // The router's OWN Winter query: the messaging cold resume (spec §3.1 — `runHomeFor`).
 // ------------------------------------------------------------------------------------------------
 
@@ -560,7 +240,7 @@ describe("the cold resume runs on a run home too", () => {
       requireRunHome: true,
       handoff: { winterHome: bed.home },
       ...(runHomeFor === undefined ? {} : { runHomeFor }),
-      messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
+      messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass } } },
     });
     return { sdk, calls };
   };
@@ -612,7 +292,7 @@ describe("the cwd check compares CANONICAL forms (L3 round 4: the daemon's cold 
       requireRunHome: true,
       handoff: { winterHome: bed.home },
       runHomeFor,
-      messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass }, official: { permissionClass: declared.official.permissionClass } } },
+      messaging: { messaging: { winter: { permissionClass: declared.winter.permissionClass } } },
     });
     return { sdk, calls };
   };

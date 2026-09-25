@@ -2,11 +2,11 @@
 //
 // Fake peers rather than the real ones, for the reason the whole phase is hermetic: the real Winter
 // peer is a REGISTRY pin whose version moves with the SDK's own releases (it was a `link:` onto a
-// sibling checkout until P8a's Task 0 retired that shape), and the real official peer is a 200MB dev
-// dependency. A matrix test that depended on either would be measuring the fixture, not the rule.
+// sibling checkout until P8a's Task 0 retired that shape). A matrix test that depended on it would be
+// measuring the fixture, not the rule. WS-23: the official peer's row is gone from the matrix.
 import { describe, expect, test } from "bun:test";
 
-import { createFakeClaudePeer, createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
+import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { assertVersionMatrix, createRuntimeSdk, parseVersion, readExportedVersion, readResolvedManifestVersion, runtimeSdkInternals, satisfiesRange, SUPPORTED, SUPPORTED_PROTOCOL_VERSIONS } from "../../src/index.ts";
 import { RuntimeSdkVersionError } from "../../src/errors.ts";
 import type { RuntimeSdkPeers } from "../../src/sdk.ts";
@@ -18,16 +18,14 @@ import { resolveVersionMatrix } from "../../src/version-matrix.ts";
 const keychain = createFakeKeychain();
 
 describe("satisfiesRange (plants)", () => {
-  test("the matrix's own two entries", () => {
+  test("the matrix's own entry (WS-23: the claude pin is gone)", () => {
     expect(satisfiesRange("0.0.21", SUPPORTED.winterAgentSdk)).toBe(true);
     expect(satisfiesRange("0.0.99", SUPPORTED.winterAgentSdk)).toBe(true);
     expect(satisfiesRange("0.0.20", SUPPORTED.winterAgentSdk)).toBe(false);
     expect(satisfiesRange("0.0.1", SUPPORTED.winterAgentSdk)).toBe(false);
     expect(satisfiesRange("0.1.0", SUPPORTED.winterAgentSdk)).toBe(false);
     expect(satisfiesRange("1.0.0", SUPPORTED.winterAgentSdk)).toBe(false);
-    expect(satisfiesRange("0.3.250", SUPPORTED.claudeAgentSdk)).toBe(true);
-    expect(satisfiesRange("0.3.251", SUPPORTED.claudeAgentSdk)).toBe(false);
-    expect(satisfiesRange("0.3.249", SUPPORTED.claudeAgentSdk)).toBe(false);
+    expect(Object.keys(SUPPORTED)).toEqual(["winterAgentSdk"]);
   });
 
   test("the caret form the close-out pins (`^0.0.3`) behaves like the range it replaces", () => {
@@ -101,31 +99,30 @@ describe("assertVersionMatrix — peerVersions (R2)", () => {
     expect(report.winterAgentSdk.source).toBe("peer-export");
   });
 
-  test("(d) the compiled-binary door: a declared claude version wins when resolved-manifest is GENUINELY unavailable", () => {
+  test("(d) the compiled-binary door: a declared Winter version wins when resolved-manifest is GENUINELY unavailable", () => {
     // ONE integrated scenario, through `resolveVersionMatrix` (the seam-carrying internal, not the
     // public `assertVersionMatrix`): a resolver that fails for EVERY name, threaded end to end into
     // probe 2 -- what `readResolvedManifestVersion`'s default resolver
     // (`createRequire(import.meta.url).resolve`) would do inside a compiled binary
     // (`file:///$bunfs/...`). Without this seam, probe 2 would resolve the REAL, installed
-    // `@anthropic-ai/claude-agent-sdk` devDependency in this checkout and silently mask the very
+    // `@yanlinglabs/winter-agent-sdk` devDependency in this checkout and silently mask the very
     // condition this test exists to demonstrate.
     const unresolvable = (): string => {
       throw new Error("Cannot find module (simulated compiled-binary resolution failure)");
     };
-    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.21" });
-    // A claude peer exporting NO version identity of its own (probe 1 fails too).
-    const noVersionClaude = {} as unknown as NonNullable<RuntimeSdkPeers["claude"]>;
+    // A Winter peer exporting NO version identity of its own (probe 1 fails too), only its protocol.
+    const noVersionWinter = { PROTOCOL_VERSION: "1.0" } as unknown as RuntimeSdkPeers["winter"];
 
     // (i) No `declared`, peer-export absent, and probe 2 genuinely broken: construction REFUSES.
     // This is the proof that the manifest path was actually unavailable in this scenario, not merely
     // unused.
-    expect(() => resolveVersionMatrix({ winter: peer, claude: noVersionClaude }, undefined, { resolveEntry: unresolvable })).toThrow(RuntimeSdkVersionError);
+    expect(() => resolveVersionMatrix({ winter: noVersionWinter }, undefined, { resolveEntry: unresolvable })).toThrow(RuntimeSdkVersionError);
 
-    // (ii) The SAME peers and the SAME failing resolver, plus `peerVersions.claudeAgentSdk` --
+    // (ii) The SAME peer and the SAME failing resolver, plus `peerVersions.winterAgentSdk` --
     // construction now succeeds, and the source is `host-declared`: the only door that was open.
-    const report = resolveVersionMatrix({ winter: peer, claude: noVersionClaude }, { claudeAgentSdk: "0.3.250" }, { resolveEntry: unresolvable });
-    expect(report.claudeAgentSdk?.packageVersion).toBe("0.3.250");
-    expect(report.claudeAgentSdk?.source).toBe("host-declared");
+    const report = resolveVersionMatrix({ winter: noVersionWinter }, { winterAgentSdk: "0.0.21" }, { resolveEntry: unresolvable });
+    expect(report.winterAgentSdk.packageVersion).toBe("0.0.21");
+    expect(report.winterAgentSdk.source).toBe("host-declared");
   });
 
   test("(e) an ABSENT `peerVersions` leaves the existing peer-export/resolved-manifest behaviour untouched", () => {
@@ -133,9 +130,6 @@ describe("assertVersionMatrix — peerVersions (R2)", () => {
     const report = assertVersionMatrix({ winter: peer });
     expect(report.winterAgentSdk.source).toBe("peer-export");
     expect(report.winterAgentSdk.packageVersion).toBe("0.0.21");
-    // The one-arg call shape (no second parameter at all) stays legal too.
-    const claudeReport = assertVersionMatrix({ winter: peer, claude: createFakeClaudePeer() });
-    expect(claudeReport.claudeAgentSdk?.source).toBe("peer-export");
   });
 });
 
@@ -147,7 +141,7 @@ describe("assertVersionMatrix", () => {
     expect(report.winterAgentSdk.source).toBe("peer-export");
     expect(report.winterAgentSdk.protocolVersion).toBe("1.0");
     expect(report.winterAgentSdk.supported).toBe(SUPPORTED.winterAgentSdk);
-    expect(report.claudeAgentSdk).toBeUndefined();
+    expect("claudeAgentSdk" in report).toBe(false);
     expect(report.supportedProtocolVersions).toEqual(SUPPORTED_PROTOCOL_VERSIONS);
     expect(Number.isNaN(Date.parse(report.checkedAt))).toBe(false);
   });
@@ -167,26 +161,10 @@ describe("assertVersionMatrix", () => {
     expect(error.message).toContain("version matrix refuses this peer set");
   });
 
-  test("AN ABSENT OFFICIAL PEER IS ALLOWED -- a Winter-only host is a supported configuration", () => {
+  test("WS-23: a Winter-only host is the only configuration — the report has no official-peer row at all", () => {
     const { peer } = createFakeWinterPeer({ packageVersion: "0.0.21" });
     const report = assertVersionMatrix({ winter: peer });
-    expect(report.claudeAgentSdk).toBeUndefined();
-  });
-
-  test("an in-range official peer is reported; an out-of-range one refuses", () => {
-    const { peer } = createFakeWinterPeer({ packageVersion: "0.0.21" });
-    const ok = assertVersionMatrix({ winter: peer, claude: createFakeClaudePeer() });
-    expect(ok.claudeAgentSdk?.packageVersion).toBe("0.3.250");
-    expect(ok.claudeAgentSdk?.packageName).toBe("@anthropic-ai/claude-agent-sdk");
-
-    let thrown: unknown;
-    try {
-      assertVersionMatrix({ winter: peer, claude: createFakeClaudePeer({ packageVersion: "0.3.265" }) });
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toBeInstanceOf(RuntimeSdkVersionError);
-    expect((thrown as RuntimeSdkVersionError).actual).toBe("@anthropic-ai/claude-agent-sdk 0.3.265");
+    expect(Object.keys(report).sort()).toEqual(["checkedAt", "supported", "supportedProtocolVersions", "winterAgentSdk"]);
   });
 
   test("a missing or unsupported PROTOCOL_VERSION refuses -- it is the second identity, not a detail", () => {
@@ -254,10 +232,9 @@ describe("the matrix and the manifest never drift", () => {
       peerDependenciesMeta: Record<string, { optional?: boolean }>;
     };
     expect(manifest.peerDependencies["@yanlinglabs/winter-agent-sdk"]).toBe(SUPPORTED.winterAgentSdk);
-    expect(manifest.peerDependencies["@anthropic-ai/claude-agent-sdk"]).toBe(SUPPORTED.claudeAgentSdk);
-    // The official peer is OPTIONAL, which is what makes "no claude peer" a configuration rather
-    // than a broken install.
-    expect(manifest.peerDependenciesMeta["@anthropic-ai/claude-agent-sdk"]?.optional).toBe(true);
+    // WS-23: the official peer is not a peer at all any more — neither required nor optional.
+    expect(manifest.peerDependencies["@anthropic-ai/claude-agent-sdk"]).toBeUndefined();
+    expect(manifest.peerDependenciesMeta["@anthropic-ai/claude-agent-sdk"]).toBeUndefined();
   });
 });
 
@@ -294,12 +271,14 @@ describe("F-8 — the handle constructed over the REAL Winter SDK module instanc
     const sdk = createRuntimeSdk({ peers: { winter }, keychain: createFakeKeychain() });
     const internals = runtimeSdkInternals(sdk);
     expect(internals).toBeDefined();
-    expect(internals?.official).toBeDefined();
-    expect(internals?.barrier).toBeDefined();
-    expect(internals?.decorator).toBeDefined();
-    // The two doors F-3 widened the field for, over the real peer.
+    // WS-23: the switch reviewer (still reached as `barrier`) and the context — no official adapter,
+    // no decorator.
+    expect(typeof internals?.barrier.reviewSwitch).toBe("function");
+    expect(internals?.context).toBeDefined();
+    expect(Object.keys(internals ?? {}).sort()).toEqual(["barrier", "context"]);
+    // The door F-3 widened the field for, over the real peer.
     expect(typeof sdk.messaging.attachWinterSession).toBe("function");
-    expect(typeof sdk.messaging.attachOfficialSession).toBe("function");
+    expect("attachOfficialSession" in sdk.messaging).toBe(false);
     expect(typeof sdk.directory.record).toBe("function");
   });
 });

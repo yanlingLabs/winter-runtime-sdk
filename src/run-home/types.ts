@@ -1,20 +1,21 @@
 // WS-21 CONTRACT A — THE RUN HOME, as the router builds it and the daemon consumes it.
 //
-// ONE SHARED RUNTIME HOME, TWO RUNTIMES. Both agent runtimes read `<home>/sdk` (claude's config-dir
-// formats, Winter's names), and neither reads it DIRECTLY: before every generation the router builds a
+// ONE SHARED RUNTIME HOME. The runtime reads `<home>/sdk` (claude's config-dir formats, Winter's
+// names), and never DIRECTLY: before every generation the router builds a
 // per-run folder, `<home>/cache/runs/<runId>`, holding exactly what this generation may see — the
 // persistent set linked in, the clash-settled items, the generated instructions, the effective
-// settings and the MCP config — and points the child at it (`CLAUDE_CONFIG_DIR` on the official leg,
-// the brand's `HOME` variable on the Winter leg). The spec is WS-21 §3; this file is the part of it a
-// host programs against.
+// settings and the MCP config — and points the child at it (the brand's `HOME` variable). The spec is
+// WS-21 §3; this file is the part of it a host programs against. WS-23: the official `claude` runtime,
+// the second reader this was built for, is retired — `RunLeg` names only the Winter leg now, and the
+// formats stay claude's because the Winter runtime reads them.
 //
 // THE LIFECYCLE, IN ONE PARAGRAPH (spec §3.1, §3.8). The daemon awaits `buildRunHome` at the start of
-// every incarnation and passes the result as `runtime.runHome` on whichever `query()` overload it
-// calls. The router applies it synchronously and refuses (`run_home_required`) a generation that
-// arrives without one when the router was created with `requireRunHome: true`. When the incarnation
-// ends the router reconciles the official leg's working copy INSIDE its spawn-proxy hook, with its own
-// store, and records the run home's outcome; the daemon disposes the folder only once
-// `runHomeOutcome(runId)` says `safe`. A crash is recovered through `reconcileRootForRecovery(root)`.
+// every incarnation and passes the result as `runtime.runHome` on `query()`. The router applies it
+// synchronously and refuses (`run_home_required`) a generation that arrives without one when the
+// router was created with `requireRunHome: true`. When the incarnation ends the router records the run
+// home's outcome; the daemon disposes the folder only once `runHomeOutcome(runId)` says `safe`. A
+// crash — or an upgrading home's leftover official working copy — is recovered through
+// `reconcileRootForRecovery(root)`.
 //
 // EVERY PRODUCT NAME HERE DERIVES FROM A BRAND. The instructions file, the project directory, the
 // global config file and the product env variables are the brand's (`RunHomeInput.brand`, defaulting
@@ -27,8 +28,11 @@ import { WINTER_BRAND, type BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 /** The session modes a run home is built for (spec §3.2's columns). */
 export type RunMode = "code" | "dispatch" | "chat";
 
-/** Which runtime the generation runs on. `projects/` differs by leg (spec §3.3). */
-export type RunLeg = "winter" | "official";
+/**
+ * Which runtime the generation runs on. WS-23: only the Winter leg — the official leg (whose
+ * `projects/` was a mirrored working copy, spec §3.3) is retired, and `buildRunHome` refuses it typed.
+ */
+export type RunLeg = "winter";
 
 /** The brand fields the builder spells names from. Absent = the Winter SDK's own profile. */
 export type RunHomeBrand = Pick<BrandProfile, "homeDirName" | "projectDirName" | "instructionsFile" | "envPrefix" | "mcpServerName">;

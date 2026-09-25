@@ -34,8 +34,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { envName } from "@yanlinglabs/winter-agent-sdk";
 
-import { ALL_AUTH_VARIABLES, NEVER_INJECTED_AUTH_VARIABLES } from "../official/auth.ts";
-import { isExecutionIndirectionVariable, OFFICIAL_RUNTIME_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "../official/env-allowlist.ts";
+import { ALL_AUTH_VARIABLES, isExecutionIndirectionVariable, NEVER_INJECTED_AUTH_VARIABLES, OFFICIAL_RUNTIME_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./env-refusals.ts";
 import type { RunHomeBuildContext } from "./build.ts";
 import { escapeRulePath, fsRootAnchored, type RunHomeBrand } from "./types.ts";
 import { isHomeOrAbove } from "./walk.ts";

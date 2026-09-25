@@ -326,3 +326,19 @@ describe("`attach()` is the one door WS-05 §6 is enforced at (review r1, nit 2)
     });
   });
 });
+
+// WS-17 row 11, the structural half (WS-23: the half that drove a handoff through the retired barrier
+// went with it). A host's disposable product index can be deleted and rebuilt without touching
+// anything this package keeps, because nothing this package keeps lives there — and nothing in it even
+// names the index.
+describe("WS-17 row 11 — the host's disposable product index", () => {
+  test("the router never reads the product index: its name appears nowhere in this lane's source", () => {
+    const { readdirSync, readFileSync: read } = require("node:fs") as typeof import("node:fs");
+    const { join: joinPath } = require("node:path") as typeof import("node:path");
+    const storeDir = joinPath(import.meta.dir, "..", "..", "src", "store");
+    const files = readdirSync(storeDir).filter((name) => name.endsWith(".ts"));
+    expect(files).toContain("wiring.ts");
+    expect(files).toContain("review-switch.ts");
+    for (const file of files) expect({ file, mentions: read(joinPath(storeDir, file), "utf8").includes("index.db") }).toEqual({ file, mentions: false });
+  });
+});

@@ -1,6 +1,6 @@
 // WS-18 W18-3 / P10b-6 R3 — THE STRUCTURED NO-CREDENTIAL REFUSAL.
 //
-// W18-2's decision table: a Claude-family model with an Anthropic API key or a Console profile, or a
+// W18-2's decision table (WS-23: every door now runs on the Winter runtime): a Claude-family model with an Anthropic API key or a Console profile, or a
 // Bedrock/Vertex cloud credential chain, runs on the official branch; one reachable only through a
 // host the official SDK cannot speak to (OpenRouter, …) runs on Winter (D13 row 3, unchanged); with
 // NONE of those, the router refuses `reason: "no-credential"` rather than the generic
@@ -96,14 +96,11 @@ describe("WS-18 W18-3 — the structured no-credential refusal", () => {
     expect(keys).not.toContain("anthropic/claude-oauth");
   });
 
-  test("the claude.ai subscription alternative is present ONLY when the D14 approval input is true", () => {
-    const closed = refused({ claudeOauthApproved: false });
-    expect((closed.alternatives ?? []).some((a) => a.providerId === "anthropic" && a.authKind === "claude-oauth")).toBe(false);
-
-    const open = refused({ claudeOauthApproved: true });
-    const subscription = (open.alternatives ?? []).find((a) => a.providerId === "anthropic" && a.authKind === "claude-oauth");
-    expect(subscription).toBeDefined();
-    expect(subscription?.label).toContain("subscription");
+  test("the claude.ai subscription alternative is never listed, whatever the retired D14 input says (WS-23)", () => {
+    for (const claudeOauthApproved of [false, true]) {
+      const refusal = refused({ claudeOauthApproved });
+      expect((refusal.alternatives ?? []).some((a) => a.providerId === "anthropic" && a.authKind === "claude-oauth")).toBe(false);
+    }
   });
 
   test("an OpenRouter credential alone is servable — on the WINTER runtime (D13 row 3), never refused", () => {
@@ -113,23 +110,23 @@ describe("WS-18 W18-3 — the structured no-credential refusal", () => {
     expect(selection.family).toBe("claude");
   });
 
-  test("a Bedrock credential alone routes to the OFFICIAL runtime (R-10b-6, cloud-credential-chain is served unconditionally)", () => {
+  test("a Bedrock credential alone is servable — on the Winter runtime (WS-23; R-10b-6's official route is retired)", () => {
     const selection = selected({ credentials: credentials(["bedrock"]) });
-    expect(selection.runtimeKind).toBe("claude-agent");
+    expect(selection.runtimeKind).toBe("winter-agent");
     expect(selection.providerId).toBe("bedrock");
     expect(selection.authFamily).toBe("cloud-credential-chain");
   });
 
-  test("a Vertex credential alone routes to the OFFICIAL runtime (R-10b-6, cloud-credential-chain is served unconditionally)", () => {
+  test("a Vertex credential alone is servable — on the Winter runtime (WS-23; R-10b-6's official route is retired)", () => {
     const selection = selected({ credentials: credentials(["vertex"]) });
-    expect(selection.runtimeKind).toBe("claude-agent");
+    expect(selection.runtimeKind).toBe("winter-agent");
     expect(selection.providerId).toBe("vertex");
     expect(selection.authFamily).toBe("cloud-credential-chain");
   });
 
-  test("an Anthropic API key alone routes to the OFFICIAL runtime (D13 row 2) — the ordinary case, unaffected by W18-3", () => {
+  test("an Anthropic API key alone selects the Winter runtime (WS-23) — the ordinary case, unaffected by W18-3", () => {
     const selection = selected({ credentials: credentials(["anthropic"]) });
-    expect(selection.runtimeKind).toBe("claude-agent");
+    expect(selection.runtimeKind).toBe("winter-agent");
     expect(selection.providerId).toBe("anthropic");
   });
 

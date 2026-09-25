@@ -23,6 +23,11 @@
 //   2. THE ROUTER'S OWN NAMES: the constructor and its handle, the version matrix, the selection
 //      contract, the seams every lane implements behind, and the typed errors.
 //
+// WS-23: the official leg's host surface (the door's official input, the approval bridge, the MCP
+// materializer, the child-env builder, the containment and branding tables) and the handoff barrier's
+// participant types are gone with the official `claude` runtime. The env-refusal sets the README tells
+// a host to read stay, from their new home (`run-home/env-refusals.ts`).
+//
 // `src/testing/` is NOT exported. It wires `@yanlinglabs/winter-conformance` and
 // `@yanlinglabs/winter-provider-conformance` — DEV dependencies — into `bun test`; a published
 // subpath for it would name imports a consumer never installed, and the installed-tarball smoke
@@ -70,14 +75,12 @@ export type { SelectionReview, SelectionRuleId } from "./selection/select-runtim
 // neither sits on a lane barrel; `test/spine/barrel-exports.test.ts` pins that no name is exported by
 // two of them again.
 export { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "./vendor-paths.ts";
-// R-7b-12: the pin's own materialized-resume verdict, so a host can read WHY its handoffs decorate.
-export { MATERIALIZED_RESUME_PROBE_REPORTS, materializedResumeReportForPin } from "./store/pinned-probes.ts";
 // The README tells a host to READ this set rather than trust a description of it (round 3, NEW-H), so
-// it has to be reachable from the package a host installs — not only from the official lane's barrel.
-export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./official/env-allowlist.ts";
-// R-7b-11's four, for the same reason: the README says the router disables the runtime's remote
-// feature configuration by default, and a host should be able to READ the set rather than trust prose.
-export { TRAFFIC_OPT_OUT_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./official/env-allowlist.ts";
+// it has to be reachable from the package a host installs. WS-23: a run home refuses these from a
+// settings file's `env` (they moved out of the retired official lane with that job).
+export { EXECUTION_INDIRECTION_ENV_NAMES, EXECUTION_INDIRECTION_ENV_PREFIXES, isExecutionIndirectionVariable } from "./run-home/env-refusals.ts";
+// R-7b-11's four, for the same reason.
+export { TRAFFIC_OPT_OUT_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./run-home/env-refusals.ts";
 // THE TOOL SURFACE IS NOT HERE (ruling P-7, R-8-1). The native schemas, their bounds, their
 // acceptors, the handler factories and the advisor all live in `@yanlinglabs/winter-agent-sdk/tools`
 // — one declaration for both hosts — and this package re-exports none of them: the router owns no
@@ -87,45 +90,7 @@ export { TRAFFIC_OPT_OUT_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./off
 export * from "./seams/index.ts";
 
 // --- typed errors ----------------------------------------------------------------------------------
-export { NotImplementedYet, RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError, UnaddressableEntryError } from "./errors.ts";
-// --- the door's official leg (Task 6b) -------------------------------------------------------------
-export { createOfficialInputStream, isOfficialQuery, officialCredentialPlan, officialConnectionEnv, officialUserTurn } from "./door.ts";
-export type { OfficialInputStream, RouterOfficialInput, RouterOfficialPolicy, RouterQuery } from "./door.ts";
-export type { LaneId } from "./errors.ts";
-
-// --- P8c-13: the official-leg HOST SURFACE ----------------------------------------------------------
-//
-// Norma (the host) bridges its own approval broker into `canUseTool` and materializes MCP servers
-// from the router's descriptors; before this cut, neither was reachable from the package root.
-// `buildOfficialOptions` uses `policy.canUseTool` verbatim and `assertOptionsInvariants` refuses
-// anything not built by `createApprovalBridge` — so a host needs THAT constructor, not a hand-rolled
-// substitute. These are re-exports of `./official/*` names that are already the seam's own contract
-// (`RouterOfficialPolicy` above already types with several of them); this block is what makes them
-// importable without reaching into `./official/index.ts`, which is a TEST import site, not a host one.
-//
-// DELIBERATELY NOT HERE: the spawn-proxy/adapter internals (`createSupervisedSpawnProxy`,
-// `createOfficialAdapter`, `ProcessIdentity`, `SpawnChild`, …). Their declaration graph pulls
-// `node:stream`/`node:module` types into a consumer that only wants the approval bridge and the MCP
-// materializer; the installed-tarball smoke's runtime import of "." would still pass either way (Node
-// erases types), but a host's own `tsc` run over the root barrel would carry Node-only types it never
-// asked for. The door (`createRuntimeSdk`) reaches the adapter through the seam, not through a name a
-// consumer imports — see `./official/index.ts`'s own header.
-export { createApprovalBridge, isOurApprovalBridge } from "./official/callbacks.ts";
-export type { ApprovalBroker, ApprovalRequest, ApprovalBridgeOptions, DecisionSource, OfficialPermissionMode, OfficialApprovalBridge } from "./official/callbacks.ts";
-
-export { materializeOfficialMcpServer, officialMcpServers, winterMcpServerDescriptor, canonicalToolNames, OFFICIAL_MATERIALIZATION_DROPS } from "./official/mcp-descriptors.ts";
-export type { OfficialMcpModule, InputShapeFactory, JsonSchemaObject, WinterMcpServerDescriptor, WinterMcpToolDescriptor, WinterMcpHandler, WinterMcpToolResult } from "./official/mcp-descriptors.ts";
-
-export { minimalOsEnvironmentFrom, buildOfficialChildEnv } from "./official/env-allowlist.ts";
-export type { OfficialEnvPolicy, OfficialEnvInput, EnvAllowlistSnapshot } from "./official/env-allowlist.ts";
-
-export type { OptionsTemplatePolicy } from "./official/options-template.ts";
-export type { ContainmentPolicy, ContainmentDisposition } from "./official/containment.ts";
-export type { AuthCredentialPlan, AuthFamily, ClaudeOauthGate } from "./official/auth.ts";
-
-export { containmentDispositions, officialDisallowedTools } from "./official/containment.ts";
-
-export { officialBranchLabel, OFFICIAL_DISCLOSURES } from "./official/branding.ts";
+export { NotImplementedYet, RuntimeLaunchInputError, RuntimeSdkDisposedError, RuntimeSdkError, RuntimeSdkVersionError, UnaddressableEntryError } from "./errors.ts";
 
 // R-7b's attributed-turn renderer for inbound messages (WS-15 §6): already the messaging lane's own
 // export (`./messaging/index.ts`), re-exported here so a host reads it off the package root rather
@@ -135,34 +100,17 @@ export { renderAttributedTurn } from "./messaging/index.ts";
 // --- WS-15 §6.1–6.4: the directory and the cross-runtime messaging router (Lane B; the three doors a host needs + their vocabulary) ---
 export { createRuntimeMessaging, createAttachedSessionRegistry } from "./messaging/index.ts";
 export type {
-  AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession,
+  AttachedSession, AttachedSessionRegistry, AttachedWinterSession,
   DirectorySnapshot, GlobalMessagingHandle, GlobalMessagingOptions, ReplyRequest, RouterMessagingAdapter,
   RuntimeDirectoryHandle, RuntimeDirectoryOptions, RuntimeDirectoryRecoveryHooks,
 } from "./messaging/index.ts";
 
-// --- P8c-13 fix round 2: the HANDOFF PARTICIPANT types (types only) --------------------------------
-//
-// `createHandoffBarrier`/`HandoffBarrierHandle` were already reachable from root via `./seams/index.ts`
-// (`HandoffBarrier`/`HandoffOutcome`/`HandoffPlan`/`HandoffStep`/`HandoffStepNumber`), but the DATA
-// shapes a host actually renders a plan/outcome FROM — who owns the session today, what the destination
-// would run, what step 8 hands the destination, per-step results, the eligibility check, the detailed
-// outcome, and the barrier's own construction deps — were not: `src/store/index.ts` exports all of
-// them, but nothing in `src/index.ts` ever imported that lane barrel. Named directly off the files that
-// DECLARE them (`./store/handoff-barrier.ts`, `./seams/handoff.ts`, `./store/materialized-resume.ts`)
-// rather than through `./store/index.ts`, matching how the rest of this barrel reaches into a lane —
-// confirmed pure data: none of the three files' EMITTED declarations names a `node:*` specifier (the
-// value-level `node:fs`/`node:crypto` imports their implementations use never appear in the .d.ts,
-// since nothing exported here has a node-typed member).
-export type {
-  DetailedHandoffOutcome, HandoffBarrierDeps, HandoffDestinationRuntime, HandoffEligibilityLike,
-  HandoffOwnerHealth, HandoffParticipants, HandoffResumeTarget, HandoffSourceOwner, HandoffStepReport,
-} from "./store/handoff-barrier.ts";
-export type { HandoffSelection } from "./seams/handoff.ts";
-// WS-18 W18-20 (P10b, fix round 1): the catalog-backed DEFAULT `resolveEndpoint` both
-// `HandoffBarrierDeps` and `OfficialLegDeps` fall back to when a host injects none. Exported so a
-// host can call it directly (e.g. to warm the cache, or to use the same default in its own tooling)
-// rather than only ever reaching it as a fallback.
+// WS-18 W18-20 (P10b, fix round 1): the catalog-backed DEFAULT `resolveEndpoint` the switch review
+// falls back to when a host injects none. Exported so a host can call it directly (e.g. to warm the
+// cache, or to use the same default in its own tooling) rather than only ever reaching it as a
+// fallback.
 export { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
-// `HandoffBarrierDeps.decorator` is typed with this — a host building `HandoffBarrierDeps` needs the
-// name to type it, not only the barrier's own construction path.
-export type { MaterializedResumeDecoratorHandle } from "./store/materialized-resume.ts";
+// WS-23: the switch review, as a host reaches it (`runtimeSdkInternals(sdk).barrier`), and its typed
+// "not in the runtime directory" refusal.
+export { SwitchReviewError } from "./store/review-switch.ts";
+export type { SwitchReviewerDeps, SwitchReviewerHandle } from "./store/review-switch.ts";

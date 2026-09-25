@@ -1,22 +1,12 @@
-// WS-21 §3.8: THE EXIT RECONCILE AND THE RECOVERY DOOR — the only two places a run home's working copy
-// is compared with the canonical store, both through the ROUTER'S OWN live store and the one function
+// WS-21 §3.8: THE RECOVERY DOOR (and, until WS-23, the exit reconcile) — the only places a run home's
+// working copy is compared with the canonical store, both through the ROUTER'S OWN live store and the one function
 // every reconcile uses (`reconcileLocalWriteRoot`).
 //
-// EXIT (the official leg). The proxy's `reconcile` hook runs inside its exit gate, before the SDK can
-// observe the exit — so before the wrapper deletes a resume's staging dir, and before a host could
-// dispose a run folder. It reconciles the CONFIG-DIR ROOT (the run folder for a fresh generation, the
-// staging root for a resume), never `<root>/projects` (the function scans `<root>/projects/…` itself):
-//
-//   clean, or appended through the store   → `safe`
-//   no working copy found, but this generation mirrored frames → UNKNOWN, never clean → quarantined
-//   diverged (or the reconcile itself failed)                 → quarantined
-//   a session artifact whose store copy differs (never overwritten, see `artifacts.ts`) → quarantined
-//
-// Either way the session's OTHER files (tool results, workflow scripts and run records, subagent
-// metadata) are carried into the shared store first, so a disposed folder takes none of them with it.
-//
-// A quarantined root's `projects/` is COPIED to `<home>/cache/quarantine/<ts>-<label>/projects` before
-// the exit is revealed: the evidence outlives the staging dir the wrapper is about to delete.
+// EXIT (the official leg) — RETIRED (WS-23). The official leg's spawn proxy ran an exit reconcile of
+// its run folder's private working copy (`runHomeExitReconciler`, removed with that leg). The Winter
+// leg's `projects/` is a link to the canonical store, so it has no working copy to reconcile at exit;
+// what remains here is the recovery door, which an upgrading home still needs for the official working
+// copies and staging roots it left behind.
 //
 // RECOVERY (after a crash, or Migration C over a pre-WS-21 spool). The in-memory decorations and the
 // mirror's pending state died with the process, so the prefix proof is rebuilt PER TRANSCRIPT: the
@@ -39,7 +29,7 @@ import { carryBackSessionArtifacts, repairTranscriptMetadata, type ArtifactCarry
 import { RunHomeError } from "./errors.ts";
 import type { RunHomeOutcome } from "./types.ts";
 import { compareTranscriptTail, isJournalKey, localIsCanonicalPrefix, reconcileLocalWriteRoot, scanLocalWriteRoot, type TranscriptJudge, type TranscriptReconcileOutcome } from "../store/reconcile.ts";
-import { HANDOFF_ENTRY_LABEL, readProviderStateSidecar } from "../store/materialized-resume.ts";
+import { HANDOFF_ENTRY_LABEL, readProviderStateSidecar } from "../store/provider-state.ts";
 import type { SharedSessionStore } from "../store/wiring.ts";
 
 const PRIVATE_DIR = 0o700;
@@ -64,68 +54,6 @@ export function quarantineRoot(root: string, home: string, label: string, now: D
   const projects = join(root, "projects");
   if (existsSync(projects)) cpSync(projects, join(destination, "projects"), { recursive: true, dereference: false });
   return destination;
-}
-
-export interface RunHomeExitReconcilerInput {
-  /** The router's OWN live store (`barrier.shared`) — the one holding `settle()` and the decorations. */
-  shared: SharedSessionStore;
-  runId: string;
-  /** The daemon's home: quarantined copies go under `<home>/cache/quarantine/`. */
-  home: string;
-  /** How many transcript entries this generation mirrored into the store so far. */
-  mirrored: () => number;
-  record: (runId: string, outcome: RunHomeOutcome) => void;
-  now?: () => Date;
-}
-
-/** The proxy's `reconcile` hook for one run-home generation. Never throws: a failure is quarantine, or `pending` when even the quarantine copy cannot be made. */
-export function runHomeExitReconciler(input: RunHomeExitReconcilerInput): (args: { observation: { root: { configDir: string } }; exit: { code: number | null; signal: string | null } }) => Promise<void> {
-  const now = input.now ?? (() => new Date());
-  return async ({ observation }) => {
-    const root = observation.root.configDir;
-    /**
-     * NEVER THROWS (review minor). `quarantined` is recorded only once the evidence is actually copied:
-     * if the copy cannot be made (a linked `cache`, a full disk), the working copy is the ONLY copy, so
-     * the outcome is left `pending` — the host never disposes it, and the recovery door reconciles it
-     * later — and the reason is logged.
-     */
-    const quarantine = (paths?: readonly string[]): void => {
-      try {
-        if (paths === undefined) quarantineRoot(root, input.home, input.runId, now());
-        else quarantineTranscripts(root, input.home, input.runId, paths, now());
-        input.record(input.runId, "quarantined");
-      } catch (error) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `winter-runtime-sdk: run home ${input.runId}: its working copy could not be quarantined (${error instanceof Error ? error.message : String(error)}); the outcome stays pending, so the folder is kept for the recovery door`,
-        );
-      }
-    };
-    try {
-      const report = await reconcileLocalWriteRoot(root, { shared: input.shared });
-      // THE SESSION'S OTHER FILES (tool results, workflow scripts and run records): carried into the
-      // shared store before the folder can be disposed — never overwriting (see `artifacts.ts`). A
-      // destination that differs quarantines that file, and the outcome says so.
-      const artifacts = carryBackSessionArtifacts(root, input.shared.identity.storeHome);
-      // A subagent's or a journal's `.meta.json`, into the store the way claude's import does — only
-      // when every transcript came back level (a diverged root is quarantined whole below).
-      const metadata: MetadataRepairReport = report.status === "diverged" ? { repaired: [], identical: [], skipped: [] } : await repairTranscriptMetadata(root, input.shared);
-      // NEVER DROPPED SILENTLY (review N-1): what the carry-back could not carry — a link, a special file,
-      // a `.jsonl` the reconcile does not recognise, metadata that cannot be repaired — goes with the
-      // folder, so it is named here.
-      const skipped = [...artifacts.skipped, ...metadata.skipped];
-      if (skipped.length > 0) {
-        // eslint-disable-next-line no-console
-        console.warn(`winter-runtime-sdk: run home ${input.runId}: ${skipped.length} file(s) in its working copy were not carried into the shared store: ${skipped.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`);
-      }
-      if (report.status === "diverged") return quarantine();
-      if (report.transcripts.length === 0 && input.mirrored() > 0) return quarantine();
-      if (artifacts.conflicts.length > 0) return quarantine(artifacts.conflicts.map((conflict) => conflict.source));
-      input.record(input.runId, "safe");
-    } catch {
-      quarantine();
-    }
-  };
 }
 
 /** One transcript's recovery outcome (I6). */
@@ -247,7 +175,7 @@ function recomputedClaudeReadyLines(canonical: SessionStoreEntry[], sidecar: Par
   return entries.map((entry) => JSON.stringify(entry));
 }
 
-/** The barrier's staged handoff note (`materialized-resume.ts`'s `buildHandoffEntry`), recognised by its label. */
+/** The retired barrier's staged handoff note (WS-23), recognised by its label in an upgrading home's copy. */
 function isHandoffNote(entry: SessionStoreEntry): boolean {
   if (entry["type"] !== "user") return false;
   const content = (entry["message"] as { content?: unknown } | undefined)?.content;

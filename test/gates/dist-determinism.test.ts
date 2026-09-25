@@ -74,7 +74,8 @@ describe("dist determinism (R1)", () => {
       // `src/testing/host.ts`) imports them -- a `.d.ts` with no matching `.js`, naming an optional
       // conformance peer no consumer of `./testing` need ever install. Reusing `rootA`'s already-built
       // tree rather than building a third root keeps this assertion free.
-      expect(readdirSync(join(rootA, "dist", "testing")).sort()).toEqual(["capture-env.d.ts", "hermetic.d.ts", "host.d.ts", "host.js", "peers.d.ts"]);
+      // WS-23: `capture-env.ts` (the official capture environment) is gone from the subpath.
+      expect(readdirSync(join(rootA, "dist", "testing")).sort()).toEqual(["hermetic.d.ts", "host.d.ts", "host.js", "peers.d.ts"]);
     } finally {
       rmSync(rootA, { recursive: true, force: true });
       rmSync(rootB, { recursive: true, force: true });

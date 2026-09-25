@@ -168,12 +168,12 @@ describe("WS-21 Contract A: `requireRunHome` — the router refuses a generation
     expect(calls).toHaveLength(0);
   });
 
-  test("the official overload refuses `run_home_required` too, before any leg opens", () => {
+  test("a selection-bearing call refuses `run_home_required` too, before anything opens", () => {
     const { peer, calls } = createFakeWinterPeer();
     const sdk = router.createRuntimeSdk({ peers: { winter: peer }, keychain, requireRunHome: true, handoff: { winterHome: "/tmp/ws21-contract-home" } });
     let caught: unknown;
     try {
-      sdk.query({ prompt: "hello", options: { cwd: "/tmp/nowhere", runtime: { selection: claudeSelection, official: { sessionId: "s-1" } } } });
+      sdk.query({ prompt: "hello", options: { cwd: "/tmp/nowhere", runtime: { selection: claudeSelection } } });
     } catch (error) {
       caught = error;
     }

@@ -22,17 +22,7 @@ export type {
 } from "./directory-store.ts";
 export { createInMemoryRuntimeDirectoryStore } from "./directory-store.ts";
 export type { GlobalMessaging, SendMessageRequest } from "./global-messaging.ts";
-export type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffStep, HandoffStepNumber } from "./handoff.ts";
 export type { KeychainSeam } from "./keychain.ts";
-export type {
-  MaterializedResumeDecorator,
-  MaterializedResumeDoor,
-  MaterializedResumeInput,
-  MaterializedResumeProbeId,
-  MaterializedResumeProbeReport,
-  MaterializedResumeProbeResult,
-  MaterializedResumeResult,
-} from "./materialized-resume.ts";
 export type {
   DeliveryOutcome,
   GlobalAgentMessage,
@@ -43,22 +33,6 @@ export type {
   RuntimeObjectKind,
   SerializedRuntimeAddress,
 } from "./messaging-contract.ts";
-export type {
-  OfficialPluginConfig,
-  OfficialSdkModule,
-  OfficialSpawnOptions,
-  OfficialSpawnedProcess,
-} from "./official-sdk-shapes.ts";
-export type {
-  EnvInput,
-  OfficialAdapter,
-  OfficialLaunchPlan,
-  OfficialLaunchProfile,
-  OfficialOptions,
-  OfficialQuery,
-  OfficialResumePlan,
-  OfficialSession,
-  OfficialSpawnClaudeCodeProcess,
-  OfficialUserMessage,
-  OptionsTemplateInput,
-} from "./official-adapter.ts";
+// WS-23: the switch review replaced the handoff barrier seam; the official adapter's and the
+// materialized-resume decorator's seams went with the official runtime.
+export type { SwitchReviewer } from "./review-switch.ts";

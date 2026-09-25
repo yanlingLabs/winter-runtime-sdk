@@ -26,7 +26,7 @@ import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/inde
 import type { RuntimeSelection, SelectionAuthFamily, SelectionInput, SelectionRefusal } from "../../src/selection/runtime-selection.ts";
 import { claudeFamily, credentials, gptFamily, listing, NOW, PROVIDER_VIEWS, row, VERSIONS } from "./fixtures.ts";
 
-/** A Code-mode session on the Claude family with an Anthropic API key and an official peer present. */
+/** A Code-mode session on the Claude family with an Anthropic API key — and the retired `hasClaudePeer: true`, which must change nothing (WS-23). */
 function input(over: Partial<SelectionInput> = {}): SelectionInput {
   return {
     mode: "code",
@@ -56,34 +56,29 @@ function refused(over: Partial<SelectionInput> = {}): SelectionRefusal {
 const oauth = { anthropic: { authFamily: "claude-oauth" as const, protocols: ["anthropic-messages"] } };
 const consoleOauth = { anthropic: { authFamily: "console-oauth" as const, protocols: ["anthropic-messages"] } };
 
-describe("D13 row 1 — Claude OAuth", () => {
-  test("D13 row 1 — a Claude OAuth credential routes to the official runtime, always", () => {
-    const selection = selected({ credentials: credentials(["anthropic"], oauth), claudeOauthApproved: true });
-    expect(selection.runtimeKind).toBe("claude-agent");
-    expect(selection.authFamily).toBe("claude-oauth");
-    expect(ruleIdOf(selection)).toBe("D13-1");
-  });
-
-  test("D13 row 1 — Claude OAuth with the D14 ship gate closed is refused, never downgraded to Winter", () => {
-    const refusal = refused({ credentials: credentials(["anthropic"], oauth), claudeOauthApproved: false });
-    expect(refusal.reason).toBe("claude-oauth-not-approved");
-    expect(refusal.detail).toContain("ship-gated");
-  });
-
-  test("D13 row 1 — Claude OAuth outside Code mode is refused: Code-only even after D14 approval", () => {
-    for (const mode of ["dispatch", "chat"] as const) {
-      const refusal = refused({ mode, credentials: credentials(["anthropic"], oauth), claudeOauthApproved: true });
-      expect(refusal.reason).toBe("mode-forbids-runtime");
-      expect(refusal.detail).toContain(mode);
+// WS-23: ONE RUNTIME. D13's two official rows are retired with the official runtime — a Claude OAuth
+// credential is refused (it never routes to Winter, D28), and every row that used to go to the
+// official runtime now selects Winter under R-7b-1, whatever the retired `hasClaudePeer`/
+// `claudeOauthApproved` inputs say.
+describe("D13 row 1 — Claude OAuth, retired with the official runtime (WS-23)", () => {
+  test("a Claude OAuth credential is refused runtime-unavailable, approved or not, peer or not — never downgraded to Winter", () => {
+    for (const claudeOauthApproved of [true, false]) {
+      for (const hasClaudePeer of [true, false]) {
+        const refusal = refused({ credentials: credentials(["anthropic"], oauth), claudeOauthApproved, hasClaudePeer });
+        expect([claudeOauthApproved, hasClaudePeer, refusal.reason]).toEqual([claudeOauthApproved, hasClaudePeer, "runtime-unavailable"]);
+        expect(refusal.detail).toContain("retired");
+        expect(refusal.detail).toContain("D28");
+      }
     }
   });
 
-  test("D13 row 1 — Claude OAuth with no official peer is refused, because it never routes to Winter", () => {
-    const refusal = refused({ credentials: credentials(["anthropic"], oauth), claudeOauthApproved: true, hasClaudePeer: false });
-    expect(refusal.reason).toBe("runtime-unavailable");
+  test("…and in Dispatch and Chat too", () => {
+    for (const mode of ["dispatch", "chat"] as const) {
+      expect(refused({ mode, credentials: credentials(["anthropic"], oauth), claudeOauthApproved: true }).reason).toBe("runtime-unavailable");
+    }
   });
 
-  test("D13 row 1 — a Claude OAuth credential cannot serve a non-Claude family", () => {
+  test("a Claude OAuth credential cannot serve a non-Claude family", () => {
     const refusal = refused({
       requested: { slot: "astra" },
       families: listing("gpt"),
@@ -93,42 +88,40 @@ describe("D13 row 1 — Claude OAuth", () => {
     expect(refusal.reason).toBe("slot-unservable");
   });
 
-  test("the D14 ship gate ships closed — the shipped default flag refuses a Claude OAuth session", () => {
+  test("the D14 constant is still exported, and still closed", () => {
     expect(D14_CLAUDE_OAUTH_APPROVED_DEFAULT).toBe(false);
-    const refusal = refused({ credentials: credentials(["anthropic"], oauth), claudeOauthApproved: D14_CLAUDE_OAUTH_APPROVED_DEFAULT });
-    expect(refusal.reason).toBe("claude-oauth-not-approved");
   });
 });
 
-describe("D13 row 2 — the official runtime", () => {
-  test("D13 row 2 — a Claude-family model on an Anthropic-protocol backend in Code mode routes to the official runtime", () => {
+describe("D13 row 2 — retired: the rows that went to the official runtime select Winter (WS-23)", () => {
+  test("a Claude-family model on an Anthropic-protocol backend in Code mode selects Winter (R-7b-1), even with `hasClaudePeer: true`", () => {
     const selection = selected();
-    expect(selection.runtimeKind).toBe("claude-agent");
+    expect(selection.runtimeKind).toBe("winter-agent");
     expect(selection.providerId).toBe("anthropic");
     expect(selection.modelRef).toBe("anthropic/claude-opus-5");
     expect(selection.family).toBe("claude");
     expect(selection.authFamily).toBe("api-key");
-    expect(ruleIdOf(selection)).toBe("D13-2");
+    expect(ruleIdOf(selection)).toBe("R-7b-1-no-peer");
   });
 
-  test("D13 row 2 — a Console OAuth bearer on the Anthropic-dialect backend routes to the official runtime", () => {
-    // R-7b-1 as clarified 2026-09-08: an API key and a Console OAuth bearer are both token-priced API
-    // access the official runtime accepts, so neither is a reason to route away from it. (This test
-    // asserted the opposite until review r1's I1 — see `officialServesBackend`'s own note.)
+  test("a Console OAuth bearer on the Anthropic-dialect backend selects Winter", () => {
     const selection = selected({ credentials: credentials(["anthropic"], consoleOauth) });
-    expect(selection.runtimeKind).toBe("claude-agent");
+    expect(selection.runtimeKind).toBe("winter-agent");
     expect(selection.authFamily).toBe("console-oauth");
-    expect(ruleIdOf(selection)).toBe("D13-2");
+    expect(ruleIdOf(selection)).toBe("R-7b-1-no-peer");
   });
 
-  test("D13 row 2 — a cloud credential chain is a backend the official branch serves, dialect notwithstanding", () => {
-    // Bedrock's catalog dialect is `bedrock-converse`, NOT the Anthropic one — it reaches the official
-    // branch through WS-14 §12's auth table, which is the distinction this test pins.
+  test("a cloud credential chain selects Winter too — the dialect distinction now only names the rule", () => {
     const selection = selected({ requested: { slot: "haiku", provider: "bedrock" }, credentials: credentials(["bedrock"]) });
-    expect(selection.runtimeKind).toBe("claude-agent");
+    expect(selection.runtimeKind).toBe("winter-agent");
     expect(selection.authFamily).toBe("cloud-credential-chain");
     expect(speaksAnthropicProtocol("bedrock", PROVIDER_VIEWS["bedrock"]!)).toBe(false);
     expect(officialServesBackend("bedrock", PROVIDER_VIEWS["bedrock"]!)).toBe(true);
+  });
+
+  test("the retired rule ids still read back from a persisted record", () => {
+    const legacy: RuntimeSelection = { ...selected(), runtimeKind: "claude-agent", reason: "D13-2: persisted before WS-23" };
+    expect(ruleIdOf(legacy)).toBe("D13-2");
   });
 });
 
@@ -199,8 +192,8 @@ describe("the persisted choice", () => {
       reason: "recorded at session creation",
       decidedAt: "2026-09-01T00:00:00.000Z",
     };
-    // Everything about the fresh inputs says "official runtime, anthropic" — and the persisted record
-    // still comes back, as the SAME OBJECT.
+    // Everything about the fresh inputs says "anthropic" — and the persisted record still comes back,
+    // as the SAME OBJECT.
     const result = selectRuntime(input({ persisted }));
     expect(result).toBe(persisted);
   });
@@ -220,8 +213,9 @@ describe("the persisted choice", () => {
     expect(review.kind).toBe("handoff-required");
     if (review.kind !== "handoff-required") throw new Error("unreachable");
     expect(review.persisted).toBe(persisted);
-    expect(review.fresh.runtimeKind).toBe("claude-agent");
-    expect(review.changed).toEqual(["runtimeKind", "providerId", "modelRef"]);
+    expect(review.fresh.runtimeKind).toBe("winter-agent");
+    // WS-23: the runtime is the same (Winter) — only the row differs.
+    expect(review.changed).toEqual(["providerId", "modelRef"]);
     expect(review.detail).toContain("never a silent rewrite");
   });
 
@@ -371,14 +365,14 @@ describe("the structural rules", () => {
 
   test("the undeclared-provider fallback still recognises the vendor's own provider id", () => {
     const selection = selected({ credentials: { byProvider: { anthropic: "keychain" } } });
-    expect(selection.runtimeKind).toBe("claude-agent");
-    expect(ruleIdOf(selection)).toBe("D13-2");
+    expect(selection.runtimeKind).toBe("winter-agent");
+    expect(ruleIdOf(selection)).toBe("R-7b-1-no-peer");
   });
 
   test("every produced record names the rule that fired and carries an ISO decidedAt", () => {
     const selection = selected();
-    expect(selection.reason.startsWith("D13-2:")).toBe(true);
-    expect(selection.reason.length).toBeGreaterThan("D13-2:".length + 20);
+    expect(selection.reason.startsWith("R-7b-1-no-peer:")).toBe(true);
+    expect(selection.reason.length).toBeGreaterThan("R-7b-1-no-peer:".length + 20);
     expect(selection.decidedAt).toBe(NOW);
     const { now: _now, ...withoutNow } = input();
     const unstamped = selectRuntime(withoutNow);
@@ -386,8 +380,8 @@ describe("the structural rules", () => {
     expect(Number.isNaN(Date.parse(unstamped.decidedAt))).toBe(false);
   });
 
-  test("the record stamps the SDK version of the runtime it chose, and unknown when none was given", () => {
-    expect(selected().sdkVersion).toBe("0.3.250");
+  test("the record stamps the Winter SDK's version (the only runtime, WS-23), and unknown when none was given", () => {
+    expect(selected().sdkVersion).toBe("0.0.2");
     expect(selected({ hasClaudePeer: false }).sdkVersion).toBe("0.0.2");
     expect(selected().engineVersion).toBe("2.1.250");
     const { versions: _versions, ...withoutVersions } = input();
@@ -443,15 +437,14 @@ describe("the structural rules", () => {
     expect(ruleIdOf(withReason("D13-2: real"))).toBe("D13-2");
   });
 
-  test("selectionVersionsFrom carries both peer identities out of the constructor's matrix report", () => {
+  test("selectionVersionsFrom carries the Winter peer's identity out of the constructor's matrix report", () => {
     const versions = selectionVersionsFrom({
       winterAgentSdk: { packageName: "w", packageVersion: "0.0.3", source: "peer-export", supported: ">=0.0.21 <0.1.0", protocolVersion: "1.0" },
-      claudeAgentSdk: { packageName: "c", packageVersion: "0.3.250", source: "peer-export", supported: "0.3.250" },
-      supported: { winterAgentSdk: ">=0.0.21 <0.1.0", claudeAgentSdk: "0.3.250" },
+      supported: { winterAgentSdk: ">=0.0.21 <0.1.0" },
       supportedProtocolVersions: ["1.0"],
       checkedAt: NOW,
     });
-    expect(versions).toEqual({ winterSdkVersion: "0.0.3", claudeSdkVersion: "0.3.250" });
+    expect(versions).toEqual({ winterSdkVersion: "0.0.3" });
   });
 });
 
@@ -494,7 +487,7 @@ describe("WS-20 tags", () => {
     ),
   };
 
-  test("a console/<id> tag derives authFamily console-profile and serves the official runtime", () => {
+  test("a console/<id> tag derives authFamily console-profile and selects the Winter runtime (WS-23)", () => {
     const result = selectRuntime(
       input({
         requested: { model: "console/claude-sonnet-5", provider: "console" },
@@ -504,7 +497,7 @@ describe("WS-20 tags", () => {
         credentials: { byProvider: { console: "file" } },
       }),
     );
-    expect(result).toMatchObject({ providerId: "console", authFamily: "console-profile", runtimeKind: "claude-agent" });
+    expect(result).toMatchObject({ providerId: "console", authFamily: "console-profile", runtimeKind: "winter-agent" });
   });
 
   test("a console/<id> row with no console credential ref is not admitted — 'no ref, no candidate' still holds", () => {

@@ -5,7 +5,8 @@
 // WS-16"), and the split is what makes the routing table implementable: "running/idle official Claude
 // session (supervised) → deliver through the OWNING LIVE SDK/CONTROL HANDLE", "exited official Claude
 // session → explicitly resume by `backendSessionId`, re-establish the adapter, THEN deliver". The
-// difference between those two rows is entirely whether this registry has a handle.
+// difference between those two rows is entirely whether this registry has a handle. (WS-23: the
+// official runtime those rows were written for is retired; the Winter branch reads the same split.)
 //
 // R-7b-4 names what a live delivery IS: "Top-level delivery into a LIVE session of either runtime is
 // a push into that session's input stream (both `query()`s accept an async-iterable prompt); cold
@@ -39,15 +40,6 @@ export interface AttachedWinterSession extends AttachedSession {
    * how a child is reached, never a session address (Task 0 fix r2, concern 4).
    */
   readonly messaging?: SessionMessagingFacet;
-}
-
-export interface AttachedOfficialSession extends AttachedSession {
-  /**
-   * REQUIRED on this branch, because there is no alternative. The pinned official SDK exposes no
-   * messaging surface of any kind (its `Query` declares none), so an input-stream push is the whole
-   * mechanism — for the session itself and, owner-qualified, for its children.
-   */
-  push(text: string): void | Promise<void>;
 }
 
 export interface AttachedSessionRegistry<T extends AttachedSession> {

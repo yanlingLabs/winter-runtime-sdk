@@ -52,24 +52,26 @@ function parentOn(family: "claude" | "gpt", hasClaudePeer = true): RuntimeSelect
 
 describe("R-7b-1 — the child's own family decides", () => {
   test("R-7b-1 — the same child under two different parents produces the identical record", () => {
-    const winterParent = parentOn("gpt");
-    const officialParent = parentOn("claude");
-    expect(winterParent.runtimeKind).toBe("winter-agent");
-    expect(officialParent.runtimeKind).toBe("claude-agent");
-    const underWinter = must(selectChildRuntime(winterParent, childOf()));
-    const underOfficial = must(selectChildRuntime(officialParent, childOf()));
-    expect(underWinter).toEqual(underOfficial);
+    const gptParent = parentOn("gpt");
+    const claudeParent = parentOn("claude");
+    // WS-23: both parents are on the Winter runtime now; the property — the parent is not an input —
+    // is what this still pins.
+    expect(gptParent.runtimeKind).toBe("winter-agent");
+    expect(claudeParent.runtimeKind).toBe("winter-agent");
+    const underGpt = must(selectChildRuntime(gptParent, childOf()));
+    const underClaude = must(selectChildRuntime(claudeParent, childOf()));
+    expect(underGpt).toEqual(underClaude);
   });
 
-  test("R-7b-1 — a Claude-family child of a Winter parent runs on the official runtime", () => {
+  test("R-7b-1 — a Claude-family child of a gpt parent runs on the Winter runtime (WS-23: once the official runtime)", () => {
     const child = must(selectChildRuntime(parentOn("gpt"), childOf()));
-    expect(child.runtimeKind).toBe("claude-agent");
+    expect(child.runtimeKind).toBe("winter-agent");
     expect(child.family).toBe("claude");
     expect(child.modelRef).toBe("anthropic/claude-sonnet-5");
-    expect(ruleIdOf(child)).toBe("D13-2");
+    expect(ruleIdOf(child)).toBe("R-7b-1-no-peer");
   });
 
-  test("R-7b-1 — a gpt-family child of an official parent runs on the Winter runtime", () => {
+  test("R-7b-1 — a gpt-family child of a Claude parent runs on the Winter runtime", () => {
     const child = must(selectChildRuntime(parentOn("claude"), childOf({ slot: "astra", families: listing("gpt") })));
     expect(child.runtimeKind).toBe("winter-agent");
     expect(child.family).toBe("gpt");
@@ -100,20 +102,20 @@ describe("R-7b-1 — the child's own family decides", () => {
     expect(refusal.reason).toBe("no-credential");
   });
 
-  test("R-7b-1 — the child's record stamps the SDK version of the runtime the child chose", () => {
-    expect(must(selectChildRuntime(parentOn("gpt"), childOf())).sdkVersion).toBe("0.3.250");
+  test("R-7b-1 — the child's record stamps the Winter SDK version (the only runtime, WS-23)", () => {
+    expect(must(selectChildRuntime(parentOn("gpt"), childOf())).sdkVersion).toBe("0.0.2");
     expect(must(selectChildRuntime(parentOn("claude"), childOf({ slot: "astra", families: listing("gpt") }))).sdkVersion).toBe("0.0.2");
   });
 });
 
-describe("R-7b-1 — the cross-runtime pair talks through the directory", () => {
-  test("R-7b-1 — a cross-runtime parent/child pair is flagged for the directory channel", () => {
+describe("R-7b-1 — the pairing's channel", () => {
+  test("R-7b-1 — a cross-family pair is NOT cross-runtime any more (WS-23): it stays on the in-runtime channel", () => {
     const pairing = selectChildRuntimePairing(parentOn("gpt"), childOf());
     if (isSelectionRefusal(pairing)) throw new Error("unreachable");
     expect(pairing.parentRuntime).toBe("winter-agent");
-    expect(pairing.child.runtimeKind).toBe("claude-agent");
-    expect(pairing.crossRuntime).toBe(true);
-    expect(pairing.channel).toBe("directory");
+    expect(pairing.child.runtimeKind).toBe("winter-agent");
+    expect(pairing.crossRuntime).toBe(false);
+    expect(pairing.channel).toBe("in-runtime");
   });
 
   test("R-7b-1 — a same-runtime pair stays on the in-runtime channel", () => {
@@ -138,12 +140,11 @@ describe("WS-13c §8 — resume follows the child's own record", () => {
   test("WS13c-SM1 — a gpt parent's sonnet child is unchanged when the parent switches to claude", () => {
     const parent = parentOn("gpt");
     const child = must(selectChildRuntime(parent, childOf()));
-    expect(child.runtimeKind).toBe("claude-agent");
+    expect(child.family).toBe("claude");
 
-    // The parent switches family. That is a NEW parent decision (the certified handoff or a visible
-    // fork); it says nothing about the child.
+    // The parent switches family. That is a NEW parent decision; it says nothing about the child.
     const switched = parentOn("claude");
-    expect(switched.runtimeKind).toBe("claude-agent");
+    expect(switched.family).toBe("claude");
 
     const resumed = resumeChildSelection(child, resumeContext());
     expect(resumed.kind).toBe("resumed");

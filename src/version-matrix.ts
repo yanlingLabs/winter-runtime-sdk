@@ -14,11 +14,10 @@
 // path and makes the failure legible.
 //
 // WHAT "VERSION IDENTITY" MEANS HERE (WS-02 §3: "the runtime engine and wrapper carry separate
-// version identities — sdkVersion vs engineVersion"). Two facts are read per peer:
+// version identities — sdkVersion vs engineVersion"). Two facts are read from the Winter peer:
 //   * the PACKAGE version — what a host installed;
-//   * for the Winter peer, `PROTOCOL_VERSION` — the wire contract the wrapper speaks to its runtime.
-// The official peer has no protocol constant to read (its wire is its own business), so only its
-// package version is matched.
+//   * `PROTOCOL_VERSION` — the wire contract the wrapper speaks to its runtime.
+// WS-23: the official peer's row (an exact `claudeAgentSdk` pin) went with the official runtime.
 //
 // HOW THE PACKAGE VERSION IS READ, in order, with the source recorded in the report:
 //   0. `host-declared` (R2, WS-02 §7.1) — the version the HOST asserts via
@@ -40,9 +39,8 @@
 //      `createRequire(import.meta.url).resolve(<name>)`. Second-best on purpose: in an ordinary
 //      install it is the same copy, but a host that injected a different instance would be told
 //      about the resolvable one. Recorded as its own `source` value so a diagnostic can say which
-//      question was answered. Neither `@yanlinglabs/winter-agent-sdk@0.0.1` nor
-//      `@anthropic-ai/claude-agent-sdk@0.3.250` exports a version identity today (measured), so this
-//      is the live path for both until the Winter SDK grows one — see the CARRY in the Task 1 report.
+//      question was answered. The Winter SDK exported no version identity when this was written
+//      (measured), so this was the live path until it grew one — see the CARRY in the Task 1 report.
 //   3. otherwise `undefined` — which is a REFUSAL, never an assumption. "I could not tell" and "it is
 //      fine" are different answers and only one of them is honest.
 //
@@ -60,17 +58,15 @@ import type { RuntimeSdkPeers } from "./sdk.ts";
 /**
  * THE MATRIX. The plan pins this object verbatim.
  *
- * `winterAgentSdk` is a RANGE because the Winter SDK is this repository's sibling and moves with it;
- * `claudeAgentSdk` is an EXACT pin because WS-02 §6.1 says declaration identity alone must not
- * approve an upgrade — a new official version is a reviewed compatibility event (WS-17's drift gate),
- * not a range that quietly widens.
+ * `winterAgentSdk` is a RANGE because the Winter SDK is this repository's sibling and moves with it.
+ * WS-23: the `claudeAgentSdk` exact pin is gone with the official runtime it described.
  */
 // R.4 (resolved, 0.0.12): raised to the SDK release that carries ws21/sdk@6170adb (L1a's port of
 // claude's rule-content grammar, which `escapeRulePath`'s two-layer spelling needs on the Winter
 // leg) plus the two-layer escape table, the sandbox spelling, the MCP rows and the parallel-batch
 // splice this router's 0.0.12 depends on. A Winter runtime older than 0.0.21 misreads `\`, `(`, `)`
 // and the doubled `\\[` in every router-written rule.
-export const SUPPORTED = { winterAgentSdk: ">=0.0.21 <0.1.0", claudeAgentSdk: "0.3.250" } as const;
+export const SUPPORTED = { winterAgentSdk: ">=0.0.21 <0.1.0" } as const;
 
 /**
  * The Winter wire protocol versions this router is tested against (`PROTOCOL_VERSION` in the SDK's
@@ -94,8 +90,6 @@ export interface PeerVersionIdentity {
 
 export interface VersionMatrixReport {
   winterAgentSdk: PeerVersionIdentity & { protocolVersion: string };
-  /** Absent when no official peer was injected — which is allowed (a Winter-only host). */
-  claudeAgentSdk?: PeerVersionIdentity;
   /** The matrix the report was produced against, so a diagnostic never has to guess. */
   supported: typeof SUPPORTED;
   supportedProtocolVersions: readonly string[];
@@ -262,12 +256,7 @@ function identityFor(packageName: string, namespace: unknown, supported: string,
 const UNKNOWN_ACTUAL = "unknown (the injected module exports no version identity and no installed copy could be resolved)";
 
 /**
- * Reads each injected peer's version identity and refuses loudly on a miss.
- *
- * Three outcomes, and the third is the one worth naming: an ABSENT official peer is allowed. A
- * Winter-only host injects `{ winter }` and never loads the official runtime (that is the whole
- * point of the optional peer), so "no claude peer" is a valid, fully-supported configuration and the
- * report simply omits the row.
+ * Reads the injected peer's version identity and refuses loudly on a miss.
  *
  * `declared` is `RuntimeSdkOptions.peerVersions` (R2), optional — the one-arg call
  * (`assertVersionMatrix(peers)`) stays legal and behaves exactly as before: with nothing declared,
@@ -277,7 +266,7 @@ const UNKNOWN_ACTUAL = "unknown (the injected module exports no version identity
  * reaches it. A public seam parameter on this function is a production call site that could pass a
  * broken resolver by accident, for a capability real hosts never need.
  */
-export function assertVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterAgentSdk?: string; claudeAgentSdk?: string }): VersionMatrixReport {
+export function assertVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterAgentSdk?: string }): VersionMatrixReport {
   return resolveVersionMatrix(peers, declared);
 }
 
@@ -291,7 +280,7 @@ export function assertVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterA
  * "resolved-manifest would have answered the same value anyway"). `assertVersionMatrix` is the public,
  * one-line delegation with the real (default) seams.
  */
-export function resolveVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterAgentSdk?: string; claudeAgentSdk?: string }, seams: VersionMatrixSeams = {}): VersionMatrixReport {
+export function resolveVersionMatrix(peers: RuntimeSdkPeers, declared?: { winterAgentSdk?: string }, seams: VersionMatrixSeams = {}): VersionMatrixReport {
   const winterName = "@yanlinglabs/winter-agent-sdk";
   const winterIdentity = identityFor(winterName, peers.winter, SUPPORTED.winterAgentSdk, declared?.winterAgentSdk, seams);
   if (winterIdentity === undefined) {
@@ -322,15 +311,5 @@ export function resolveVersionMatrix(peers: RuntimeSdkPeers, declared?: { winter
     checkedAt: new Date().toISOString(),
   };
 
-  if (peers.claude === undefined) return report;
-
-  const claudeName = "@anthropic-ai/claude-agent-sdk";
-  const claudeIdentity = identityFor(claudeName, peers.claude, SUPPORTED.claudeAgentSdk, declared?.claudeAgentSdk, seams);
-  if (claudeIdentity === undefined) {
-    throw new RuntimeSdkVersionError({ expected: `${claudeName} ${SUPPORTED.claudeAgentSdk}`, actual: UNKNOWN_ACTUAL });
-  }
-  if (!satisfiesRange(claudeIdentity.packageVersion, SUPPORTED.claudeAgentSdk)) {
-    throw new RuntimeSdkVersionError({ expected: `${claudeName} ${SUPPORTED.claudeAgentSdk}`, actual: `${claudeName} ${claudeIdentity.packageVersion}` });
-  }
-  return { ...report, claudeAgentSdk: claudeIdentity };
+  return report;
 }

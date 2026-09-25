@@ -1,5 +1,11 @@
-// WS-15 §6.2–6.4: THE CROSS-RUNTIME MESSAGING ROUTER — the shared core (R-7b-4) composed with two
-// adapters, a directory, and the durable ledger the in-process reference never needed.
+// WS-15 §6.2–6.4: THE MESSAGING ROUTER — the shared core (R-7b-4) composed with the Winter adapter, a
+// directory, and the durable ledger the in-process reference never needed.
+//
+// WS-23: it was the CROSS-RUNTIME router, with a second adapter for the official `claude` runtime. That
+// runtime is retired and its adapter with it. A directory row still recorded on `claude-agent` (an
+// upgrading host's) has no adapter to route to, and the dispatcher answers that typed — `unavailable`
+// ("no messaging adapter is registered for the claude-agent runtime") — never a throw; a host may still
+// `registerAdapter` one of its own.
 //
 // WHAT THE CORE BRINGS, and is therefore NOT re-implemented here: WS-10 §12's id allocation and retry
 // short-circuit, §11's resolution order (rules 1–6), the self-target refusal, the size bound and the
@@ -52,8 +58,7 @@ import type { GlobalMessaging, SendMessageRequest } from "../seams/global-messag
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress, RuntimeKind, SerializedRuntimeAddress } from "../seams/messaging-contract.ts";
 import { createDispatchingAdapter, type RouterMessagingAdapter } from "./dispatch.ts";
 import { createInboundPolicy, type InboundPolicy, type InboundPolicyHooks } from "./inbound.ts";
-import { createOfficialMessagingAdapter, type OfficialMessagingAdapter, type OfficialMessagingAdapterDeps } from "./official-adapter.ts";
-import { createAttachedSessionRegistry, type AttachedOfficialSession, type AttachedSessionRegistry, type AttachedWinterSession } from "./sessions.ts";
+import { createAttachedSessionRegistry, type AttachedSessionRegistry, type AttachedWinterSession } from "./sessions.ts";
 import { createWinterMessagingAdapter, type WinterColdResumeRunHomes, type WinterMessagingAdapter, type WinterMessagingAdapterDeps } from "./winter-adapter.ts";
 
 /** The context this factory needs: the seam's, with the directory as the concrete handle. */
@@ -65,8 +70,6 @@ export interface GlobalMessagingOptions extends InboundPolicyHooks {
   now?: () => number;
   /** Passed to the Winter adapter this factory builds (cold-resume options, child resume context). */
   winter?: Omit<WinterMessagingAdapterDeps, "peers" | "directory" | "sessions" | "runHomes">;
-  /** Passed to the official adapter this factory builds (the resume collaborator, the class hook). */
-  official?: Omit<OfficialMessagingAdapterDeps, "directory" | "sessions">;
   /**
    * R-7b-4's one behavioural seam, forwarded to the core: how a THROW out of an adapter is classified.
    *
@@ -87,10 +90,8 @@ export interface ReplyRequest {
 /** The seam, plus the doors a host and this package's own tool handlers need. */
 export interface GlobalMessagingHandle extends GlobalMessaging {
   readonly winterAdapter: WinterMessagingAdapter;
-  readonly officialAdapter: OfficialMessagingAdapter;
   /** Register a live Winter session AND bridge its idle notices. Returns the detach function. */
   attachWinterSession(address: SerializedRuntimeAddress, handle: AttachedWinterSession): () => void;
-  attachOfficialSession(address: SerializedRuntimeAddress, handle: AttachedOfficialSession): () => void;
   /**
    * `send()`, keeping the shared core's SUPPLEMENTARY fact about a combined call.
    *
@@ -139,16 +140,11 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
   const now = options.now ?? (() => Date.now());
 
   const winterSessions: AttachedSessionRegistry<AttachedWinterSession> = createAttachedSessionRegistry<AttachedWinterSession>();
-  const officialSessions: AttachedSessionRegistry<AttachedOfficialSession> = createAttachedSessionRegistry<AttachedOfficialSession>();
 
   // WS-21: the cold resume's run-home door is the ROUTER's own (`internal`), laid over whatever a host
   // passed — the public options type does not even name it.
   const winterAdapter = createWinterMessagingAdapter({ peers: context.peers, directory, sessions: winterSessions, ...(options.winter ?? {}), ...(internal.winterRunHomes === undefined ? {} : { runHomes: internal.winterRunHomes }) });
-  const officialAdapter = createOfficialMessagingAdapter({ directory, sessions: officialSessions, ...(options.official ?? {}) });
-  const adapters = new Map<RuntimeKind, RouterMessagingAdapter>([
-    ["winter-agent", winterAdapter],
-    ["claude-agent", officialAdapter],
-  ]);
+  const adapters = new Map<RuntimeKind, RouterMessagingAdapter>([["winter-agent", winterAdapter]]);
 
   const policy: InboundPolicy = createInboundPolicy({
     store,
@@ -175,8 +171,7 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
      *
      * So the substitution is gone: `inbound.ts` holds an unknown-class receiver's mail with a reason
      * that names exactly that, and a host clears it by telling the adapter what it launched
-     * (`winter.permissionClass` / `official.permissionClass`) or by setting the receiver's own
-     * `crossSessionInbound`.
+     * (`winter.permissionClass`) or by setting the receiver's own `crossSessionInbound`.
      */
     receiverClass: async (receiver) => (await adapters.get(receiver.runtimeKind)?.senderPermissionClass(receiver.parsed)) ?? "unknown",
   });
@@ -357,7 +352,6 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
 
   const handle: GlobalMessagingHandle = {
     winterAdapter,
-    officialAdapter,
     bounds: {
       heldCap: policy.caps.held,
       acceptedCap: policy.caps.accepted,
@@ -387,10 +381,6 @@ export function createGlobalMessaging(context: GlobalMessagingContext, options: 
         unsubscribe();
         detachHandle();
       };
-    },
-
-    attachOfficialSession(address, session) {
-      return officialSessions.attach(address, session);
     },
 
     registerAdapter(kind, adapter) {

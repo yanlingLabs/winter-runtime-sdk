@@ -46,8 +46,8 @@ function childInput(child: ChildSelectionInput): SelectionInput {
     requested,
     families: child.families,
     credentials: child.credentials,
-    hasClaudePeer: child.hasClaudePeer,
-    claudeOauthApproved: child.claudeOauthApproved,
+    ...(child.hasClaudePeer === undefined ? {} : { hasClaudePeer: child.hasClaudePeer }),
+    ...(child.claudeOauthApproved === undefined ? {} : { claudeOauthApproved: child.claudeOauthApproved }),
     ...(child.versions === undefined ? {} : { versions: child.versions }),
     ...(child.now === undefined ? {} : { now: child.now }),
   };

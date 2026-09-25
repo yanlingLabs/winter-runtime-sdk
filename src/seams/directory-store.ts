@@ -15,7 +15,6 @@
 //     resolution order. A cap enforced in the store would be a second, invisible copy of a rule the
 //     router must apply anyway (it has to produce the visible refusal), and the two would drift.
 import type { RuntimeSelection } from "../selection/runtime-selection.ts";
-import type { RemoteConfigPolicy } from "./official-adapter.ts";
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, RuntimeAddress, RuntimeKind, RuntimeObjectKind, SerializedRuntimeAddress } from "./messaging-contract.ts";
 
 /**
@@ -90,9 +89,11 @@ export interface RuntimeDirectoryEntry {
    * IT IS ON THE ROW BECAUSE THE SURFACE IS NOT DERIVABLE FROM THE VERSION. Two sessions on the same
    * pinned artifact advertise different tool sets depending on this one answer, so a reader asking
    * "what could this session do?" cannot answer it from `selection.engineVersion` alone. Written by
-   * the official adapter's record sink at launch, from `OfficialLaunchPlan.remoteConfig`.
+   * the official adapter's record sink at launch, from `OfficialLaunchPlan.remoteConfig`. WS-23: nothing
+   * writes it any more (the official runtime is retired); a row persisted before then may still carry
+   * it, so the field stays readable.
    */
-  remoteConfig?: RemoteConfigPolicy;
+  remoteConfig?: "deny" | "allow";
   capabilities: ListedRuntimeObject["capabilities"];
   /**
    * ISO-8601. A DELIBERATE DEPARTURE from WS-15 §6.1's `updatedAt: number`: every other timestamp on

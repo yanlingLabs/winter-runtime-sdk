@@ -308,7 +308,7 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
     put(join(root, ".winter", "settings.json"), json({ permissions: { deny: ["Read(/secrets)", "Edit(/src/**)"] } }));
     const spelled = String.raw`\\[w\\] a\\*b \\\(o\\\)`;
     const escaped = [`Read(/${join(escapeRulePath(bed.root), spelled, "secrets")})`, `Edit(/${join(escapeRulePath(bed.root), spelled, "src/**")})`];
-    for (const leg of ["official", "winter"] as const) {
+    for (const leg of ["winter"] as const) {
       const permissions = (await effective(bed, root, { leg }))["permissions"] as { deny: string[] };
       expect([leg, permissions.deny]).toEqual([leg, escaped]);
     }
@@ -353,7 +353,7 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
       denyRead: [join(bed.root, "shared"), join(escapedRoot, "secrets/[ab]")],
       allowWrite: [join(escapedRoot, "out/**"), "~/cache"],
     };
-    for (const leg of ["official", "winter"] as const) {
+    for (const leg of ["winter"] as const) {
       const settings = await effective(bed, root, { leg });
       expect([leg, (settings["sandbox"] as { filesystem: unknown }).filesystem]).toEqual([leg, expected]);
       expect([leg, (settings["permissions"] as { additionalDirectories: string[] }).additionalDirectories]).toEqual([leg, [join(root, "sub")]]);
@@ -365,7 +365,7 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
     const root = join(bed.root, "a?b*c");
     mkdirSync(root, { recursive: true });
     put(join(root, ".winter", "settings.json"), json({ sandbox: { filesystem: { allowWrite: ["out", "/abs"], allowRead: ["docs"], denyWrite: ["guarded"] } } }));
-    for (const leg of ["official", "winter"] as const) {
+    for (const leg of ["winter"] as const) {
       const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root, leg }));
       expect([leg, (runHome.effectiveSettings["sandbox"] as { filesystem: unknown }).filesystem]).toEqual([leg, { allowWrite: ["/abs"], allowRead: [], denyWrite: [join(root, "guarded")] }]);
       expect([leg, runHome.report.droppedRules]).toEqual([

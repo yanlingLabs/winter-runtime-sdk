@@ -1,42 +1,71 @@
 # winter-runtime-sdk
 
-One door over two agent runtimes. A host that wants both the Winter Agent SDK and the official
-Claude Agent SDK talks to this package as a single SDK: the same `query()`, the same `Options`, the
-same closed `SDKMessage` union — plus runtime-selection inputs.
+One door over the Winter Agent SDK. A host talks to this package as a single SDK: the same
+`query()`, the same `Options`, the same closed `SDKMessage` union — plus runtime-selection inputs, a
+per-run home, the runtime directory and messaging router, and the pre-flight review a host asks
+before a model change.
 
-Decision record: WS-00 D19 (2026-09-05). Boundaries that do not move:
+**WS-23 (`0.0.14`): the official Claude Agent SDK is gone.** Until `0.0.13` this package was one door
+over TWO runtimes and could move a session between them. Every model — Claude's included — now runs
+on the Winter runtime, so the official-SDK adapter, the `claude-agent` leg of the door, the handoff
+barrier and its materialized-resume decorations, temp continuity, the official messaging adapter and
+the `@anthropic-ai/claude-agent-sdk` peer are removed. See "What `0.0.14` changes" below.
+
+Decision record: WS-00 D19 (2026-09-05), amended by WS-23. Boundaries that do not move:
 
 - `@yanlinglabs/winter-agent-sdk` stands alone for Winter-only hosts and never learns this package
-  or the official runtime exists.
-- This package is a selector and an adapter, never a translation layer: Options and the message
-  stream pass through verbatim. It owns runtime selection (the D13 rule), the official-SDK adapter
-  (Options template, spool env, supervised spawn proxy, mirror errors, tool aliases and deny floor,
-  builtin-path containment, Winter MCP plugin registration), shared session-store wiring, the
-  cross-runtime handoff barrier with the materialized-resume decoration doors, and the runtime
-  directory plus cross-runtime messaging router.
-- **It owns NO TOOL** (the user's tool-ownership ruling, R-8-1). The default tools — `SendMessage`,
-  `ListAgents`, `ReadNotifications`, `advisor` — are DECLARED once in
-  `@yanlinglabs/winter-agent-sdk/tools` and BOUND here, under the official runtime's own built-in
-  names; the capability tools (computer, browser, office) are the HOST's, handed over as MCP servers
-  and forwarded to both legs unchanged. This package re-exports no tool surface of its own.
-- The host vendors all three packages directly (`winter-runtime-sdk`, `winter-agent-sdk`,
-  `claude-agent-sdk`); this package declares the two SDKs as peer dependencies and receives their
-  module instances by injection, so a host that never creates a Claude session never loads the
-  official runtime and no SDK is ever instantiated twice.
-- A `brand` profile flows through unchanged (Winter defaults); Claude Code's own literals stay fixed.
+  exists.
+- This package is a selector, never a translation layer: Options and the message stream pass through
+  verbatim. It owns runtime selection (the D13/D28 table, now always deciding the Winter runtime),
+  shared session-store wiring, the switch review (`reviewSwitch`), the per-run home (WS-21), the
+  recovery door for an upgrading host's leftover working copies, and the runtime directory plus the
+  messaging router.
+- **It owns NO TOOL** (the user's tool-ownership ruling, R-8-1). The default tools are DECLARED once
+  in `@yanlinglabs/winter-agent-sdk/tools`; the capability tools (computer, browser, office) are the
+  HOST's, handed over as MCP servers and forwarded unchanged. This package re-exports no tool surface.
+- The host injects the Winter SDK's module instance, so no SDK is ever instantiated twice.
+- A `brand` profile flows through unchanged (Winter defaults); claude's config-dir FORMAT names in
+  the run home stay fixed (the Winter runtime reads them).
 
-Status: Phase 7b landed all four lanes and routed the door; `0.0.2` was the Phase-8b prerequisite
-release. The spine (the package scaffold, the contract re-export, the `createRuntimeSdk` constructor
-with its version matrix, the seams, the test harness and CI) and the four lanes behind those seams —
-the official-SDK adapter, the runtime directory and messaging router, the store wiring and handoff
-barrier, and runtime selection — are on `main`, with WS-17's eighteen router-owned rows proven and
-cited in `docs/conformance-rows.md`. See `docs/architecture.md` for the ownership map, the pinned
-interfaces and how this package consumes the Winter SDK.
+Status: see `docs/conformance-rows.md` for the WS-17 rows this package still proves (the rows that
+were about the official runtime are listed there as retired), and `docs/architecture.md` for the
+ownership map and how this package consumes the Winter SDK.
+
+## What `0.0.14` changes (WS-23 — one runtime)
+
+- **Removed**: `src/official/**`, `src/door.ts` (the official leg), the official messaging adapter,
+  the handoff barrier (`plan()`/`execute()`, leases, staging roots, `sdk.handoff()`), the
+  materialized-resume decorator and its pinned probe reports, temp continuity, the official seams
+  (`OfficialAdapter`, `OfficialSdkModule`, the handoff and decorator seams), `RuntimeHandoffRequiredError`,
+  the official host surface on the package root (the approval bridge, the MCP materializer, the child
+  env builder, containment and branding tables), `officialCaptureEnv`/`HERMETIC_TRAFFIC_OPT_OUTS`/
+  `createFakeClaudePeer`/`runOfficialCapture` from the testing harness, and the
+  `@anthropic-ai/claude-agent-sdk` peer and dev dependency.
+- **Selection**: the table never picks `claude-agent`. A Claude model selects the Winter runtime
+  (`R-7b-1-no-peer`, or a D13 row-3 id); a Claude OAuth credential is refused `runtime-unavailable`
+  (it never routes to Winter, D28). `hasClaudePeer`/`claudeOauthApproved` are optional and ignored.
+  `RuntimeKind` keeps `"claude-agent"` — a host's persisted records and directory rows still carry it,
+  and the retired rule ids (`D13-1`, `D13-2`) still read back through `ruleIdOf`.
+- **The door**: `query()` returns the Winter peer's `Query`; a `runtime.selection`/`select` naming
+  `claude-agent` is a typed `RuntimeLaunchInputError` (field `runtime.selection`), before the peer.
+- **The switch review survives** as its own module (`createSwitchReviewer`), reached where hosts
+  always reached it — `runtimeSdkInternals(sdk).barrier.reviewSwitch` — with the same read-only
+  behaviour and the same "not in the runtime directory" refusal text (`SwitchReviewError`). Its
+  `message.model` fallback now reads the claude-written turns of a session the official runtime
+  created before a host adopted it onto the Winter runtime.
+- **Kept**: `buildRunHome` (`RunLeg` is `"winter"`; `"official"` is refused typed), the recovery door
+  (`reconcileRootForRecovery`, for an upgrading host's leftover official working copies and staging
+  roots), the directory and messaging router (a `claude-agent` row has no adapter and answers
+  `unavailable`, typed), and the env-refusal sets the run home applies to a settings file's `env`
+  (`EXECUTION_INDIRECTION_ENV_*`, `TRAFFIC_OPT_OUT_*`, moved to `src/run-home/env-refusals.ts`).
+- `RuntimeSdkOptions.keychain` is optional and unused; `peers.claude`, `vendoredOfficialRuntime`,
+  `toInputShape`, `advisor` and `official` are gone; `handoff` configures the reviewer
+  (`{ winterHome, resolveEndpoint }`).
 
 ## Run home (WS-21)
 
-**Shipped in `0.0.12`.** Both agent runtimes read ONE shared home, `<home>/sdk`, in the official
-runtime's config-dir formats with the brand's names. Neither reads it directly: before every
+**Shipped in `0.0.12`.** The runtime reads ONE shared home, `<home>/sdk`, in claude's config-dir
+formats with the brand's names (WS-23: there were two runtimes reading it until `0.0.14`). Neither reads it directly: before every
 generation a per-run folder is built, `<home>/cache/runs/<runId>`, and the child is pointed at it.
 This section is the contract a host builds against (Contract A); `src/run-home/types.ts` is its source.
 
@@ -44,7 +73,7 @@ This section is the contract a host builds against (Contract A); `src/run-home/t
 
 ```ts
 type RunMode = "code" | "dispatch" | "chat";
-type RunLeg = "winter" | "official";
+type RunLeg = "winter";                  // WS-23: "official" is refused typed
 interface RunHomeInput {
   home: string;                          // the daemon's home; the shared home is sdkHomeOf(home)
   mode: RunMode;

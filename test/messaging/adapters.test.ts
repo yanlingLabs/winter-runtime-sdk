@@ -1,4 +1,8 @@
-// THE TWO ADAPTERS, and the WS-15 §6.2 routing table read row by row.
+// THE WINTER ADAPTER, and the WS-15 §6.2 routing table read row by row.
+//
+// WS-23: the official adapter is retired with the official runtime, so its four rows below are now a
+// single fact — a row still recorded on `claude-agent` (an upgrading host's) has no adapter, and the
+// router answers it `unavailable`, typed, never a throw (the last describe here).
 //
 // | Target state                          | Required behaviour                                        |
 // | Running Winter child                  | enqueue at the child's next round boundary → `queued`     |
@@ -12,8 +16,7 @@
 // | Completed official child              | only through the owning parent, once it is active         |
 // | Archived session                      | refuse until a deliberate resume unarchives it            |
 //
-// Plus WS13c-SM1/SM2/SM3: the cross-family pairs, which are the whole reason the adapter is chosen by
-// the CHILD's own record rather than by its parent's runtime.
+// Plus WS13c-SM3: a child is routed by its OWN record rather than by its parent's runtime.
 import { describe, expect, test } from "bun:test";
 
 import { createRuntimeMessaging } from "../../src/messaging/index.ts";
@@ -21,7 +24,7 @@ import { createRuntimeMessaging } from "../../src/messaging/index.ts";
 // its own `GlobalMessagingHandle`, which satisfies `MessagingToolPort` structurally (ruling P-3).
 import { createMessagingToolHandlers } from "@yanlinglabs/winter-agent-sdk/tools";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { childAddress, childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
+import { childAddress, childEntry, createBed, createFakeFacet, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
 import { credentials, listing, NOW, VERSIONS } from "../selection/fixtures.ts";
 import type { SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 
@@ -34,7 +37,6 @@ function bedWith(options: GlobalMessagingOptions = {}, messages?: SdkMessage[]) 
     now: bed.clock.now,
     ...options,
     winter: { ...declaredClasses().winter, ...(options.winter ?? {}) },
-    official: { ...declaredClasses().official, ...(options.official ?? {}) },
   };
   const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: messagingOptions });
   return { ...bed, directory, messaging };
@@ -136,103 +138,6 @@ describe("the Winter adapter", () => {
   });
 });
 
-describe("the official adapter", () => {
-  test("a live official session is delivered through its own handle, attributed", async () => {
-    const world = bedWith();
-    const official = createFakeOfficialSession("idle");
-    await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
-
-    const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hello", originToolCallId: "t1" });
-    expect(outcome.status).toBe("delivered");
-    expect(official.pushed[0]).toContain('<agent-message from="session:sender"');
-    expect(official.pushed[0]).toContain("hello");
-  });
-
-  test("a RUNNING official child is delivered to the ACTIVE owning parent, OWNER-QUALIFIED", async () => {
-    const world = bedWith();
-    const parent = createFakeOfficialSession("running");
-    await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude-parent", { runtimeKind: "claude-agent" }));
-    await world.directory.record(childEntry("claude-parent", "sub-1", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude-parent", parent.handle);
-
-    const outcome = await world.messaging.deliver(envelope({ messageId: "m1", from: sessionAddress("sender"), to: { objectKind: "agent", runtimeKind: "claude-agent", winterSessionId: "claude-parent", parentWinterSessionId: "claude-parent", childId: "sub-1" } }));
-    expect(outcome.status).toBe("queued");
-    // The frame names the child it was FOR — "the public result stays owner-qualified" (WS-15 §6.2).
-    expect(parent.pushed[0]).toContain('for="agent:claude-parent:sub-1"');
-    expect(parent.pushed[0]).toContain('from="session:sender"');
-  });
-
-  test("a COMPLETED official child with no active parent is retryably unavailable, and says why", async () => {
-    const world = bedWith();
-    await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude-parent", { runtimeKind: "claude-agent", status: "exited" }));
-    await world.directory.record(childEntry("claude-parent", "sub-1", { runtimeKind: "claude-agent", status: "exited" }));
-
-    const outcome = await world.messaging.deliver(envelope({ messageId: "m1", from: sessionAddress("sender"), to: { objectKind: "agent", runtimeKind: "claude-agent", winterSessionId: "claude-parent", parentWinterSessionId: "claude-parent", childId: "sub-1" } }));
-    expect(outcome.status).toBe("unavailable");
-    if (outcome.status === "unavailable") {
-      expect(outcome.retryable).toBe(true);
-      expect(outcome.reason).toContain("explicitly resumed");
-    }
-  });
-
-  test("an EXITED official session is unavailable without a resume collaborator, and resumed_and_delivered with one", async () => {
-    const bare = bedWith();
-    await bare.directory.record(sessionEntry("sender"));
-    await bare.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent", status: "exited", backendSessionId: "b-1" }));
-    const refusal = await bare.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" });
-    expect(refusal.status).toBe("unavailable");
-    if (refusal.status === "unavailable") {
-      expect(refusal.retryable).toBe(false);
-      expect(refusal.reason).toContain("official adapter");
-    }
-
-    const resumedSession = createFakeOfficialSession("idle");
-    const asked: string[] = [];
-    const wired = bedWith({
-      official: {
-        resumeExited: async (entry) => {
-          asked.push(entry.backendSessionId ?? "");
-          return resumedSession.handle;
-        },
-      },
-    });
-    await wired.directory.record(sessionEntry("sender"));
-    await wired.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent", status: "exited", backendSessionId: "b-1" }));
-    const outcome = await wired.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" });
-    expect(outcome.status).toBe("resumed_and_delivered");
-    expect(asked).toEqual(["b-1"]); // resumed BY the backend session id, per WS-15 §6.2
-    expect(resumedSession.pushed.length).toBe(1);
-  });
-
-  test("notify_when_idle against the official branch refuses the WHOLE call — it has no idle signal", async () => {
-    const world = bedWith();
-    await world.directory.record(sessionEntry("watcher"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", createFakeOfficialSession().handle);
-
-    const outcome = await world.messaging.notifyWhenIdle(sessionAddress("claude"), { from: sessionAddress("watcher"), messageId: "sub-1" });
-    expect(outcome.status).toBe("refused");
-    if (outcome.status === "refused") expect(outcome.reason).toContain("idle signal");
-    expect((await world.store.subscriptions.list()).length).toBe(0);
-  });
-
-  test("a push that throws is delivery_uncertain — the write may have landed before the failure", async () => {
-    const world = bedWith();
-    const official = createFakeOfficialSession();
-    official.setFailure(new Error("EPIPE"));
-    await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
-
-    const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" });
-    expect(outcome.status).toBe("delivery_uncertain");
-  });
-});
-
 describe("one envelope, one answer: attribution before any push (review r1, D1)", () => {
   // THE DEFECT: `renderAttributedTurn`'s owner check — a claimed `agent:` sender the receiving session
   // does not own (WS-10 §10.3) — was evaluated in three different places on three delivery paths. The
@@ -245,7 +150,7 @@ describe("one envelope, one answer: attribution before any push (review r1, D1)"
   /** An envelope claiming to come from a child of a DIFFERENT session than the receiver. */
   const foreign = (to: ReturnType<typeof sessionAddress>) => envelope({ messageId: "m-foreign", from: childAddress("stranger", "c1"), to });
 
-  test("all three delivery paths answer `refused`, and none of them pushes anything", async () => {
+  test("both Winter delivery paths answer `refused`, and neither pushes anything (WS-23: the official path went with its runtime)", async () => {
     const world = bedWith();
     await world.directory.record(sessionEntry("stranger"));
     // The sender is a REAL child of a real other session, so the route is authenticated and the
@@ -254,18 +159,14 @@ describe("one envelope, one answer: attribution before any push (review r1, D1)"
     await world.directory.record(childEntry("stranger", "c1"));
     await world.directory.record(sessionEntry("writer"));
     await world.directory.record(sessionEntry("faceted"));
-    await world.directory.record(sessionEntry("official", { runtimeKind: "claude-agent" }));
     const writer = winterWriterHandle(() => "running");
     const facet = createFakeFacet();
-    const official = createFakeOfficialSession("running");
     world.messaging.attachWinterSession("session:writer", writer.handle);
     world.messaging.attachWinterSession("session:faceted", winterHandle(facet));
-    world.messaging.attachOfficialSession("session:official", official.handle);
 
     const paths = [
       { name: "winter writer", outcome: await world.messaging.deliver(foreign(sessionAddress("writer"))), pushed: writer.pushed.length },
       { name: "winter facet", outcome: await world.messaging.deliver({ ...foreign(sessionAddress("faceted")), messageId: "m-foreign-2" }), pushed: facet.delivered.length },
-      { name: "official", outcome: await world.messaging.deliver({ ...foreign(sessionAddress("official")), messageId: "m-foreign-3" }), pushed: official.pushed.length },
     ];
 
     for (const path of paths) {
@@ -322,70 +223,9 @@ describe("one envelope, one answer: attribution before any push (review r1, D1)"
     const asTarget = await world.messaging.reply({ original: envelope({ from: malformed, to: sessionAddress("b") }), body: "hi" });
     expect(asTarget.status).toBe("refused");
   });
-
-  test("the official OWNER-QUALIFIED child relay keeps its deliberate absence of an owner", async () => {
-    // A message FOR a child is handed to the parent that owns the child but NOT the sender — the one
-    // place the owner check must not run, and the reason `renderOwnerQualifiedTurn` takes no owner.
-    const world = bedWith();
-    const parent = createFakeOfficialSession("running");
-    await world.directory.record(sessionEntry("stranger"));
-    await world.directory.record(childEntry("stranger", "c1"));
-    await world.directory.record(sessionEntry("claude-parent", { runtimeKind: "claude-agent" }));
-    await world.directory.record(childEntry("claude-parent", "sub-1", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude-parent", parent.handle);
-
-    const outcome = await world.messaging.deliver(
-      envelope({ messageId: "m-relay", from: childAddress("stranger", "c1"), to: { objectKind: "agent", runtimeKind: "claude-agent", winterSessionId: "claude-parent", parentWinterSessionId: "claude-parent", childId: "sub-1" } }),
-    );
-    expect(outcome.status).toBe("queued");
-    expect(parent.pushed[0]).toContain('for="agent:claude-parent:sub-1"');
-  });
 });
 
-describe("WS13c-SM1/SM2/SM3 — the cross-family pairs, routed by the CHILD's own record", () => {
-  test("SM1 — a `gpt` Winter parent's `claude` child is reached on the OFFICIAL runtime, and the parent switching changes nothing", async () => {
-    const world = bedWith();
-    const parentFacet = createFakeFacet();
-    const childSession = createFakeOfficialSession("running");
-    await world.directory.record(sessionEntry("gpt-parent"));
-    // The child's OWN slot selected the official runtime (R-7b-1), so on that runtime it is a session
-    // in its own right: `claude-handle`, with its own handle — not a native subagent of an official
-    // parent (`claude-child`), which is a different door entirely.
-    await world.directory.record({ ...childEntry("gpt-parent", "sonnet-child", { runtimeKind: "claude-agent" }), transport: "claude-handle" });
-    world.messaging.attachWinterSession("session:gpt-parent", winterHandle(parentFacet));
-    world.messaging.attachOfficialSession("agent:gpt-parent:sonnet-child", childSession.handle);
-
-    const outcome = await world.messaging.deliver(envelope({ messageId: "m1", from: sessionAddress("gpt-parent"), to: { objectKind: "agent", runtimeKind: "claude-agent", winterSessionId: "gpt-parent", parentWinterSessionId: "gpt-parent", childId: "sonnet-child" } }));
-    expect(outcome.status).toBe("queued");
-    expect(childSession.pushed.length).toBe(1);
-    // The Winter parent's facet was never asked to steer it — the child is not inside that process.
-    expect(parentFacet.steered.length).toBe(0);
-
-    // The parent switches runtime. The child's record is untouched, so the next message routes the same
-    // way: "resume and SendMessage follow the CHILD's record, never the parent's current runtime."
-    await world.directory.record(sessionEntry("gpt-parent", { runtimeKind: "claude-agent" }));
-    const after = await world.messaging.deliver(envelope({ messageId: "m2", from: sessionAddress("gpt-parent"), to: { objectKind: "agent", runtimeKind: "claude-agent", winterSessionId: "gpt-parent", parentWinterSessionId: "gpt-parent", childId: "sonnet-child" } }));
-    expect(after.status).toBe("queued");
-    expect(childSession.pushed.length).toBe(2);
-    expect((await world.directory.get("agent:gpt-parent:sonnet-child"))?.runtimeKind).toBe("claude-agent");
-  });
-
-  test("SM2 — the mirror: an official parent's Winter child is reached on the WINTER runtime, through its own facet", async () => {
-    const world = bedWith();
-    const officialParent = createFakeOfficialSession("running");
-    const childFacet = createFakeFacet();
-    await world.directory.record(sessionEntry("claude-parent", { runtimeKind: "claude-agent" }));
-    await world.directory.record({ ...childEntry("claude-parent", "winter-child"), transport: "winter-session" });
-    world.messaging.attachOfficialSession("session:claude-parent", officialParent.handle);
-    world.messaging.attachWinterSession("agent:claude-parent:winter-child", winterHandle(childFacet));
-
-    const outcome = await world.messaging.deliver(envelope({ messageId: "m1", from: sessionAddress("claude-parent"), to: childAddress("claude-parent", "winter-child") }));
-    expect(outcome.status).toBe("queued");
-    expect(childFacet.delivered.length).toBe(1);
-    // The official parent was never handed an owner-qualified relay: this child is not its subagent.
-    expect(officialParent.pushed.length).toBe(0);
-  });
-
+describe("WS13c-SM3 — a child routed by its OWN record (WS-23: SM1/SM2, the cross-runtime pairs, went with the official runtime)", () => {
   test("SM3 — a child whose recorded provider is gone refuses with `child-provider-unavailable`, and NO generation is started", async () => {
     const parentFacet = createFakeFacet();
     const world = bedWith({
@@ -452,15 +292,11 @@ describe("NEW-12 — a host permission-class hook that raises", () => {
 
   for (const [label, hooks] of [
     ["the WINTER adapter's host hook", { winter: { permissionClass: boom } }],
-    ["the OFFICIAL adapter's host hook", { official: { permissionClass: boom } }],
   ] as const) {
     test(`${label} falls through to unknown, and D2 HOLDS rather than delivering`, async () => {
       const world = bedWith(hooks as GlobalMessagingOptions);
       await world.directory.record(sessionEntry("sender"));
-      // The hook under test has to be the one the RECEIVER's branch reads, so the receiver's runtime
-      // follows the adapter being exercised.
-      const receiverKind = "official" in hooks ? ("claude-agent" as const) : ("winter-agent" as const);
-      await world.directory.record(sessionEntry("receiver", { runtimeKind: receiverKind }));
+      await world.directory.record(sessionEntry("receiver"));
       world.messaging.attachWinterSession("session:receiver", winterWriterHandle(() => "idle").handle);
 
       // BEFORE: this line threw, out of `send()` and out of the model-facing handler with it.
@@ -523,5 +359,25 @@ describe("reply() — the refusal names sender or target, whichever is malformed
     });
     expect(outcome.status).toBe("refused");
     expect("reason" in outcome ? outcome.reason : "").toContain("sender");
+  });
+});
+
+describe("WS-23: a row still recorded on the retired official runtime", () => {
+  test("a message to it is typed `unavailable` naming the missing adapter — never a throw, never delivered elsewhere", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("sender"));
+    await world.directory.record(sessionEntry("legacy", { runtimeKind: "claude-agent", status: "exited", backendSessionId: "backend-legacy" }));
+    const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:legacy", body: "are you there?", originToolCallId: "t-legacy" });
+    expect(outcome.status).toBe("unavailable");
+    expect(JSON.stringify(outcome)).toContain("no messaging adapter is registered for the claude-agent runtime");
+    // Nothing was opened on the Winter runtime in its place.
+    expect(world.peerCalls).toHaveLength(0);
+  });
+
+  test("directory recovery tolerates it: the row is read back, never a throw", async () => {
+    const world = bedWith();
+    await world.directory.record(sessionEntry("legacy", { runtimeKind: "claude-agent", status: "exited", backendSessionId: "backend-legacy" }));
+    await world.directory.recover();
+    expect((await world.directory.get("session:legacy"))?.runtimeKind).toBe("claude-agent");
   });
 });

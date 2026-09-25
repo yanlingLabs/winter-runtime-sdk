@@ -12,7 +12,7 @@ import { createRuntimeMessaging } from "../../src/messaging/index.ts";
 // its own `GlobalMessagingHandle`, which satisfies `MessagingToolPort` structurally (ruling P-3).
 import { createMessagingToolHandlers } from "@yanlinglabs/winter-agent-sdk/tools";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { childEntry, createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
+import { childEntry, createBed, createFakeFacet, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle, declaredClasses } from "./support.ts";
 
 function bedWith(options: GlobalMessagingOptions = {}) {
   const bed = createBed();
@@ -23,7 +23,6 @@ function bedWith(options: GlobalMessagingOptions = {}) {
     now: bed.clock.now,
     ...options,
     winter: { ...declaredClasses().winter, ...(options.winter ?? {}) },
-    official: { ...declaredClasses().official, ...(options.official ?? {}) },
   };
   const { directory, messaging } = createRuntimeMessaging(bed.context, { directory: { now: bed.clock.now }, messaging: messagingOptions });
   return { ...bed, directory, messaging };
@@ -46,20 +45,20 @@ describe("row 7 — addressing", () => {
     expect(facet.delivered[0]?.to.winterSessionId).toBe("receiver");
   });
 
-  test("a display name resolves, and the resolved envelope carries the DIRECTORY's runtime kind", async () => {
+  test("a display name resolves to the session the DIRECTORY names, never the sender's own", async () => {
+    // WS-23: this case routed to the official adapter by the row's declared kind; with one runtime the
+    // property left to prove is that the name resolves through the directory to its own session.
     const world = bedWith();
     const facet = createFakeFacet();
+    const reviewer = winterWriterHandle(() => "idle");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("official", { runtimeKind: "claude-agent", displayName: "reviewer" }));
-    // The official adapter is what must receive it — chosen by the ROW's declared kind, since a
-    // serialized address carries none.
-    const official = { pushed: [] as string[], push: (text: string) => void official.pushed.push(text), status: () => "idle" as const };
-    world.messaging.attachOfficialSession("session:official", official);
+    await world.directory.record(sessionEntry("named", { displayName: "reviewer" }));
+    world.messaging.attachWinterSession("session:named", reviewer.handle);
     world.messaging.attachWinterSession("session:sender", winterHandle(facet));
 
     const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "reviewer", body: "hello", originToolCallId: "t1" });
     expect(outcome.status).toBe("delivered");
-    expect(official.pushed.length).toBe(1);
+    expect(reviewer.pushed.length).toBe(1);
     expect(facet.delivered.length).toBe(0);
   });
 
@@ -443,20 +442,6 @@ describe("row 7 — notify_when_idle through the MODEL-facing path (review r1, M
     const retry = JSON.parse((await createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_6" }).sendMessage({ to: "session:target", message: "ping" })).text ?? "{}") as Record<string, unknown>;
     expect(retry["status"]).toBe("delivered");
     expect(writer.pushed.length).toBe(1);
-  });
-
-  test("an official target refuses the whole call the same way", async () => {
-    const world = bedWith();
-    const official = createFakeOfficialSession("running");
-    await world.directory.record(sessionEntry("watcher"));
-    await world.directory.record(sessionEntry("official", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:official", official.handle);
-    const handlers = createMessagingToolHandlers(world.messaging, { sessionId: "watcher", toolUseId: "toolu_4" });
-
-    const payload = JSON.parse((await handlers.sendMessage({ to: "session:official", message: "hi", notify_when_idle: true })).text ?? "{}") as Record<string, unknown>;
-    expect(payload["status"]).toBe("refused");
-    expect(official.pushed.length).toBe(0);
-    expect((await world.store.subscriptions.list()).length).toBe(0);
   });
 
   test("NEW-3 — the ROLLBACK is real: an adapter that refuses after the record is written leaves none", async () => {

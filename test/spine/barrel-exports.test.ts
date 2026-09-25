@@ -145,16 +145,44 @@ describe("the shared module neither lane owns", () => {
   test("one definition means one identity: both lanes' importers see the SAME function object", async () => {
     // The real hazard N13 named was two functions with mirrored argument orders. Identity is the only
     // assertion that cannot be satisfied by a second copy that merely looks the same today.
+    // WS-23: the two lanes that imported it (the official spool and the materialized-resume decorator)
+    // are gone; what is left to pin is the one definition and its argument order.
     const shared = await import("../../src/vendor-paths.ts");
-    const spool = await import("../../src/official/spool.ts");
-    const store = await import("../../src/store/materialized-resume.ts");
-    expect(Object.keys(spool)).not.toContain("resumeStagingRoot");
-    expect(Object.keys(store)).not.toContain("resumeStagingRoot");
-    // The acceptor half of this check retired with `native-args.ts` itself: there is no router-side
-    // copy left to be identical to. `src/official/aliases.ts` no longer re-exports any of it.
-    const aliases = (await import("../../src/official/aliases.ts")) as Record<string, unknown>;
-    expect(aliases["acceptNativeSendMessageArgs"]).toBeUndefined();
-    // …and the one surviving argument order is `(uuid, base)`, not the mirrored one.
+    // The one surviving argument order is `(uuid, base)`, not the mirrored one.
     expect(shared.resumeStagingRoot("u", "/tmp")).toBe(`/tmp/${shared.RESUME_STAGING_PREFIX}u`);
+  });
+});
+
+describe("WS-23: the official runtime's surface is gone from the package barrel", () => {
+  // The official leg's host surface, the handoff barrier's participant types and the decorator's probe
+  // report left with the official runtime. A name that crept back would be a door onto nothing.
+  const RETIRED = [
+    "createApprovalBridge",
+    "isOurApprovalBridge",
+    "materializeOfficialMcpServer",
+    "officialMcpServers",
+    "buildOfficialChildEnv",
+    "minimalOsEnvironmentFrom",
+    "containmentDispositions",
+    "officialDisallowedTools",
+    "officialBranchLabel",
+    "OFFICIAL_DISCLOSURES",
+    "createOfficialInputStream",
+    "isOfficialQuery",
+    "officialCredentialPlan",
+    "officialConnectionEnv",
+    "officialUserTurn",
+    "materializedResumeReportForPin",
+    "MATERIALIZED_RESUME_PROBE_REPORTS",
+    "RuntimeHandoffRequiredError",
+  ];
+
+  test("none of them is exported, and the switch review is", async () => {
+    const barrel = (await import("../../src/index.ts")) as Record<string, unknown>;
+    expect(RETIRED.filter((name) => name in barrel)).toEqual([]);
+    expect(typeof barrel["SwitchReviewError"]).toBe("function");
+    // The env-refusal sets the README tells a host to read are still reachable, from their new home.
+    expect(Array.isArray(barrel["EXECUTION_INDIRECTION_ENV_NAMES"])).toBe(true);
+    expect(typeof barrel["TRAFFIC_OPT_OUT_VARIABLES"]).toBe("object");
   });
 });

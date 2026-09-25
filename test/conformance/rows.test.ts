@@ -35,7 +35,11 @@ export interface RouterRow {
   id: string;
   /** WS-17 §8's own text for the row. */
   bullet: string;
-  status: "proven" | "unproven";
+  /**
+   * `retired` (WS-23): the row's subject was the official `claude` runtime, which this package no
+   * longer serves — kept in the table with the reason, never silently dropped.
+   */
+  status: "proven" | "unproven" | "retired";
   /** Which lane's landing flips this row (or which one already did). */
   owner: string;
   citations?: Citation[];
@@ -54,12 +58,8 @@ export interface RouterRow {
 
 const SELECTION = "../selection";
 const GATES = "../gates";
-const OFFICIAL = "../official";
 const MESSAGING = "../messaging";
 const STORE = "../store";
-// The bed that belongs to neither lane (fix wave, item 14). A row whose two halves were proven
-// against each other's DOUBLES is cited here as well as to each lane, because the join is the row.
-const JOINT = "../joint";
 
 /**
  * The thirteen rows R-7b-7 names. Rows 6, 9, 10, 16 and 18 are excluded by WS-17 §8 itself (they are
@@ -70,74 +70,37 @@ export const ROUTER_ROWS: RouterRow[] = [
   {
     id: "WS17-1",
     bullet: "Real model-emitted `SendMessage` through the TS alias reaches `mcp__winter__send_message` with native args and returns the visible result.",
-    status: "proven",
+    status: "retired",
     owner: "Lane B (the handlers the official branch's aliases reach), with Lane A's `toolAliases`",
-    citations: [
-      { file: `${JOINT}/rows-1-2.test.ts`, testName: "row 1 — a model-emitted SendMessage is delivered by the REAL router, and the router's typed outcome is what the model sees" },
-      { file: `${JOINT}/rows-1-2.test.ts`, testName: "row 1 — a refusal is rendered as a classified failure the model can act on, not as a crash" },
-      { file: `${JOINT}/rows-1-2.test.ts`, testName: "the REVERSE direction — a peer's message reaches the live official session's own row, through the router" },
-      { file: `${OFFICIAL}/runtime-aliases.test.ts`, testName: "row 1: a model-emitted `SendMessage` reaches the canonical handler with NATIVE args, and its result is what the model sees" },
-      { file: `${MESSAGING}/handlers.test.ts`, testName: "a retry with the SAME vendor tool-use id returns the stored outcome, not a second delivery" },
-    ],
-    note:
-      "PROVEN WHOLE-ROW IN THE FIX WAVE (item 14). Each lane's half was already green against a DOUBLE of the other — Lane A's alias test used a recording handler, Lane B's router tests used a scripted caller — and the row is the join. `test/joint/` drives one real 0.3.250 process through its own `toolAliases` into Lane B's real handler and router, and the delivered frame, the class, the summary and the typed outcome are read at the far end. The joint run also established what no report knew: the WS-10 §12 retry key survives the whole path, because the caller is bound with NO tool-use id and the message id still carries the model's own (item 15).",
+    note: "RETIRED (WS-23, the official runtime is gone): its subject was the official branch's TS alias onto the router's handlers; the Winter runtime's own `SendMessage` reaches its own tools, and `messaging/handlers.test.ts` still pins the retry.",
   },
   {
     id: "WS17-2",
     bullet: "`ListAgents` aliasing; canonical MCP duplicate deferred/hidden visibility; behavior without Tool Search.",
-    status: "proven",
+    status: "retired",
     owner: "Lane B (handlers), with Lane A's alias table",
-    citations: [
-      { file: `${JOINT}/rows-1-2.test.ts`, testName: "row 2 — a model-emitted ListAgents renders the REAL directory, and both canonical twins are advertised" },
-      { file: `${OFFICIAL}/runtime-aliases.test.ts`, testName: "row 2: `ListAgents` aliases the same way, and the advertised set records what 0.3.250 actually does" },
-      { file: `${OFFICIAL}/aliases-containment.test.ts`, testName: "the canonical duplicates are DEFERRED rather than hidden — they stay addressable by name" },
-    ],
-    note:
-      "The visibility half is RECORDED, not asserted-as-wished: with no Tool Search active the pinned runtime advertises the native name AND the canonical twin, so `deferred` is this package's intent and the runtime's own decision is what the test writes down. Re-measured under the hermetic child env (F-1), where the advertised set is the artifact's own 21 names rather than 25 including three remotely-flagged tools.",
+    note: "RETIRED (WS-23, the official runtime is gone): `ListAgents` aliasing and the canonical MCP duplicate were the official branch's.",
   },
   {
     id: "WS17-3",
     bullet: "`disallowedTools` + permission floor cover harness-internal/direct paths aliases miss.",
-    status: "proven",
+    status: "retired",
     owner: "Lane A (aliases + deny floor, WS-14 §7)",
-    citations: [
-      { file: `${OFFICIAL}/runtime-aliases.test.ts`, testName: "row 3: the paths the alias does not cover — the canonical name direct, and where a deny rule must be spelled" },
-      { file: `${OFFICIAL}/aliases-containment.test.ts`, testName: "the floor is a PATH rule, so it covers tools no disposition anticipated" },
-    ],
-    note:
-      "The measurement behind it: denying only the built-in leaves the alias resolving and the handler RUNNING, because the deny check happens after alias resolution. `aliasDenyNames` is the door that stops a host tripping over it, and row 3 is why it exists.",
+    note: "RETIRED (WS-23, the official runtime is gone): the alias-vs-deny-floor gap was the official branch's.",
   },
   {
     id: "WS17-4",
     bullet: "Two official sessions under the spool: isolated discovery, delivery, hold/refuse, idle wake, zero visibility into `~/.claude`.",
-    status: "proven",
+    status: "retired",
     owner: "Lane A (spool isolation, WS-14 §1) with Lane B (delivery, hold/refuse, idle wake)",
-    citations: [
-      { file: `${OFFICIAL}/runtime-spool.test.ts`, testName: "row 4: two sessions under ONE spool stay isolated, and neither can see the vendor home" },
-      { file: `${MESSAGING}/official-pair.test.ts`, testName: "DISCOVERY is isolated: each sees the other session and its OWN children, never the other's" },
-      { file: `${MESSAGING}/official-pair.test.ts`, testName: "DELIVERY between the two lands in the receiver's own handle, attributed to the sender" },
-      { file: `${MESSAGING}/official-pair.test.ts`, testName: "HOLD and REFUSE are the receiver's, and neither delivers anything" },
-      { file: `${MESSAGING}/official-pair.test.ts`, testName: "IDLE WAKE: an idle official session starts one turn (`delivered`), a running one queues" },
-      { file: `${JOINT}/rows-4-5.test.ts`, testName: "two live official sessions get DIFFERENT config dirs, each under its own spool" },
-      { file: `${JOINT}/rows-4-5.test.ts`, testName: "a model in one official session DISCOVERS and ADDRESSES the other, and the delivery lands in it" },
-      { file: `${JOINT}/rows-4-5.test.ts`, testName: "a receiver whose permission class cannot be known is HELD, not delivered — fail-closed, with the real runtime as the sender" },
-      { file: `${JOINT}/rows-4-5.test.ts`, testName: "notify_when_idle against an OFFICIAL target refuses the whole call — measured, because this branch has no idle signal" },
-    ],
-    note:
-      "Both halves are now measured against two REAL 0.3.250 processes over one shared directory (item 14) — run SEQUENTIALLY, each with its own spool, which is what the isolation assertion compares; not one lane's real runtime beside the other lane's double. The `idle wake` clause resolves to WS-10 §14's WHOLE-CALL REFUSAL on this branch — the pinned SDK's `Query` exposes no session-status surface, so an adapter without a reliable idle signal must refuse rather than subscribe. That is a measurement about the artifact, not a gap in the row.",
+    note: "RETIRED (WS-23, the official runtime is gone): two official sessions under the spool — there is no official session any more.",
   },
   {
     id: "WS17-5",
     bullet: "Official parent resume after restart restores completed children for native SendMessage resume.",
-    status: "proven",
+    status: "retired",
     owner: "Lane A (parent-restart child restoration, WS-14 §15) with Lane B (the resume route)",
-    citations: [
-      { file: `${MESSAGING}/official-pair.test.ts`, testName: "recovery keeps the completed children, and a native SendMessage to one routes through the resumed parent" },
-      { file: `${MESSAGING}/official-pair.test.ts`, testName: "before the parent is resumed, the same send is retryably unavailable rather than not-found" },
-      { file: `${JOINT}/rows-4-5.test.ts`, testName: "generation two is a real `resume()` of generation one's backend session, and the completed children are addressable through it" },
-    ],
-    note:
-      "The joint half is a REAL `resume()` (round 2, NEW-B): generation one's `system/init` session id and its own spool are handed to `adapter.resume()`, the second generation reports the SAME backend session id and the same observed root, and a native SendMessage to a completed child is asserted `delivered`/`queued` with the frame arriving in the resumed parent's stream. The earlier version launched two fresh sessions and closed on `not.toBe(\"not_found\")`, which `unavailable` and `held` also satisfy.",
+    note: "RETIRED (WS-23, the official runtime is gone): an official parent's resume — there is no official session any more.",
   },
   {
     id: "WS17-7",
@@ -161,15 +124,9 @@ export const ROUTER_ROWS: RouterRow[] = [
   {
     id: "WS17-8",
     bullet: "Shared filesystem `SessionStore` + pinned dialect: Claude→Winter, Winter→Claude, and both round-trips at every advertised level.",
-    status: "proven",
+    status: "retired",
     owner: "Lane C (store wiring, WS-05 §6/§7)",
-    citations: [
-      { file: `${STORE}/rows.test.ts`, testName: "Claude -> Winter, Winter -> Claude and both round trips at level" },
-      { file: `${STORE}/rows.test.ts`, testName: "the subagent level round-trips too: a subkey survives both directions" },
-    ],
-    scoped: true,
-    note:
-      "SCOPED, and the scope is what this row's own tests cover: both legs are produced by the SHARED STORE over the pinned dialect, at every advertised level, over real `mkdtemp` homes. A Claude leg written by the PINNED RUNTIME is covered next door rather than here — `docs/probes/materialized-resume.md`'s probe (c) drives both round-trip orders with the real artifact producing every Claude leg, and as of round 2 it PASSES (its round-1 failure was two probe-side defects: a seed that never reached the canonical store, and a line-adjacency rule stricter than the dialect and than the barrier's own step 5). All four probes now pass measured, so `probe()` reports `preferred`; the SHIPPED default is still `fallback`, because the door follows a measurement a host takes on its own pin. No `agent-state` or `full-filesystem` compatibility claim rests on this row.",
+    note: "RETIRED (WS-23, the official runtime is gone): the Claude→Winter / Winter→Claude transfer through the shared store was the handoff barrier's; a session the official runtime wrote now resumes on the Winter runtime in place (the daemon's adoption, WS-23 R2).",
   },
   {
     id: "WS17-11",
@@ -177,10 +134,9 @@ export const ROUTER_ROWS: RouterRow[] = [
     status: "proven",
     owner: "Lane C (store wiring)",
     citations: [
-      { file: `${STORE}/rows.test.ts`, testName: "runtime mappings, backend ids and cursors all survive, because none of them live there" },
-      { file: `${STORE}/rows.test.ts`, testName: "the router never reads the product index: its name appears nowhere in this lane's source" },
+      { file: `${STORE}/wiring.test.ts`, testName: "the router never reads the product index: its name appears nowhere in this lane's source" },
     ],
-    note: "Proven the strong way and the structural way: the data survives a delete/rebuild BECAUSE none of it lives in the index, and a source scan pins that the router never reads the index at all.",
+    note: "Proven the structural way: the data survives a delete/rebuild BECAUSE none of it lives in the index, and a source scan pins that the store lane never reads it. (WS-23: the half that drove a handoff through the barrier went with the barrier.)",
   },
   {
     id: "WS17-12",
@@ -208,42 +164,23 @@ export const ROUTER_ROWS: RouterRow[] = [
       { file: `${GATES}/release-gates.test.ts`, testName: "nothing tracked is the pinned package, its bundle, or a vendored copy" },
       { file: `${GATES}/scripts.test.ts`, testName: "an embedded Anthropic artifact is rejected, by directory name and by file name" },
       { file: `${GATES}/scripts.test.ts`, testName: "rule 7: the OPTIONAL peer named in a REACHABLE declaration is rejected -- and only there" },
-      { file: "./rows.test.ts", testName: "row 13's other half — the pinned artifact is fetched by integrity hash into a gitignored tree" },
+      { file: "./rows.test.ts", testName: "row 13's other half — WS-23: no Anthropic artifact is fetched at all any more" },
     ],
-    note: "Scoped to the ROUTER's own distribution: the artifact exists only in gitignored `node_modules`, is pinned by lockfile integrity (the plan's Global Constraints), and is rejected by the pack scan if it ever reaches a tarball. WS-02 §6's checksum-verified ephemeral FETCH is the SDK repository's own harness gate and stays there.",
+    note: "Scoped to the ROUTER's own distribution: the pack scan rejects the artifact if it ever reaches a tarball. WS-23: the official runtime is retired, so this repository no longer fetches it at all (no dependency, no lockfile entry). WS-02 §6's checksum-verified ephemeral FETCH is the SDK repository's own harness gate and stays there.",
   },
   {
     id: "WS17-14",
     bullet: "Native + aliased Agent/worktree, durable Cron, workflow, saved-approval, plan-mode, and arbitrary file/shell paths cannot create `CLAUDE.md`, `.claude/`, or `~/.claude/plans` under strict policy.",
-    status: "proven",
+    status: "retired",
     owner: "Lane A (builtin-path containment, WS-14 §8)",
-    citations: [
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "the native writers: every §8 row is EXERCISED, and the tally says which containment stopped it" },
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "arbitrary file and shell paths: an approving broker does not lift the floor" },
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r2, NEW-3: a command that BUILDS the name is caught post-hoc — swept, reported, and the call blocked" },
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r3, NEW-9: a command whose side effect precedes a FAILURE is swept too" },
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r3, NEW-11 / WS-21 §4.3: the saved-approval path, for real — the durable update is kept for the session only and no vendor settings file appears" },
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "review r4, NEW-18 (a): a host hook stamped with the exported floor mark does not REPLACE the floor — the floor is recognised by identity" },
-      { file: `${OFFICIAL}/runtime-containment.test.ts`, testName: "the whole session's writes stay inside the spool, the cwd and the product home" },
-    ],
-    note: "Two layers, and the scope is exact. PRE-HOC: the permission floor refuses any call whose arguments name a forbidden target — path fields (case-folded, NFKC), command text (un-normalized, quote-stripped), and the §8 writers with no path argument at all — installed by `launch()` itself on EVERY launch — merged ahead of the caller's own hooks and never replaced by one of them (the floor is recognised by IDENTITY: a hook merely stamped with the exported floor mark is not the floor, and a genuine floor built under a looser template policy does not stand in for the adapter's own) — and required by `assertOptionsInvariants` by that same identity, not merely offered by the options builder. POST-HOC: a sweep registered on PostToolUse, PostToolUseFailure and PostToolBatch snapshots the forbidden names under the session's cwd AND the child's HOME, to a bounded depth (6 by default), around every filesystem-touching call; it removes what APPEARED under its roots during the call, records a typed containment breach, and ends the turn. SCOPE, stated rather than implied: shell-escape and constructed-name spellings are caught POST-HOC by the sweep, never pre-hoc; the sweep sees the SYNCHRONOUSLY-VISIBLE effects of the call it brackets (a background write that lands later is caught opportunistically by the next swept call), and its diff is TIME-BASED rather than causal — under the child's HOME that means a vendor home created by something else during a long call is removed and attributed to that call, which is narrow (an existing one is in every baseline and is never touched) but is what the wording says; it does not look outside cwd and HOME, nor below its depth bound; and the TURN ends only for a call that SUCCEEDS — for a failing call the guarantee is that the artifact does not survive it.",
+    note: "RETIRED (WS-23, the official runtime is gone): the builtin-path containment it proved was the official runtime's; the Winter runtime's own containment is the host's and the SDK's.",
   },
   {
     id: "WS17-15",
     bullet: "Canonical memory + the D18 temp layout, cross-engine temp continuity, vendor temp roots reported honestly, supervised pre-cleanup reconciliation, default-spawn `mirror_error` handoff refusal, entire-adapter projection, `$bunfs` extraction avoided or tested.",
-    status: "proven",
+    status: "retired",
     owner: "Lane C (temp continuity and the barrier) with Lane A (the supervised proxy)",
-    scoped: true,
-    citations: [
-      { file: `${STORE}/rows.test.ts`, testName: "the temp home stabilizes in the vendor engine dir across a full round trip" },
-      { file: `${STORE}/rows.test.ts`, testName: "the vendor temp roots are reported honestly, including the one a copy left behind" },
-      { file: `${STORE}/rows.test.ts`, testName: "supervised PRE-CLEANUP reconciliation: the entries are in the store before the staging root is deleted" },
-      { file: `${STORE}/rows.test.ts`, testName: "a DEFAULT-SPAWN session with a mirror error is refused, never reconciled by guesswork" },
-      { file: `${OFFICIAL}/runtime-spool.test.ts`, testName: "row 15: the vendor temp root is what we configured PLUS the engine's own segment, reported honestly" },
-      { file: `${OFFICIAL}/runtime-spool.test.ts`, testName: "§1 profile 2 + §6 rules 2/3: a store-backed resume is observed as a staging root, and reconciliation runs BEFORE cleanup" },
-    ],
-    note:
-      "SCOPED: six of the row's seven clauses are proven, four of them against the pinned runtime. The seventh — `$bunfs` extraction avoided or tested — is NOT claimed here: it is a property of how a HOST packages this package (a single-file Bun executable extracting its own embedded runtime), and nothing in this repository builds one. A row that counted it would be counting somebody else's build. The `entire-adapter projection` clause is likewise the projector's (Phase 8, WS-15 §4), and what this row proves for it is the durable half — the roots and records a projector reads.",
+    note: "RETIRED (WS-23, the official runtime is gone): temp continuity across engines, the staging roots and the pre-cleanup reconcile were the official runtime's and the barrier's.",
   },
   {
     id: "WS17-17",
@@ -254,7 +191,7 @@ export const ROUTER_ROWS: RouterRow[] = [
       { file: `${SELECTION}/row-17.test.ts`, testName: "row 17 — the fixture really is one raw model id behind several providers" },
       { file: `${SELECTION}/row-17.test.ts`, testName: "row 17 identity — two selections of the same raw id keep distinct provider-qualified identities" },
       { file: `${SELECTION}/row-17.test.ts`, testName: "row 17 credentials — each row is admitted by ITS OWN provider's credential ref, never a sibling's" },
-      { file: `${SELECTION}/row-17.test.ts`, testName: "row 17 continuation — the same raw id routes to DIFFERENT runtimes depending on the provider" },
+      { file: `${SELECTION}/row-17.test.ts`, testName: "row 17 continuation — the same raw id is decided by DIFFERENT rules depending on the provider" },
       { file: `${SELECTION}/row-17.test.ts`, testName: "row 17 resume — a record on one provider never resumes onto its twin behind another provider" },
       { file: `${SELECTION}/row-17.test.ts`, testName: "row 17 — two children on the same raw id under one parent stay two distinct records" },
     ],
@@ -269,14 +206,14 @@ export const ROUTER_ROWS: RouterRow[] = [
 export const RULING_ROWS: RouterRow[] = [
   {
     id: "D13/D28",
-    bullet: "The runtime-selection table: Claude OAuth → official always (D14-gated); a Claude-family model on a backend the official branch serves in Code mode → official; Claude through other endpoints and all Dispatch/Chat → Winter; never a raw model-ID substring; the persisted selection wins.",
+    bullet: "The runtime-selection table (WS-23: one runtime): Claude OAuth → refused, never Winter (D28); every other Claude row, every family and all Dispatch/Chat → Winter; never a raw model-ID substring; the persisted selection wins.",
     status: "proven",
     owner: "Lane D",
     citations: [
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 1 — a Claude OAuth credential routes to the official runtime, always" },
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 2 — a Claude-family model on an Anthropic-protocol backend in Code mode routes to the official runtime" },
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 2 — a Console OAuth bearer on the Anthropic-dialect backend routes to the official runtime" },
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 2 — a cloud credential chain is a backend the official branch serves, dialect notwithstanding" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "a Claude OAuth credential is refused runtime-unavailable, approved or not, peer or not — never downgraded to Winter" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "a Claude-family model on an Anthropic-protocol backend in Code mode selects Winter (R-7b-1), even with `hasClaudePeer: true`" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "a Console OAuth bearer on the Anthropic-dialect backend selects Winter" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "a cloud credential chain selects Winter too — the dialect distinction now only names the rule" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "officialServesBackend agrees with OFFICIAL_SERVED_AUTH_FAMILIES for every auth family" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 3 — the same Claude model through a non-Anthropic-protocol endpoint routes to Winter" },
       { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 3 — Dispatch and Chat run on Winter even on the Anthropic-protocol backend" },
@@ -288,14 +225,13 @@ export const RULING_ROWS: RouterRow[] = [
   },
   {
     id: "D14 gate",
-    bullet: "The Claude OAuth ship gate is closed by default, and a closed gate refuses rather than falling back to the Winter runtime.",
+    bullet: "The Claude OAuth ship gate is closed by default, and a closed gate refuses rather than falling back to the Winter runtime. (WS-23: stronger now — a Claude OAuth credential is refused whatever the gate says, in every mode.)",
     status: "proven",
     owner: "Lane D",
     citations: [
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "the D14 ship gate ships closed — the shipped default flag refuses a Claude OAuth session" },
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 1 — Claude OAuth with the D14 ship gate closed is refused, never downgraded to Winter" },
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 1 — Claude OAuth outside Code mode is refused: Code-only even after D14 approval" },
-      { file: `${SELECTION}/select-runtime.test.ts`, testName: "D13 row 1 — Claude OAuth with no official peer is refused, because it never routes to Winter" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "the D14 constant is still exported, and still closed" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "a Claude OAuth credential is refused runtime-unavailable, approved or not, peer or not — never downgraded to Winter" },
+      { file: `${SELECTION}/select-runtime.test.ts`, testName: "…and in Dispatch and Chat too" },
     ],
   },
   {
@@ -305,9 +241,9 @@ export const RULING_ROWS: RouterRow[] = [
     owner: "Lane D (the selection half; the delivery half is Lane B's)",
     citations: [
       { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — the same child under two different parents produces the identical record" },
-      { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a Claude-family child of a Winter parent runs on the official runtime" },
-      { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a gpt-family child of an official parent runs on the Winter runtime" },
-      { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a cross-runtime parent/child pair is flagged for the directory channel" },
+      { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a Claude-family child of a gpt parent runs on the Winter runtime (WS-23: once the official runtime)" },
+      { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a gpt-family child of a Claude parent runs on the Winter runtime" },
+      { file: `${SELECTION}/child-runtime.test.ts`, testName: "R-7b-1 — a cross-family pair is NOT cross-runtime any more (WS-23): it stays on the in-runtime channel" },
       { file: `${SELECTION}/child-runtime.test.ts`, testName: "WS-13c §8 — a resume never re-decides the runtime, even when the table would now differ" },
       { file: `${SELECTION}/child-runtime.test.ts`, testName: "WS-13c §8 — a resume succeeds on a recorded row that is not its provider's first row" },
       { file: `${SELECTION}/child-runtime.test.ts`, testName: "WS-13c §8 — a resume refuses when the recorded ROW is unservable though its provider still serves the model" },
@@ -328,18 +264,9 @@ export const RULING_ROWS: RouterRow[] = [
   {
     id: "R-7b-8",
     bullet: "The D29 probe: whether the pinned official runtime exposes an advisor server tool in an SDK session, and under which condition, measured against the pinned artifact through the loopback capture and recorded.",
-    status: "proven",
+    status: "retired",
     owner: "Lane D",
-    citations: [
-      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "the probe drove the PINNED artifact, over loopback only, and printed its inventories" },
-      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — no condition puts an advisor tool in the session's advertised tool inventory" },
-      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — configuring an advisor model puts NOTHING advisor-shaped on the wire (the pinned artifact, alone)" },
-      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "D29 — no advisor appears in ANY hermetic condition, on the wire or in the inventory" },
-      { file: `${SELECTION}/d29-advisor-probe.test.ts`, testName: "the remote-configuration leg, when it is explicitly enabled, shows what the CDN adds" },
-      { file: "../../docs/probes/d29-advisor.md", testName: "## 3. Verdict" },
-    ],
-    note:
-      "REWRITTEN IN THE FIX WAVE (whole-branch F-1). The first version's citations pointed at tests asserting that `settings.advisorModel` put an advisor on the wire; that was the pinned artifact PLUS its remote feature configuration, and it went red whenever the CDN fetch timed out. With the runtime's four traffic opt-outs set, no condition puts an advisor anywhere — it is a remotely-flagged capability, not a property of the pin. D29's split is unaffected either way (nothing client-side to alias under either condition). One labelled non-hermetic leg survives behind `WINTER_D29_ALLOW_REMOTE_CONFIG=1` and is evidence for nothing. The probe skips with a printed reason where the pinned runtime cannot start, so the citation is to the tests AND to the record they produce.",
+    note: "RETIRED (WS-23, the official runtime is gone): the D29 probe measured the pinned official runtime.",
   },
 ];
 
@@ -377,6 +304,7 @@ function countOccurrences(haystack: string, needle: string): number {
  * note column instead (also M4), and leave the status word alone.
  */
 function statusCell(row: RouterRow): string {
+  if (row.status === "retired") return "retired (WS-23)";
   if (row.status !== "proven") return "unproven";
   return row.scoped === true ? "**proven** (router-scoped — see the note)" : "**proven**";
 }
@@ -421,6 +349,15 @@ export function renderRowsDocument(): string {
     }
     lines.push("");
   }
+  const retired = ALL_ROWS.filter((row) => row.status === "retired");
+  if (retired.length > 0) {
+    lines.push("## Retired (WS-23)");
+    lines.push("");
+    lines.push("The official `claude` runtime is no longer served by this package; these rows were about it.");
+    lines.push("");
+    for (const row of retired) lines.push(`- **${row.id}** — ${row.note ?? ""}`);
+    lines.push("");
+  }
   const unproven = ALL_ROWS.filter((row) => row.status === "unproven");
   lines.push("## Still unproven");
   lines.push("");
@@ -433,10 +370,13 @@ export function renderRowsDocument(): string {
 const DOC_PATH = fileURLToPath(new URL("../../docs/conformance-rows.md", import.meta.url));
 
 describe("WS-17 §8 — the router's conformance rows", () => {
-  test("every row is proven with citations or unproven with the lane that owns it", () => {
+  test("every row is proven with citations, unproven with the lane that owns it, or retired with the reason", () => {
     for (const row of ALL_ROWS) {
       if (row.status === "proven") {
         expect(row.citations?.length ?? 0, `${row.id}: a proven row must carry at least one citation`).toBeGreaterThan(0);
+      } else if (row.status === "retired") {
+        expect(row.note?.startsWith("RETIRED (WS-23"), `${row.id}: a retired row must say why`).toBe(true);
+        expect(row.citations, `${row.id}: a retired row carries no citations`).toBeUndefined();
       } else {
         expect(row.owner.length, `${row.id}: an unproven row must name the lane that owns it`).toBeGreaterThan(6);
         expect(row.citations, `${row.id}: an unproven row must not carry citations`).toBeUndefined();
@@ -472,13 +412,13 @@ describe("WS-17 §8 — the router's conformance rows", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  test("row 13's other half — the pinned artifact is fetched by integrity hash into a gitignored tree", () => {
-    // The router's distribution never contains the artifact (the gates cited on row 13 prove that).
-    // This is the other clause: the copy that DOES exist locally is pinned by a lockfile integrity
-    // hash rather than fetched loosely, and the tree it lands in is gitignored.
+  test("row 13's other half — WS-23: no Anthropic artifact is fetched at all any more", () => {
+    // The router's distribution never contained the artifact (the gates cited on row 13 prove that).
+    // The other clause used to be that the copy fetched for tests was pinned by a lockfile integrity
+    // hash into a gitignored tree; with the official runtime retired, nothing fetches it.
     const lock = readCited("../../pnpm-lock.yaml");
-    const pinned = lock.match(/'@anthropic-ai\/claude-agent-sdk@0\.3\.250':\s*\n\s*resolution: \{integrity: sha512-[A-Za-z0-9+/=]+==\}/);
-    expect(pinned, "the pinned official SDK must carry a lockfile integrity hash").not.toBeNull();
+    expect(lock.includes("@anthropic-ai/claude-agent-sdk"), "the lockfile must not name the official SDK").toBe(false);
+    expect(readCited("../../package.json")).not.toContain("@anthropic-ai/claude-agent-sdk");
     expect(readCited("../../.gitignore")).toContain("node_modules");
     expect(readCited("../../.github/workflows/ci.yml")).toContain("pnpm install --frozen-lockfile");
   });
@@ -508,6 +448,6 @@ describe("WS-17 §8 — the router's conformance rows", () => {
     const proven = ALL_ROWS.filter((row) => row.status === "proven");
     console.log(`[rows] ${proven.length}/${ALL_ROWS.length} proven: ${proven.map((row) => row.id).join(", ")}`);
     console.log(`[rows] still unproven: ${ALL_ROWS.filter((row) => row.status === "unproven").map((row) => `${row.id} (${row.owner})`).join("; ")}`);
-    expect(proven.length + ALL_ROWS.filter((row) => row.status === "unproven").length).toBe(ALL_ROWS.length);
+    expect(proven.length + ALL_ROWS.filter((row) => row.status !== "proven").length).toBe(ALL_ROWS.length);
   });
 });

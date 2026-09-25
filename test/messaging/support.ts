@@ -15,7 +15,7 @@ import type { SeamContext } from "../../src/seams/context.ts";
 import type { RuntimeDirectoryEntry, RuntimeDirectoryStore } from "../../src/seams/directory-store.ts";
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress, RuntimeKind } from "../../src/seams/messaging-contract.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import type { AttachedOfficialSession, AttachedWinterSession, LiveSessionStatus } from "../../src/messaging/index.ts";
+import type { AttachedWinterSession, LiveSessionStatus } from "../../src/messaging/index.ts";
 import { WINTER_BRAND, type SdkMessage, type SessionMessagingFacet } from "@yanlinglabs/winter-agent-sdk";
 import type { MessagingIdleNoticePayload, MessagingNotificationsPage } from "@yanlinglabs/winter-agent-sdk";
 import type { NotificationRecord } from "@yanlinglabs/winter-agent-sdk/messaging";
@@ -111,10 +111,10 @@ export function envelope(over: Partial<GlobalAgentMessage> = {}): GlobalAgentMes
  * Since review r1's D2 an UNKNOWN receiver class fails closed (the mail is held until the class is
  * known), so a bed whose subject is DELIVERY declares one and a bed whose subject is the POLICY does
  * not. A live Winter facet always wins over this; it is the answer for a session driven through a
- * plain writer, and for every official session (the pinned SDK exposes no permission mode at all).
+ * plain writer.
  */
-export function declaredClasses(label: PermissionClassLabel = "prompts"): { winter: { permissionClass: () => PermissionClassLabel }; official: { permissionClass: () => PermissionClassLabel } } {
-  return { winter: { permissionClass: () => label }, official: { permissionClass: () => label } };
+export function declaredClasses(label: PermissionClassLabel = "prompts"): { winter: { permissionClass: () => PermissionClassLabel } } {
+  return { winter: { permissionClass: () => label } };
 }
 
 /** A clock the test moves by hand — no timers, no sleeps, no flake. */
@@ -225,35 +225,6 @@ export function createFakeFacet(): FakeFacet {
     },
     setChildOutcome(outcome) {
       childOutcome = outcome;
-    },
-  };
-}
-
-export interface FakeOfficialSession {
-  handle: AttachedOfficialSession;
-  pushed: string[];
-  setStatus(status: NonNullable<ReturnType<NonNullable<AttachedOfficialSession["status"]>>>): void;
-  setFailure(error: Error | undefined): void;
-}
-
-export function createFakeOfficialSession(status: "running" | "idle" = "running"): FakeOfficialSession {
-  const pushed: string[] = [];
-  let current = status as NonNullable<ReturnType<NonNullable<AttachedOfficialSession["status"]>>>;
-  let failure: Error | undefined;
-  return {
-    pushed,
-    handle: {
-      push(text) {
-        if (failure !== undefined) throw failure;
-        pushed.push(text);
-      },
-      status: () => current,
-    },
-    setStatus(next) {
-      current = next;
-    },
-    setFailure(error) {
-      failure = error;
     },
   };
 }

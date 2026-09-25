@@ -92,13 +92,14 @@ describe("WS-17 row 17 — one raw model id, three providers", () => {
     expect(on("bedrock", { requested: { model: "bedrock/anthropic.claude-haiku-4-5", provider: "bedrock" }, credentials: credentials(["bedrock"]) }).authFamily).toBe("cloud-credential-chain");
   });
 
-  test("row 17 continuation — the same raw id routes to DIFFERENT runtimes depending on the provider", () => {
-    // This is the sharpest form of "distinct routes": identical model, identical family, identical
-    // mode — and the runtime the session will live on differs, because the backend differs.
+  test("row 17 continuation — the same raw id is decided by DIFFERENT rules depending on the provider", () => {
+    // Identical model, identical family, identical mode — and the rule that fired differs, because the
+    // backend differs. WS-23: both now land on the Winter runtime (the vendor's row used to run on the
+    // official one), so the distinct route is the rule and the row, not the runtime.
     const vendor = on("anthropic");
     const reseller = on("kie");
-    expect(vendor.runtimeKind).toBe("claude-agent");
-    expect(ruleIdOf(vendor)).toBe("D13-2");
+    expect(vendor.runtimeKind).toBe("winter-agent");
+    expect(ruleIdOf(vendor)).toBe("R-7b-1-no-peer");
     expect(reseller.runtimeKind).toBe("winter-agent");
     expect(ruleIdOf(reseller)).toBe("D13-3-endpoint");
   });
@@ -147,8 +148,8 @@ describe("WS-17 row 17 — one raw model id, three providers", () => {
     if (isSelectionRefusal(viaVendor) || isSelectionRefusal(viaReseller)) throw new Error("unreachable");
     expect(viaVendor.modelRef).not.toBe(viaReseller.modelRef);
     expect(viaVendor.providerId).not.toBe(viaReseller.providerId);
-    // …and they even land on different runtimes, so the directory has two genuinely different objects.
-    expect(viaVendor.runtimeKind).toBe("claude-agent");
+    // WS-23: both on the Winter runtime now; still two genuinely different records.
+    expect(viaVendor.runtimeKind).toBe("winter-agent");
     expect(viaReseller.runtimeKind).toBe("winter-agent");
   });
 });

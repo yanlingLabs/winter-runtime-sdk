@@ -5,9 +5,8 @@
 // explicit deadline whatever the body did). `withLoopbackFake` below is re-exported under a name that
 // says so, because the one thing a lane must never do is call `startFake` and remember to close it.
 //
-// R-7b-6: the official SDK is driven in tests through `ANTHROPIC_BASE_URL` pointed at one of these
-// fakes — never a real endpoint. `officialCaptureEnv` builds the minimal environment that does it,
-// so the env allowlist a test uses is one object rather than a habit.
+// A runtime is driven in tests against one of these fakes — never a real endpoint. (WS-23: the
+// official SDK's capture environment, `officialCaptureEnv`, went with the official runtime.)
 //
 // BUN ONLY, and openly: `@yanlinglabs/winter-provider-conformance` declares `engines.bun` alone
 // because its fakes use `Bun.serve`. Calling one of the four functions below under Node (or under Bun
@@ -28,10 +27,8 @@
 // `./host.ts`, not `./index.ts`). Measured directly: a consumer with the OPTIONAL peer absent still
 // failed `tsc --noEmit` on THIS file's own `import type` line even when importing an unrelated name
 // from the barrel — a `.d.ts` binds its own top-level type-only imports as part of being loaded at
-// all, not lazily per export. `./capture-env.ts` carries the two exports below (`HERMETIC_TRAFFIC_OPT_OUTS`,
-// `officialCaptureEnv`) that name no peer, so `./host.ts` can import THAT file directly; this file
-// stays reachable only from `./index.ts`, the INTERNAL, unpublished barrel `bun test` uses by relative
-// path.
+// all, not lazily per export. So this file stays reachable only from `./index.ts`, the INTERNAL,
+// unpublished barrel `bun test` uses by relative path.
 import type { FakeRoute, FakeServer, RecordedRequest, StartFakeOptions } from "@yanlinglabs/winter-provider-conformance/fakes";
 
 export type { FakeRoute, FakeServer, RecordedRequest, StartFakeOptions };
@@ -72,8 +69,3 @@ export async function requestsTo(fake: FakeServer, path: string): Promise<Record
   return (await loadFakesModule()).requestsTo(fake, path);
 }
 
-// `HERMETIC_TRAFFIC_OPT_OUTS`/`officialCaptureEnv` MOVED to `./capture-env.ts` (0.0.3, P8c-13): they
-// name no optional peer, so they belong in the file `./host.ts` (the published `./testing` subpath)
-// can import directly. Re-exported here, unchanged, for the tests that still reach them off this
-// file or off the full internal barrel (`./index.ts`).
-export { HERMETIC_TRAFFIC_OPT_OUTS, officialCaptureEnv } from "./capture-env.ts";

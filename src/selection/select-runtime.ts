@@ -26,6 +26,13 @@
 //      family." A selector that cannot serve what was asked says so; it does not quietly serve
 //      something else.
 //
+// WS-23: ONE RUNTIME. The official runtime is retired, so the table never picks `claude-agent`: a
+// Claude model routes to the Winter runtime (`R-7b-1-no-peer` in Code mode on a backend the official
+// branch used to serve, the D13 row-3 ids otherwise), and a Claude OAuth credential — which never
+// routes to Winter (D28) — is a typed refusal. `hasClaudePeer`/`claudeOauthApproved` are accepted and
+// ignored. The retired rule ids (`D13-1`, `D13-2`) stay in `SELECTION_RULES` so a record a host
+// persisted under one still reads back through `ruleIdOf`.
+//
 // EVERY DECISION CARRIES A RULE ID. `RuntimeSelection.reason` is prefixed with the id of the rule that
 // fired (`SELECTION_RULES`), so a host rendering "why is this session on that runtime" and a test
 // asserting which branch was taken read the same token instead of substring-matching prose.
@@ -75,11 +82,8 @@ export const ANTHROPIC_PROTOCOL_PROVIDER_FALLBACK: readonly string[] = ["anthrop
 export const CLAUDE_RESERVED_SLOT_NAMES: readonly string[] = ["fable", "opus", "sonnet", "haiku"];
 
 /**
- * D14's ship gate, as the shipped default.
- *
- * WS-14 §12: Claude OAuth is "built but publicly ship-gated pending written Anthropic approval…
- * Until approval exists, the shippable branch uses API-key/cloud/gateway auth only." A host that has
- * approval passes `claudeOauthApproved: true` deliberately; everything that does not say so gets this.
+ * D14's ship gate, as the shipped default. WS-23: nothing reads the gate any more (a Claude OAuth
+ * credential is refused whatever it says); the constant stays exported for a host that still names it.
  */
 export const D14_CLAUDE_OAUTH_APPROVED_DEFAULT = false;
 
@@ -106,6 +110,7 @@ export const OFFICIAL_SERVED_AUTH_FAMILIES: readonly SelectionAuthFamily[] = ["a
  * a test pin prose a product person should be free to improve).
  */
 export const SELECTION_RULES = {
+  // RETIRED (WS-23): never decided any more; kept so a record persisted under either reads back.
   "D13-1": "a Claude OAuth credential always routes to the official runtime (WS-13 §9, D13 row 1)",
   "D13-2": "a Claude-family model on an Anthropic-protocol backend in Code mode routes to the official runtime (WS-13 §9, D13 row 2)",
   "D13-3-endpoint": "a Claude-family model reached through a backend the official branch does not serve routes to the Winter runtime (WS-13 §9, D13 row 3)",
@@ -301,9 +306,9 @@ function labelForProvider(providerId: string): string {
  * ANTHROPIC IS THREE DOORS BEHIND ONE ROW (D13/D14/P10a), which a per-row auth view cannot express —
  * the catalog names one `anthropic` row for the model, and this package already owns the vocabulary
  * for its three auth kinds (`api-key`, `console-profile`, `claude-oauth`), so it is the one provider
- * this function names by id rather than by declared auth view. The subscription door is listed only
- * while `input.claudeOauthApproved` is true (D14's own ship gate is the "officialSubscriptionAuthEnabled"
- * input at this layer — a claude.ai subscription IS a Claude OAuth credential, WS-15 §1's own union).
+ * this function names by id rather than by declared auth view. WS-23: two of them — the claude.ai
+ * subscription door (a Claude OAuth credential) served only the retired official runtime and is never
+ * listed.
  *
  * BEDROCK AND VERTEX ARE NAMED THE SAME WAY, for the same reason: WS-14 §12's own table is what makes
  * them `cloud-credential-chain` (`officialServesBackend`'s own comment names them as exactly that
@@ -317,7 +322,7 @@ function labelForProvider(providerId: string): string {
  * auth kind on the hint declares it, and this function never invents a credential shape a row might
  * not use.
  */
-function claudeAlternatives(rows: readonly ModelRow[], input: Pick<SelectionInput, "credentials" | "claudeOauthApproved">): SelectionAlternative[] {
+function claudeAlternatives(rows: readonly ModelRow[], input: Pick<SelectionInput, "credentials">): SelectionAlternative[] {
   const out: SelectionAlternative[] = [];
   const seen = new Set<string>();
   const push = (entry: SelectionAlternative): void => {
@@ -330,7 +335,6 @@ function claudeAlternatives(rows: readonly ModelRow[], input: Pick<SelectionInpu
     if (row.providerId === "anthropic") {
       push({ providerId: "anthropic", authKind: "api-key", label: "Anthropic API key" });
       push({ providerId: "anthropic", authKind: "console-profile", label: "Anthropic Console login" });
-      if (input.claudeOauthApproved) push({ providerId: "anthropic", authKind: "claude-oauth", label: "claude.ai subscription" });
       continue;
     }
     if (row.providerId === "bedrock" || row.providerId === "vertex") {
@@ -535,13 +539,8 @@ function unservableDetail(subject: string, input: SelectionInput): string {
 
 // --- the decision -------------------------------------------------------------------------------
 
-function versionFor(kind: RuntimeSelection["runtimeKind"], versions: SelectionVersions | undefined): string {
-  const raw = kind === "claude-agent" ? versions?.claudeSdkVersion : versions?.winterSdkVersion;
-  return raw ?? UNKNOWN_VERSION;
-}
-
 function record(
-  kind: RuntimeSelection["runtimeKind"],
+  kind: "winter-agent",
   rule: SelectionRuleId,
   candidate: SelectionCandidate,
   input: Pick<SelectionInput, "versions" | "now">,
@@ -556,7 +555,7 @@ function record(
     modelRef: candidate.row.key,
     family: candidate.family,
     authFamily: candidate.auth.authFamily,
-    sdkVersion: versionFor(kind, input.versions),
+    sdkVersion: input.versions?.winterSdkVersion ?? UNKNOWN_VERSION,
     ...(engineVersion === undefined ? {} : { engineVersion }),
     reason: reasonFor(rule),
     decidedAt: input.now ?? new Date().toISOString(),
@@ -573,25 +572,14 @@ function record(
 export function decideRuntime(candidate: SelectionCandidate, input: SelectionInput): RuntimeSelection | SelectionRefusal {
   const { authFamily } = candidate.auth;
 
-  // D13 ROW 1 — Claude OAuth. Checked FIRST because it is unconditional in one direction and
-  // impossible in the other: it "always" routes to the official SDK (WS-13 §9) and it "never routes
-  // to winter" (WS-13c §0, D28). Every failure below is therefore a refusal, never a fallback.
+  // D13 ROW 1 — Claude OAuth. It "never routes to winter" (WS-13c §0, D28), and the official runtime
+  // it "always" routed to is retired (WS-23), so every Claude OAuth candidate is a refusal — never a
+  // fallback onto some other runtime or credential.
   if (authFamily === "claude-oauth") {
     if (candidate.family !== CLAUDE_FAMILY_ID) {
       return refuse("slot-unservable", `the row ${candidate.row.key} is in the ${candidate.family} family but its provider's configured credential is a Claude OAuth credential, which serves no other family`);
     }
-    // The ship gate first: WS-15 §2's mode rule is written "Claude OAuth is Code-only EVEN AFTER D14
-    // approval", so approval is the earlier question.
-    if (!input.claudeOauthApproved) {
-      return refuse("claude-oauth-not-approved", `${candidate.row.key} would run on the official runtime under a Claude OAuth credential, which is ship-gated pending written approval (WS-14 §12, D14); configure an API key, a cloud credential chain or a gateway credential for this provider`);
-    }
-    if (input.mode !== "code") {
-      return refuse("mode-forbids-runtime", `a Claude OAuth credential is Code-only even after D14 approval (WS-15 §2), and this session's mode is ${input.mode}; it cannot fall back to the Winter runtime, which a Claude OAuth credential never routes to (D28)`);
-    }
-    if (!input.hasClaudePeer) {
-      return refuse("runtime-unavailable", `${candidate.row.key} must run on the official runtime under a Claude OAuth credential, and this router holds no official runtime; a Claude OAuth credential never routes to the Winter runtime (D28)`);
-    }
-    return record("claude-agent", "D13-1", candidate, input);
+    return refuse("runtime-unavailable", `${candidate.row.key} is configured with a Claude OAuth credential, which only the official Claude runtime could use — that runtime is retired (WS-23) and a Claude OAuth credential never routes to the Winter runtime (D28); configure an API key, a Console login, a cloud credential chain or a gateway credential for this provider`);
   }
 
   if (candidate.family === CLAUDE_FAMILY_ID) {
@@ -601,11 +589,9 @@ export function decideRuntime(candidate: SelectionCandidate, input: SelectionInp
     if (!officialServesBackend(candidate.row.providerId, candidate.auth)) {
       return record("winter-agent", "D13-3-endpoint", candidate, input);
     }
-    // The backend is one the official branch serves and the mode allows it — so the only remaining
-    // question is whether this router HOLDS that runtime. R-7b-1: "else the Winter runtime through
-    // WS-13c §4's order".
-    if (!input.hasClaudePeer) return record("winter-agent", "R-7b-1-no-peer", candidate, input);
-    return record("claude-agent", "D13-2", candidate, input);
+    // The backend is one the official branch used to serve and the mode allowed it — and no router
+    // holds that runtime any more (WS-23). R-7b-1: "else the Winter runtime through WS-13c §4's order".
+    return record("winter-agent", "R-7b-1-no-peer", candidate, input);
   }
 
   // D28: "Opus and Sonnet route there; Astra and Luna route to Winter."
@@ -683,9 +669,5 @@ export function reviewPersistedSelection(input: SelectionInput & { persisted: Ru
  * wrong for the runtime it did not test.
  */
 export function selectionVersionsFrom(report: VersionMatrixReport): SelectionVersions {
-  const claude = report.claudeAgentSdk?.packageVersion;
-  return {
-    winterSdkVersion: report.winterAgentSdk.packageVersion,
-    ...(claude === undefined ? {} : { claudeSdkVersion: claude }),
-  };
+  return { winterSdkVersion: report.winterAgentSdk.packageVersion };
 }
