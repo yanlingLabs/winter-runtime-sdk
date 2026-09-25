@@ -1,5 +1,13 @@
 // THE ONE DOOR (D19b): `createRuntimeSdk` and the `RuntimeSdk` handle.
 //
+// WS-23: ONE RUNTIME. This door used to route a query to one of two runtimes — the Winter Agent SDK or
+// the official Claude Agent SDK (`door.ts`'s official leg) — and to move a session between them
+// (`handoff()`, WS-05 §12's barrier). The official runtime is retired: every query is a Winter query,
+// every model (Claude's included) runs on it, and a persisted selection naming `claude-agent` is a
+// typed refusal at the door rather than a second runtime. What is left is exactly the pass-through
+// below, plus the run home, the directory and messaging router, the selection contract, and the
+// switch review a host asks before a model change (`runtimeSdkInternals(sdk).barrier.reviewSwitch`).
+//
 // "A selector + adapter, never a translation layer: the pinned `query()`/`Options`/`SDKMessage`
 // contract passes through verbatim plus runtime-selection inputs." Everything in this file exists to
 // keep that sentence true — which is why `query()` forwards the caller's own `options` OBJECT when
@@ -17,37 +25,25 @@
 //      architecture says it must not be one: every host would have to rewrite its call site to adopt
 //      it, and "the same `query()`" (this repository's own README) would be false.
 //   2. THE STREAMING PROMPT IS `AsyncIterable<string>`, not `AsyncIterable<SDKUserMessage>`. The
-//      plan names the OFFICIAL SDK's type; the Winter SDK — whose contract this package re-exports
-//      and whose `query` this door forwards to today — takes `string | AsyncIterable<string>` and
-//      exports no `SDKUserMessage` at all. Taking a type the required peer cannot accept would make
-//      the door untypeable. Mapping a Winter prompt onto the official branch's
-//      `AsyncIterable<SDKUserMessage>` is Lane A's adapter concern (`OfficialLaunchPlan.prompt`
-//      already carries the official shape).
+//      plan named the OFFICIAL SDK's type; the Winter SDK — whose contract this package re-exports
+//      and whose `query` this door forwards to — takes `string | AsyncIterable<string>` and exports
+//      no `SDKUserMessage` at all.
 //
 // Both are in the Task 1 report under "what the pinned interfaces forced me to change".
-import type { BrandProfile, McpSdkServerConfigWithInstance, Options, Query, SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import type { BrandProfile, McpSdkServerConfigWithInstance, Options, Query } from "@yanlinglabs/winter-agent-sdk";
+import type { ContinuityEndpoint, MessageOrigin } from "@yanlinglabs/winter-provider-runtime";
 
-import { RuntimeHandoffRequiredError, RuntimeLaunchInputError, RuntimeSdkDisposedError, RuntimeSdkError } from "./errors.ts";
-import { officialLegAddress, openOfficialLeg, sessionLedgerKey, type RouterOfficialInput, type RouterOfficialPolicy, type RouterQuery } from "./door.ts";
+import { RuntimeLaunchInputError, RuntimeSdkDisposedError, RuntimeSdkError } from "./errors.ts";
 import type { SeamContext, SeamContextWithDirectory } from "./seams/context.ts";
-import type { OfficialSdkModule } from "./seams/official-sdk-shapes.ts";
 import type { GlobalMessagingHandle } from "./messaging/router.ts";
-import type { HandoffBarrier, HandoffOutcome } from "./seams/handoff.ts";
 import type { KeychainSeam } from "./seams/keychain.ts";
-import type { MaterializedResumeDecorator } from "./seams/materialized-resume.ts";
-import type { OfficialAdapter } from "./seams/official-adapter.ts";
 import type { RuntimeDirectory } from "./seams/directory.ts";
 import type { RuntimeDirectoryStore } from "./seams/directory-store.ts";
 import { createInMemoryRuntimeDirectoryStore } from "./seams/directory-store.ts";
 import { createRuntimeMessaging } from "./messaging/index.ts";
 import type { GlobalMessagingOptions, RuntimeDirectoryOptions } from "./messaging/index.ts";
-import { createHandoffBarrier } from "./store/index.ts";
-import { materializedResumeReportForPin } from "./store/pinned-probes.ts";
-import type { HandoffBarrierDeps } from "./store/index.ts";
-import { createOfficialAdapter } from "./official/adapter.ts";
-import type { ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
-import { capabilityNameCollisionError, capabilityServerDescriptors, type InputShapeFactory, type OfficialMcpModule, type WinterMcpServerDescriptor } from "./official/mcp-descriptors.ts";
-import type { RuntimeKind, RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
+import { createSwitchReviewer, type SwitchReviewerHandle } from "./store/review-switch.ts";
+import type { RuntimeSelection, SelectionInput } from "./selection/runtime-selection.ts";
 import { isSelectionRefusal, selectRuntime as selectRuntimePure, SelectionRefusedError } from "./selection/runtime-selection.ts";
 import { assertVersionMatrix, type VersionMatrixReport } from "./version-matrix.ts";
 import { RunHomeError } from "./run-home/errors.ts";
@@ -57,27 +53,14 @@ import { defaultEndpointResolver } from "./default-endpoint-resolver.ts";
 import { sdkHomeOf, type RunHome, type RunHomeFor, type RunHomeOutcome } from "./run-home/types.ts";
 
 /**
- * The injected peers.
+ * The injected peer.
  *
- * INSTANCES, not names. The router never imports the official SDK as a value — a host that only ever
- * creates Winter sessions never loads it — and taking the Winter peer by injection too means a host
- * that vendors all three packages (WS-02's own model) can be certain no SDK is instantiated twice.
+ * AN INSTANCE, not a name: a host that vendors the packages (WS-02's own model) can be certain no SDK
+ * is instantiated twice. WS-23: the optional `claude` peer (the official runtime's module) is gone
+ * with the official leg.
  */
 export interface RuntimeSdkPeers {
   winter: typeof import("@yanlinglabs/winter-agent-sdk");
-  /**
-   * The official runtime's module instance, when the host has one.
-   *
-   * TYPED STRUCTURALLY (`OfficialSdkModule`), not as `typeof import("@anthropic-ai/claude-agent-sdk")`
-   * as the plan pins — a fourth documented departure, and forced by the plan's own decision to make
-   * this peer OPTIONAL. A `typeof import(…)` in a published `.d.ts` makes every consumer's
-   * type-checker resolve the module, so a Winter-only host that (correctly) did not install it would
-   * see `Cannot find module` coming out of this package. See `seams/official-sdk-shapes.ts` for the
-   * full reasoning, the conformance test that keeps the structural shape honest against the real
-   * 0.3.250 declarations, and the packing gate that keeps the specifier out of the reachable
-   * declaration graph.
-   */
-  claude?: OfficialSdkModule;
 }
 
 export interface RuntimeSdkOptions {
@@ -93,20 +76,23 @@ export interface RuntimeSdkOptions {
    * the identity was DISCOVERED; an unparseable declared value falls through to probe 1 rather than
    * refusing on its own. Absent, behaviour is unchanged: probes 1 and 2, in that order.
    */
-  peerVersions?: { winterAgentSdk?: string; claudeAgentSdk?: string };
+  peerVersions?: { winterAgentSdk?: string };
   /** R-7b-2's seam; default = in-memory (which is also what every hermetic test uses). */
   directoryStore?: RuntimeDirectoryStore;
-  /** Host-provided credential reads (WS-14 §12) — never disk, never this package's own keychain. */
-  keychain: KeychainSeam;
-  /** `pathToClaudeCodeExecutable` for the official branch: the host vendors it; tests use node_modules. */
-  vendoredOfficialRuntime?: string;
   /**
-   * Flows through to both branches unchanged (D19 clause a).
+   * Host-provided credential reads (WS-14 §12). WS-23: the official leg — which fetched a family's
+   * credential at spawn — was this seam's only reader, and the Winter runtime resolves its own
+   * `Options.provider.authRef` locator. Accepted and unused, so a host that still passes one keeps
+   * compiling.
+   */
+  keychain?: KeychainSeam;
+  /**
+   * Flows through to the Winter leg unchanged (D19 clause a).
    *
    * RESOLVED ONCE, at construction, through the INJECTED peer's own `resolveBrand` — so an invalid
    * profile is a typed construction refusal (`InvalidBrandError`, the Winter SDK's own class) beside
    * the version matrix's, rather than a surprise at the first query. `RuntimeSdk.brand` is the
-   * result, and it is what the official branch and the router's own name derivations use.
+   * result, and it is what the router's own name derivations use.
    *
    * PRECEDENCE, in one sentence: a per-query `Options.brand` wins on the Winter leg and is never
    * rewritten; this constructor profile fills in when a query supplies none; Winter's own defaults
@@ -114,92 +100,33 @@ export interface RuntimeSdkOptions {
    */
   brand?: Partial<BrandProfile>;
   /**
-   * WS-09 §1.3's capability servers, as the Winter SDK's own in-process shape — FORWARDED ON BOTH
-   * LEGS, never rewritten into anything else (R-8, and the user's tool-ownership ruling R-8-1).
+   * The switch reviewer's collaborators — the key keeps its name from when it configured the handoff
+   * barrier (WS-23 retired the barrier; `reviewSwitch` is what survives of it).
+   *
+   * `winterHome` here is what fills `SeamContext.winterHome`, so the reviewer, the recovery door and
+   * any later seam that reads the context all resolve under the same home. `resolveEndpoint` is the
+   * host's catalog-registry resolver (WS-18 W18-20); absent, `defaultEndpointResolver()`. The shared
+   * store is not offered: the router builds the one store every reader goes through.
+   */
+  handoff?: { winterHome?: string; resolveEndpoint?: (origin: MessageOrigin) => ContinuityEndpoint };
+  /**
+   * WS-09 §1.3's capability servers, as the Winter SDK's own in-process shape — FORWARDED, never
+   * rewritten into anything else (R-8, and the user's tool-ownership ruling R-8-1).
    *
    * THE ROUTER OWNS NO TOOL. The daemon owns the capability tools — computer, browser, office — and
-   * hands them over as MCP SERVERS; this is the door they come through, and the router's whole job is
-   * to put the same servers in front of both runtimes. The Winter leg receives each entry BY
-   * REFERENCE under its own `name`, merged into `Options.mcpServers`. The official leg cannot take the
-   * object itself (its runtime registers in-process servers through its own constructor, over its own
-   * validator's schema shape), so the same tools are REGISTERED there from the server's own
-   * declaration — see `capabilityServerDescriptor`. Identical names, identical schemas, identical
-   * handlers, two registrations.
+   * hands them over as MCP SERVERS; this is the door they come through. The Winter leg receives each
+   * entry BY REFERENCE under its own `name`, merged into `Options.mcpServers`.
    *
-   * THE BRAND'S OWN SERVER NAME IS RESERVED. `brand.mcpServerName` is the standing server's key on the
-   * official branch (§7's aliases resolve to `mcp__<mcpServerName>__<tool>`), so a capability server
-   * that claimed it would shadow the messaging tools on one branch and not the other. That is a typed
-   * refusal at construction, not a silent overwrite.
-   *
-   * WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR: the official leg refuses rather than open a
-   * session whose capability tools exist on one branch only.
-   *
-   * A CALLER'S OWN `Options.mcpServers` REACHES THE WINTER LEG ONLY, and always has: the official leg
-   * builds its servers from this constructor and `runtime.official.mcpServers`, and never reads the
-   * pinned `Options` field at all. A caller key that collides with a capability name is therefore
-   * refused for BOTH legs at the door (interim review I-6) rather than refused on one and silently
-   * dropped on the other.
+   * THE BRAND'S OWN SERVER NAME IS RESERVED: `brand.mcpServerName` is the standing server's key, the
+   * one the messaging tools resolve through (`mcp__<mcpServerName>__<tool>`), so a capability server
+   * that claimed it would shadow them. That is a typed refusal at construction, not a silent
+   * overwrite. A caller key that collides with a capability name is refused at the door too.
    */
   capabilities?: readonly McpSdkServerConfigWithInstance[];
   /**
-   * The host's JSON-Schema → validator-shape bridge, for the official branch's in-process servers.
-   *
-   * INJECTED BECAUSE THE ROUTER DEPENDS ON NO VALIDATOR (see `official/mcp-descriptors.ts`'s header):
-   * the official runtime's own server constructor takes schemas in its peer validator's shape, and a
-   * package whose entire design is "two injected peers and nothing else" will not grow a third
-   * dependency to produce them. A host that has the official SDK already has that validator, and
-   * writes this in one line.
-   */
-  toInputShape?: InputShapeFactory;
-  /**
-   * The REVIEWER behind the standing advisor (R-8-1(3), ruling P-6; interim review I-5).
-   *
-   * The advisor tool itself is not optional and is not configured here: the official leg registers it
-   * on the standing server unconditionally, because the Winter runtime always advertises `advisor` and
-   * two legs whose advertised sets differ by a host option is the divergence WS-14 §11 exists to
-   * prevent. This supplies WHO REVIEWS — a resolver the host owns, because reviewer RESOLUTION is the
-   * runtime's provider-layer concern (D30) and the router has no provider layer. With no resolver the
-   * tool answers WS-06 §4's ordinary error.
-   *
-   * The transcript is NOT a field here: the source is this session's own, built by the leg over the one
-   * shared store, keyed by the backend session id the runtime reports at `system/init`.
-   */
-  advisor?: { resolveReviewer: ReviewerResolver; maxChars?: number };
-  /**
-   * The handoff barrier's collaborators (whole-branch review, F-3).
-   *
-   * WITHOUT THIS FIELD THE HANDLE'S `handoff()` COULD NEVER RETURN `resumed`. `HandoffBarrierDeps`
-   * carries `participants` — the source owner to drain and the destination to confirm — and the
-   * factory was called with no options at all, so `markersFor` set step 8 "no destination runtime was
-   * supplied" and every `sdk.handoff()` ended in a lossy fork. The spine's promise was one wiring
-   * line per seam; keeping it meant the lane factories were CONSTRUCTED but never CONFIGURABLE.
-   *
-   * `shared` AND `decorator` ARE NOT OFFERED, on purpose: the barrier builds both so that one store,
-   * one decoration registry and one door are structural (see `createHandoffBarrier`'s own F2 note).
-   * A host that injected a second store would get the wash-back that check exists to refuse.
-   *
-   * `winterHome` here is what fills `SeamContext.winterHome`, so the barrier, its decorator and any
-   * later seam that reads the context all resolve under the same home.
-   */
-  handoff?: Omit<HandoffBarrierDeps, "shared" | "decorator">;
-  /**
-   * The official adapter's own policy (Task 6b).
-   *
-   * WITHOUT IT THE OFFICIAL LEG IS UNCONFIGURABLE, in the same way F-3 found the other two seams to
-   * be: `createOfficialAdapter(context)` was called with no options at all, so a host could not name
-   * its `configuredExtras`, its containment dispositions, its crash hook or its reconciler — and the
-   * door builds this branch's options and child environment from exactly those. `env.remoteConfig` is
-   * the deployment-wide default for R-7b-11; a per-query `runtime.official.remoteConfig` wins over it.
-   */
-  official?: RouterOfficialPolicy;
-  /**
-   * The directory's and the router's own options (whole-branch review, F-3).
-   *
-   * WITHOUT THIS FIELD EVERY OFFICIAL RECEIVER WAS HELD FOREVER. `official.permissionClass` is the
-   * ONLY way an official session's permission class can be known — there is no facet to ask — and
-   * since D2 an unknown class fails closed, so a host that could not pass it had a `messaging` that
-   * held every message to every official session and never released it. The README sentence item 19
-   * owes ("fail-closed until `official.permissionClass` is wired") had no field to name.
+   * The directory's and the router's own options (whole-branch review, F-3) — `messaging.winter`
+   * carries the Winter adapter's options (its `permissionClass`, without which a receiver's class is
+   * unknown and, since D2, fails closed).
    */
   messaging?: { directory?: RuntimeDirectoryOptions; messaging?: GlobalMessagingOptions };
   /**
@@ -208,8 +135,8 @@ export interface RuntimeSdkOptions {
    * OPT-IN, AND THAT IS THE FEATURE DETECTION (the plan's Global Constraints). A host that has not
    * adopted WS-21 keeps its old defaults and this router serves it unchanged; the daemon sets this the
    * moment it links a router that exports `buildRunHome`, and from then on no child can run on the
-   * user's real home by accident — a missing run home is a typed refusal on both overloads, raised
-   * synchronously, before either leg is touched.
+   * user's real home by accident — a missing run home is a typed refusal, raised synchronously,
+   * before the peer is touched.
    */
   requireRunHome?: boolean;
   /**
@@ -221,46 +148,34 @@ export interface RuntimeSdkOptions {
   runHomeFor?: RunHomeFor;
 }
 
-/** Options members this package OWNS. Never forwarded to either SDK — see `query()`. */
+/** Options members this package OWNS. Never forwarded to the peer — see `query()`. */
 export const ROUTER_ONLY_OPTION_KEYS = ["runtime"] as const;
 export type RouterOnlyOptionKey = (typeof ROUTER_ONLY_OPTION_KEYS)[number];
 
 /**
  * The runtime-selection inputs the door accepts ALONGSIDE the pinned `Options` — "additive and
- * typed" (the plan's Global Constraints), and stripped before either SDK sees them.
+ * typed" (the plan's Global Constraints), and stripped before the peer sees them.
  */
 export interface RouterRuntimeInput {
-  /** A selection already persisted for this session. It WINS: a change is a handoff or a visible fork. */
+  /**
+   * A selection already persisted for this session. WS-23: it must name `winter-agent` — the only
+   * runtime this router serves; one naming the retired `claude-agent` runtime is a typed refusal
+   * (`RuntimeLaunchInputError`, field `runtime.selection`) rather than a query on some other runtime.
+   */
   selection?: RuntimeSelection;
-  /** Everything needed to decide one when there is no persisted selection yet. */
+  /** Everything needed to decide one when there is no persisted selection yet (same rule). */
   select?: SelectionInput;
   /**
-   * This session's own id, on EITHER leg.
-   *
-   * WHAT IT BUYS: the door can hold a caller to the session's persisted choice. `selection` is
-   * documented as "already persisted for this session", so a `selection` that disagrees with the
-   * session's record is a REQUEST TO CHANGE RUNTIME, and D13 answers that with a certified handoff or
-   * a visible fork — never by serving the new runtime on the old transcript. With an id, the door
-   * refuses that in-process on both legs; the official leg additionally reads the durable directory
-   * row before it launches anything. Without one, the host is the only party holding the record.
-   *
-   * The official leg takes its id from `official.sessionId` (which it requires anyway); this field is
-   * for the Winter leg and for a host that prefers to say it once.
+   * This session's own id. WS-23: it keyed the in-process ledger that refused a mid-session change of
+   * RUNTIME; with one runtime there is no such change, so it is accepted and unused.
    */
   sessionId?: string;
   /**
    * WS-21 §3.1: the per-run folder this generation runs on, built by `buildRunHome` and awaited by the
-   * host before it calls `query()`. Applied synchronously on either leg; required when the router was
-   * created with `requireRunHome: true`.
+   * host before it calls `query()`. Applied synchronously; required when the router was created with
+   * `requireRunHome: true`.
    */
   runHome?: RunHome;
-  /**
-   * What the OFFICIAL leg needs and only the host knows (Task 6b) — the session id its directory row
-   * is addressed by, its credential plan for families whose variables are the host's, the vendored
-   * runtime's neighbours. Ignored entirely on the Winter leg, where the pinned `Options` already say
-   * everything.
-   */
-  official?: RouterOfficialInput;
 }
 
 /** `Options` plus the router's own additive input. Nothing is removed and nothing is renamed. */
@@ -272,17 +187,11 @@ export interface RuntimeSdk {
   /** The resolved brand profile every Winter-owned name in this session derives from (I2). */
   readonly brand: BrandProfile;
   /**
-   * The one door, over BOTH runtimes (Task 6b). See this module's header for the deviations from the
-   * plan's pinned line, and `src/door.ts` for the official leg's own composition.
-   *
-   * TWO OVERLOADS, AND THE SPLIT IS A FACT RATHER THAN A CONVENIENCE. The official leg is reachable
-   * ONLY through `options.runtime`, so a call that passes none can only ever produce the Winter peer's
-   * `Query` — and says so. A call that DOES pass one is decided at run time, and its type is the union
-   * of the two runtimes' own handles, because neither of them is the other and this package will not
-   * flatten them into a facade (see `RouterQuery`).
+   * The one door (D19b). See this module's header for the deviations from the plan's pinned line.
+   * WS-23: it returns the Winter peer's own `Query`, always — there is no second runtime whose handle
+   * it could be.
    */
-  query(args: { prompt: string | AsyncIterable<string>; options?: Options & { runtime?: WinterLegRuntimeInput } }): Query;
-  query(args: { prompt: string | AsyncIterable<string>; options: RouterOptions }): RouterQuery;
+  query(args: { prompt: string | AsyncIterable<string>; options?: RouterOptions }): Query;
   /** D13/D28, pure. Throws `SelectionRefusedError` on a typed refusal (see that class's own note). */
   selectRuntime(input: SelectionInput): RuntimeSelection;
   /** WS-15 §6.1. */
@@ -292,13 +201,10 @@ export interface RuntimeSdk {
    *
    * WIDENED, NEVER NARROWED (F-3). The plan pins `GlobalMessaging`, and `GlobalMessagingHandle`
    * extends it: every pinned member is present with its pinned signature, and what is added is
-   * `attachWinterSession`/`attachOfficialSession` — without which a host can configure a receiver's
-   * permission class and still have nothing live to deliver to. Typing the field as the seam meant
-   * the one door the package exists for could be reached only through a cast.
+   * `attachWinterSession` — without which a host can configure a receiver's permission class and
+   * still have nothing live to deliver to.
    */
   messaging: GlobalMessagingHandle;
-  /** WS-05 §12's mechanics; the host renders the outcome (R-7b-3). */
-  handoff(session: SessionKey, to: RuntimeKind): Promise<HandoffOutcome>;
   readonly versions: VersionMatrixReport;
   /**
    * WS-21 §3.8: what became of a run home's working copy. `safe` — nothing is left to reconcile, the
@@ -325,14 +231,13 @@ export interface RuntimeSdk {
 }
 
 /**
- * The Winter overload's `runtime` (WS-21): a run home and nothing else. A selection, a `select` or an
- * official input would make the call the OTHER overload's, whose type is the union of both handles.
+ * The `runtime` a host passes when it has only a run home to say (WS-21). WS-23: kept as a name — it
+ * was the Winter overload's input when the door had two; `RouterRuntimeInput` accepts it as it is.
  */
 export interface WinterLegRuntimeInput {
   runHome: RunHome;
   selection?: never;
   select?: never;
-  official?: never;
 }
 
 /**
@@ -343,9 +248,11 @@ export interface WinterLegRuntimeInput {
  * lanes' own tests to reach a single seam without standing up the whole handle.
  */
 export interface RuntimeSdkInternals {
-  official: OfficialAdapter;
-  barrier: HandoffBarrier;
-  decorator: MaterializedResumeDecorator;
+  /**
+   * The switch reviewer (`reviewSwitch`) and the one shared store. The name is the handoff barrier's,
+   * which this was part of until WS-23 — hosts reach the review as `runtimeSdkInternals(sdk).barrier`.
+   */
+  barrier: SwitchReviewerHandle;
   /** The exact object every seam factory was handed — what a lane's real factory will receive. */
   context: SeamContextWithDirectory;
 }
@@ -415,19 +322,20 @@ function mergedMcpServers(callerOwned: Options["mcpServers"], capabilityServers:
 }
 
 /**
- * The collision rule, as ONE function the door runs before it picks a leg (interim review I-6).
- *
- * It used to live only inside the Winter leg's merge, which made the same caller mistake a typed
- * refusal on one leg and SILENCE on the other: the official leg never reads `Options.mcpServers` at
- * all, so a caller whose own entry shadowed a capability name simply lost it there, with no error and
- * no tool. One options object cannot mean two different things depending on which runtime the session
- * was decided onto — that is the class the R5 re-review closed for `runtime.official.mcpServers`, and
- * this is the same class one field over.
+ * The collision rule, as ONE function the door runs before it forwards anything (interim review I-6):
+ * a caller entry that shadows a capability name is a typed refusal, never a silent overwrite in
+ * either direction — one of the two servers would simply not be there, and the party who would find
+ * out is the model.
  */
 function assertNoCapabilityCollision(callerOwned: Options["mcpServers"], capabilityServers: Readonly<Record<string, unknown>>): void {
   if (callerOwned === undefined) return;
   for (const name of Object.keys(capabilityServers)) {
-    if (name in callerOwned) throw capabilityNameCollisionError({ field: "mcpServers", name });
+    if (name in callerOwned) {
+      throw new RuntimeLaunchInputError({
+        field: "mcpServers",
+        reason: `\`${name}\` is the name of a capability server this handle forwards, and the caller's own \`mcpServers\` already carries it — one of the two would silently not be registered, so the door refuses rather than choose for you`,
+      });
+    }
   }
 }
 
@@ -436,9 +344,8 @@ function assertNoCapabilityCollision(callerOwned: Options["mcpServers"], capabil
  *
  * TWO REFUSALS, BOTH AT CONSTRUCTION. Two servers under one name is a host that has lost track of
  * which one is registered; a server under `brand.mcpServerName` is a host claiming the STANDING
- * server's key — the one `mcp__<mcpServerName>__<tool>` resolves through and the official leg
- * registers the messaging tools under — which would leave the two branches advertising different
- * tools under one name.
+ * server's key — the one `mcp__<mcpServerName>__<tool>` resolves through, which the messaging tools
+ * are registered under — which would shadow them.
  */
 function capabilityServerRecord(capabilities: readonly McpSdkServerConfigWithInstance[] | undefined, brand: BrandProfile): Record<string, McpSdkServerConfigWithInstance> | undefined {
   if (capabilities === undefined || capabilities.length === 0) return undefined;
@@ -447,7 +354,7 @@ function capabilityServerRecord(capabilities: readonly McpSdkServerConfigWithIns
     if (server.name === brand.mcpServerName) {
       throw new RuntimeLaunchInputError({
         field: "capabilities",
-        reason: `\`${server.name}\` is the brand's own standing-server name, which the router registers the messaging tools under on the official branch — a capability server may not claim it (WS-09 §1.3)`,
+        reason: `\`${server.name}\` is the brand's own standing-server name, which the messaging tools are registered under — a capability server may not claim it (WS-09 §1.3)`,
       });
     }
     if (server.name in record) {
@@ -466,19 +373,15 @@ function capabilityServerRecord(capabilities: readonly McpSdkServerConfigWithIns
  */
 export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
   const versions = assertVersionMatrix(opts.peers, opts.peerVersions);
-  // THE BRAND, RESOLVED ONCE, THROUGH THE INJECTED PEER (I2). The injected instance is authoritative
-  // everywhere else in this file, and it must be here too: a host that vendored its own copy of the
-  // Winter SDK gets ITS validation and ITS `InvalidBrandError`, so a caught error is the class the
-  // host has. `resolveBrand` returns a result rather than throwing (its own doc says so), and this is
-  // the caller that turns a refusal into a throw — beside the version matrix's, at construction,
-  // before any seam exists.
+  // THE BRAND, RESOLVED ONCE, THROUGH THE INJECTED PEER (I2). A host that vendored its own copy of the
+  // Winter SDK gets ITS validation and ITS `InvalidBrandError`. `resolveBrand` returns a result rather
+  // than throwing, and this is the caller that turns a refusal into a throw — at construction.
   const resolved = opts.peers.winter.resolveBrand(opts.brand);
   if (!resolved.ok) throw new opts.peers.winter.InvalidBrandError(resolved.reason);
   const brand = resolved.brand;
   // WS-21: A RUN-HOME ROUTER NAMES ITS HOME. Its store is rooted at `sdkHomeOf(home)` — the shared
   // runtime home — and a store resolved from the peer's own default instead would be a guess about
-  // which home that is (the default itself moves to the shared home in the agent SDK's WS-21 release,
-  // so `sdkHomeOf` of it would double up). Refused at construction, where it costs nothing.
+  // which home that is. Refused at construction, where it costs nothing.
   if (opts.requireRunHome === true && (opts.handoff?.winterHome === undefined || opts.handoff.winterHome.length === 0)) {
     throw new RuntimeLaunchInputError({
       field: "handoff.winterHome",
@@ -487,38 +390,30 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
   }
   const storeHome = opts.requireRunHome === true && opts.handoff?.winterHome !== undefined ? sdkHomeOf(opts.handoff.winterHome) : undefined;
   const directoryStore = opts.directoryStore ?? createInMemoryRuntimeDirectoryStore();
-  // THE CAPABILITY SERVERS, BUILT ONCE (R-8). Both shapes are derived here, beside the store, rather
-  // than per query: the Winter leg's record is the object every query forwards — value identity across
-  // queries is part of what "the same servers" means, and a record rebuilt per call would hand the
-  // peer a new object for an unchanged configuration — and the official leg's descriptors are a READ
-  // of the host's declaration, so doing it once also means a malformed one is a construction refusal
-  // rather than a first-query surprise.
+  // THE CAPABILITY SERVERS, BUILT ONCE (R-8): the record is the object every query forwards — value
+  // identity across queries is part of what "the same servers" means, and a malformed declaration is
+  // a construction refusal rather than a first-query surprise.
   const capabilityServers = capabilityServerRecord(opts.capabilities, brand);
-  const capabilityDescriptors: readonly WinterMcpServerDescriptor[] | undefined = opts.capabilities === undefined || opts.capabilities.length === 0 ? undefined : capabilityServerDescriptors(opts.capabilities);
 
-  // ONE CONTEXT, BUILT ONCE, HANDED TO EVERY SEAM FACTORY. The directory is built FIRST and hoisted
-  // out of the handle's object literal, because every other seam takes it (a lane's messaging router
-  // and handoff barrier both resolve addresses through it).
+  // ONE CONTEXT, BUILT ONCE, HANDED TO EVERY SEAM FACTORY. The directory is built FIRST, because the
+  // messaging router resolves addresses through it.
   const base: SeamContext = {
     peers: opts.peers,
-    keychain: opts.keychain,
+    ...(opts.keychain === undefined ? {} : { keychain: opts.keychain }),
     brand,
     directoryStore,
-    ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
-    // The barrier's home IS the context's home (F-3): one field, so the store the barrier resolves and
-    // the store any later seam resolves through the context cannot end up being two.
+    // The reviewer's home IS the context's home (F-3): one field, so the store the reviewer resolves
+    // and the store any later seam resolves through the context cannot end up being two.
     ...(opts.handoff?.winterHome === undefined ? {} : { winterHome: opts.handoff.winterHome }),
     // WS-21: the store's root, for every seam that resolves the shared store through the context.
     ...(storeHome === undefined ? {} : { storeHome }),
   };
-  // LANES B AND C ARE LANDED (controller wiring, one commit): the directory and the messaging router
-  // come from ONE factory (the directory's child view delivers through the router while the router
-  // resolves through the directory -- a real circularity closed by a late binding inside
-  // `createRuntimeMessaging`); the barrier OWNS its decorator so one store, one decoration registry
-  // and one door are structural (`decorator: barrier.decorator` is load-bearing, not a shortcut).
   // WS-21 §3.8: every run home this handle applied, by run id. Absent = `pending`. Built BEFORE the
   // messaging router, because the router's own cold resume records into it too.
   const runHomeOutcomes = new Map<string, RunHomeOutcome>();
+  // The directory and the messaging router come from ONE factory (the directory's child view delivers
+  // through the router while the router resolves through the directory — a circularity closed by a
+  // late binding inside `createRuntimeMessaging`).
   const { directory, messaging } = createRuntimeMessaging(base, opts.messaging ?? {}, {
     winterRunHomes: {
       require: opts.requireRunHome === true,
@@ -533,60 +428,9 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     },
   });
   const context: SeamContextWithDirectory = { ...base, directory };
-  // R-7b-12: THE PREFERRED DOOR, KEYED TO THE PIN BY MEASUREMENT. The four WS-17 §8 probes pass
-  // against 0.3.250 on both supported platforms, so a handle over THAT peer gets the decorated
-  // materialized copy; a peer at any other version — or no official peer at all — gets `fallback`,
-  // which is the always-available door. The report travels as data because the probes cost a process
-  // tree each and `createRuntimeSdk` is a startup path; CI re-derives it against the real artifact.
-  const decorationReport = materializedResumeReportForPin(versions.claudeAgentSdk?.packageVersion);
-  const barrier = createHandoffBarrier(context, {
-    ...(opts.handoff ?? {}),
-    ...(opts.handoff?.decorationReport !== undefined || decorationReport === undefined ? {} : { decorationReport }),
-  });
-
-  // ONE WIRING LINE PER SEAM. A lane replaces the right-hand side and nothing else in this file
-  // moves; see `seams/stubs.ts`'s own header for why the indirection exists.
-  const internals: RuntimeSdkInternals = {
-    // LANE A IS LANDED (P7b fix round 1, review r1 M3 — the wiring the lane owed, made usable):
-    // `createOfficialAdapter` needs no initialization call (its child starter resolves synchronously
-    // on first use) and defaults §6 rule 2's durable record to the directory store in `context`,
-    // addressed by `OfficialLaunchPlan.address`.
-    official: createOfficialAdapter(context, opts.official ?? {}),
-    barrier,
-    decorator: barrier.decorator,
-    context,
-  };
-
-  /**
-   * WHICH RUNTIME EACH SESSION THIS HANDLE HAS SERVED IS PERSISTED ON (D13).
-   *
-   * IN-PROCESS, and openly so: the durable answer is the directory row, and reading it is asynchronous
-   * while `query()` is not. What this catches is the case a live host actually produces — the same
-   * handle, the same session, a second `query()` naming a different runtime — and it catches it before
-   * anything at all has happened. Its only writers are `query()` (the runtime a session was served on)
-   * and `handoff()` (on a certified transfer, never on a fork offer).
-   */
-  const persistedRuntime = new Map<string, RuntimeKind>();
-
-  /**
-   * R-7b-13: the INJECTED peer's own transcript key derivation, resolved once.
-   *
-   * Read off the peer rather than imported, for the same reason the store class is: WS-05 §6's
-   * "the identical package/version on both legs" is a statement about the instance the host handed us.
-   * A peer that does not export it is a typed refusal at the first official launch rather than a
-   * silently different key — the two branches would then write under two project directories for one
-   * working directory, which is exactly what this key exists to prevent.
-   */
-  const transcriptProjectKey = (cwd: string): string => {
-    const derive = (opts.peers.winter as unknown as { transcriptProjectKey?: (path: string) => string }).transcriptProjectKey;
-    if (typeof derive !== "function") {
-      throw new RuntimeLaunchInputError({
-        field: "runtime.official.projectKey",
-        reason: "the injected Winter peer exports no `transcriptProjectKey`, so the door cannot derive the key the WINTER leg writes under — name it explicitly rather than let the two branches write to two project directories for one cwd (WS-14 §2/§3, R-7b-13)",
-      });
-    }
-    return derive(cwd);
-  };
+  // THE SWITCH REVIEWER, over the ONE shared store the recovery door also writes through.
+  const reviewer = createSwitchReviewer(context, opts.handoff?.resolveEndpoint === undefined ? {} : { resolveEndpoint: opts.handoff.resolveEndpoint });
+  const internals: RuntimeSdkInternals = { barrier: reviewer, context };
 
   let disposed = false;
   const assertLive = (method: string): void => {
@@ -599,124 +443,50 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     return result;
   };
 
-  /**
-   * The door's body, written once and typed by what it actually returns.
-   *
-   * IT IS CAST ONTO THE OVERLOADED MEMBER at the one site below, and the cast is the honest shape of
-   * the situation rather than a workaround: the overloads express a fact TypeScript cannot derive —
-   * that the official leg is reachable ONLY through `options.runtime`, so a call without one is a
-   * `Query` — while the body, which is checked against neither overload, returns the union it really
-   * produces. Narrowing the body's own type instead would require a cast at each return.
-   */
-  const queryImpl = (args: { prompt: string | AsyncIterable<string>; options?: RouterOptions }): RouterQuery => {
-      assertLive("query");
-      // THE DOOR DECIDES, AND SERVES BOTH RUNTIMES (Task 6b; whole-branch review F-4's interim refusal
-      // is gone).
-      //
-      // "Forwards to Winter" and "honours the selection" are not the same thing, and before F-4 they
-      // were conflated: a host passing the persisted choice the entire selection lane exists to
-      // honour (`runtime.selection = { runtimeKind: "claude-agent", … }`) got a WINTER session, with
-      // no error, no diagnostic and no record of which runtime ran — D13's "the certified handoff or a
-      // visible fork, never a silent rewrite", broken at the one door. F-4 made that a typed refusal;
-      // this routes it.
-      const options = args.options ?? {};
-      // WS-21 §3.1: NO GENERATION WITHOUT A RUN HOME, on either leg, refused before anything else —
-      // before the selection is decided, before a directory row, a credential or a child exists.
-      const runHome = (options as RouterOptions).runtime?.runHome;
-      if (opts.requireRunHome === true && runHome === undefined) {
-        throw new RunHomeError(
-          "run_home_required",
-          "this router was created with `requireRunHome: true`, so every generation must carry the per-run folder the host built for it (`runtime.runHome`, from `buildRunHome`) — without one the child would read the user's real home (WS-21 §3.1)",
-        );
-      }
-      // BEFORE THE LEG IS PICKED (I-6): the caller's own `mcpServers` is only ever forwarded to the
-      // WINTER leg, so a collision with a forwarded capability had to be judged here rather than
-      // inside the leg that happens to read the field.
-      if (capabilityServers !== undefined) assertNoCapabilityCollision(options.mcpServers, capabilityServers);
-      const runtime = (options as RouterOptions).runtime;
-      // The persisted selection WINS and is never re-decided (D13); `select` is decided here only when
-      // there is no persisted one — the same precedence `selectRuntime` itself implements.
-      const decided = runtime === undefined ? undefined : (runtime.selection ?? (runtime.select === undefined ? undefined : decide(runtime.select)));
-      // D13, AT THE DOOR: a change of runtime mid-session is a handoff or a visible fork, never a
-      // rewrite. The in-process ledger is what this side can answer synchronously — `query()` returns a
-      // `Query`, not a promise for one, so a durable read cannot gate the Winter leg without turning
-      // the pass-through into a wrapper. The official leg checks the DURABLE row too, inside its own
-      // launch, before a credential is read or a child is spawned.
-      //
-      // IT IS READ HERE AND WRITTEN WHEN A LEG ACTUALLY OPENS (review r1, I-1). Writing it on the
-      // DECISION poisoned every path that then refused — a claude-agent selection with no
-      // `runtime.official` threw, and the session's own correct Winter runtime was refused ever after.
-      // KEYED BY ADDRESS, not by the bare session id (L-3): a Winter session `x` and a claude child `x`
-      // of some parent are different objects and must not share a slot.
-      const ledgerKey = runtime?.official !== undefined ? officialLegAddress(runtime.official) : runtime?.sessionId === undefined ? undefined : sessionLedgerKey(runtime.sessionId);
-      if (decided !== undefined && ledgerKey !== undefined) {
-        const known = persistedRuntime.get(ledgerKey);
-        if (known !== undefined && known !== decided.runtimeKind) throw new RuntimeHandoffRequiredError({ from: known, to: decided.runtimeKind, address: ledgerKey });
-      }
-      const noteOpened = (kind: RuntimeKind): void => {
-        if (ledgerKey !== undefined) persistedRuntime.set(ledgerKey, kind);
-      };
-      // WS-21 §3.1: THE RUN HOME IS CHECKED FOR THE LEG IT IS ABOUT TO RUN ON, before either leg opens.
-      const leg = decided !== undefined && decided.runtimeKind === "claude-agent" ? "official" : "winter";
-      if (runHome !== undefined) {
-        assertRunHomeApplicable(runHome, { leg, cwd: options.cwd, brand, storeHome });
-        // FIX ROUND 1, M1: on either leg, the options a run home decides are not the caller's.
-        assertNoRunHomeDecidedOptions(options);
-      }
-      if (decided !== undefined && decided.runtimeKind === "claude-agent") {
-        const official = runtime?.official;
-        if (official === undefined) {
-          throw new RuntimeLaunchInputError({
-            field: "runtime.official",
-            reason:
-              "a claude-agent session is a supervised child process with a directory row of its own, so the door needs at least the session id that row is addressed by (WS-14 §6 rule 2, WS-15 §6.1) — the Winter leg needs none of this, which is why it is not on `Options`",
-          });
-        }
-        return openOfficialLeg(
-          {
-            brand,
-            official: internals.official,
-            directory,
-            messaging,
-            keychain: opts.keychain,
-            shared: () => barrier.shared,
-            transcriptProjectKey,
-            ...(opts.vendoredOfficialRuntime === undefined ? {} : { vendoredOfficialRuntime: opts.vendoredOfficialRuntime }),
-            ...(opts.official === undefined ? {} : { policy: opts.official }),
-            // THE DESCRIPTORS, NOT THE WINTER INSTANCES (R-8). The official runtime registers its own
-            // in-process servers; handing it the Winter instance object would register nothing. The
-            // bridge and the module travel with them because materialization needs both.
-            ...(capabilityDescriptors === undefined ? {} : { capabilities: capabilityDescriptors }),
-            ...(opts.toInputShape === undefined ? {} : { toInputShape: opts.toInputShape }),
-            ...(opts.peers.claude === undefined ? {} : { mcpModule: opts.peers.claude as OfficialMcpModule }),
-            ...(opts.advisor === undefined ? {} : { advisor: opts.advisor }),
-            onOpened: noteOpened,
-            recordRunHomeOutcome: (runId, outcome) => {
-              runHomeOutcomes.set(runId, outcome);
-            },
-          },
-          // THE OFFICIAL LEG TAKES NO CAPABILITY RECORD HERE: its `mcpServers` are materialized by the
-          // leg itself (`officialCapabilityServers`) and merged into the options TEMPLATE, because the
-          // vendor's `Options.mcpServers` is not the Winter shape this record holds.
-          { prompt: args.prompt, options: forwardableOptions(options, opts.brand === undefined ? undefined : brand), input: official, selection: decided, ...(runHome === undefined ? {} : { runHome }) },
-        );
-      }
-      // WS-21 §3.1: the run home's env, setting source and memory pin, laid over the caller's options
-      // before the pass-through — synchronously, so nothing reaches the peer without them.
-      const winterOptions = runHome === undefined ? options : applyWinterRunHome(options, runHome, brand);
-      const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(winterOptions, opts.brand === undefined ? undefined : brand, capabilityServers) });
-      // AFTER the peer returned, because that is when the Winter leg actually opened (I-1).
-      noteOpened("winter-agent");
-      if (runHome === undefined) return winterQuery;
-      // WS-21 §3.8 (fix round 1, M6): `pending` while the incarnation runs, `safe` only when it ENDS.
-      // The Winter child writes the canonical store directly (its `projects/` is a link to it), so there
-      // is no working copy to reconcile — but it reads the run folder for as long as it runs, and a
-      // host disposes on `safe`, so `safe` must wait for the query to settle.
-      const runId = runHome.runId;
-      runHomeOutcomes.set(runId, "pending");
-      return observeQueryEnd(winterQuery, () => {
-        runHomeOutcomes.set(runId, "safe");
+  const queryImpl = (args: { prompt: string | AsyncIterable<string>; options?: RouterOptions }): Query => {
+    assertLive("query");
+    const options = args.options ?? {};
+    const runtime = options.runtime;
+    // WS-21 §3.1: NO GENERATION WITHOUT A RUN HOME, refused before anything else — before the
+    // selection is read, before a child exists.
+    const runHome = runtime?.runHome;
+    if (opts.requireRunHome === true && runHome === undefined) {
+      throw new RunHomeError(
+        "run_home_required",
+        "this router was created with `requireRunHome: true`, so every generation must carry the per-run folder the host built for it (`runtime.runHome`, from `buildRunHome`) — without one the child would read the user's real home (WS-21 §3.1)",
+      );
+    }
+    // Before anything is forwarded (I-6): the caller's own `mcpServers` against the capability names.
+    if (capabilityServers !== undefined) assertNoCapabilityCollision(options.mcpServers, capabilityServers);
+    // WS-23: ONE RUNTIME. A persisted selection wins and is never re-decided (D13); `select` is decided
+    // only when there is none. Either way it must name the runtime this router serves — a selection on
+    // the retired official runtime is refused typed, never quietly served here on its transcript.
+    const decided = runtime === undefined ? undefined : (runtime.selection ?? (runtime.select === undefined ? undefined : decide(runtime.select)));
+    if (decided !== undefined && decided.runtimeKind !== "winter-agent") {
+      throw new RuntimeLaunchInputError({
+        field: "runtime.selection",
+        reason: `the selection names the ${decided.runtimeKind} runtime, which this router no longer serves — the official Claude runtime is retired and every model runs on the Winter runtime (WS-23); decide the session onto \`winter-agent\``,
       });
+    }
+    if (runHome !== undefined) {
+      assertRunHomeApplicable(runHome, { leg: "winter", cwd: options.cwd, brand, storeHome });
+      // FIX ROUND 1, M1: the options a run home decides are not the caller's.
+      assertNoRunHomeDecidedOptions(options);
+    }
+    // WS-21 §3.1: the run home's env, setting source and memory pin, laid over the caller's options
+    // before the pass-through — synchronously, so nothing reaches the peer without them.
+    const winterOptions = runHome === undefined ? options : applyWinterRunHome(options, runHome, brand);
+    const winterQuery = opts.peers.winter.query({ prompt: args.prompt, options: forwardableOptions(winterOptions, opts.brand === undefined ? undefined : brand, capabilityServers) });
+    if (runHome === undefined) return winterQuery;
+    // WS-21 §3.8 (fix round 1, M6): `pending` while the incarnation runs, `safe` only when it ENDS.
+    // The Winter child writes the canonical store directly (its `projects/` is a link to it), so there
+    // is no working copy to reconcile — but it reads the run folder for as long as it runs, and a
+    // host disposes on `safe`, so `safe` must wait for the query to settle.
+    const runId = runHome.runId;
+    runHomeOutcomes.set(runId, "pending");
+    return observeQueryEnd(winterQuery, () => {
+      runHomeOutcomes.set(runId, "safe");
+    });
   };
 
   const sdk: RuntimeSdk & { [INTERNALS]: RuntimeSdkInternals } = {
@@ -725,32 +495,10 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
     brand,
     directory,
     messaging,
-    query: queryImpl as RuntimeSdk["query"],
+    query: queryImpl,
     selectRuntime(input) {
       assertLive("selectRuntime");
       return decide(input);
-    },
-    async handoff(session, to) {
-      assertLive("handoff");
-      // THE LOCAL `barrier`, not `internals.barrier`, and the difference is load-bearing: the handle's
-      // `execute()` returns a `DetailedHandoffOutcome`, which carries the ROW the transfer moved. The
-      // seam's narrower `HandoffOutcome` does not, and that is what forced the wrong key below.
-      const plan = await barrier.plan(session, to);
-      const outcome = await barrier.execute(plan);
-      // THE LEDGER FOLLOWS THE CERTIFIED TRANSFER, and only it. A handoff that ended in a lossy fork
-      // offer or a refusal did NOT move the session, so the door must go on refusing the new runtime —
-      // updating the ledger on anything but `resumed` would turn a failed handoff into the silent
-      // switch the ledger exists to prevent.
-      //
-      // KEYED BY THE ROW THE BARRIER MOVED (re-review, N-1). `SessionKey.sessionId` is the BACKEND
-      // uuid — the README says so, and I-2 is what made a host able to obtain it — while `query()`
-      // keys the same session by its WINTER session id. So a certified `resumed` wrote
-      // `session:<backend uuid>` and the very next Winter query, on the same handle, was still refused
-      // `from=claude-agent`: the door's own remedy ("a runtime change mid-session is
-      // `sdk.handoff(session, …)`") named a route that completed and then did not take effect. Step 8
-      // already knows which row it transferred, so the ledger uses that address.
-      if (outcome.kind === "resumed") persistedRuntime.set(outcome.target?.address ?? sessionLedgerKey(session.sessionId), to);
-      return outcome;
     },
     runHomeOutcome(runId) {
       return runHomeOutcomes.get(runId) ?? "pending";
@@ -764,7 +512,7 @@ export function createRuntimeSdk(opts: RuntimeSdkOptions): RuntimeSdk {
         throw new RuntimeSdkError("winter-runtime-sdk: reconcileRootForRecovery needs a router created with `requireRunHome` and an explicit `handoff.winterHome` — the recovered transcript belongs in the shared runtime home under it (WS-21 §3.8)");
       }
       return reconcileRootForRecovery(root, {
-        shared: barrier.shared,
+        shared: reviewer.shared,
         home,
         storeHome,
         resolveEndpoint: opts.handoff?.resolveEndpoint ?? defaultEndpointResolver(),

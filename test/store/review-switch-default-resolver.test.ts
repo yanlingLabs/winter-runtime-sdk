@@ -2,7 +2,7 @@
 //
 // `test/store/review-switch.test.ts` proves `reviewSwitch` end to end, but every one of its cases
 // injects `fixtureResolveEndpoint` — so the DEFAULT path (what a host gets if it never wires
-// `HandoffBarrierDeps.resolveEndpoint`) had ZERO coverage. Measured before this fix: with no injected
+// `SwitchReviewerDeps.resolveEndpoint` (then the barrier's own)) had ZERO coverage. Measured before this fix: with no injected
 // resolver, DeepSeek->GLM with a `{material:"exposed",complete:true}` sidecar record came back
 // `{prompt:true, lossClass:"warned-lossy"}` instead of `lossless-portable` — `endpointFromOrigin`
 // alone reports `readableState:"none"` for every model, breaking R-10b-2/W18-21 on exactly the row
@@ -28,9 +28,8 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
-import { WINTER_BRAND, envName } from "@yanlinglabs/winter-agent-sdk";
 
-import { createHandoffBarrier, providerStateSidecarPath, resolveEngineTempLayout, type HandoffBarrierDeps } from "../../src/store/index.ts";
+import { createSwitchReviewer, providerStateSidecarPath, type SwitchReviewerDeps, type SwitchReviewerHandle } from "../../src/store/index.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { withStoreBed, type StoreBed } from "./support.ts";
 
@@ -44,7 +43,7 @@ const CLAUDE_SONNET = { providerId: "anthropic", modelRef: "anthropic/claude-son
 
 function selection(row: { providerId: string; modelRef: string; family: string }, over: Partial<RuntimeSelection> = {}): RuntimeSelection {
   return {
-    runtimeKind: row.family === "claude" ? "claude-agent" : "winter-agent",
+    runtimeKind: "winter-agent",
     providerId: row.providerId,
     modelRef: row.modelRef,
     family: row.family,
@@ -76,18 +75,9 @@ function writeSummary(home: string, key: SessionKey, anchorUuid: string, row: { 
   appendFileSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
 }
 
-function barrierFor(bed: StoreBed, deps: Partial<HandoffBarrierDeps> = {}): ReturnType<typeof createHandoffBarrier> {
+function barrierFor(bed: StoreBed, deps: Partial<SwitchReviewerDeps> = {}): SwitchReviewerHandle {
   // DELIBERATELY NO `resolveEndpoint` HERE — this is the whole point of this file.
-  const full: HandoffBarrierDeps = {
-    shared: bed.shared,
-    winterHome: bed.home,
-    tempLayoutFor: () => {
-      mkdirSync(bed.tempBase, { recursive: true });
-      return resolveEngineTempLayout({ brand: WINTER_BRAND, tempProjectKey: bed.key.projectKey, backendUuid: bed.key.sessionId, uid: 4242, env: { [envName(WINTER_BRAND, "TMPDIR")]: bed.tempBase } });
-    },
-    ...deps,
-  };
-  return createHandoffBarrier(bed.context, full);
+  return createSwitchReviewer(bed.context, { shared: bed.shared, winterHome: bed.home, ...deps });
 }
 
 describe("WS-18 W18-20 fix round 1 — reviewSwitch's DEFAULT path (no injected resolveEndpoint), real catalog rows", () => {
@@ -128,7 +118,7 @@ describe("WS-18 W18-20 fix round 1 — reviewSwitch's DEFAULT path (no injected 
       await bed.shared.settle(bed.key);
       writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.prompt).toBe(true);
       expect(review.classification?.lossClass).toBe("warned-lossy");
     });
@@ -155,7 +145,7 @@ describe("WS-18 W18-20 fix round 1 — reviewSwitch's DEFAULT path (no injected 
       await bed.shared.store.append(bed.key, t.entries);
       await bed.shared.settle(bed.key);
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.prompt).toBe(false);
       expect(review.skipped).toBe("same-family");
       expect(review.classification).toBeUndefined();

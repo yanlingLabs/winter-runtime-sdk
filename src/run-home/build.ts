@@ -122,7 +122,8 @@ function assertInput(input: RunHomeInput): void {
     if (value !== null && (typeof value !== "string" || !isAbsolute(value))) throw new TypeError(`buildRunHome: \`${field}\` must be an absolute path or null (got ${JSON.stringify(value)})`);
   }
   if (!["code", "dispatch", "chat"].includes(input.mode)) throw new TypeError(`buildRunHome: unknown mode ${JSON.stringify(input.mode)}`);
-  if (!["winter", "official"].includes(input.leg)) throw new TypeError(`buildRunHome: unknown leg ${JSON.stringify(input.leg)}`);
+  if ((input.leg as string) === "official") throw new TypeError("buildRunHome: the official leg is retired (WS-23) — every generation runs on the Winter leg");
+  if (input.leg !== "winter") throw new TypeError(`buildRunHome: unknown leg ${JSON.stringify(input.leg)}`);
 }
 
 /**
@@ -174,9 +175,8 @@ async function ensureSdkEntry(path: string): Promise<void> {
  * Spec §3.3's first two rows and its `backups/` rule.
  *
  *   * the persistent set: pre-created in `sdk/` when missing, then symlinked in (absolute targets);
- *   * `projects/`: a link to `sdk/projects` on the Winter leg — the Winter child writes the canonical
- *     store directly — and an empty private directory on the official leg, where it is the working
- *     copy claude writes first and the wrapper mirrors into the store;
+ *   * `projects/`: a link to `sdk/projects` — the Winter child writes the canonical store directly.
+ *     (WS-23: the official leg's empty working-copy directory went with that leg.)
  *   * `backups/`: never created. claude keeps `.claude.json` copies there, which are per-session.
  *
  * Nothing else in `sdk/` is linked: `plugins` is reached through the plugin-cache variable, and every
@@ -190,13 +190,7 @@ async function buildCore(context: RunHomeBuildContext): Promise<void> {
     await ensureSdkEntry(target);
     await symlink(target, join(dir, entry));
   }
-  if (input.leg === "winter") {
-    const target = join(sdkHome, "projects");
-    await ensureSdkEntry(target);
-    await symlink(target, join(dir, "projects"));
-  } else {
-    const projects = join(dir, "projects");
-    await mkdir(projects, { mode: PRIVATE_DIR });
-    await chmod(projects, PRIVATE_DIR);
-  }
+  const target = join(sdkHome, "projects");
+  await ensureSdkEntry(target);
+  await symlink(target, join(dir, "projects"));
 }

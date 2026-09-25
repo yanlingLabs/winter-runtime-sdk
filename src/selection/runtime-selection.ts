@@ -23,9 +23,11 @@
 // Code-only even after D14 approval… never silent fallbacks").
 //
 // THE RULES THE BODIES MUST IMPLEMENT, so the signature is not the only thing that is pinned:
-//   * WS-13 §9 / D13 — Claude OAuth → the official SDK, always (ship-gated by D14: `claudeOauthApproved`);
-//     a Claude-family model on an Anthropic-protocol backend in Code mode → the official SDK; Claude
-//     via non-Anthropic endpoints, and ALL Dispatch/Chat → the Winter runtime.
+//   * WS-23 — ONE RUNTIME. Every family routes to the Winter runtime; D13's two official rows (Claude
+//     OAuth → the official SDK; a Claude model on an Anthropic-protocol backend in Code mode → the
+//     official SDK) are retired with the official runtime. A Claude OAuth credential still never
+//     routes to Winter (D28), so it is a typed refusal. `RuntimeKind` keeps `"claude-agent"`, because
+//     a host's persisted records and directory rows still carry it.
 //   * "Routing decisions use the persisted runtime profile/auth source — NEVER a raw model-ID
 //     substring" (WS-13 §9). `SelectionInput` carries no raw model string for the decision precisely
 //     so that rule is structural: `requested.model` exists to RESOLVE a slot (WS-13c §4), and the
@@ -163,10 +165,8 @@ export interface CredentialPresence {
  * constructor's own matrix report, which is where a host already has the answer.
  */
 export interface SelectionVersions {
-  /** The Winter SDK's own version — stamped when the table picks `winter-agent`. */
+  /** The Winter SDK's own version — stamped into every selection (WS-23: the only runtime). */
   winterSdkVersion?: string;
-  /** The official SDK's version — stamped when the table picks `claude-agent`. */
-  claudeSdkVersion?: string;
   /** The runtime ENGINE's version, when the host knows it (WS-02 §3's second identity). */
   engineVersion?: string;
 }
@@ -177,14 +177,18 @@ export interface SelectionInput {
   requested: { slot?: string; model?: string; provider?: string };
   families: ModelFamilyListing;
   credentials: CredentialPresence;
-  hasClaudePeer: boolean;
   /**
-   * D14's ship gate. `false` IS THE SHIPPED DEFAULT (`D14_CLAUDE_OAUTH_APPROVED_DEFAULT` in
-   * `./select-runtime.ts`): WS-14 §12 — "built but publicly ship-gated pending written Anthropic
-   * approval… until approval exists, the shippable branch uses API-key/cloud/gateway auth only".
-   * Required rather than optional on purpose — a host must say it, and saying nothing is not consent.
+   * WS-23: RETIRED, accepted and ignored. It told the table whether this router held the official
+   * runtime; no router does any more, so a Claude model always selects the Winter runtime. Optional so
+   * a host that still states it keeps compiling.
    */
-  claudeOauthApproved: boolean;
+  hasClaudePeer?: boolean;
+  /**
+   * WS-23: RETIRED, accepted and ignored. D14's ship gate for Claude OAuth on the official runtime; a
+   * Claude OAuth credential is refused whatever this says, because the runtime it gated is gone and it
+   * never routes to Winter (D28).
+   */
+  claudeOauthApproved?: boolean;
   persisted?: RuntimeSelection;
   /** Stamped into the produced record. Absent → `UNKNOWN_VERSION`. */
   versions?: SelectionVersions;
@@ -303,8 +307,10 @@ export interface ChildSelectionInput {
   mode: "code" | "dispatch" | "chat";
   families: ModelFamilyListing;
   credentials: CredentialPresence;
-  hasClaudePeer: boolean;
-  claudeOauthApproved: boolean;
+  /** WS-23: retired, accepted and ignored — see `SelectionInput.hasClaudePeer`. */
+  hasClaudePeer?: boolean;
+  /** WS-23: retired, accepted and ignored — see `SelectionInput.claudeOauthApproved`. */
+  claudeOauthApproved?: boolean;
   /** Stamped into the child's own record. */
   versions?: SelectionVersions;
   /** The ISO-8601 instant to record as the child's `decidedAt`. */

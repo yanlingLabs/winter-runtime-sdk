@@ -114,26 +114,20 @@ describe("projects/, backups/ and the rest of sdk/", () => {
     expect(lstatSync(join(bed.sdk, "projects")).isDirectory()).toBe(true);
   });
 
-  test("official leg: projects is an empty private directory (the working copy the wrapper mirrors)", async () => {
+  test("WS-23: a run home for the retired official leg is refused typed, and nothing is built", async () => {
     const bed = runHomeBed();
-    const runHome = await buildRunHome(inputFor(bed, { leg: "official" }));
-    const dir = join(runHome.dir, "projects");
-    expect(lstatSync(dir).isDirectory()).toBe(true);
-    expect(lstatSync(dir).isSymbolicLink()).toBe(false);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(readdirSync(dir)).toEqual([]);
+    await expect(buildRunHome(inputFor(bed, { leg: "official" as "winter" }))).rejects.toThrow(/official leg is retired/);
+    expect(existsSync(join(bed.home, "cache", "runs")) ? readdirSync(join(bed.home, "cache", "runs")) : []).toEqual([]);
   });
 
   test("backups/ is never created, and sdk/plugins is never linked (the plugin root is an env var)", async () => {
     const bed = runHomeBed();
     mkdirSync(join(bed.sdk, "plugins"), { recursive: true });
     mkdirSync(join(bed.sdk, "backups"), { recursive: true });
-    for (const leg of ["winter", "official"] as const) {
-      const runHome = await buildRunHome(inputFor(bed, { leg }));
-      const names = readdirSync(runHome.dir);
-      expect(names).not.toContain("backups");
-      expect(names).not.toContain("plugins");
-    }
+    const runHome = await buildRunHome(inputFor(bed, { leg: "winter" }));
+    const names = readdirSync(runHome.dir);
+    expect(names).not.toContain("backups");
+    expect(names).not.toContain("plugins");
   });
 
   test("nothing else in sdk/ is linked in by the core (history, sessions, caches stay out)", async () => {

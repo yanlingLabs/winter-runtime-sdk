@@ -1,10 +1,12 @@
 // Lane C's one import site (P7b Task 4).
 //
-// The PACKAGE's barrel is `src/index.ts` and it is spine-owned; what it already exports is the SEAM —
-// `HandoffBarrier`, `HandoffOutcome`, `MaterializedResumeDecorator` and their vocabulary — which is
-// what a HOST programs against. This file is what a TEST (and the spine's own wiring, in one line per
-// seam) needs: the factories behind those seams and the store-side vocabulary that has no seam of its
-// own, because nothing outside this package was ever given one.
+// The PACKAGE's barrel is `src/index.ts` and it is spine-owned; what it exports is the SEAM a HOST
+// programs against. This file is what a TEST (and the spine's own wiring) needs: the factories behind
+// the seams and the store-side vocabulary that has no seam of its own.
+//
+// WS-23: the handoff barrier, the materialized-resume decorator, its pinned probe reports and the
+// temp-continuity layer went with the official runtime they moved sessions onto; `reviewSwitch` and
+// the provider-state sidecar reader are what survive of them.
 export {
   assertOneSharedStore,
   lazySharedSessionStore,
@@ -47,54 +49,6 @@ export {
 } from "./reconcile.ts";
 export type { LocalTranscript, ReconcileReport, TailComparison, TranscriptReconcileHook, TranscriptReconciler, TranscriptReconcileOutcome } from "./reconcile.ts";
 
-export {
-  materializeTempContinuity,
-  resolveEngineTempLayout,
-  sessionTempDirFor,
-  tempContinuityDisclosure,
-  tempContinuityModeFor,
-  TempContinuityError,
-  VENDOR_ENGINE_DIR_PREFIX,
-} from "./temp-continuity.ts";
-export type { EngineTempLayout, EngineTempLayoutInput, TempContinuityDisclosure, TempContinuityInput, TempContinuityResult } from "./temp-continuity.ts";
-
-export {
-  classifyCrashPairs,
-  createMaterializedResumeDecorator,
-  HANDOFF_ENTRY_LABEL,
-  hasConversationalEntry,
-  materializedTranscriptPath,
-  MaterializedResumeError,
-  providerStateSidecarPath,
-  PROVIDER_STATE_SUFFIX,
-  readProviderStateSidecar,
-  // `RESUME_STAGING_PREFIX`/`resumeStagingRoot` are NOT here: they are the vendor's own vocabulary,
-  // shared with Lane A, and they live in `src/vendor-paths.ts` with one definition and one argument
-  // order (review r4, N13). The package barrel exports them once.
-} from "./materialized-resume.ts";
-export type {
-  CrashPairClassification,
-  StagedResumeResult,
-  MaterializedResumeDecoratorHandle,
-  MaterializedResumeDeps,
-  MaterializedResumeProbeDetail,
-  MaterializedResumeProbeLeg,
-  PinnedRuntimeProbeLegs,
-} from "./materialized-resume.ts";
-
-export { MATERIALIZED_RESUME_PROBE_REPORTS, materializedResumeReportForPin } from "./pinned-probes.ts";
-export { acquireHandoffLease, createHandoffBarrier, HANDOFF_STEPS, HandoffCommitError, HandoffLeaseError, HandoffPlanError, HandoffWiringError, releaseHandoffLease, validateSessionTranscript } from "./handoff-barrier.ts";
-export type {
-  CompatibilityLevel,
-  DetailedHandoffOutcome,
-  HandoffBarrierDeps,
-  HandoffBarrierHandle,
-  HandoffDestinationRuntime,
-  HandoffEligibilityLike,
-  HandoffOwnerHealth,
-  HandoffParticipants,
-  HandoffResumeTarget,
-  HandoffSourceOwner,
-  HandoffStepReport,
-  TranscriptValidation,
-} from "./handoff-barrier.ts";
+export { HANDOFF_ENTRY_LABEL, providerStateSidecarPath, PROVIDER_STATE_SUFFIX, readProviderStateSidecar } from "./provider-state.ts";
+export { createSwitchReviewer, SwitchReviewError } from "./review-switch.ts";
+export type { SwitchReviewerDeps, SwitchReviewerHandle } from "./review-switch.ts";

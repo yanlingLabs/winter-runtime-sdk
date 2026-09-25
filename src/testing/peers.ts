@@ -134,19 +134,3 @@ export function createFakeWinterPeer(options: FakeWinterPeerOptions = {}): FakeW
   };
   return { peer: namespace as unknown as RuntimeSdkPeers["winter"], calls, scripted };
 }
-
-export interface FakeClaudePeerOptions {
-  /** Defaults to the exact pin in the matrix. */
-  packageVersion?: string;
-}
-
-/**
- * An official peer, for matrix tests only.
- *
- * It exports a version identity ON PURPOSE: without one, the matrix's second probe would resolve the
- * REAL `@anthropic-ai/claude-agent-sdk@0.3.250` that this repository installs as a dev dependency,
- * and an "out of range" test would pass for the wrong reason.
- */
-export function createFakeClaudePeer(options: FakeClaudePeerOptions = {}): NonNullable<RuntimeSdkPeers["claude"]> {
-  return { version: options.packageVersion ?? "0.3.250" } as unknown as NonNullable<RuntimeSdkPeers["claude"]>;
-}

@@ -21,37 +21,9 @@ export class RuntimeSdkError extends Error {
 }
 
 /**
- * A session's runtime was changed MID-SESSION, and the door will not rewrite the past to serve it.
- *
- * D13's own words: "the certified handoff or a visible fork, never a silent rewrite". A persisted
- * `RuntimeSelection` is a fact about a transcript that already exists — which runtime wrote it, in
- * which dialect, against which backend session id. Honouring a different `runtimeKind` on the next
- * `query()` would continue that transcript on a runtime that never wrote any of it, which is the
- * silent rewrite, and it would do it at the one door where nothing else is watching.
- *
- * SO THE DOOR REFUSES AND NAMES THE TWO LEGITIMATE ROUTES. `sdk.handoff(session, to)` runs WS-05
- * §12's eight steps — drain, compare, validate, persist, transfer the lease, confirm the destination
- * — and produces a `HandoffOutcome` the host renders; a `forkSession` resume is the visible fork.
- * Both leave evidence; neither pretends the change did not happen.
- */
-export class RuntimeHandoffRequiredError extends RuntimeSdkError {
-  /** The runtime this session is persisted on. */
-  readonly from: string;
-  /** The runtime the caller asked for. */
-  readonly to: string;
-  readonly address: string;
-  constructor(args: { from: string; to: string; address: string }) {
-    super(
-      `winter-runtime-sdk: ${args.address} is persisted on the ${args.from} runtime and this query asks for ${args.to}. A runtime change mid-session is \`sdk.handoff(session, "${args.to}")\` — WS-05 §12's certified transfer — or a visible fork (\`forkSession\`); serving the new runtime on the old transcript would be the silent rewrite D13 forbids`,
-    );
-    this.from = args.from;
-    this.to = args.to;
-    this.address = args.address;
-  }
-}
-
-/**
- * The official leg was asked for and something only the HOST can supply was missing.
+ * The door was given an input only the HOST can correct (WS-23: it was first the official leg's —
+ * "something only the host can supply was missing" — and is now the Winter door's: a capability-name
+ * collision, a selection naming the retired official runtime, a missing home).
  *
  * WHY ITS OWN CLASS RATHER THAN `OfficialConfigurationError`. That class is WS-14 §13's, and it is
  * about an options object that is wrong — a field this branch refuses, a combination the runtime

@@ -122,4 +122,4 @@ export function credentials(providerIds: string[], over: Record<string, Provider
 export const NOW = "2026-09-08T12:00:00.000Z";
 
 /** The version identities a host would stamp; both present so a test can see which one was chosen. */
-export const VERSIONS = { winterSdkVersion: "0.0.2", claudeSdkVersion: "0.3.250", engineVersion: "2.1.250" };
+export const VERSIONS = { winterSdkVersion: "0.0.2", engineVersion: "2.1.250" };

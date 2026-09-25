@@ -13,8 +13,9 @@
 // into anything the consumer actually touched. Measured directly against a packed tarball with only
 // the required peer installed.
 //
-// So this file imports ONLY from the two testing modules that name no peer at all
-// (`./hermetic.ts`, `./capture-env.ts`) plus the peer-free half of `./peers.ts` — a host that installs
+// So this file imports ONLY from the testing module that names no peer at all (`./hermetic.ts`) plus
+// the peer-free half of `./peers.ts` (WS-23: `./capture-env.ts`, the official capture environment,
+// and the fake official peer went with the official runtime) — a host that installs
 // neither `@yanlinglabs/winter-conformance` nor `@yanlinglabs/winter-provider-conformance` still gets
 // a clean `tsc` AND a clean runtime import of `@yanlinglabs/winter-runtime-sdk/testing`.
 //
@@ -25,9 +26,8 @@
 // clean.
 export { createFakeKeychain, withHermeticHomes, withTempDir } from "./hermetic.ts";
 export type { FakeKeychain } from "./hermetic.ts";
-export { createFakeClaudePeer, createFakeWinterPeer } from "./peers.ts";
-export type { FakeClaudePeerOptions, FakeWinterPeer, FakeWinterPeerOptions, RecordedQueryCall } from "./peers.ts";
-export { HERMETIC_TRAFFIC_OPT_OUTS, officialCaptureEnv } from "./capture-env.ts";
+export { createFakeWinterPeer } from "./peers.ts";
+export type { FakeWinterPeer, FakeWinterPeerOptions, RecordedQueryCall } from "./peers.ts";
 
 // NOT HERE, deliberately (see the header above): `./conformance.ts`'s golden-trace tooling and
 // `./fakes.ts`'s loopback-fake builders (`anthropicFake`, `openaiResponsesFake`, `requestsTo`,

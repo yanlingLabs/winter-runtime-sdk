@@ -317,7 +317,7 @@ describe("the brand sweep gate", () => {
   test("the sweep is not vacuous: it scans both roots and this repository's real files", () => {
     expect(files.length).toBeGreaterThan(10);
     expect(files).toContain("src/index.ts");
-    expect(files).toContain("src/seams/official-adapter.ts");
+    expect(files).toContain("src/seams/review-switch.ts");
     expect(files).toContain("scripts/smoke-installed.ts");
   });
 

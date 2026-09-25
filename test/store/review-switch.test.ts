@@ -1,5 +1,10 @@
-// WS-18 W18-20 / P10b-6 R8 — `reviewSwitch` AND `plan().review`: THE S7 TABLE, END TO END THROUGH
-// THE STORE.
+// WS-18 W18-20 / P10b-6 R8 — `reviewSwitch`: THE S7 TABLE, END TO END THROUGH THE STORE.
+//
+// WS-23: the review is now its own module (`createSwitchReviewer`) — the handoff barrier whose
+// `plan()` used to embed it is retired with the official runtime, and so is the claude-ready copy's
+// truncation check (a destination on the official runtime was the only one it could measure). The
+// directory rows recorded on `claude-agent` below are an upgrading host's legacy rows: the review's
+// `message.model` fallback is what reads them now.
 //
 // `reviewSwitch(session, requested)` reads the session's persisted (FROM) selection off the
 // directory, the canonical transcript and the provider-state sidecar off the shared store — never
@@ -15,16 +20,13 @@ import { describe, expect, test } from "bun:test";
 import type { ContinuityEndpoint, MessageOrigin } from "@yanlinglabs/winter-provider-runtime";
 import { endpointFromOrigin } from "@yanlinglabs/winter-provider-runtime";
 import type { SessionKey, SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
-import { WINTER_BRAND, envName } from "@yanlinglabs/winter-agent-sdk";
 
-import { createHandoffBarrier, providerStateSidecarPath, resolveEngineTempLayout, type HandoffBarrierDeps } from "../../src/store/index.ts";
-import type { RuntimeSelection, SelectionInput } from "../../src/selection/runtime-selection.ts";
+import { createSwitchReviewer, providerStateSidecarPath, type SwitchReviewerDeps, type SwitchReviewerHandle } from "../../src/store/index.ts";
+import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
 import { withStoreBed, type StoreBed } from "./support.ts";
 import { createRuntimeSdk, runtimeSdkInternals, sdkHomeOf } from "../../src/index.ts";
-import type { HandoffBarrier } from "../../src/seams/handoff.ts";
 import type { SharedSessionStore } from "../../src/store/wiring.ts";
 import { createFakeKeychain } from "../../src/testing/index.ts";
-import { credentials, listing, VERSIONS } from "../selection/fixtures.ts";
 
 const NOW = "2026-09-13T12:00:00.000Z";
 
@@ -45,7 +47,7 @@ function fixtureResolveEndpoint(origin: MessageOrigin): ContinuityEndpoint {
 
 function selection(endpoint: ContinuityEndpoint, over: Partial<RuntimeSelection> = {}): RuntimeSelection {
   return {
-    runtimeKind: endpoint.family === "claude" ? "claude-agent" : "winter-agent",
+    runtimeKind: "winter-agent",
     providerId: endpoint.providerId,
     modelRef: endpoint.modelKey,
     family: endpoint.family,
@@ -117,18 +119,8 @@ function writeOrigin(home: string, key: SessionKey, anchorUuid: string, endpoint
   appendFileSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
 }
 
-function barrierFor(bed: StoreBed, deps: Partial<HandoffBarrierDeps> = {}): ReturnType<typeof createHandoffBarrier> {
-  const full: HandoffBarrierDeps = {
-    shared: bed.shared,
-    winterHome: bed.home,
-    resolveEndpoint: fixtureResolveEndpoint,
-    tempLayoutFor: () => {
-      mkdirSync(bed.tempBase, { recursive: true });
-      return resolveEngineTempLayout({ brand: WINTER_BRAND, tempProjectKey: bed.key.projectKey, backendUuid: bed.key.sessionId, uid: 4242, env: { [envName(WINTER_BRAND, "TMPDIR")]: bed.tempBase } });
-    },
-    ...deps,
-  };
-  return createHandoffBarrier(bed.context, full);
+function barrierFor(bed: StoreBed, deps: Partial<SwitchReviewerDeps> = {}): SwitchReviewerHandle {
+  return createSwitchReviewer(bed.context, { shared: bed.shared, winterHome: bed.home, resolveEndpoint: fixtureResolveEndpoint, ...deps });
 }
 
 describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the store", () => {
@@ -140,7 +132,7 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
       await bed.shared.settle(bed.key);
       writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.prompt).toBe(true);
       expect(review.classification?.lossClass).toBe("warned-lossy");
       expect(review.skipped).toBeUndefined();
@@ -214,7 +206,7 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
       await bed.shared.store.append(bed.key, t.entries);
       await bed.shared.settle(bed.key);
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.prompt).toBe(false);
       expect(review.skipped).toBe("same-family");
       expect(review.classification).toBeUndefined();
@@ -242,87 +234,12 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
       ]);
       await bed.shared.settle(bed.key);
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.prompt).toBe(false);
       expect(review.skipped).toBe("no-source-turns");
     });
   });
 
-  test("truncated:true flips an otherwise-lossless exposed transfer to prompt (Claude destination — the one leg this router can measure `dropped` for)", async () => {
-    await withStoreBed(async (bed) => {
-      await bed.record({ runtimeKind: "winter-agent", selection: selection(DEEPSEEK) });
-      const t = turn(bed.key, null, "deepseek's full reasoning trace, long enough that a tiny budget cannot keep it");
-      await bed.shared.store.append(bed.key, t.entries);
-      await bed.shared.settle(bed.key);
-      writeOrigin(bed.home, bed.key, t.assistantUuid, DEEPSEEK);
-      writeSummary(bed.home, bed.key, t.assistantUuid, DEEPSEEK, {
-        text: "deepseek's full reasoning trace, long enough that a tiny budget cannot keep it",
-        material: "exposed",
-        complete: true,
-      });
-      const claudeRequested = selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" });
-
-      // BASELINE: unbounded budget, nothing dropped — the same shape as the DeepSeek->GLM/GPT rows.
-      const baseline = await barrierFor(bed).reviewSwitch(bed.key, claudeRequested);
-      expect(baseline.prompt).toBe(false);
-      expect(baseline.classification?.lossClass).toBe("lossless-portable");
-
-      // A BUDGET TOO TINY TO CARRY EVEN ONE CHARACTER of the decoration: `dropped > 0`, which
-      // `reviewModelSwitch` folds into `SwitchFacts.truncated`, which `classifySwitch` flips to lossy —
-      // measured, not assumed: the baseline above is what makes this a controlled A/B rather than a
-      // guess about which way the matrix would have gone anyway.
-      const truncated = await barrierFor(bed, { reviewSwitchBudgetChars: 1 }).reviewSwitch(bed.key, claudeRequested);
-      expect(truncated.prompt).toBe(true);
-      expect(truncated.classification?.lossClass).toBe("warned-lossy");
-    });
-  });
-
-  test("plan().review embeds the SAME classification for a servable, family-crossing plan", async () => {
-    await withStoreBed(async (bed) => {
-      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
-      const t = turn(bed.key, null, "gpt's reasoning summary");
-      await bed.shared.store.append(bed.key, t.entries);
-      await bed.shared.settle(bed.key);
-      writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
-      const claudeRequested = selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" });
-
-      const barrier = barrierFor(bed, { participants: { source: () => ({ runtimeKind: "winter-agent" as const, drainToIdleBoundary: () => ({ ok: true } as const), drainStream: () => ({ ok: true } as const), close: () => ({ ok: true } as const) }) } });
-      const plan = await barrier.plan(bed.key, "claude-agent", { requested: claudeRequested });
-      expect(plan.review).toBeDefined();
-      expect(plan.review?.prompt).toBe(true);
-      expect(plan.review?.classification?.lossClass).toBe("warned-lossy");
-
-      // AND IT MATCHES `reviewSwitch` CALLED DIRECTLY — one classification, not two computed differently.
-      const direct = await barrier.reviewSwitch(bed.key, claudeRequested);
-      expect(plan.review).toEqual(direct);
-    });
-  });
-
-  test("plan().review is ABSENT for a refused plan — nothing to review", async () => {
-    await withStoreBed(async (bed) => {
-      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
-      const input = (): SelectionInput => ({
-        mode: "code",
-        requested: {},
-        families: listing("claude"),
-        credentials: credentials(["anthropic"]),
-        hasClaudePeer: true,
-        claudeOauthApproved: true,
-        versions: VERSIONS,
-        now: NOW,
-      });
-      const barrier = barrierFor(bed, {
-        selectionInputFor: () => input(),
-        participants: {
-          source: () => ({ runtimeKind: "claude-agent" as const, drainToIdleBoundary: () => ({ ok: true } as const), drainStream: () => ({ ok: true } as const), close: () => ({ ok: true } as const) }),
-        },
-      });
-      // A requested row whose auth family the winter destination can never serve (D28) — a genuine refusal.
-      const plan = await barrier.plan(bed.key, "winter-agent", { requested: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent", authFamily: "claude-oauth" }) });
-      expect(plan.selection.kind).toBe("refused");
-      expect(plan.review).toBeUndefined();
-    });
-  });
 });
 
 // --- fix wave 2, CRITICAL C1 — computeSwitchReview's `from` is the LIVE tip, never the stale --------
@@ -358,7 +275,7 @@ describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE s
       writeOrigin(bed.home, bed.key, t3.assistantUuid, GPT);
       writeSummary(bed.home, bed.key, t3.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       // THE STALE-SOURCE (deepseek) ANSWER WOULD BE: prompt:false, lossless-portable (a fully-exposed
       // reasoning trace survives a switch away losslessly). THE LIVE-SOURCE (gpt) ANSWER IS THIS ONE —
       // gpt's readable state is summary-only, so leaving it for Claude (which cannot read it back
@@ -415,7 +332,7 @@ describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE s
       await bed.shared.store.append(bed.key, t.entries);
       await bed.shared.settle(bed.key);
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.skipped).toBe("same-family");
       expect(review.prompt).toBe(false);
       expect(review.classification).toBeUndefined();
@@ -429,7 +346,7 @@ describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE s
       // and the review must fall back to `entry.selection` exactly as it always did.
       await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.skipped).toBe("no-source-turns");
       expect(review.prompt).toBe(false);
     });
@@ -482,7 +399,7 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
       await bed.shared.store.append(bed.key, [errorResidueEntry(bed.key, t.assistantUuid)]);
       await bed.shared.settle(bed.key);
 
-      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET));
       expect(review.skipped).toBe("same-family");
       expect(review.prompt).toBe(false);
     });
@@ -496,7 +413,7 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
       await bed.shared.store.append(bed.key, t.entries);
       await bed.shared.settle(bed.key);
 
-      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET));
       expect(review.skipped).toBe("same-family");
       expect(review.prompt).toBe(false);
     });
@@ -510,7 +427,7 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
       await bed.shared.store.append(bed.key, t.entries);
       await bed.shared.settle(bed.key);
 
-      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed, { resolveEndpoint: hostileResolveEndpoint }).reviewSwitch(bed.key, selection(CLAUDE_SONNET));
       expect(review.skipped).toBe("same-family");
       expect(review.prompt).toBe(false);
     });
@@ -525,7 +442,7 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
       writeOrigin(bed.home, bed.key, t.assistantUuid, GPT);
       writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.skipped).toBeUndefined();
       expect(review.prompt).toBe(true);
     });
@@ -546,11 +463,11 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
 });
 
 describe("integration Important: under WS-21 (`requireRunHome`) the review reads the sidecar from the STORE home, where the child writes it", () => {
-  /** The ROUTER's own barrier over the shared runtime home `<home>/sdk` — not a barrier built on the bed's pre-WS-21 store. */
-  function routerOf(bed: StoreBed): { barrier: HandoffBarrier; shared: SharedSessionStore; storeHome: string } {
+  /** The ROUTER's own reviewer over the shared runtime home `<home>/sdk` — not one built on the bed's pre-WS-21 store. */
+  function routerOf(bed: StoreBed): { barrier: SwitchReviewerHandle; shared: SharedSessionStore; storeHome: string } {
     mkdirSync(bed.home, { recursive: true, mode: 0o700 }); // the daemon's home always exists; the store creates `sdk/` under it
     const sdk = createRuntimeSdk({ peers: bed.peers, keychain: createFakeKeychain(), directoryStore: bed.directoryStore, requireRunHome: true, handoff: { winterHome: bed.home, resolveEndpoint: fixtureResolveEndpoint } });
-    const barrier = runtimeSdkInternals(sdk)!.barrier as unknown as HandoffBarrier & { shared: SharedSessionStore };
+    const barrier = runtimeSdkInternals(sdk)!.barrier;
     return { barrier, shared: barrier.shared, storeHome: sdkHomeOf(bed.home) };
   }
 
@@ -564,7 +481,7 @@ describe("integration Important: under WS-21 (`requireRunHome`) the review reads
       await shared.settle(bed.key);
       writeSummary(storeHome, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
-      const review = await barrier.reviewSwitch(bed.key, selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }));
+      const review = await barrier.reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.prompt).toBe(true);
       expect(review.classification?.lossClass).toBe("warned-lossy");
     });

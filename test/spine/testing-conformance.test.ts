@@ -5,17 +5,16 @@
 // with it, and the trace normalizer runs — so that when Lane A or Lane D writes a differential, a
 // failure is about the differential and not about the wiring.
 //
-// IT NEVER CALLS `runOfficialCapture`. That function installs the pinned official SDK into a
-// throwaway npm prefix and needs network egress; WS-02 §6 makes that fetch an ephemeral,
-// checksum-verified, deliberate act. Asserting it is a function is the whole of what a hermetic
-// suite may say about it.
+// WS-23: `runOfficialCapture` — which installed the pinned official SDK and captured it — went with the
+// official runtime.
 //
 // EVERY CALL BELOW IS AWAITED (0.0.3, P8c-13): `./conformance.ts`'s functions became lazy — a dynamic
 // `import()` of the optional `@yanlinglabs/winter-conformance` peer inside each function body, so this
 // package's published `./testing` subpath does not require it — which made every one of them async.
 import { describe, expect, test } from "bun:test";
 
-import { compareTraces, goldenTracePath, listGoldenTraces, loadGoldenTrace, normalizeTrace, runOfficialCapture } from "../../src/testing/index.ts";
+import * as testing from "../../src/testing/index.ts";
+import { compareTraces, goldenTracePath, listGoldenTraces, loadGoldenTrace, normalizeTrace } from "../../src/testing/index.ts";
 import type { ConformanceTraceEntry } from "../../src/testing/index.ts";
 
 describe("the conformance harness", () => {
@@ -62,7 +61,7 @@ describe("the conformance harness", () => {
     expect(normalized?.payload).toEqual({ kept: "yes", nested: { kept: 1 } });
   });
 
-  test("the official capture is present and is NOT invoked here", () => {
-    expect(typeof runOfficialCapture).toBe("function");
+  test("WS-23: the official capture is gone from the harness", () => {
+    expect("runOfficialCapture" in testing).toBe(false);
   });
 });

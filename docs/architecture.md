@@ -1,5 +1,12 @@
 # Architecture — `@yanlinglabs/winter-runtime-sdk`
 
+> **WS-23 (`0.0.14`): the official runtime is retired.** Everything below that describes the official
+> leg (Lane A, `src/official/**`, `door.ts`), the handoff barrier and its decorations (Lane C's
+> `handoff-barrier.ts`, `materialized-resume.ts`, `temp-continuity.ts`) or the official messaging
+> adapter is history: those modules are removed. What remains is the Winter door (`sdk.ts`), selection,
+> the store wiring plus the switch review (`store/review-switch.ts`), the run home, and the directory and
+> messaging router. See the README's "What `0.0.14` changes".
+
 One door over two agent runtimes: the Winter Agent SDK and the official Claude Agent SDK. **A
 selector and an adapter, never a translation layer** — the pinned `query()` / `Options` /
 `SDKMessage` contract passes through verbatim, plus runtime-selection inputs.

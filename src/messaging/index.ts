@@ -16,14 +16,12 @@ export { createGlobalMessaging, deriveMessageId } from "./router.ts";
 export type { GlobalMessagingContext, GlobalMessagingHandle, GlobalMessagingOptions, ReplyRequest } from "./router.ts";
 export { createWinterMessagingAdapter } from "./winter-adapter.ts";
 export type { WinterMessagingAdapter, WinterMessagingAdapterDeps } from "./winter-adapter.ts";
-export { createOfficialMessagingAdapter } from "./official-adapter.ts";
-export type { OfficialMessagingAdapter, OfficialMessagingAdapterDeps } from "./official-adapter.ts";
 export { createDispatchingAdapter } from "./dispatch.ts";
 export type { DispatchDeps, RouterMessagingAdapter } from "./dispatch.ts";
 export { createInboundPolicy } from "./inbound.ts";
 export type { InboundPolicy, InboundPolicyDeps, InboundPolicyHooks, InboundVerdict } from "./inbound.ts";
 export { createAttachedSessionRegistry } from "./sessions.ts";
-export type { AttachedOfficialSession, AttachedSession, AttachedSessionRegistry, AttachedWinterSession, LiveSessionStatus } from "./sessions.ts";
+export type { AttachedSession, AttachedSessionRegistry, AttachedWinterSession, LiveSessionStatus } from "./sessions.ts";
 export { renderAttributedTurn, renderOwnerQualifiedTurn, UnattributableSenderError } from "./attribution.ts";
 // THE MESSAGING TOOL HANDLERS ARE NOT HERE ANY MORE (R-8-1): `createMessagingToolHandlers`, the
 // acceptors, the native schemas and `callerAddress` all live in `@yanlinglabs/winter-agent-sdk/tools`,

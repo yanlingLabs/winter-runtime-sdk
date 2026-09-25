@@ -12,13 +12,13 @@ import { join } from "node:path";
 import { createFakeKeychain, createFakeWinterPeer } from "../../src/testing/index.ts";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk, runtimeSdkInternals } from "../../src/index.ts";
 import { NotImplementedYet } from "../../src/errors.ts";
-import { HandoffPlanError, createSharedSessionStore, resolveEngineTempLayout, type HandoffBarrierHandle } from "../../src/store/index.ts";
-import { stubGlobalMessaging, stubHandoffBarrier, stubMaterializedResumeDecorator, stubOfficialAdapter, stubRuntimeDirectory } from "../../src/seams/stubs.ts";
+import { SwitchReviewError } from "../../src/store/index.ts";
+import { stubGlobalMessaging, stubRuntimeDirectory } from "../../src/seams/stubs.ts";
 import type { SeamContext, SeamContextWithDirectory } from "../../src/seams/context.ts";
 import type { DeliveryRecord, IdleSubscriptionRecord, NameLeaseRecord, RuntimeDirectoryEntry } from "../../src/seams/directory-store.ts";
 import type { GlobalAgentMessage } from "../../src/seams/messaging-contract.ts";
 import type { RuntimeSelection } from "../../src/selection/runtime-selection.ts";
-import { WinterCompatibilitySessionStore, WINTER_BRAND, envName, type SessionKey } from "@yanlinglabs/winter-agent-sdk";
+import { WinterCompatibilitySessionStore, WINTER_BRAND } from "@yanlinglabs/winter-agent-sdk";
 
 const keychain = createFakeKeychain();
 
@@ -80,28 +80,6 @@ async function laneOfThrow(fn: () => unknown): Promise<string> {
 }
 
 describe("every stub throws NotImplementedYet, naming its lane", () => {
-  test("the official adapter STUB is Lane A's, including the spawn proxy", async () => {
-    const adapter = stubOfficialAdapter(seamContext());
-    expect(await laneOfThrow(() => adapter.launch({} as never))).toBe("lane-a");
-    expect(await laneOfThrow(() => adapter.resume({} as never))).toBe("lane-a");
-    expect(await laneOfThrow(() => adapter.buildOptions({} as never))).toBe("lane-a");
-    expect(await laneOfThrow(() => adapter.buildChildEnv({} as never))).toBe("lane-a");
-    expect(await laneOfThrow(() => adapter.spawnProxy({} as never))).toBe("lane-a");
-  });
-
-  test("…but the WIRED official seam is Lane A's real adapter — the stub above is no longer constructed", () => {
-    // Review r2, NEW-8. This file's header promises "nothing pretends to work", and it verified that
-    // by calling `stubOfficialAdapter` DIRECTLY — which stayed true after `src/sdk.ts` stopped wiring
-    // it, so the assertion was about a factory nothing constructs. Both facts are now stated: the stub
-    // is still honest, and the handle no longer uses it.
-    const { peer } = createFakeWinterPeer();
-    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
-    const official = runtimeSdkInternals(sdk)?.official;
-    expect(official).toBeDefined();
-    // A real adapter builds options; the stub throws `NotImplementedYet` from every member.
-    expect(() => official?.buildChildEnv({} as never)).not.toThrow(NotImplementedYet);
-  });
-
   test("the directory and the messaging router are Lane B's", async () => {
     const directory = stubRuntimeDirectory(seamContext());
     for (const call of [
@@ -125,21 +103,6 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     ]) {
       expect(await laneOfThrow(call)).toBe("lane-b");
     }
-  });
-
-  test("the barrier and the decorator are Lane C's -- but the decorator's DOOR already answers", async () => {
-    const barrier = stubHandoffBarrier(seamContext());
-    const key: SessionKey = { projectKey: "p", sessionId: "s" };
-    expect(await laneOfThrow(() => barrier.plan(key, "claude-agent"))).toBe("lane-c");
-    expect(await laneOfThrow(() => barrier.execute({} as never))).toBe("lane-c");
-
-    const decorator = stubMaterializedResumeDecorator(seamContext());
-    // WS-13 §8.2 makes FALLBACK the always-available door and PREFERRED the one four probes open.
-    // "Which door is open" has a correct answer before Lane C lands, and reporting "preferred" would
-    // be the lie -- so this one is a value, not a throw.
-    expect(decorator.door).toBe("fallback");
-    expect(await laneOfThrow(() => decorator.probe())).toBe("lane-c");
-    expect(await laneOfThrow(() => decorator.decorate({} as never))).toBe("lane-c");
   });
 
   // LANE D HAS LANDED, so this seam no longer throws `NotImplementedYet` — it answers. The stub
@@ -174,20 +137,22 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     expect(decided.providerId).toBe("local");
   });
 
-  // LANE C HAS LANDED (controller wiring): the handle's `handoff()` reaches the real barrier, whose
-  // `plan()` refuses a session the directory has never heard of with a typed `HandoffPlanError` --
-  // not a `NotImplementedYet`. The barrier's own behaviour is proven in `test/store/`.
-  test("the handle's handoff() reaches Lane C's barrier", async () => {
+  // WS-23: the handle's `handoff()` is gone with the barrier. What is left of Lane C's seam is the
+  // switch review, reached as `runtimeSdkInternals(sdk).barrier`; a session the directory has never
+  // heard of is a typed `SwitchReviewError` — "not in the runtime directory", the words a host matches
+  // on — not a `NotImplementedYet`. Its own behaviour is proven in `test/store/review-switch*.test.ts`.
+  test("the handle's switch review reaches Lane C's real reviewer", async () => {
     const { peer } = createFakeWinterPeer();
     const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain });
-    await expect(sdk.handoff({ projectKey: "p", sessionId: "s" }, "claude-agent")).rejects.toThrow(HandoffPlanError);
+    const requested: RuntimeSelection = selection();
+    const review = runtimeSdkInternals(sdk)!.barrier.reviewSwitch({ projectKey: "p", sessionId: "s" }, requested);
+    await expect(review).rejects.toThrow(SwitchReviewError);
+    await expect(review).rejects.toThrow(/not in the runtime directory/);
   });
 
-  // `SeamContext.winterHome` WAS A FIELD NOTHING READ (fix wave, item 12). The spine added it for
-  // Lane C and then wired the barrier as `createHandoffBarrier(context)` with no deps -- so a host
-  // that set a home got a store that resolved somewhere else, silently. Both halves are pinned here:
-  // the constructor option REACHES the context, and the barrier RESOLVES ITS STORE THERE.
-  test("winterHome reaches the seam context, and the barrier's store resolves under it", async () => {
+  // `SeamContext.winterHome` WAS A FIELD NOTHING READ (fix wave, item 12). Both halves are pinned
+  // here: the constructor option REACHES the context, and the reviewer RESOLVES ITS STORE THERE.
+  test("winterHome reaches the seam context, and the reviewer's store resolves under it", async () => {
     const home = mkdtempSync(join(tmpdir(), "runtime-sdk-seam-home-"));
     try {
       const { peer } = createFakeWinterPeer();
@@ -203,12 +168,7 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
       const sdk = createRuntimeSdk({ peers: { winter }, keychain, handoff: { winterHome: home } });
       const internals = runtimeSdkInternals(sdk)!;
       expect(internals.context.winterHome).toBe(home);
-      // `internals.barrier` is typed as the SEAM (deliberately -- the seam is the contract), so
-      // reaching the handle's own two readers is an explicit cast rather than a widened spine type.
-      const barrier = internals.barrier as HandoffBarrierHandle;
-      expect(barrier.shared.identity.winterHome).toBe(home);
-      // ONE store, so the decorator resolves under the same home -- `decorator: barrier.decorator`.
-      expect(barrier.decorator.shared).toBe(barrier.shared);
+      expect(internals.barrier.shared.identity.winterHome).toBe(home);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -220,115 +180,9 @@ describe("every stub throws NotImplementedYet, naming its lane", () => {
     expect(runtimeSdkInternals(sdk)?.context.winterHome).toBeUndefined();
   });
 
-  // ==================================================================================================
-  // F-3 — WIRED FOR CONSTRUCTION IS NOT WIRED FOR CONFIGURATION.
-  //
-  // Every lane factory was CALLED from `createRuntimeSdk` — the spine's promise, kept — and none of
-  // them could be given its own options, because `RuntimeSdkOptions` had no field for them. The two
-  // consequences were not subtle and neither had a test: `handoff()` could never return `resumed`
-  // (no `participants` means step 8 is "no destination runtime was supplied", so every handoff ended
-  // in a lossy fork), and `messaging` could never deliver to an official session (no
-  // `official.permissionClass` means an unknown class, which since D2 fails closed and HOLDS). The
-  // README sentence item 19 owes had no constructor field to name.
-  // ==================================================================================================
-  test("F-3 — a handoff through the HANDLE reaches `resumed` when the host supplies participants", async () => {
-    const home = mkdtempSync(join(tmpdir(), "runtime-sdk-f3-"));
-    try {
-      const { peer } = createFakeWinterPeer();
-      const winter = {
-        ...peer,
-        WinterCompatibilitySessionStore,
-        resolveWinterHome: () => {
-          throw new Error("a hermetic test must never resolve the real Winter home");
-        },
-      } as unknown as typeof peer;
-      const directoryStore = createInMemoryRuntimeDirectoryStore();
-      const ok = { ok: true as const, detail: "the fixture confirms" };
-      const sdk = createRuntimeSdk({
-        peers: { winter },
-        keychain,
-        directoryStore,
-        handoff: {
-          winterHome: home,
-          participants: {
-            source: () => ({ runtimeKind: "winter-agent" as const, drainToIdleBoundary: () => ok, drainStream: () => ok, close: () => ok }) as never,
-            destination: () => ({ runtimeKind: "claude-agent" as const, confirmInit: () => ok }),
-          },
-          stagingRootFor: (uuid) => join(home, "staging", uuid),
-          // The REAL layout resolver over a temp root, not a hand-rolled shape: step 7 materializes
-          // against it, and a fixture that merely looks like the type fails there.
-          tempLayoutFor: () => {
-            const tempBase = join(home, "temp");
-            mkdirSync(tempBase, { recursive: true });
-            return resolveEngineTempLayout({ brand: WINTER_BRAND, tempProjectKey: key.projectKey, backendUuid: key.sessionId, uid: 4242, env: { [envName(WINTER_BRAND, "TMPDIR")]: tempBase } });
-          },
-        },
-      });
-      const key: SessionKey = { projectKey: "-f3", sessionId: "11111111-2222-4333-8444-555555555555" };
-      const address = `session:${key.sessionId}`;
-      await directoryStore.upsert({ ...entry(address), backendSessionId: key.sessionId });
-      // A real store under a real (temp) home, so this is the handle's own path end to end.
-      const shared = createSharedSessionStore({ peers: { winter }, winterHome: home });
-      await shared.store.append(key, [
-        {
-          type: "user",
-          uuid: "11111111-1111-4111-8111-111111111111",
-          parentUuid: null,
-          sessionId: key.sessionId,
-          timestamp: new Date(0).toISOString(),
-          cwd: "/f3",
-          version: "0.0.0",
-          isSidechain: false,
-          message: { role: "user", content: "hi" },
-        } as never,
-      ]);
-      await shared.settle(key);
-
-      const outcome = await sdk.handoff(key, "claude-agent");
-      // BEFORE F-3 this was ALWAYS `lossy-fork-offered` at step 8, for every host, with no way to fix it.
-      expect(outcome.kind).toBe("resumed");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test("F-3 — an official receiver with a DECLARED class is delivered to, not held", async () => {
-    const { peer } = createFakeWinterPeer();
-    const directoryStore = createInMemoryRuntimeDirectoryStore();
-    const officialRow = { ...entry("session:official-receiver"), runtimeKind: "claude-agent" as const, transport: "claude-handle" as const, status: "idle" as const };
-    officialRow.parsed = { objectKind: "session", runtimeKind: "claude-agent", winterSessionId: "official-receiver" };
-    const sdk = createRuntimeSdk({
-      peers: { winter: peer },
-      keychain,
-      directoryStore,
-      messaging: {
-        messaging: {
-          // The hook that had no door. Without it every message to an official session is HELD.
-          official: { permissionClass: () => "prompts" as const },
-          winter: { permissionClass: () => "prompts" as const },
-        },
-      },
-    });
-    await directoryStore.upsert(entry("session:sender"));
-    await directoryStore.upsert(officialRow);
-    const delivered: string[] = [];
-    sdk.messaging.attachOfficialSession("session:official-receiver", {
-      status: () => "idle",
-      push: async (text: string) => {
-        delivered.push(text);
-      },
-    } as never);
-
-    const outcome = await sdk.messaging.send({
-      from: { objectKind: "session", runtimeKind: "winter-agent", winterSessionId: "sender" },
-      to: "session:official-receiver",
-      body: "hi",
-      originToolCallId: "toolu-f3",
-    });
-    expect(outcome.status).not.toBe("held");
-    expect(delivered.length).toBeGreaterThan(0);
-  });
-
+  // F-3 — WIRED FOR CONSTRUCTION IS NOT WIRED FOR CONFIGURATION. WS-23: its two cases (a handoff
+  // through the handle reaching `resumed`, and an official receiver with a declared class) went with
+  // the official runtime; the Winter adapter's declared class is pinned in `test/messaging/policy.test.ts`.
   test("a NotImplementedYet says what it is about, not just that it is missing", () => {
     const error = new NotImplementedYet("lane-a", "OfficialAdapter.launch (WS-14 §1)");
     expect(error.seam).toBe("OfficialAdapter.launch (WS-14 §1)");
@@ -558,12 +412,12 @@ describe("the handle's internals are reachable for the lanes' own wiring", () =>
   test("`runtimeSdkInternals` hands back the seams and the ONE context every factory was given", () => {
     const { peer } = createFakeWinterPeer();
     const store = createInMemoryRuntimeDirectoryStore();
-    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, directoryStore: store, vendoredOfficialRuntime: "/vendored/winter" });
+    const sdk = createRuntimeSdk({ peers: { winter: peer }, keychain, directoryStore: store });
     const internals = runtimeSdkInternals(sdk);
     expect(internals?.context.directoryStore).toBe(store);
     expect(internals?.context.keychain).toBe(keychain);
     expect(internals?.context.peers.winter).toBe(peer);
-    expect(internals?.context.vendoredOfficialRuntime).toBe("/vendored/winter");
+    expect("vendoredOfficialRuntime" in (internals?.context ?? {})).toBe(false);
     // The directory on the handle IS the one in the context -- one object, not two (M3's hoist).
     expect(internals?.context.directory).toBe(sdk.directory);
     expect(runtimeSdkInternals({} as never)).toBeUndefined();

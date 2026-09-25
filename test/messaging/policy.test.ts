@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { ACCEPTED_QUEUE_CAP, DEFAULT_HOLD_EXPIRY_MS, HELD_INBOX_CAP } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { createRuntimeMessaging, renderAttributedTurn } from "../../src/messaging/index.ts";
 import type { GlobalMessagingOptions } from "../../src/messaging/index.ts";
-import { createBed, createFakeFacet, createFakeOfficialSession, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle } from "./support.ts";
+import { createBed, createFakeFacet, envelope, sessionAddress, sessionEntry, winterHandle, winterWriterHandle } from "./support.ts";
 
 function bedWith(options: GlobalMessagingOptions = {}) {
   const bed = createBed();
@@ -117,56 +117,61 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
   // `bypasses x prompts -> hold` (the row that exists to stop a prompting sender's mail landing
   // unreviewed in a bypassing session) never runs. A hold is visible, releasable and reversible; a
   // delivery into a bypassing session is not.
+  //
+  // WS-23: these cases used an official receiver (which had no facet to ask); the same fail-closed
+  // path is a Winter session driven through a plain WRITER, whose class only the host's hook knows.
 
-  test("an official receiver with no class hook HOLDS, and the reason names exactly why", async () => {
+  test("a Winter receiver driven through a plain writer, with no class hook, HOLDS, and the reason names exactly why", async () => {
     const world = bedWith(); // this file's bed declares NO classes: its subject is the policy
-    const official = createFakeOfficialSession("running");
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    await world.directory.record(sessionEntry("claude"));
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
 
     const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" });
     expect(outcome.status).toBe("held");
     if (outcome.status === "held") expect(outcome.reason).toContain("receiver class unknown");
-    expect(official.pushed.length).toBe(0);
+    expect(receiver.pushed.length).toBe(0);
     expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(1);
   });
 
   test("the host says what it launched, and the same message is delivered", async () => {
-    const world = bedWith({ official: { permissionClass: () => "prompts" } });
-    const official = createFakeOfficialSession("running");
+    const world = bedWith({ winter: { permissionClass: () => "prompts" } });
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    await world.directory.record(sessionEntry("claude"));
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
 
     expect((await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" })).status).toBe("queued");
-    expect(official.pushed.length).toBe(1);
+    expect(receiver.pushed.length).toBe(1);
   });
 
   test("a BYPASSING receiver the host declares still holds a prompting sender — the row the substitution skipped", async () => {
-    const world = bedWith({ official: { permissionClass: () => "bypasses" } });
-    const official = createFakeOfficialSession("running");
+    // Only the RECEIVER is declared bypassing: the hook is per entry, and the sender stays `unknown`
+    // (read as prompting on the sender side, §13) — the pair the official receiver used to give.
+    const world = bedWith({ winter: { permissionClass: (entry) => (entry.address === "session:claude" ? "bypasses" : "unknown") } });
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    await world.directory.record(sessionEntry("claude"));
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
 
     const outcome = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" });
     expect(outcome.status).toBe("held");
-    expect(official.pushed.length).toBe(0);
+    expect(receiver.pushed.length).toBe(0);
   });
 
   test("an EXPLICIT setting still wins over an unknown class, in both directions", async () => {
     const accepting = bedWith({ explicitSetting: () => "accept" });
-    const official = createFakeOfficialSession("running");
+    const receiver = winterWriterHandle(() => "running");
     await accepting.directory.record(sessionEntry("sender"));
-    await accepting.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    accepting.messaging.attachOfficialSession("session:claude", official.handle);
+    await accepting.directory.record(sessionEntry("claude"));
+    accepting.messaging.attachWinterSession("session:claude", receiver.handle);
     expect((await accepting.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" })).status).toBe("queued");
 
     const refusing = bedWith({ explicitSetting: () => "refuse" });
     await refusing.directory.record(sessionEntry("sender"));
-    await refusing.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    refusing.messaging.attachOfficialSession("session:claude", createFakeOfficialSession().handle);
+    await refusing.directory.record(sessionEntry("claude"));
+    refusing.messaging.attachWinterSession("session:claude", winterWriterHandle(() => "running").handle);
     expect((await refusing.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "hi", originToolCallId: "t1" })).status).toBe("refused");
   });
 
@@ -179,35 +184,35 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
     const world = bedWith(); // no class hook anywhere
     const senderFacet = createFakeFacet();
     senderFacet.setSenderClass("bypasses");
-    const official = createFakeOfficialSession("running");
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    await world.directory.record(sessionEntry("claude"));
     world.messaging.attachWinterSession("session:sender", winterHandle(senderFacet));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
 
     const held = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" });
     expect(held.status).toBe("held");
 
     expect(await world.messaging.releaseHeld("session:claude")).toEqual([]);
-    expect(official.pushed.length).toBe(0);
+    expect(receiver.pushed.length).toBe(0);
     expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(1);
   });
 
   test("NEW-1's other half — once the class IS known, the same release delivers", async () => {
     let known = false;
-    const world = bedWith({ official: { permissionClass: () => (known ? "bypasses" : "unknown") } });
+    const world = bedWith({ winter: { permissionClass: () => (known ? "bypasses" : "unknown") } });
     const senderFacet = createFakeFacet();
     senderFacet.setSenderClass("bypasses");
-    const official = createFakeOfficialSession("running");
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    await world.directory.record(sessionEntry("claude"));
     world.messaging.attachWinterSession("session:sender", winterHandle(senderFacet));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
     expect((await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "do the thing", originToolCallId: "t1" })).status).toBe("held");
 
     known = true; // bypasses x bypasses -> accept
     expect((await world.messaging.releaseHeld("session:claude")).map((outcome) => outcome.status)).toEqual(["queued"]);
-    expect(official.pushed.length).toBe(1);
+    expect(receiver.pushed.length).toBe(1);
   });
 
   test("the unknown-class hold is CLASS-DRIVEN, so it is released the moment the class is known", async () => {
@@ -215,17 +220,17 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
     // auto-promotes an explicit hold, so an unknown-class message parked as "explicit" could not be
     // released BY LEARNING THE CLASS — which is the one thing that should release it.
     let known = false;
-    const world = bedWith({ official: { permissionClass: () => (known ? "prompts" : "unknown") } });
-    const official = createFakeOfficialSession("running");
+    const world = bedWith({ winter: { permissionClass: () => (known ? "prompts" : "unknown") } });
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    await world.directory.record(sessionEntry("claude"));
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
     expect((await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "waiting", originToolCallId: "t1" })).status).toBe("held");
 
     known = true;
     const released = await world.messaging.releaseHeld("session:claude");
     expect(released.map((outcome) => outcome.status)).toEqual(["queued"]);
-    expect(official.pushed.length).toBe(1);
+    expect(receiver.pushed.length).toBe(1);
     expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(0);
   });
 
@@ -233,7 +238,7 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
     let classReads = 0;
     let settingReads = 0;
     const world = bedWith({
-      official: {
+      winter: {
         permissionClass: () => {
           classReads += 1;
           return "unknown";
@@ -244,10 +249,10 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
         return undefined;
       },
     });
-    const official = createFakeOfficialSession("running");
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    await world.directory.record(sessionEntry("claude"));
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
     for (let index = 0; index < 8; index += 1) {
       await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: `held-${index}`, originToolCallId: `t-${index}` });
     }
@@ -264,14 +269,14 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
 
   test("NEW-10 — a hold that is REFUSED on re-evaluation writes its receipt through", async () => {
     let authenticated = true;
-    const world = bedWith({ official: { permissionClass: () => "prompts" }, authenticatedRoute: () => authenticated });
-    const official = createFakeOfficialSession("running");
+    const world = bedWith({ winter: { permissionClass: () => "prompts" }, authenticatedRoute: () => authenticated });
+    const receiver = winterWriterHandle(() => "running");
     const senderFacet = createFakeFacet();
     senderFacet.setSenderClass("bypasses");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
+    await world.directory.record(sessionEntry("claude"));
     world.messaging.attachWinterSession("session:sender", winterHandle(senderFacet));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
 
     const held = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "waiting", originToolCallId: "t1" });
     expect(held.status).toBe("held");
@@ -279,7 +284,7 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
     authenticated = false; // the route lost its authentication while the message sat there
     expect(await world.messaging.releaseHeld("session:claude")).toEqual([]);
     expect((await world.store.mailboxes.listHeld("session:claude")).length).toBe(0);
-    expect(official.pushed.length).toBe(0);
+    expect(receiver.pushed.length).toBe(0);
     // THE SENDER IS TOLD. "held" reading forever for a message that no longer exists is the harm.
     const receipt = await world.store.deliveries.get(held.messageId);
     expect(receipt?.outcome?.status).toBe("refused");
@@ -288,10 +293,10 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
 
   test("NEW-10 — a hold swept by the five-minute expiry writes its receipt through too", async () => {
     const world = bedWith(); // no class hook: the unknown-class hold, which is the shipped default
-    const official = createFakeOfficialSession("running");
+    const receiver = winterWriterHandle(() => "running");
     await world.directory.record(sessionEntry("sender"));
-    await world.directory.record(sessionEntry("claude", { runtimeKind: "claude-agent" }));
-    world.messaging.attachOfficialSession("session:claude", official.handle);
+    await world.directory.record(sessionEntry("claude"));
+    world.messaging.attachWinterSession("session:claude", receiver.handle);
     const held = await world.messaging.send({ from: sessionAddress("sender"), to: "session:claude", body: "waiting", originToolCallId: "t1" });
     expect(held.status).toBe("held");
 
@@ -302,7 +307,7 @@ describe("an UNKNOWN receiver class fails closed (review r1, D2)", () => {
     const receipt = await world.store.deliveries.get(held.messageId);
     expect(receipt?.outcome?.status).toBe("refused");
     if (receipt?.outcome?.status === "refused") expect(receipt.outcome.reason).toContain("expired unread");
-    expect(official.pushed.length).toBe(0);
+    expect(receiver.pushed.length).toBe(0);
   });
 
   test("a Winter session driven through a plain WRITER can be declared too", async () => {

@@ -132,7 +132,8 @@ describe("release-pack's tarball scan", () => {
       .map(([name]) => name)
       .sort();
     expect(optionalPeersFrom(manifest).sort()).toEqual(expected);
-    expect(expected).toContain("@anthropic-ai/claude-agent-sdk");
+    // WS-23: the official SDK is no longer a peer of any kind.
+    expect(expected).not.toContain("@anthropic-ai/claude-agent-sdk");
     expect(expected).toContain("@yanlinglabs/winter-conformance");
     expect(expected).toContain("@yanlinglabs/winter-provider-conformance");
   });
