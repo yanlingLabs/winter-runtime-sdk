@@ -9,7 +9,8 @@
 // would have filtered it — otherwise a repository could promote itself.
 //
 // THE STEPS, in order:
-//   1. read the tiers — project and local only for a trusted project;
+//   1. read the tiers — project and local only for a trusted project; a local file git TRACKS is the
+//      repository's, and is filtered as the project tier from here on (WS-24, `localTierTrackedByGit`);
 //   2. drop the keys the runtime refuses from that tier (`PROJECT_TIER_REFUSED_KEYS`, from the pinned
 //      runtime: its trusted-source-only readers and its repo-controllable warnings), a repository's
 //      escalating permission mode (`REFUSED_DEFAULT_MODES`) and the model-routing keys Winter refuses
@@ -31,6 +32,7 @@
 // Here the project file is the trusted root's, and a cwd below it would move a `Read(/secrets)` deny
 // off the path its author meant. The runtime's own schema text says project paths are "relative to
 // the settings file root (project root for project settings)".
+import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { envName } from "@yanlinglabs/winter-agent-sdk";
@@ -191,7 +193,9 @@ const EVERY_TIER_MODEL_KEY_REASONS: Readonly<Record<string, string>> = {
  *     and the router sets no `Options.permissionMode` on the official child, so a repository's
  *     `"acceptEdits"` would have the child approve every in-cwd write without asking.
  *   * local — `auto` only, as before (claude takes `auto` from user, flag or managed settings only); the
- *     project-tier filter does not name the local tier.
+ *     project-tier filter does not name the local tier. EXCEPT a local file git TRACKS (WS-24): that one
+ *     arrived with the repository, so it is filtered as the project tier — every escalating mode, and every
+ *     key `PROJECT_TIER_REFUSED_KEYS.project` names (see `localTierTrackedByGit`).
  *
  * DIVERGENCE, deliberate: claude drops the EFFECTIVE mode when the highest tier that sets one is the
  * project, so a user's own mode under a project's escalating one becomes no mode at all (`default`).
@@ -297,6 +301,39 @@ export function everyTierEnvRefused(name: string, brand: Pick<RunHomeBrand, "env
 }
 
 type Tier = "user" | "project" | "local";
+
+/** How long the tracked-file probe may take before it counts as unanswered (and so as tracked). */
+const GIT_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * WS-24: is `<gitRoot>/<relPath>` in the repository's index? A LOCAL settings file is the user's own
+ * only while git does not track it; a tracked one arrived with the repository (anyone can commit a file
+ * under that name), so `buildEffectiveSettings` filters it exactly as the project tier.
+ *
+ * TRACKED means IN THE INDEX (`git ls-files`, which lists the index): committed, or staged and not yet
+ * committed — either way it is the repository's content, not a file git ignores.
+ *
+ * FAILS CLOSED: the answer is `false` (untracked) ONLY when git runs, exits 0 and lists nothing. Every
+ * other outcome — no git executable, a non-zero exit (not a repository, a repository git refuses to read
+ * for its owner, a broken index), a timeout — is `true`, so what git cannot vouch for is never promoted.
+ *
+ * The probe reads the index and nothing else: literal pathspecs (a brand dir name is never a glob), and
+ * `core.fsmonitor` off so no configured monitor command runs.
+ */
+export function localTierTrackedByGit(gitRoot: string, relPath: string, git = "git"): Promise<boolean> {
+  return new Promise((resolveTracked) => {
+    try {
+      execFile(
+        git,
+        ["-C", gitRoot, "--literal-pathspecs", "-c", "core.fsmonitor=false", "ls-files", "-z", "--", relPath],
+        { timeout: GIT_PROBE_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 },
+        (error, stdout) => resolveTracked(error !== null || String(stdout).length > 0),
+      );
+    } catch {
+      resolveTracked(true);
+    }
+  });
+}
 
 /** Rule names whose specifier is a PATH (the runtime's file-permission rules). */
 const PATH_RULE_TOOLS: ReadonlySet<string> = new Set(["Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS"]);
@@ -434,15 +471,20 @@ function anchorTier(settings: Record<string, unknown>, anchor: string, dropped: 
   return out;
 }
 
-function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<RunHomeBrand, "envPrefix">, dropped: (rule: string, reason: string) => void = () => undefined): Record<string, unknown> {
+/**
+ * One tier, filtered (steps 2-3). `repositoryShipped` marks a LOCAL tier git tracks (WS-24): it is refused
+ * what the project tier is refused, and is still reported and env-filtered as `local`.
+ */
+function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<RunHomeBrand, "envPrefix">, dropped: (rule: string, reason: string) => void = () => undefined, repositoryShipped = false): Record<string, unknown> {
   const out: Record<string, unknown> = { ...settings };
+  const refusals: "project" | "local" = tier === "project" || repositoryShipped ? "project" : "local";
   for (const key of EVERY_TIER_REFUSED_MODEL_KEYS) {
     if (!Object.hasOwn(out, key)) continue;
     delete out[key];
     dropped(key, EVERY_TIER_MODEL_KEY_REASONS[key] ?? "Winter never switches model silently");
   }
   if (tier !== "user") {
-    for (const key of PROJECT_TIER_REFUSED_KEYS[tier]) delete out[key];
+    for (const key of PROJECT_TIER_REFUSED_KEYS[refusals]) delete out[key];
     for (const key of REPOSITORY_TIER_REFUSED_MODEL_KEYS) {
       if (!Object.hasOwn(out, key)) continue;
       delete out[key];
@@ -455,7 +497,7 @@ function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<R
     }
     const permissions = out["permissions"];
     const mode = isPlainObject(permissions) ? permissions["defaultMode"] : undefined;
-    if (isPlainObject(permissions) && typeof mode === "string" && REFUSED_DEFAULT_MODES[tier].has(mode)) {
+    if (isPlainObject(permissions) && typeof mode === "string" && REFUSED_DEFAULT_MODES[refusals].has(mode)) {
       const { defaultMode: _refused, ...rest } = permissions;
       if (Object.keys(rest).length === 0) delete out["permissions"];
       else out["permissions"] = rest;
@@ -463,7 +505,9 @@ function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<R
         `permissions.defaultMode: ${mode}`,
         tier === "project"
           ? "a repository never sets the session's permission mode: claude drops an escalating mode (bypassPermissions, auto, acceptEdits) from the project tier, and merged into the user tier it would reach the child unfiltered"
-          : "the `auto` permission mode is taken from the user's own settings only (claude refuses it from a repository tier)",
+          : repositoryShipped
+            ? "a repository never sets the session's permission mode: this local settings file is tracked by git (or git could not say it is not), so it is the repository's and is filtered as the project tier"
+            : "the `auto` permission mode is taken from the user's own settings only (claude refuses it from a repository tier)",
       );
     }
   }
@@ -531,22 +575,28 @@ async function readTier(path: string): Promise<Record<string, unknown> | undefin
 /** Builds `<run>/settings.json` and returns exactly what it holds. */
 export async function buildEffectiveSettings(context: RunHomeBuildContext): Promise<Record<string, unknown>> {
   const { input, brand, sdkHome, dir } = context;
-  const tiers: Array<{ tier: Tier; path: string; anchor: string }> = [{ tier: "user", path: join(sdkHome, "settings.json"), anchor: sdkHome }];
+  const tiers: Array<{ tier: Tier; path: string; anchor: string; gitRoot?: string }> = [{ tier: "user", path: join(sdkHome, "settings.json"), anchor: sdkHome }];
   // FIX ROUND 1, M2: a root (or a local anchor) at `$HOME` or above it is not a project — its dot-dir is
   // the daemon's own home — so neither repository tier is read from it.
   if (input.trustedProjectRoot !== null && !isHomeOrAbove(input.trustedProjectRoot, context.userHome)) {
     tiers.push({ tier: "project", path: join(input.trustedProjectRoot, brand.projectDirName, "settings.json"), anchor: input.trustedProjectRoot });
     const gitRoot = input.gitRoot ?? input.cwd;
-    if (!isHomeOrAbove(gitRoot, context.userHome)) tiers.push({ tier: "local", path: join(gitRoot, brand.projectDirName, "settings.local.json"), anchor: gitRoot });
+    // WS-24: the git probe runs only for a real repository (`input.gitRoot`, the host's own
+    // `rev-parse --show-toplevel`). Without one the local file sits at the cwd, no repository can have
+    // shipped it, and it keeps the local tier's filter (DECISION: a null `gitRoot` is the host saying
+    // "not a repository", which is an answer, not git failing to give one).
+    if (!isHomeOrAbove(gitRoot, context.userHome)) tiers.push({ tier: "local", path: join(gitRoot, brand.projectDirName, "settings.local.json"), anchor: gitRoot, ...(input.gitRoot === null ? {} : { gitRoot: input.gitRoot }) });
   }
   let merged: Record<string, unknown> = {};
-  for (const { tier, path, anchor } of tiers) {
+  for (const { tier, path, anchor, gitRoot } of tiers) {
     const raw = await readTier(path);
     if (raw === undefined) continue;
     const dropped = (rule: string, reason: string): void => {
       context.report.droppedRules.push({ rule, tier, reason });
     };
-    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand, dropped), anchor, dropped));
+    // Probed only once the file has parsed, so a build without one spawns nothing.
+    const repositoryShipped = tier === "local" && gitRoot !== undefined && (await localTierTrackedByGit(gitRoot, join(brand.projectDirName, "settings.local.json"), context.internals.git));
+    merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand, dropped, repositoryShipped), anchor, dropped));
   }
   const settings = stripForMode(merged, input.mode, input.dispatchChild);
   const effective: Record<string, unknown> = {};

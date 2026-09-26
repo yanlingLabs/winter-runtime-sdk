@@ -52,6 +52,8 @@ export interface RunHomeBuildInternals {
    * change the file system between the in-root check and the read.
    */
   beforeRepositoryRead?: (real: string) => void;
+  /** The git executable the local-tier tracked probe runs (`"git"` from `PATH` when absent). */
+  git?: string;
 }
 
 const PRIVATE_DIR = 0o700;

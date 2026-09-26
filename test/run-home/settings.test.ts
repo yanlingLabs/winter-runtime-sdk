@@ -2,6 +2,7 @@
 // filtered first, every relative path re-anchored, then stripped per mode and cut to claude's schema.
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -11,9 +12,19 @@ import { cleanupRunHomeBeds, inputFor, put, runHomeBed, type RunHomeBed } from "
 
 afterAll(cleanupRunHomeBeds);
 
+// Git runs with no system or global config, so nothing outside the bed shapes its answers.
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
+function git(root: string, ...args: string[]): void {
+  const result = spawnSync("git", ["-C", root, ...args], { env: GIT_ENV, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+}
+
+/** A trusted project that is a real (empty) git repository, as the host's `gitRoot` says it is. */
 function repo(bed: RunHomeBed): { root: string } {
   const root = join(bed.root, "repo");
   mkdirSync(root, { recursive: true });
+  git(root, "init", "-q");
   return { root };
 }
 
@@ -236,7 +247,7 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
       const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
       expect([mode, runHome.effectiveSettings["permissions"], runHome.report.droppedRules]).toEqual([mode, { defaultMode: mode }, []]);
     }
-    // The LOCAL tier (claude parity: `An` names the project tier only) drops `auto` alone.
+    // The LOCAL tier (claude parity: `An` names the project tier only) drops `auto` alone — while git does not track it (WS-24).
     for (const [mode, kept] of [["auto", false], ["acceptEdits", true], ["bypassPermissions", true]] as const) {
       const bed = runHomeBed();
       const { root } = repo(bed);
@@ -250,6 +261,66 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
     put(join(bed.sdk, "settings.json"), json({ permissions: { defaultMode: "acceptEdits" } }));
     const runHome = await buildRunHome(inputFor(bed));
     expect([runHome.effectiveSettings["permissions"], runHome.report.droppedRules]).toEqual([{ defaultMode: "acceptEdits" }, []]);
+  });
+
+  describe("WS-24: a local settings file git TRACKS is the repository's, and is filtered as the project tier", () => {
+    const trackedReason = expect.stringContaining("tracked by git");
+    const localFile = (root: string): string => join(root, ".winter", "settings.local.json");
+    const shipped = { permissions: { defaultMode: "bypassPermissions", allow: ["Bash(ls)"] }, skipDangerousModePermissionPrompt: true, env: { KEPT: "1" } };
+
+    test("committed: the escalating mode is not applied (reported, tier `local`), nor any key the project tier refuses; the rest merges as before", async () => {
+      for (const mode of ["bypassPermissions", "acceptEdits", "auto"]) {
+        const bed = runHomeBed();
+        const { root } = repo(bed);
+        put(localFile(root), json({ ...shipped, permissions: { ...shipped.permissions, defaultMode: mode } }));
+        git(root, "add", "--force", ".winter/settings.local.json"); // past any excludes file: a repository can commit it regardless
+        git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "x");
+        const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+        expect([mode, runHome.effectiveSettings]).toEqual([mode, { permissions: { allow: ["Bash(ls)"] }, env: { KEPT: "1" } }]);
+        expect([mode, runHome.report.droppedRules]).toEqual([mode, [{ rule: `permissions.defaultMode: ${mode}`, tier: "local", reason: trackedReason }]]);
+      }
+    });
+
+    test("staged but not yet committed counts as tracked (it is in the index)", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(localFile(root), json(shipped));
+      git(root, "add", "--force", ".winter/settings.local.json"); // past any excludes file: a repository can commit it regardless
+      const settings = await effective(bed, root);
+      expect([settings["permissions"], settings["skipDangerousModePermissionPrompt"]]).toEqual([{ allow: ["Bash(ls)"] }, undefined]);
+    });
+
+    test("an UNtracked local file (the user's own) keeps the local tier's filter: its mode is honoured", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(localFile(root), json(shipped));
+      const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+      expect(runHome.effectiveSettings).toEqual(shipped);
+      expect(runHome.report.droppedRules).toEqual([]);
+    });
+
+    test("git cannot answer — no git executable, or the named git root is not a repository — counts as tracked: the mode is refused", async () => {
+      const noGit = runHomeBed();
+      const a = repo(noGit);
+      put(localFile(a.root), json(shipped));
+      const runHome = await buildRunHome(inputFor(noGit, { cwd: a.root, trustedProjectRoot: a.root, gitRoot: a.root }), { git: join(noGit.root, "no-such-git") });
+      expect(runHome.effectiveSettings["permissions"]).toEqual({ allow: ["Bash(ls)"] });
+      expect(runHome.report.droppedRules).toEqual([{ rule: "permissions.defaultMode: bypassPermissions", tier: "local", reason: trackedReason }]);
+
+      const notRepo = runHomeBed();
+      const root = join(notRepo.root, "plain");
+      put(localFile(root), json(shipped));
+      const settings = await effective(notRepo, root);
+      expect([settings["permissions"], settings["skipDangerousModePermissionPrompt"]]).toEqual([{ allow: ["Bash(ls)"] }, undefined]);
+    });
+
+    test("no git root at all (the host says: not a repository) — nothing can have shipped the cwd's local file, and it keeps the local tier's filter", async () => {
+      const bed = runHomeBed();
+      const root = join(bed.root, "plain");
+      put(localFile(root), json(shipped));
+      const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: null }), { git: join(bed.root, "no-such-git") });
+      expect(runHome.effectiveSettings).toEqual(shipped);
+    });
   });
 
   test("I1 (R.3): a project's escalating mode never overrides the user's own mode — the user's value survives (claude would drop the effective value outright)", async () => {
