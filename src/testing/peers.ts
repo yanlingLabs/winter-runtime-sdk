@@ -10,7 +10,7 @@
 // identity, not deep equality) and yields exactly the messages it was scripted with, so "the stream
 // passes through verbatim" is checkable rather than assumed.
 import { InvalidBrandError, resolveBrand, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import type { AccountInfo, AgentInfo, ModelFamilyListing, ModelInfo, Options, PermissionMode, Query, RewindFilesResult, SdkMessage } from "@yanlinglabs/winter-agent-sdk";
+import type { AccountInfo, AgentInfo, EffortLevel, ModelFamilyListing, ModelInfo, Options, PermissionMode, Query, RewindFilesResult, SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 
 import type { RuntimeSdkPeers } from "../sdk.ts";
 
@@ -79,6 +79,12 @@ function scriptedQuery(messages: SdkMessage[]): Query {
     },
     interrupt: unsupported("interrupt"),
     setModel: unsupported("setModel") as (model?: string) => Promise<void>,
+    // WS-23 (SDK 0.0.25): the Winter-only mid-session effort change and the on-demand compaction.
+    // `setEffort` is a required member of the pinned `Query`, `compact` an optional one the SDK itself
+    // documents as absent on a host's own structural double; the fake carries both anyway, `unsupported`
+    // like the rest, so a door test that ever drove either would fail by name rather than find a hole.
+    setEffort: unsupported("setEffort") as (effort?: EffortLevel | null) => Promise<void>,
+    compact: unsupported("compact") as (opts?: { customInstructions?: string }) => Promise<{ retainedCount: number }>,
     supportedModels: unsupported("supportedModels") as () => Promise<ModelInfo[]>,
     // Spawn-surface parity (0.0.15): the same "answers with data, never a rejection standing in for
     // absence" posture as its `supportedModels` sibling above -- but this fake is scripted for the
