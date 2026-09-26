@@ -2,7 +2,7 @@
 // copy the root was staged from, proves the canonical file a prefix of the working copy (or quarantines),
 // and appends the tail through the router's own store.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { WinterCompatibilitySessionStore, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
@@ -391,6 +391,89 @@ describe("session artifacts on the recovery door", () => {
     expect(readFileSync(join(storeSession, "workflows", "wf_9.json"), "utf8")).toBe("{\"runId\":\"wf_9\"}\n");
     expect(readFileSync(join(storeSession, "tool-results", "r2.txt"), "utf8")).toBe("the store's own\n");
     expect(readFileSync(join(report.quarantine!, "projects", KEY.projectKey, KEY.sessionId, "tool-results", "r2.txt"), "utf8")).toBe("the working copy's\n");
+  });
+});
+
+// WS-23 (fix round 1, minor 5): the exit reconcile's cases, ported to the recovery door. The exit hook
+// went with the official leg, but `carryBackSessionArtifacts` and `repairTranscriptMetadata` still run
+// here for an upgrading host's leftover working copies, so the same three guarantees are pinned on the
+// door that still calls them.
+describe("the exit reconcile's guarantees, on the recovery door (ported from the retired exit hook)", () => {
+  const sub = (key: SessionKey, count: number, parent: string | null = null): SessionStoreEntry[] => {
+    const out: SessionStoreEntry[] = [];
+    let at = parent;
+    for (let i = 0; i < count; i += 1) {
+      const entry = { ...user(`sub ${i}`, at), sessionId: key.sessionId, isSidechain: true, agentId: "w1" } as SessionStoreEntry;
+      out.push(entry);
+      at = String(entry["uuid"]);
+    }
+    return out;
+  };
+  const inSession = (root: string, relative: string): string => join(root, "projects", KEY.projectKey, KEY.sessionId, relative);
+  const put = (path: string, content: string): void => {
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, content);
+  };
+
+  test("a link in the working copy is never followed, and nothing is written through a link in the store", async () => {
+    const bed = runHomeBed();
+    const { sdk, shared } = router(bed);
+    const first = user("q1", null);
+    await shared.store.append(KEY, [first]);
+    await shared.settle(KEY);
+    const root = stagingWith(bed, [JSON.stringify(first)]);
+    put(inSession(root, "tool-results/b1.txt"), "a large tool output\n");
+    put(inSession(root, "workflows/wf_1.json"), "{\"runId\":\"wf_1\"}\n");
+    const secret = join(bed.root, "outside-secret.txt");
+    writeFileSync(secret, "never copied\n");
+    symlinkSync(secret, inSession(root, "tool-results/evil.txt"));
+    // The STORE side: the session's `workflows/` is a link to somewhere else.
+    const elsewhere = join(bed.root, "elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    mkdirSync(inSession(bed.sdk, ""), { recursive: true });
+    symlinkSync(elsewhere, inSession(bed.sdk, "workflows"));
+    const report = await sdk.reconcileRootForRecovery(root);
+    expect(existsSync(inSession(bed.sdk, "tool-results/evil.txt"))).toBe(false);
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(readFileSync(inSession(bed.sdk, "tool-results/b1.txt"), "utf8")).toBe("a large tool output\n");
+    expect(report.outcome).toBe("quarantined");
+  });
+
+  test("a file the STORE owns is never written from the working copy — not a .meta.json, a summary, a lock, a tail-quarantine, a temp or a sidecar", async () => {
+    const bed = runHomeBed();
+    const { sdk, shared } = router(bed);
+    const first = user("q1", null);
+    await shared.store.append(KEY, [first]);
+    await shared.settle();
+    const root = stagingWith(bed, [JSON.stringify(first)]);
+    put(inSession(root, "subagents/agent-a1.meta.json"), `${JSON.stringify({ agentType: "general-purpose", description: "a sub" })}\n`);
+    const planted = [`../${KEY.sessionId}.summary.json`, `../${KEY.sessionId}.lock`, `../${KEY.sessionId}.jsonl.tail-quarantine`, "subagents/agent-a1.jsonl.tmp-1-2-x", "x.provider-state.jsonl"];
+    for (const relative of planted) put(inSession(root, relative), "planted\n");
+    await sdk.reconcileRootForRecovery(root);
+    expect(existsSync(inSession(bed.sdk, "subagents/agent-a1.meta.json"))).toBe(false);
+    for (const relative of planted) {
+      const target = inSession(bed.sdk, relative);
+      expect([relative, existsSync(target) && readFileSync(target, "utf8") === "planted\n"]).toEqual([relative, false]);
+    }
+    expect((await shared.store.load(KEY))?.filter((entry) => entry["type"] !== "agent_metadata")).toHaveLength(1);
+  });
+
+  test("a NESTED workflow-subagent transcript (subagents/workflows/<run>/agent-*.jsonl) is reconciled through the store, never copied as a file", async () => {
+    const bed = runHomeBed();
+    const { sdk, shared } = router(bed);
+    const first = user("q1", null);
+    await shared.store.append(KEY, [first]);
+    await shared.settle();
+    const nestedKey: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_1/agent-w1" };
+    const nested = sub(nestedKey, 2);
+    const root = stagingWith(bed, [JSON.stringify(first)]);
+    // Spelled with a space after each `{`: a RAW copy would keep it, an append through the store re-serializes.
+    put(inSession(root, "subagents/workflows/wf_1/agent-w1.jsonl"), nested.map((entry) => `${JSON.stringify(entry).replace(/^\{/, "{ ")}\n`).join(""));
+    const report = await sdk.reconcileRootForRecovery(root);
+    expect(report.outcome).not.toBe("quarantined");
+    const loaded = ((await shared.store.load(nestedKey)) ?? []).filter((entry) => entry["type"] !== "agent_metadata");
+    expect(loaded.map((entry) => entry["uuid"])).toEqual(nested.map((entry) => entry["uuid"]));
+    expect(readFileSync(inSession(bed.sdk, "subagents/workflows/wf_1/agent-w1.jsonl"), "utf8")).not.toContain('{ "');
   });
 });
 
