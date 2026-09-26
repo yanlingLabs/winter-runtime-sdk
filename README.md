@@ -31,6 +31,24 @@ Status: see `docs/conformance-rows.md` for the WS-17 rows this package still pro
 were about the official runtime are listed there as retired), and `docs/architecture.md` for the
 ownership map and how this package consumes the Winter SDK.
 
+## What `0.0.15` changes (WS-24 — run-home repository-tier hardening)
+
+A patch release; no API or peer-floor change (`@yanlinglabs/winter-agent-sdk >=0.0.21 <0.1.0`).
+
+- **A tracked local settings file is the repository's.** `<git root>/<project dir>/settings.local.json`
+  is filtered as the project tier when git tracks it (it is in the index) or when git cannot say it does
+  not (no git executable, an error, a timeout): its escalating `permissions.defaultMode` is dropped and
+  reported under the `local` tier, and every key the project tier refuses is dropped as it is there. An untracked local file
+  — and one at a cwd with no git root — keeps the local tier's filter. The probe runs only when the tier
+  file exists and parses (`git ls-files`, literal pathspec, no fsmonitor).
+- **Effort keys never come from a repository tier.** `effortLevel`, `modelSettings`, `ultracode` and
+  `alwaysThinkingEnabled` are dropped from the project and local tiers and reported in `droppedRules`,
+  like the model-routing keys; the user tier keeps them.
+- **Repository files are read as admitted.** The project-rule copies, the project instructions files and
+  their in-root imports are read only while the path still names the in-root regular file the build
+  admitted (no link followed, same real path, same file); otherwise the file is skipped and reported
+  (`skippedLinks`, `outside-root`).
+
 ## What `0.0.14` changes (WS-23 — one runtime)
 
 - **Removed**: `src/official/**`, `src/door.ts` (the official leg), the official messaging adapter,
