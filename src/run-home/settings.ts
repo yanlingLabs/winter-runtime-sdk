@@ -13,7 +13,8 @@
 //   2. drop the keys the runtime refuses from that tier (`PROJECT_TIER_REFUSED_KEYS`, from the pinned
 //      runtime: its trusted-source-only readers and its repo-controllable warnings), a repository's
 //      escalating permission mode (`REFUSED_DEFAULT_MODES`) and the model-routing keys Winter refuses
-//      (`EVERY_TIER_REFUSED_MODEL_KEYS`, `REPOSITORY_TIER_REFUSED_MODEL_KEYS`) — the last two reported;
+//      (`EVERY_TIER_REFUSED_MODEL_KEYS`, `REPOSITORY_TIER_REFUSED_MODEL_KEYS`) and effort keys
+//      (`REPOSITORY_TIER_REFUSED_EFFORT_KEYS`) — the last three reported;
 //   3. filter `env` — the runtime's own per-tier sets, plus `CLAUDE_CONFIG_DIR` and every variable the
 //      ROUTER sets (a settings `env` block would otherwise override the process environment the router
 //      built), plus the router's refused execution-indirection list;
@@ -156,6 +157,24 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
  */
 export const EVERY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["fallbackModel", "modelOverrides"];
 export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "availableModels", "advisorModel", "enforceAvailableModels"];
+
+/**
+ * EFFORT AND THINKING (WS-24): a repository never sets how hard the session's model works either. Dropped
+ * from the project and local tiers and REPORTED, the same way as the model keys; the user tier keeps them.
+ *
+ *   * `effortLevel` — the session's reasoning effort;
+ *   * `modelSettings` — per-model settings, a per-model `effortLevel` among them;
+ *   * `ultracode` — the maximum-effort coding switch;
+ *   * `alwaysThinkingEnabled` — extended thinking on every turn.
+ *
+ * DIVERGENCE, deliberate: claude honours these from a project's settings. Winter's session effort is the
+ * daemon's (the host's `Options.effort`, per session and per message), and each of these keys changes what
+ * a turn costs, so a repository's copy is refused rather than promoted to the user tier by the merge. The
+ * Winter runtime reads none of them from a settings file today (agent SDK 0.0.27/0.0.28); every one is a
+ * `Settings` key, though, so without this the run folder would carry a repository's value to any runtime
+ * that starts reading it.
+ */
+export const REPOSITORY_TIER_REFUSED_EFFORT_KEYS: readonly string[] = ["effortLevel", "modelSettings", "ultracode", "alwaysThinkingEnabled"];
 
 /** Why each every-tier key is dropped (the report's `reason`). */
 const EVERY_TIER_MODEL_KEY_REASONS: Readonly<Record<string, string>> = {
@@ -428,6 +447,11 @@ function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<R
       if (!Object.hasOwn(out, key)) continue;
       delete out[key];
       dropped(key, "a repository never chooses models: the session's model is the daemon's, and model routing comes from the user's own settings only");
+    }
+    for (const key of REPOSITORY_TIER_REFUSED_EFFORT_KEYS) {
+      if (!Object.hasOwn(out, key)) continue;
+      delete out[key];
+      dropped(key, "a repository never sets the session's effort or thinking: the session's effort is the daemon's, and these come from the user's own settings only");
     }
     const permissions = out["permissions"];
     const mode = isPlainObject(permissions) ? permissions["defaultMode"] : undefined;

@@ -102,6 +102,26 @@ describe("the tiers and claude's merge (F17)", () => {
     ]);
   });
 
+  test("WS-24: the effort keys (`effortLevel`, `modelSettings`, `ultracode`, `alwaysThinkingEnabled`) never come from a repository tier (reported); the user's own are kept", async () => {
+    const bed = runHomeBed();
+    const { root } = repo(bed);
+    const user = { effortLevel: "low", modelSettings: { "m-1": { effortLevel: "low" } }, ultracode: false, alwaysThinkingEnabled: false };
+    put(join(bed.sdk, "settings.json"), json(user));
+    put(join(root, ".winter", "settings.json"), json({ effortLevel: "max", modelSettings: { "m-1": { effortLevel: "max" } }, ultracode: true, alwaysThinkingEnabled: true, outputStyle: "p" }));
+    put(join(root, ".winter", "settings.local.json"), json({ effortLevel: "high", modelSettings: { "m-2": { effortLevel: "high" } } }));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+    expect(runHome.effectiveSettings).toEqual({ ...user, outputStyle: "p" });
+    const reason = expect.stringContaining("repository never sets the session's effort");
+    expect(runHome.report.droppedRules).toEqual([
+      { rule: "effortLevel", tier: "project", reason },
+      { rule: "modelSettings", tier: "project", reason },
+      { rule: "ultracode", tier: "project", reason },
+      { rule: "alwaysThinkingEnabled", tier: "project", reason },
+      { rule: "effortLevel", tier: "local", reason },
+      { rule: "modelSettings", tier: "local", reason },
+    ]);
+  });
+
   test("an untrusted project contributes nothing (neither project nor local)", async () => {
     const bed = runHomeBed();
     const { root } = repo(bed);
