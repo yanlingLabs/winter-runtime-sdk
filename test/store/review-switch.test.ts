@@ -13,6 +13,17 @@
 // `readableState`/family facts the S7 table's own rows depend on (matching what the real catalog
 // would report for these families) — this is the "a host's own catalog registry" seam
 // `createEndpointResolver` would normally fill.
+//
+// WS-23 (reasoning-state, decision 9 — SDK b5a79db): a switch now prompts only over what the TARGET
+// cannot represent — images or documents for a text-only model, another vendor's server-tool steps, a
+// compaction the fit check will run (and an interrupted turn, which the host decides: the review reads
+// a snapshot and never sees a running turn). Reasoning parked in the sidecar is not lost. Every row
+// below that used to prompt over reasoning keeps its prompt by carrying one of those losses instead,
+// with a CONTROL proving the loss, not the family change, is what prompts; the rows about WHICH model
+// the review reads as the source assert on what still depends on it — the same-family skip and the
+// `portable` list, which names the source's own reasoning. Media and fit read the REAL catalog row of
+// the requested model key, so the text-only target is the real `zai/glm-5` (the fixture `GLM` key is
+// off-catalog and reads as image-capable with no window).
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -37,8 +48,10 @@ const CLAUDE_OPUS: ContinuityEndpoint = { providerId: "anthropic", modelKey: "an
 const CLAUDE_SONNET: ContinuityEndpoint = { providerId: "anthropic", modelKey: "anthropic/claude-sonnet-5", family: "claude", readableState: "none" };
 const DEEPSEEK: ContinuityEndpoint = { providerId: "deepseek", modelKey: "deepseek/deepseek-r1", family: "deepseek", readableState: "full-exposed" };
 const GLM: ContinuityEndpoint = { providerId: "z-ai", modelKey: "z-ai/glm-4.6", family: "glm", readableState: "full-exposed" };
+/** WS-23: a REAL catalog key whose row reads text only (`inputModalities: ["text"]`, a 200k window). */
+const GLM_TEXT_ONLY: ContinuityEndpoint = { providerId: "zai", modelKey: "zai/glm-5", family: "glm", readableState: "full-exposed" };
 
-const ENDPOINTS = [GPT, TERRA, CLAUDE_OPUS, CLAUDE_SONNET, DEEPSEEK, GLM];
+const ENDPOINTS = [GPT, TERRA, CLAUDE_OPUS, CLAUDE_SONNET, DEEPSEEK, GLM, GLM_TEXT_ONLY];
 
 /** The hermetic stand-in for `createEndpointResolver(registry)`: a fixed lookup table, never a live catalog. */
 function fixtureResolveEndpoint(origin: MessageOrigin): ContinuityEndpoint {
@@ -59,8 +72,12 @@ function selection(endpoint: ContinuityEndpoint, over: Partial<RuntimeSelection>
   };
 }
 
-/** One user/assistant pair, chained onto whatever `parent` names. Returns the assistant's own uuid. */
-function turn(key: SessionKey, parent: string | null, assistantText: string): { entries: SessionStoreEntry[]; userUuid: string; assistantUuid: string } {
+/**
+ * One user/assistant pair, chained onto whatever `parent` names. Returns the assistant's own uuid.
+ * WS-23: `over` replaces either side's content (an image in the user turn, an Anthropic server-tool step
+ * in the reply) — what the target cannot represent is now the only thing that prompts.
+ */
+function turn(key: SessionKey, parent: string | null, assistantText: string, over: { userContent?: unknown; assistantBlocks?: unknown[] } = {}): { entries: SessionStoreEntry[]; userUuid: string; assistantUuid: string } {
   const userUuid = randomUUID();
   const assistantUuid = randomUUID();
   const base = (uuid: string, p: string | null) => ({ uuid, parentUuid: p, sessionId: key.sessionId, timestamp: NOW, cwd: "/review-switch", version: "0.0.0", isSidechain: false });
@@ -68,10 +85,24 @@ function turn(key: SessionKey, parent: string | null, assistantText: string): { 
     userUuid,
     assistantUuid,
     entries: [
-      { type: "user", ...base(userUuid, parent), message: { role: "user", content: "go" } },
-      { type: "assistant", ...base(assistantUuid, userUuid), message: { id: `msg_${assistantUuid}`, type: "message", role: "assistant", content: [{ type: "text", text: assistantText }] } },
+      { type: "user", ...base(userUuid, parent), message: { role: "user", content: over.userContent ?? "go" } },
+      { type: "assistant", ...base(assistantUuid, userUuid), message: { id: `msg_${assistantUuid}`, type: "message", role: "assistant", content: [...(over.assistantBlocks ?? []), { type: "text", text: assistantText }] } },
     ],
   };
+}
+
+/** A user turn carrying one image (the review counts blocks, never bytes). */
+const USER_WITH_IMAGE = [{ type: "text", text: "what is in this picture?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }];
+
+/** One Anthropic web-search step as it sits in a Claude reply: the server-side call and its result. */
+const ANTHROPIC_SERVER_TOOL_STEP = [
+  { type: "server_tool_use", id: "srvtoolu_review_1", name: "web_search", input: { query: "winter release notes" } },
+  { type: "web_search_tool_result", tool_use_id: "srvtoolu_review_1", content: [{ type: "web_search_result", url: "https://example.com/notes", title: "Release notes" }] },
+];
+
+/** True when the review's `portable` list names `modelKey`'s own reasoning — how the review reports its SOURCE. */
+function portableNamesReasoningOf(review: { classification?: { portable: string[] } }, modelKey: string): boolean {
+  return (review.classification?.portable ?? []).some((line) => line.startsWith(`${modelKey}'s reasoning`) || line.startsWith(`${modelKey}'s own reasoning`));
 }
 
 /** Writes ONE `kind: "summary"` sidecar record anchored on `anchorUuid`, in the dialect the router reads. */
@@ -124,7 +155,9 @@ function barrierFor(bed: StoreBed, deps: Partial<SwitchReviewerDeps> = {}): Swit
 }
 
 describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the store", () => {
-  test("GPT (summary) -> Claude: prompt, warned-lossy", async () => {
+  // WS-23: the plain cross-family switch. GPT's summary stays in the sidecar for GPT, so this row no
+  // longer prompts — the S7 row's PROMPT moves to the next test, onto a loss that still counts.
+  test("GPT (summary) -> Claude: SILENT, lossless-portable — the summary stays in the sidecar for GPT (WS-23)", async () => {
     await withStoreBed(async (bed) => {
       await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
       const t = turn(bed.key, null, "gpt's reasoning summary");
@@ -133,13 +166,51 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
       writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
-      expect(review.prompt).toBe(true);
-      expect(review.classification?.lossClass).toBe("warned-lossy");
+      expect(review.prompt).toBe(false);
       expect(review.skipped).toBeUndefined();
+      expect(review.classification?.lossClass).toBe("lossless-portable");
+      expect(review.classification?.warnings).toEqual([]);
+      expect(portableNamesReasoningOf(review, GPT.modelKey)).toBe(true);
     });
   });
 
-  test("Claude (signed thinking, carried as summary) -> DeepSeek: prompt", async () => {
+  test("GPT (summary) with an image -> a text-only model (zai/glm-5): prompt, warned-lossy over the media", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
+      const t = turn(bed.key, null, "a picture of a mountain", { userContent: USER_WITH_IMAGE });
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+      writeSummary(bed.home, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GLM_TEXT_ONLY));
+      expect(review.prompt).toBe(true);
+      expect(review.classification?.lossClass).toBe("warned-lossy");
+      expect(review.skipped).toBeUndefined();
+      expect(review.classification?.warnings).toEqual([expect.stringContaining("zai/glm-5 cannot read images or documents: the 1 in this conversation")]);
+
+      // CONTROL: the same history toward Claude, which reads images, is the plain switch.
+      expect((await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS))).prompt).toBe(false);
+    });
+  });
+
+  // WS-23: Claude's signed thinking stays in the sidecar (spliced back on a switch to Claude), so it
+  // no longer prompts; Anthropic's own server-tool steps do, since DeepSeek receives them as text.
+  test("Claude with an Anthropic web-search step -> DeepSeek: prompt, warned-lossy over the server-tool steps", async () => {
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "claude's answer, from a web search", { assistantBlocks: ANTHROPIC_SERVER_TOOL_STEP });
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+      writeSummary(bed.home, bed.key, t.assistantUuid, CLAUDE_OPUS, { text: "claude's summarized thinking" });
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(DEEPSEEK));
+      expect(review.prompt).toBe(true);
+      expect(review.classification?.lossClass).toBe("warned-lossy");
+      expect(review.classification?.warnings).toEqual([expect.stringContaining("2 steps of anthropic's own server-side tools")]);
+    });
+
+    // CONTROL: the same Claude turn WITHOUT the server-tool step is the plain switch — its signed
+    // thinking is no loss.
     await withStoreBed(async (bed) => {
       await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
       const t = turn(bed.key, null, "claude's summarized thinking");
@@ -148,8 +219,8 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
       writeSummary(bed.home, bed.key, t.assistantUuid, CLAUDE_OPUS, { text: "claude's summarized thinking" });
 
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(DEEPSEEK));
-      expect(review.prompt).toBe(true);
-      expect(review.classification?.lossClass).toBe("warned-lossy");
+      expect(review.prompt).toBe(false);
+      expect(review.classification?.lossClass).toBe("lossless-portable");
     });
   });
 
@@ -181,21 +252,31 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
     });
   });
 
-  test("DeepSeek with ONE incomplete exposed turn -> GPT: prompt", async () => {
+  // The row's point was the per-turn sweep: ONE lossy turn among clean ones is enough to prompt. WS-23:
+  // an incomplete exposed trace is no longer a loss (what was captured is parked in the sidecar), so
+  // the sweep is kept on the loss that still counts — an image in the SECOND turn only.
+  test("DeepSeek with ONE incomplete exposed turn and an image in that turn only -> GPT is silent, -> a text-only model prompts", async () => {
     await withStoreBed(async (bed) => {
       await bed.record({ runtimeKind: "winter-agent", selection: selection(DEEPSEEK) });
       const t1 = turn(bed.key, null, "deepseek's complete trace");
       await bed.shared.store.append(bed.key, t1.entries);
-      const t2 = turn(bed.key, t1.assistantUuid, "deepseek's incomplete trace");
+      const t2 = turn(bed.key, t1.assistantUuid, "deepseek's incomplete trace", { userContent: USER_WITH_IMAGE });
       await bed.shared.store.append(bed.key, t2.entries);
       await bed.shared.settle(bed.key);
       writeSummary(bed.home, bed.key, t1.assistantUuid, DEEPSEEK, { text: "deepseek's complete trace", material: "exposed", complete: true });
       // The SECOND turn's exposure is INCOMPLETE — a dropped delta, an abort, a max_tokens stop.
       writeSummary(bed.home, bed.key, t2.assistantUuid, DEEPSEEK, { text: "deepseek's incomplete trace", material: "exposed", complete: false });
 
-      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GPT));
+      // GPT reads images: the incomplete trace alone is no loss any more (WS-23).
+      const toGpt = await barrierFor(bed).reviewSwitch(bed.key, selection(GPT));
+      expect(toGpt.prompt).toBe(false);
+      expect(toGpt.classification?.lossClass).toBe("lossless-portable");
+
+      // A text-only target: the ONE image, in the second turn only, is enough to prompt.
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GLM_TEXT_ONLY));
       expect(review.prompt).toBe(true);
       expect(review.classification?.lossClass).toBe("warned-lossy");
+      expect(review.classification?.warnings).toEqual([expect.stringContaining("the 1 in this conversation")]);
     });
   });
 
@@ -209,7 +290,9 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.prompt).toBe(false);
       expect(review.skipped).toBe("same-family");
-      expect(review.classification).toBeUndefined();
+      // WS-23: the loss matrix runs BEFORE the skip reasons (a same-family switch can still lose
+      // something the target cannot represent), so a classification is present — and empty.
+      expect(review.classification?.warnings).toEqual([]);
     });
 
     await withStoreBed(async (bed) => {
@@ -250,7 +333,7 @@ describe("WS-18 W18-20 — reviewSwitch, the S7 table end to end through the sto
 // (`stale.ts`), the symmetric switch-BACK-to-the-stale-model case, the official-leg (`message.model`)
 // fallback, and the no-assistant-entry fallback — the three branches `liveSourceOrigin` walks, in order.
 describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE source, never the stale directory record", () => {
-  test("A-5 chain, directory LEFT STALE at deepseek: claude -> deepseek (handoff) -> GLM -> gpt (both same-runtime, record never moves) -> claude PROMPTS", async () => {
+  test("A-5 chain, directory LEFT STALE at deepseek: claude -> deepseek (handoff) -> GLM -> gpt (both same-runtime, record never moves) -> the review's source is gpt", async () => {
     await withStoreBed(async (bed) => {
       // THE DIRECTORY ROW: exactly what a real host would have after the ORIGINAL claude -> deepseek
       // handoff wrote it — and exactly what it still says after two SAME-RUNTIME winter moves
@@ -275,18 +358,26 @@ describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE s
       writeOrigin(bed.home, bed.key, t3.assistantUuid, GPT);
       writeSummary(bed.home, bed.key, t3.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
+      // WS-23: neither source prompts toward Claude any more (reasoning is parked, not lost), so the
+      // stale-vs-live question is asked of what still DEPENDS on the source. Two discriminators:
+      //   1. the same-family skip — gpt -> Terra is same-family (skipped); the stale deepseek -> Terra
+      //      would be reviewed as a family change;
+      //   2. the `portable` list, which names the SOURCE's own reasoning as kept for it — gpt's, never
+      //      the stale deepseek's.
+      const toTerra = await barrierFor(bed).reviewSwitch(bed.key, selection(TERRA));
+      expect(toTerra.skipped).toBe("same-family");
+      expect(toTerra.prompt).toBe(false);
+
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
-      // THE STALE-SOURCE (deepseek) ANSWER WOULD BE: prompt:false, lossless-portable (a fully-exposed
-      // reasoning trace survives a switch away losslessly). THE LIVE-SOURCE (gpt) ANSWER IS THIS ONE —
-      // gpt's readable state is summary-only, so leaving it for Claude (which cannot read it back
-      // either) is a genuine, warned loss.
       expect(review.skipped).toBeUndefined();
-      expect(review.prompt).toBe(true);
-      expect(review.classification?.lossClass).toBe("warned-lossy");
+      expect(review.prompt).toBe(false);
+      expect(review.classification?.lossClass).toBe("lossless-portable");
+      expect(portableNamesReasoningOf(review, GPT.modelKey)).toBe(true);
+      expect(portableNamesReasoningOf(review, DEEPSEEK.modelKey)).toBe(false);
     });
   });
 
-  test("switching BACK to the stale recorded model prompts — a live family change the same-profile skip used to swallow", async () => {
+  test("switching BACK to the stale recorded model is REVIEWED — a live family change the same-profile skip used to swallow", async () => {
     // "Claude on OpenRouter" (winter-agent, family claude, NOT the official leg) — absent from the
     // fixture resolver's own list, so it resolves through `endpointFromOrigin`'s registry-free
     // fallback (`readableState: "none"`, same posture as CLAUDE_OPUS/CLAUDE_SONNET).
@@ -311,10 +402,15 @@ describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE s
       // REQUESTING A SWITCH BACK TO THE STALE RECORD'S OWN MODEL: the old bug's `from` (the directory
       // row) and `to` (this request) name the IDENTICAL provider+model, so the same-profile skip fired
       // and nothing was ever shown to the host. The live source is gpt — a real family change.
+      // WS-23: the gpt -> Claude move itself is the plain switch now (gpt's summary is parked, not
+      // lost), so it no longer PROMPTS — but it must still be REVIEWED: the old bug's answer is
+      // `{prompt:false, skipped:"same-profile"}` with NO classification at all, and the fixed answer is
+      // a real review whose `portable` list names the live source, gpt.
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_ON_OPENROUTER, { runtimeKind: "winter-agent" }));
       expect(review.skipped).toBeUndefined();
-      expect(review.prompt).toBe(true);
-      expect(review.classification?.lossClass).toBe("warned-lossy");
+      expect(review.prompt).toBe(false);
+      expect(review.classification?.lossClass).toBe("lossless-portable");
+      expect(portableNamesReasoningOf(review, GPT.modelKey)).toBe(true);
     });
   });
 
@@ -335,7 +431,8 @@ describe("WS-18 W18-20 fix wave 2, CRITICAL C1 — reviewSwitch reads the LIVE s
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.skipped).toBe("same-family");
       expect(review.prompt).toBe(false);
-      expect(review.classification).toBeUndefined();
+      // WS-23: the loss matrix runs before the skip reasons, so the classification is present — and empty.
+      expect(review.classification?.warnings).toEqual([]);
     });
   });
 
@@ -433,7 +530,10 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
     });
   });
 
-  test("GPT -> Claude from any of these tips still prompts — the skip is same-FAMILY, not blanket", async () => {
+  // WS-23: a plain cross-family switch no longer PROMPTS, so "not skipped" is asserted directly — the
+  // review runs and reports a classification rather than a `same-family` skip — and the off-catalog
+  // Claude tip also carries an Anthropic server-tool step, a loss GPT cannot take, which must prompt.
+  test("GPT -> Claude from any of these tips is REVIEWED, never skipped — the skip is same-FAMILY, not blanket", async () => {
     await withStoreBed(async (bed) => {
       await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
       const t = turn(bed.key, null, "gpt's reasoning summary");
@@ -444,7 +544,8 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
 
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(CLAUDE_OPUS));
       expect(review.skipped).toBeUndefined();
-      expect(review.prompt).toBe(true);
+      expect(review.prompt).toBe(false);
+      expect(review.classification?.lossClass).toBe("lossless-portable");
     });
 
     // AND from an off-catalog Claude tip specifically (the exact shape this fix wave is about):
@@ -457,7 +558,22 @@ describe("fix wave 2 re-review, MAJOR (new) — an error-residue or off-catalog 
 
       const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GPT));
       expect(review.skipped).toBeUndefined();
+      expect(review.prompt).toBe(false);
+      expect(review.classification?.lossClass).toBe("lossless-portable");
+    });
+
+    // ...and the same off-catalog Claude tip with a web-search step in its reply: that loss PROMPTS.
+    await withStoreBed(async (bed) => {
+      await bed.record({ runtimeKind: "claude-agent", selection: selection(CLAUDE_OPUS, { runtimeKind: "claude-agent" }) });
+      const t = turn(bed.key, null, "opus's reply, from a web search", { assistantBlocks: ANTHROPIC_SERVER_TOOL_STEP });
+      (t.entries[1]!.message as { model?: string }).model = "claude-opus-5-20260301";
+      await bed.shared.store.append(bed.key, t.entries);
+      await bed.shared.settle(bed.key);
+
+      const review = await barrierFor(bed).reviewSwitch(bed.key, selection(GPT));
+      expect(review.skipped).toBeUndefined();
       expect(review.prompt).toBe(true);
+      expect(review.classification?.warnings).toEqual([expect.stringContaining("server-side tools")]);
     });
   });
 });
@@ -471,24 +587,30 @@ describe("integration Important: under WS-21 (`requireRunHome`) the review reads
     return { barrier, shared: barrier.shared, storeHome: sdkHomeOf(bed.home) };
   }
 
-  test("GPT (summary) -> Claude with the summary under `<home>/sdk`: prompt, warned-lossy (the S7 row, on the WS-21 layout)", async () => {
+  // THE ONE THAT FAILS ON THE OLD READ (`homeOf()`). WS-23: summary records no longer decide the
+  // answer, so the sidecar fact this pins is the one the review still consumes — the tip's `origin`
+  // record, which names the LIVE source. The directory row says DeepSeek; only the origin record under
+  // `<home>/sdk` says the tip is GPT, and GPT -> Terra is then a same-family skip. Read from the wrong
+  // home, the review falls back to the row (DeepSeek) and reviews a family change instead.
+  test("the live source comes from the `origin` record under `<home>/sdk`: GPT -> Terra is skipped same-family (the S7 row, on the WS-21 layout)", async () => {
     await withStoreBed(async (bed) => {
       const { barrier, shared, storeHome } = routerOf(bed);
       expect(shared.identity.storeHome).toBe(storeHome);
-      await bed.record({ runtimeKind: "winter-agent", selection: selection(GPT) });
+      await bed.record({ runtimeKind: "winter-agent", selection: selection(DEEPSEEK) });
       const t = turn(bed.key, null, "gpt's reasoning summary");
       await shared.store.append(bed.key, t.entries);
       await shared.settle(bed.key);
+      writeOrigin(storeHome, bed.key, t.assistantUuid, GPT);
       writeSummary(storeHome, bed.key, t.assistantUuid, GPT, { text: "gpt's reasoning summary" });
 
-      const review = await barrier.reviewSwitch(bed.key, selection(CLAUDE_OPUS));
-      expect(review.prompt).toBe(true);
-      expect(review.classification?.lossClass).toBe("warned-lossy");
+      const review = await barrier.reviewSwitch(bed.key, selection(TERRA));
+      expect(review.skipped).toBe("same-family");
+      expect(review.prompt).toBe(false);
     });
   });
 
-  // THE ONE THAT FAILS ON THE OLD READ (`homeOf()`): with no sidecar found, the review cannot know the
-  // trace was complete, so it prompts "part of this turn's trace was not captured" (warned-lossy).
+  // WS-23: this row no longer discriminates the read path (a complete or incomplete trace is no loss
+  // either way); it stays as the plain switch on the WS-21 layout. The test above is the read-path pin.
   test("DeepSeek (complete exposed) -> GLM: the sidecar under `<home>/sdk` keeps the switch silent, lossless-portable", async () => {
     await withStoreBed(async (bed) => {
       const { barrier, shared, storeHome } = routerOf(bed);
