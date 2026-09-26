@@ -36,6 +36,7 @@ import type { RunHomeBuildContext } from "./build.ts";
 import { claudeFrontmatterSplit } from "./claude-frontmatter.ts";
 import { joinFrontmatter, keyRange, listOf, removeKey, splitFrontmatter } from "./frontmatter.ts";
 import { isWithin, projectRulesOf, projectWalk } from "./items.ts";
+import { readAdmittedFile } from "./walk.ts";
 
 const PRIVATE_FILE = 0o600;
 /** claude's own import depth cap. */
@@ -152,10 +153,20 @@ export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
           return whole;
         }
         let body: string;
-        try {
-          body = readFileSync(real, "utf8");
-        } catch {
-          return whole;
+        if (input.tier !== "user") {
+          // WS-24: a repository import is read under the same re-check as the file that holds it.
+          const read = readAdmittedFile(real, realRoot as string);
+          if ("refused" in read) {
+            if (read.refused === "outside-root") dropped.push(target);
+            return whole;
+          }
+          body = read.text;
+        } else {
+          try {
+            body = readFileSync(real, "utf8");
+          } catch {
+            return whole;
+          }
         }
         return lead + expand(body, target, depth + 1, new Set([...seen, real]));
       }),
@@ -251,15 +262,26 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
   for (const source of sources) {
     // A project file is read by its REAL path, and only when that stays inside the root — the same
     // boundary the items obey (an instructions file that is a link out of the repository is not the project's).
+    // WS-24: and the READ is of that admitted real path, re-checked at the read (`readAdmittedFile`).
+    let text: string | undefined;
     if (source.tier !== "user") {
       const real = realOrUndefined(source.path);
       if (real === undefined) continue;
-      if (!isWithin(real, realOrSelf(input.trustedProjectRoot as string))) {
+      const realRoot = realOrSelf(input.trustedProjectRoot as string);
+      if (!isWithin(real, realRoot)) {
         report.skippedLinks.push({ path: source.path, reason: "outside-root" });
         continue;
       }
+      context.internals.beforeRepositoryRead?.(real);
+      const read = readAdmittedFile(real, realRoot);
+      if ("refused" in read) {
+        if (read.refused === "outside-root") report.skippedLinks.push({ path: source.path, reason: "outside-root" });
+        continue;
+      }
+      text = read.text;
+    } else {
+      text = await textOf(source.path);
     }
-    const text = await textOf(source.path);
     if (text === undefined) continue;
     const expanded = expandImports({ content: text, filePath: source.path, tier: source.tier, projectRoot: input.trustedProjectRoot });
     report.droppedImports.push(...expanded.dropped);
@@ -327,6 +349,10 @@ export function rebaseGlob(glob: string, relSegments: readonly string[]): string
  * edit in the repository (an approved Write adding `@~/…`, say) reach the run home unsettled, read at the
  * user tier. A rule that can no longer be read is removed and reported (`skippedLinks`, `missing`).
  *
+ * THE COPY READS EXACTLY WHAT DISCOVERY ADMITTED (WS-24): the rule's real path, re-checked at the read
+ * (`readAdmittedFile` — no link followed, still in the root, still the same file). A rule whose path no
+ * longer names that in-root file is removed and reported (`skippedLinks`, `outside-root`).
+ *
  *   1. `paths:` re-expressed from the cwd (a rule anchored AT the cwd reads the same at the user tier).
  *   2. IMPORTS (R.3, C1 i). At the user tier both runtimes follow a rule's `@imports` ANYWHERE (claude's
  *      `includeExternal` for the user tier; the Winter SDK expands a rule under its own tier), so a
@@ -340,14 +366,17 @@ export function rebaseGlob(glob: string, relSegments: readonly string[]): string
 async function rewriteProjectRules(context: RunHomeBuildContext): Promise<void> {
   const { input, dir, report } = context;
   const cwd = resolve(input.cwd);
+  const realRoot = input.trustedProjectRoot === null ? undefined : realOrSelf(input.trustedProjectRoot);
   for (const link of projectRulesOf(context)) {
     const destination = join(dir, "rules", link.name);
-    const text = await textOf(link.real);
-    if (text === undefined) {
+    context.internals.beforeRepositoryRead?.(link.real);
+    const read = realRoot === undefined ? ({ refused: "outside-root" } as const) : readAdmittedFile(link.real, realRoot);
+    if ("refused" in read) {
       await rm(destination, { force: true });
-      report.skippedLinks.push({ path: link.path, reason: "missing" });
+      report.skippedLinks.push({ path: link.path, reason: read.refused });
       continue;
     }
+    const text = read.text;
     let next = text;
     const rel = relative(link.anchor, cwd);
     const doc = rel === "" ? undefined : splitFrontmatter(text);

@@ -39,11 +39,19 @@ export interface RunHomeBuildContext {
   report: RunHomeReport;
   /** `$HOME` — where every project walk and project tier stops (`os.homedir()` unless a test injects one). */
   userHome: string;
+  /** Test-only (`RunHomeBuildInternals`); absent in production. */
+  internals: RunHomeBuildInternals;
 }
 
 /** Test-only construction knobs; not part of Contract A. */
 export interface RunHomeBuildInternals {
   userHome?: string;
+  /**
+   * Called with a repository file's real path after the build has admitted it and immediately before it
+   * is read (the project rules' copies and the project instructions files) — the one place a test can
+   * change the file system between the in-root check and the read.
+   */
+  beforeRepositoryRead?: (real: string) => void;
 }
 
 const PRIVATE_DIR = 0o700;
@@ -75,7 +83,7 @@ export async function buildRunHome(input: RunHomeInput, internals: RunHomeBuildI
   await mkdir(dir, { mode: PRIVATE_DIR });
   await chmod(dir, PRIVATE_DIR); // the umask may have narrowed `mode`; never widened, but be exact
   const report: RunHomeReport = { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [], droppedRules: [] };
-  const context: RunHomeBuildContext = { input, brand, sdkHome, dir, report, userHome: internals.userHome ?? homedir() };
+  const context: RunHomeBuildContext = { input, brand, sdkHome, dir, report, userHome: internals.userHome ?? homedir(), internals };
   let effectiveSettings: Record<string, unknown>;
   try {
     await buildCore(context);

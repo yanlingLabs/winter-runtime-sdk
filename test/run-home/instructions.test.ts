@@ -2,7 +2,7 @@
 // `CLAUDE.md` link to it; imports expanded under each file's own tier rule (F17); leftover import
 // tokens neutralised; project rules' `paths:` re-expressed from the cwd.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildRunHome } from "../../src/index.ts";
@@ -312,5 +312,81 @@ describe("project rules' imports (R.3, C1 i): a rule is read at the USER tier in
     put(rule, "plain rule\n@~/.ssh/id_rsa\n");
     expect(readFileSync(copied, "utf8")).toBe("plain rule\n");
     expect(lstatSync(join(runHome.dir, "rules", "mine.md")).isSymbolicLink()).toBe(true);
+  });
+});
+
+describe("WS-24: a repository file is read only while it is still the file its in-root check admitted", () => {
+  const ruleName = "project--.winter--rules--x.md";
+  const outside = (bed: RunHomeBed): string => {
+    const path = join(bed.root, "elsewhere", "secret.md");
+    put(path, "OUTSIDE THE ROOT\n");
+    return path;
+  };
+
+  test("a project rule whose path becomes a link between discovery and the copy is not copied (reported `outside-root`)", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const rule = join(p.root, ".winter", "rules", "x.md");
+    put(rule, "plain rule\n");
+    const target = outside(bed);
+    const seen: string[] = [];
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }), {
+      beforeRepositoryRead: (real) => {
+        seen.push(real);
+        if (real !== rule) return;
+        rmSync(rule);
+        symlinkSync(target, rule);
+      },
+    });
+    expect(seen).toContain(rule);
+    expect(existsSync(join(runHome.dir, "rules", ruleName))).toBe(false);
+    expect(runHome.report.skippedLinks).toContainEqual({ path: rule, reason: "outside-root" });
+  });
+
+  test("a project rule whose DIRECTORY becomes a link out of the root between discovery and the copy is not copied either", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const rulesDir = join(p.root, ".winter", "rules");
+    const rule = join(rulesDir, "x.md");
+    put(rule, "plain rule\n");
+    const elsewhere = join(bed.root, "elsewhere-rules");
+    put(join(elsewhere, "x.md"), "OUTSIDE THE ROOT\n");
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }), {
+      beforeRepositoryRead: (real) => {
+        if (real !== rule) return;
+        renameSync(rulesDir, join(p.root, ".winter", "rules-was"));
+        symlinkSync(elsewhere, rulesDir);
+      },
+    });
+    expect(existsSync(join(runHome.dir, "rules", ruleName))).toBe(false);
+    expect(runHome.report.skippedLinks).toContainEqual({ path: rule, reason: "outside-root" });
+  });
+
+  test("an unchanged rule is copied as before (the check refuses nothing it admitted)", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    put(join(p.root, ".winter", "rules", "x.md"), "plain rule\n");
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }), { beforeRepositoryRead: () => undefined });
+    expect(readFileSync(join(runHome.dir, "rules", ruleName), "utf8")).toBe("plain rule\n");
+    expect(runHome.report.skippedLinks).toEqual([]);
+  });
+
+  test("a project instructions file whose path becomes a link between its in-root check and the read is not read (reported `outside-root`)", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const file = join(p.root, "WINTER.md");
+    put(file, "root text\n");
+    const target = outside(bed);
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }), {
+      beforeRepositoryRead: (real) => {
+        if (real !== file) return;
+        rmSync(file);
+        symlinkSync(target, file);
+      },
+    });
+    const text = readFileSync(join(runHome.dir, "WINTER.md"), "utf8");
+    expect(text).not.toContain("OUTSIDE THE ROOT");
+    expect(text).not.toContain(`# ${file}\n`);
+    expect(runHome.report.skippedLinks).toContainEqual({ path: file, reason: "outside-root" });
   });
 });
