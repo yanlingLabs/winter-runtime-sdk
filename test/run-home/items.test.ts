@@ -1,7 +1,7 @@
 // WS-21 §3.3, §3.4.1-2, §3.2: the item merge — claude's clash rules (F8), settled once at build time,
 // the agent rewrites (F19c), the link rules (§3.4.6) and the mode × kind matrix.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildRunHome } from "../../src/index.ts";
@@ -105,8 +105,51 @@ describe("output styles (F8: project beats user; the FARTHEST project dir wins)"
     const runHome = await buildRunHome(inputFor(bed, { cwd: p.cwd, trustedProjectRoot: p.root, gitRoot: p.root }));
     const styles = join(runHome.dir, "output-styles");
     expect(readdirSync(styles).sort()).toEqual(["pkgonly.md", "terse.md", "useronly.md"]);
-    expect(linkTarget(join(styles, "terse.md"))).toBe(join(p.rootDot, "output-styles", "terse.md"));
+    // WS-24: the winning project style is a COPY of the root's (see below); the user's stays a link.
+    expect(parseClaudeFrontmatter(readFileSync(join(styles, "terse.md"), "utf8"))!.frontmatter).toEqual({ description: "root-terse", "keep-coding-instructions": true });
     expect(linkTarget(join(styles, "useronly.md"))).toBe(join(bed.sdk, "output-styles", "useronly.md"));
+  });
+
+  test("WS-24: a project style is a 0600 COPY with `keep-coding-instructions: true` forced (false or absent in the repository), everything else as written; a user style stays a link, as written", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    put(join(bed.sdk, "output-styles", "mine.md"), "---\nkeep-coding-instructions: false\n---\n\nuser style\n");
+    put(join(p.rootDot, "output-styles", "replace.md"), "---\nname: replace\ndescription: d\nkeep-coding-instructions: false\n---\n\nproject body\n");
+    put(join(p.rootDot, "output-styles", "bare.md"), "no frontmatter at all\n");
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
+    const styles = join(runHome.dir, "output-styles");
+    for (const name of ["replace.md", "bare.md"]) {
+      expect([name, lstatSync(join(styles, name)).isSymbolicLink(), statSync(join(styles, name)).mode & 0o777]).toEqual([name, false, 0o600]);
+    }
+    const replace = parseClaudeFrontmatter(readFileSync(join(styles, "replace.md"), "utf8"))!;
+    expect([replace.frontmatter, replace.body]).toEqual([{ name: "replace", description: "d", "keep-coding-instructions": true }, "project body\n"]);
+    const bare = parseClaudeFrontmatter(readFileSync(join(styles, "bare.md"), "utf8"))!;
+    expect([bare.frontmatter, bare.body]).toEqual([{ "keep-coding-instructions": true }, "no frontmatter at all\n"]);
+    expect(linkTarget(join(styles, "mine.md"))).toBe(join(bed.sdk, "output-styles", "mine.md"));
+    // A snapshot: an edit in the repository after the build does not reach the run folder.
+    put(join(p.rootDot, "output-styles", "replace.md"), "---\nkeep-coding-instructions: false\n---\nlater\n");
+    expect(readFileSync(join(styles, "replace.md"), "utf8")).toContain("project body");
+  });
+
+  test("WS-24: a project style or agent whose path becomes a link out of the root before its read is not copied (reported `outside-root`)", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    const style = join(p.rootDot, "output-styles", "s.md");
+    const agent = join(p.rootDot, "agents", "a.md");
+    put(style, md("in-root style"));
+    put(agent, "---\nname: a\ndescription: in-root agent\n---\n\nbody\n");
+    const outside = join(bed.root, "elsewhere.md");
+    put(outside, "---\nname: a\ndescription: OUTSIDE\n---\n\nOUTSIDE\n");
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }), {
+      beforeRepositoryRead: (real) => {
+        if (real !== style && real !== agent) return;
+        rmSync(real);
+        symlinkSync(outside, real);
+      },
+    });
+    expect(existsSync(join(runHome.dir, "output-styles", "s.md"))).toBe(false);
+    expect(existsSync(join(runHome.dir, "agents", "a.md"))).toBe(false);
+    expect(runHome.report.skippedLinks).toEqual(expect.arrayContaining([{ path: style, reason: "outside-root" }, { path: agent, reason: "outside-root" }]));
   });
 });
 

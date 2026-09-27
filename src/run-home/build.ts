@@ -48,7 +48,7 @@ export interface RunHomeBuildInternals {
   userHome?: string;
   /**
    * Called with a repository file's real path after the build has admitted it and immediately before it
-   * is read (the project rules' copies and the project instructions files) — the one place a test can
+   * is read (the project rules', output styles' and agents' copies and the project instructions files) — the one place a test can
    * change the file system between the in-root check and the read.
    */
   beforeRepositoryRead?: (real: string) => void;

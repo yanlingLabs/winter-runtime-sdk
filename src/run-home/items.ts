@@ -6,7 +6,8 @@
 //   skills     user, then self (`sdk/skills/self/*`), then project, nearest project dir first — the
 //              first name wins; identity is the DIRECTORY name.
 //   commands   user, then project, nearest first — and any skill beats any command of the same name.
-//   styles     project beats user, and the FARTHEST project dir wins.
+//   styles     project beats user, and the FARTHEST project dir wins; a project style is a COPY with
+//              `keep-coding-instructions: true` (WS-24 — it may add to the prompt, never replace it).
 //   agents     project beats user; COPIED, never linked, with `permissionMode` removed and a
 //              `memory: project|local` scope rewritten to `memory: user` (F19c — a project-scoped agent
 //              memory would write into the repository's vendor dir).
@@ -47,7 +48,7 @@ const PRIVATE_FILE = 0o600;
 
 // The walk and the containment test live in `walk.ts` (shared with the instructions and settings builders).
 export { isWithin, projectWalk } from "./walk.ts";
-import { isWithin, projectWalk } from "./walk.ts";
+import { isWithin, projectWalk, readAdmittedFile } from "./walk.ts";
 
 /** Real path, or `undefined` when the path (or a link on it) leads nowhere. */
 async function realOrMissing(path: string): Promise<string | undefined> {
@@ -206,7 +207,7 @@ export async function buildItems(context: RunHomeBuildContext): Promise<void> {
   if (code && !input.dispatchChild) {
     const ordered: Candidate[] = [...(await candidatesIn(scope, join(sdkHome, "output-styles"), "user", "markdown"))];
     for (const walkDir of walk) ordered.push(...(await candidatesIn(scope, projectKindDir(walkDir, "output-styles"), "project", "markdown", { from: walkDir })));
-    await linkAll(join(dir, "output-styles"), lastWins(ordered), (candidate) => `${candidate.name}.md`);
+    await buildOutputStyles(context, scope, lastWins(ordered));
   }
 
   // ---- rules --------------------------------------------------------------------------------------
@@ -214,6 +215,52 @@ export async function buildItems(context: RunHomeBuildContext): Promise<void> {
 
   // ---- agents: copies, project beats user ---------------------------------------------------------
   await buildAgents(context, scope, walk);
+}
+
+/**
+ * WS-24: the output styles. A user style is linked (the user's own tier). A PROJECT style is a settled
+ * COPY (0600), read as admitted (`readAdmittedFile`) and rewritten by `rewriteProjectOutputStyle`: in the
+ * run folder every style is read at the USER tier, where a style may drop the base prompt's coding
+ * instructions — which the Winter runtime refuses a project-tier style (it may add, never replace). The
+ * copy is also a snapshot, like the project rules. A project style that cannot be read as admitted is
+ * skipped (`skippedLinks`); one whose frontmatter cannot be rewritten provably is skipped and reported
+ * (`droppedRules`, `output style: <path>`).
+ */
+async function buildOutputStyles(context: RunHomeBuildContext, scope: ResolveScope, winners: Map<string, Candidate>): Promise<void> {
+  const stylesDir = join(context.dir, "output-styles");
+  await mkdir(stylesDir, { mode: PRIVATE_DIR });
+  for (const candidate of [...winners.values()].sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const destination = join(stylesDir, `${candidate.name}.md`);
+    if (candidate.tier !== "project") {
+      await symlink(candidate.target, destination);
+      continue;
+    }
+    context.internals.beforeRepositoryRead?.(candidate.target);
+    const read = scope.realRoot === undefined ? ({ refused: "outside-root" } as const) : readAdmittedFile(candidate.target, scope.realRoot);
+    if ("refused" in read) {
+      context.report.skippedLinks.push({ path: candidate.path, reason: read.refused });
+      continue;
+    }
+    const rewritten = rewriteProjectOutputStyle(read.text);
+    if (!rewritten.ok) {
+      context.report.droppedRules.push({ rule: `output style: ${candidate.path}`, tier: "project", reason: `a project output style is copied with \`keep-coding-instructions: true\`, and this one's frontmatter could not be rewritten provably (${rewritten.reason})` });
+      continue;
+    }
+    await writeFile(destination, rewritten.text, { mode: PRIVATE_FILE, flag: "wx" });
+  }
+}
+
+/**
+ * A PROJECT output style for the run folder, from the runtime's own parse of it: `keep-coding-instructions`
+ * forced to `true` (a style with no frontmatter gets one holding just that — ABSENT means drop on the Winter
+ * runtime), everything else as parsed. The same proved re-serialisation the agents use.
+ */
+export function rewriteProjectOutputStyle(text: string): { ok: true; text: string } | { ok: false; reason: "unparseable" | "no-yaml-parser" } {
+  const parsed = parseClaudeFrontmatter(text);
+  if (parsed === undefined) return { ok: false, reason: "no-yaml-parser" };
+  if (parsed.matched && parsed.error !== undefined) return { ok: false, reason: "unparseable" };
+  const serialized = serializeClaudeFrontmatter({ ...parsed.frontmatter, "keep-coding-instructions": true }, parsed.body);
+  return serialized === undefined ? { ok: false, reason: "unparseable" } : { ok: true, text: serialized };
 }
 
 /** The project rules' linked names, so the instructions step can find the ones it must rewrite. */
@@ -304,7 +351,19 @@ async function agentCandidates(scope: ResolveScope, dir: string, tier: Tier, fro
     const path = join(dir, rel);
     const target = await resolveCandidate(scope, tier, path, "markdown");
     if (target === undefined) continue;
-    const text = await readFile(target, "utf8");
+    let text: string;
+    if (tier === "project") {
+      // WS-24: a project definition is read as admitted — no link followed, still the in-root file.
+      scope.context.internals.beforeRepositoryRead?.(target);
+      const read = scope.realRoot === undefined ? ({ refused: "outside-root" } as const) : readAdmittedFile(target, scope.realRoot);
+      if ("refused" in read) {
+        scope.context.report.skippedLinks.push({ path, reason: read.refused });
+        continue;
+      }
+      text = read.text;
+    } else {
+      text = await readFile(target, "utf8");
+    }
     const parsed = parseClaudeFrontmatter(text);
     // IDENTITY FROM THE SAME PARSE THE RUNTIME USES: `name` when set (stringified, as the pin does),
     // else the file stem.
