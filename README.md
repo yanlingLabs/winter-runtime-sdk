@@ -35,19 +35,33 @@ ownership map and how this package consumes the Winter SDK.
 
 A patch release; no API or peer-floor change (`@yanlinglabs/winter-agent-sdk >=0.0.21 <0.1.0`).
 
-- **A tracked local settings file is the repository's.** `<git root>/<project dir>/settings.local.json`
-  is filtered as the project tier when git tracks it (it is in the index) or when git cannot say it does
-  not (no git executable, an error, a timeout): its escalating `permissions.defaultMode` is dropped and
-  reported under the `local` tier, and every key the project tier refuses is dropped as it is there. An untracked local file
-  — and one at a cwd with no git root — keeps the local tier's filter. The probe runs only when the tier
-  file exists and parses (`git ls-files`, literal pathspec, no fsmonitor).
-- **Effort keys never come from a repository tier.** `effortLevel`, `modelSettings`, `ultracode` and
-  `alwaysThinkingEnabled` are dropped from the project and local tiers and reported in `droppedRules`,
-  like the model-routing keys; the user tier keeps them.
-- **Repository files are read as admitted.** The project-rule copies, the project instructions files and
-  their in-root imports are read only while the path still names the in-root regular file the build
-  admitted (no link followed, same real path, same file); otherwise the file is skipped and reported
-  (`skippedLinks`, `outside-root`).
+- **A local settings file the repository shipped is filtered as the project tier.**
+  `<git root>/<project dir>/settings.local.json` counts as shipped when git lists it in the index
+  (matched case-insensitively, or through a dot-dir that is itself a tracked link or a submodule), when
+  the dot-dir or the file is a link or does not resolve to exactly that path, or when git cannot answer
+  (no git executable, an error, a timeout). Its escalating `permissions.defaultMode` is then dropped and
+  reported under the `local` tier, and every key the project tier refuses is dropped as it is there. With
+  no host `gitRoot`, git is still asked (from the cwd) when a `.git` entry sits at the trusted root, the
+  cwd or between them; with none, the cwd's local file keeps the local tier's filter, as does an untracked
+  one. The probe (`git ls-files -s`, `:(literal,icase)` pathspecs, no fsmonitor, no `GIT_*` variables)
+  runs only when the tier file exists and parses. A repository delivered together with its `.git`
+  controls its own index, so this closes the committed-file case, not every delivery.
+- **Effort keys, the output style and an unsafe `plansDirectory` never come from a repository tier.**
+  `effortLevel`, `modelSettings`, `ultracode`, `alwaysThinkingEnabled` and `outputStyle` are dropped from
+  the project and local tiers, and a repository's `plansDirectory` that is not a short relative path
+  without `..` or control characters (the agent SDK's own project-tier rule) is dropped — each reported in
+  `droppedRules`; the user tier keeps them.
+- **Project output styles are copies that keep the coding instructions.** A project style in the run
+  folder is a 0600 snapshot whose frontmatter has `keep-coding-instructions: true` forced (a style with
+  no frontmatter gets one); one that cannot be rewritten provably is skipped and reported
+  (`droppedRules`, `output style: <path>`). User styles stay links.
+- **Repository files are read as admitted.** The project settings file, the project-rule, output-style
+  and agent copies, the project instructions files and their in-root imports are read only while the path
+  still names the in-root regular file the build admitted (no link followed, same real path, same file);
+  otherwise the file is skipped and reported (`skippedLinks`, `outside-root`).
+- **Still live links (a follow-up, unchanged here):** project skills and commands are linked into the run
+  folder by their in-root real path, not snapshotted, so an edit in the repository after the build reaches
+  a running session's skills and commands.
 
 ## What `0.0.14` changes (WS-23 — one runtime)
 
@@ -121,7 +135,9 @@ interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; un
                                          // "fallbackModel" and "modelOverrides" from ANY tier (a silent model switch: on overload, or on the wire
                                          // behind the reported model); "model", "availableModels", "advisorModel", "enforceAvailableModels" from a
                                          // repository tier (a repository never chooses models); and "effortLevel", "modelSettings", "ultracode",
-                                         // "alwaysThinkingEnabled" from a repository tier (a repository never sets the session's effort)
+                                         // "alwaysThinkingEnabled", "outputStyle" and an unsafe "plansDirectory" from a repository tier; a local
+                                         // file the repository shipped is filtered as the project tier; "output style: <path>" for a project
+                                         // style whose frontmatter could not be rewritten
 interface RunHome { runId; dir; sdkHome; input; effectiveSettings; report; dispose(): Promise<void> }
 const RUN_HOME_CONTRACT_VERSION = 1;
 const RUN_HOME_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"];
