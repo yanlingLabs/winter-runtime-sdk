@@ -41,8 +41,8 @@ A patch release; no API or peer-floor change (`@yanlinglabs/winter-agent-sdk >=0
   the dot-dir or the file is a link or does not resolve to exactly that path, or when git cannot answer
   (no git executable, an error, a timeout). Its escalating `permissions.defaultMode` is then dropped and
   reported under the `local` tier, and every key the project tier refuses is dropped as it is there. With
-  no host `gitRoot`, git is still asked (from the cwd) when a `.git` entry sits at the trusted root, the
-  cwd or between them; with none, the cwd's local file keeps the local tier's filter, as does an untracked
+  no host `gitRoot`, git is still asked (from the cwd) when a `.git` entry sits at the cwd, on the walk to
+  the trusted root, or above the root up to `$HOME` (or `/`); with none, the cwd's local file keeps the local tier's filter, as does an untracked
   one. The probe (`git ls-files -s`, `:(literal,icase)` pathspecs, no fsmonitor, no `GIT_*` variables)
   runs only when the tier file exists and parses. A repository delivered together with its `.git`
   controls its own index, so this closes the committed-file case, not every delivery.
@@ -54,7 +54,9 @@ A patch release; no API or peer-floor change (`@yanlinglabs/winter-agent-sdk >=0
 - **Project output styles are copies that keep the coding instructions.** A project style in the run
   folder is a 0600 snapshot whose frontmatter has `keep-coding-instructions: true` forced (a style with
   no frontmatter gets one); one that cannot be rewritten provably is skipped and reported
-  (`droppedRules`, `output style: <path>`). User styles stay links.
+  (`droppedRules`, `output style: <path>`). User styles stay links. A repository never redefines a style:
+  on a name collision (case-folded) the user's own style and the runtime's built-ins (`default`,
+  `proactive`, `explanatory`, `learning`) win, and the project style is skipped and reported the same way.
 - **Repository files are read as admitted.** The project settings file, the project-rule, output-style
   and agent copies, the project instructions files and their in-root imports are read only while the path
   still names the in-root regular file the build admitted (no link followed, same real path, same file);

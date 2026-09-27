@@ -394,12 +394,21 @@ export async function localTierShippedByRepository(root: string, dirName: string
 }
 
 /**
- * WS-24 (I-2): a `.git` entry (a directory, or a worktree's file) at the trusted root, at the cwd, or on
- * the walk between them. The host's `gitRoot` is null both for "no repository" and for "git could not
- * answer"; a `.git` entry here tells the two apart, so the second is probed (and fails closed).
+ * WS-24 (I-2): a `.git` entry (a directory, or a worktree's file) at the cwd, on the walk up to the trusted
+ * root, or ABOVE the trusted root up to `$HOME` (inclusive) or the file-system root — never above either.
+ * The host's `gitRoot` is null both for "no repository" and for "git could not answer"; a `.git` entry here
+ * tells the two apart, so the second is probed (and fails closed). Walking above the trusted root covers a
+ * trusted root that is a SUBDIRECTORY of a repository, whose `.git` sits higher up.
  */
 function gitEntryNear(cwd: string, trustedProjectRoot: string, userHome: string): boolean {
-  const dirs = new Set([resolve(trustedProjectRoot), resolve(cwd), ...projectWalk(cwd, trustedProjectRoot, userHome)]);
+  const dirs = new Set([resolve(cwd), ...projectWalk(cwd, trustedProjectRoot, userHome)]);
+  const home = resolve(userHome);
+  for (let current = resolve(trustedProjectRoot); ; ) {
+    dirs.add(current);
+    const parent = dirname(current);
+    if (current === home || parent === current) break;
+    current = parent;
+  }
   for (const dir of dirs) if (lstatKind(join(dir, ".git")) !== "missing") return true;
   return false;
 }

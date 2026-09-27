@@ -417,6 +417,22 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
       expect(honoured.effectiveSettings).toEqual(shipped);
     });
 
+    test("I-2 (m-1): a trusted root that is a SUBDIRECTORY of a repository — the `.git` above it is found, git is asked: tracked is refused, git unavailable is refused", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      const sub = join(root, "sub");
+      put(localFile(sub), json(shipped));
+      git(root, "add", "--force", "sub/.winter/settings.local.json");
+      await refused(bed, sub, null);
+
+      const noGit = runHomeBed();
+      const b = repo(noGit);
+      const bSub = join(b.root, "sub");
+      put(localFile(bSub), json(shipped));
+      const runHome = await buildRunHome(inputFor(noGit, { cwd: bSub, trustedProjectRoot: bSub, gitRoot: null }), { git: join(noGit.root, "no-such-git") });
+      expect(runHome.report.droppedRules).toEqual([{ rule: "permissions.defaultMode: bypassPermissions", tier: "local", reason: trackedReason }]);
+    });
+
     test("no git root and no `.git` entry at the root, the cwd or between them — nothing can have shipped the cwd's local file, and it keeps the local tier's filter", async () => {
       const bed = runHomeBed();
       const root = join(bed.root, "plain");
