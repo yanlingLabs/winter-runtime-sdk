@@ -93,21 +93,37 @@ describe("commands (F8: user beats project; any skill beats any legacy command)"
   });
 });
 
-describe("output styles (F8: project beats user; the FARTHEST project dir wins)", () => {
-  test("the root's style beats the nearer directory's, which beats the user's", async () => {
+describe("output styles (among project dirs the FARTHEST wins; the user's own and the built-ins are never redefined — WS-24)", () => {
+  test("the root's style beats the nearer directory's; the user's own style of a name beats the project's (reported)", async () => {
     const bed = runHomeBed();
     const p = project(bed);
     put(join(bed.sdk, "output-styles", "terse.md"), md("user-terse"));
     put(join(bed.sdk, "output-styles", "useronly.md"), md("user-useronly"));
     put(join(p.pkgDot, "output-styles", "terse.md"), md("pkg-terse"));
     put(join(p.rootDot, "output-styles", "terse.md"), md("root-terse"));
+    put(join(p.pkgDot, "output-styles", "shared.md"), md("pkg-shared"));
+    put(join(p.rootDot, "output-styles", "shared.md"), md("root-shared"));
     put(join(p.pkgDot, "output-styles", "pkgonly.md"), md("pkg-pkgonly"));
     const runHome = await buildRunHome(inputFor(bed, { cwd: p.cwd, trustedProjectRoot: p.root, gitRoot: p.root }));
     const styles = join(runHome.dir, "output-styles");
-    expect(readdirSync(styles).sort()).toEqual(["pkgonly.md", "terse.md", "useronly.md"]);
-    // WS-24: the winning project style is a COPY of the root's (see below); the user's stays a link.
-    expect(parseClaudeFrontmatter(readFileSync(join(styles, "terse.md"), "utf8"))!.frontmatter).toEqual({ description: "root-terse", "keep-coding-instructions": true });
+    expect(readdirSync(styles).sort()).toEqual(["pkgonly.md", "shared.md", "terse.md", "useronly.md"]);
+    expect(linkTarget(join(styles, "terse.md"))).toBe(join(bed.sdk, "output-styles", "terse.md"));
     expect(linkTarget(join(styles, "useronly.md"))).toBe(join(bed.sdk, "output-styles", "useronly.md"));
+    // Among project dirs the root's (the FARTHEST) wins — a copy (see below).
+    expect(parseClaudeFrontmatter(readFileSync(join(styles, "shared.md"), "utf8"))!.frontmatter).toEqual({ description: "root-shared", "keep-coding-instructions": true });
+    expect(runHome.report.droppedRules).toEqual([{ rule: `output style: ${join(p.rootDot, "output-styles", "terse.md")}`, tier: "project", reason: expect.stringContaining("user's own style of this name wins") }]);
+  });
+
+  test("WS-24: a project style never takes a built-in's name, nor the user's in another case (reported)", async () => {
+    const bed = runHomeBed();
+    const p = project(bed);
+    put(join(bed.sdk, "output-styles", "mine.md"), md("user-mine"));
+    put(join(p.rootDot, "output-styles", "Default.md"), md("project-default"));
+    put(join(p.rootDot, "output-styles", "learning.md"), md("project-learning"));
+    put(join(p.rootDot, "output-styles", "MINE.md"), md("project-mine"));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: p.root, trustedProjectRoot: p.root, gitRoot: p.root }));
+    expect(readdirSync(join(runHome.dir, "output-styles"))).toEqual(["mine.md"]);
+    expect(runHome.report.droppedRules.map((d) => d.rule).sort()).toEqual(["Default.md", "MINE.md", "learning.md"].map((f) => `output style: ${join(p.rootDot, "output-styles", f)}`).sort());
   });
 
   test("WS-24: a project style is a 0600 COPY with `keep-coding-instructions: true` forced (false or absent in the repository), everything else as written; a user style stays a link, as written", async () => {

@@ -6,8 +6,9 @@
 //   skills     user, then self (`sdk/skills/self/*`), then project, nearest project dir first — the
 //              first name wins; identity is the DIRECTORY name.
 //   commands   user, then project, nearest first — and any skill beats any command of the same name.
-//   styles     project beats user, and the FARTHEST project dir wins; a project style is a COPY with
-//              `keep-coding-instructions: true` (WS-24 — it may add to the prompt, never replace it).
+//   styles     the USER's style and a built-in beat a project style of the same name, case-folded (WS-24 —
+//              a repository never redefines the style; claude lets the project win); among project dirs
+//              the FARTHEST wins; a project style is a COPY with `keep-coding-instructions: true` (WS-24).
 //   agents     project beats user; COPIED, never linked, with `permissionMode` removed and a
 //              `memory: project|local` scope rewritten to `memory: user` (F19c — a project-scoped agent
 //              memory would write into the repository's vendor dir).
@@ -203,11 +204,11 @@ export async function buildItems(context: RunHomeBuildContext): Promise<void> {
     await linkAll(join(dir, "commands"), winners, (candidate) => `${candidate.name}.md`);
   }
 
-  // ---- output styles: user, then project from NEAREST to FARTHEST, last wins ---------------------
+  // ---- output styles: user, then project from NEAREST to FARTHEST (see `buildOutputStyles`) -------
   if (code && !input.dispatchChild) {
     const ordered: Candidate[] = [...(await candidatesIn(scope, join(sdkHome, "output-styles"), "user", "markdown"))];
     for (const walkDir of walk) ordered.push(...(await candidatesIn(scope, projectKindDir(walkDir, "output-styles"), "project", "markdown", { from: walkDir })));
-    await buildOutputStyles(context, scope, lastWins(ordered));
+    await buildOutputStyles(context, scope, ordered);
   }
 
   // ---- rules --------------------------------------------------------------------------------------
@@ -218,21 +219,48 @@ export async function buildItems(context: RunHomeBuildContext): Promise<void> {
 }
 
 /**
+ * The Winter runtime's built-in style names (agent SDK `packages/runtime/src/context/output-styles.ts`,
+ * the built-in table). The runtime resolves a name from the run folder's `output-styles/<name>.md` BEFORE
+ * its built-ins, so a file of one of these names there would redefine the built-in.
+ */
+export const WINTER_BUILTIN_OUTPUT_STYLE_NAMES: readonly string[] = ["default", "proactive", "explanatory", "learning"];
+
+/**
  * WS-24: the output styles. A user style is linked (the user's own tier). A PROJECT style is a settled
  * COPY (0600), read as admitted (`readAdmittedFile`) and rewritten by `rewriteProjectOutputStyle`: in the
  * run folder every style is read at the USER tier, where a style may drop the base prompt's coding
  * instructions — which the Winter runtime refuses a project-tier style (it may add, never replace). The
- * copy is also a snapshot, like the project rules. A project style that cannot be read as admitted is
- * skipped (`skippedLinks`); one whose frontmatter cannot be rewritten provably is skipped and reported
- * (`droppedRules`, `output style: <path>`).
+ * copy is also a snapshot, like the project rules.
+ *
+ * A REPOSITORY NEVER PICKS, NOR REDEFINES, THE OUTPUT STYLE (WS-24 re-review). On a name collision the
+ * user's own style and a built-in win, and the project style is skipped and reported (`droppedRules`,
+ * `output style: <path>`). DIVERGENCE, deliberate: claude lets a project style beat the user's of the same
+ * name. Names are compared case-insensitively, because the runtime opens `<name>.md` on a volume that may
+ * fold case. Among project styles the FARTHEST project dir still wins (claude's own order), and a later
+ * project style whose name folds to one already written is skipped the same way.
+ *
+ * A project style that cannot be read as admitted is skipped (`skippedLinks`); one whose frontmatter
+ * cannot be rewritten provably is skipped and reported (`droppedRules`, `output style: <path>`).
  */
-async function buildOutputStyles(context: RunHomeBuildContext, scope: ResolveScope, winners: Map<string, Candidate>): Promise<void> {
+async function buildOutputStyles(context: RunHomeBuildContext, scope: ResolveScope, ordered: readonly Candidate[]): Promise<void> {
   const stylesDir = join(context.dir, "output-styles");
   await mkdir(stylesDir, { mode: PRIVATE_DIR });
-  for (const candidate of [...winners.values()].sort((a, b) => (a.name < b.name ? -1 : 1))) {
-    const destination = join(stylesDir, `${candidate.name}.md`);
-    if (candidate.tier !== "project") {
-      await symlink(candidate.target, destination);
+  const drop = (candidate: Candidate, reason: string): void => {
+    context.report.droppedRules.push({ rule: `output style: ${candidate.path}`, tier: "project", reason });
+  };
+  const byName = (a: Candidate, b: Candidate): number => (a.name < b.name ? -1 : 1);
+  const taken = new Set(WINTER_BUILTIN_OUTPUT_STYLE_NAMES.map((name) => name.toLowerCase()));
+  const userNames = new Set<string>();
+  for (const candidate of [...lastWins(ordered.filter((c) => c.tier !== "project")).values()].sort(byName)) {
+    if (userNames.has(candidate.name.toLowerCase())) continue; // one user dir; a case-folded twin cannot be written beside it
+    userNames.add(candidate.name.toLowerCase());
+    await symlink(candidate.target, join(stylesDir, `${candidate.name}.md`));
+  }
+  for (const name of userNames) taken.add(name);
+  for (const candidate of [...lastWins(ordered.filter((c) => c.tier === "project")).values()].sort(byName)) {
+    const folded = candidate.name.toLowerCase();
+    if (taken.has(folded)) {
+      drop(candidate, userNames.has(folded) ? "a repository never redefines the output style: the user's own style of this name wins" : "a repository never redefines the output style: this name is a built-in style's, or another project style's");
       continue;
     }
     context.internals.beforeRepositoryRead?.(candidate.target);
@@ -243,10 +271,11 @@ async function buildOutputStyles(context: RunHomeBuildContext, scope: ResolveSco
     }
     const rewritten = rewriteProjectOutputStyle(read.text);
     if (!rewritten.ok) {
-      context.report.droppedRules.push({ rule: `output style: ${candidate.path}`, tier: "project", reason: `a project output style is copied with \`keep-coding-instructions: true\`, and this one's frontmatter could not be rewritten provably (${rewritten.reason})` });
+      drop(candidate, `a project output style is copied with \`keep-coding-instructions: true\`, and this one's frontmatter could not be rewritten provably (${rewritten.reason})`);
       continue;
     }
-    await writeFile(destination, rewritten.text, { mode: PRIVATE_FILE, flag: "wx" });
+    taken.add(folded);
+    await writeFile(join(stylesDir, `${candidate.name}.md`), rewritten.text, { mode: PRIVATE_FILE, flag: "wx" });
   }
 }
 
