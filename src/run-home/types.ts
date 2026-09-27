@@ -89,7 +89,10 @@ export interface RunHomeReport {
    * (review minor); a sandbox ALLOW entry whose anchor holds `*`/`?`, on either leg; a repository tier's
    * escalating `permissions.defaultMode` (`"permissions.defaultMode: <mode>"`, R.3 I1); `fallbackModel` and
    * `modelOverrides` from any tier, and `model`/`availableModels`/`advisorModel`/`enforceAvailableModels`
-   * from a repository tier (the key's name, R.3 M3, Touch 4).
+   * from a repository tier (the key's name, R.3 M3, Touch 4); from a repository tier also the effort keys
+   * (`effortLevel`, `modelSettings`, `ultracode`, `alwaysThinkingEnabled`), `outputStyle` and an unsafe
+   * `plansDirectory` (WS-24); and a project output style whose frontmatter could not be rewritten
+   * (`"output style: <path>"`, WS-24). A local tier the repository shipped is filtered as the project tier.
    */
   droppedRules: { rule: string; tier: "user" | "project" | "local"; reason: string }[];
 }

@@ -1,7 +1,7 @@
 // WS-21 §3.4.4: the effective settings — three tiers merged by claude's rules (F17), each tier
 // filtered first, every relative path re-anchored, then stripped per mode and cut to claude's schema.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -42,11 +42,12 @@ describe("the tiers and claude's merge (F17)", () => {
   test("user < project < local; arrays concatenated and deduplicated; objects deep-merged", async () => {
     const bed = runHomeBed();
     const { root } = repo(bed);
-    put(join(bed.sdk, "settings.json"), json({ outputStyle: "user-style", permissions: { allow: ["Bash(ls:*)", "Bash(pwd)"] }, env: { A: "user", B: "user" } }));
-    put(join(root, ".winter", "settings.json"), json({ outputStyle: "project-style", permissions: { allow: ["Bash(pwd)", "Bash(git status)"] }, env: { B: "project" } }));
+    put(join(bed.sdk, "settings.json"), json({ language: "user-lang", outputStyle: "user-style", permissions: { allow: ["Bash(ls:*)", "Bash(pwd)"] }, env: { A: "user", B: "user" } }));
+    put(join(root, ".winter", "settings.json"), json({ language: "project-lang", permissions: { allow: ["Bash(pwd)", "Bash(git status)"] }, env: { B: "project" } }));
     put(join(root, ".winter", "settings.local.json"), json({ permissions: { allow: ["Bash(make)"] }, env: { C: "local" } }));
     const settings = await effective(bed, root);
-    expect(settings["outputStyle"]).toBe("project-style");
+    expect(settings["language"]).toBe("project-lang");
+    expect(settings["outputStyle"]).toBe("user-style");
     expect((settings["permissions"] as { allow: string[] }).allow).toEqual(["Bash(ls:*)", "Bash(pwd)", "Bash(git status)", "Bash(make)"]);
     expect(settings["env"]).toEqual({ A: "user", B: "project", C: "local" });
   });
@@ -96,10 +97,10 @@ describe("the tiers and claude's merge (F17)", () => {
     const { root } = repo(bed);
     const user = { model: "user-model", availableModels: ["user-a"], advisorModel: "user-advisor", enforceAvailableModels: true };
     put(join(bed.sdk, "settings.json"), json(user));
-    put(join(root, ".winter", "settings.json"), json({ model: "p", modelOverrides: { a: "p" }, availableModels: ["p"], advisorModel: "p", enforceAvailableModels: false, outputStyle: "p" }));
+    put(join(root, ".winter", "settings.json"), json({ model: "p", modelOverrides: { a: "p" }, availableModels: ["p"], advisorModel: "p", enforceAvailableModels: false, language: "p" }));
     put(join(root, ".winter", "settings.local.json"), json({ model: "l", advisorModel: "l", enforceAvailableModels: true }));
     const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
-    expect(runHome.effectiveSettings).toEqual({ ...user, outputStyle: "p" });
+    expect(runHome.effectiveSettings).toEqual({ ...user, language: "p" });
     const reason = expect.stringContaining("repository never chooses");
     expect(runHome.report.droppedRules).toEqual([
       { rule: "modelOverrides", tier: "project", reason: expect.stringContaining("wire") },
@@ -118,10 +119,10 @@ describe("the tiers and claude's merge (F17)", () => {
     const { root } = repo(bed);
     const user = { effortLevel: "low", modelSettings: { "m-1": { effortLevel: "low" } }, ultracode: false, alwaysThinkingEnabled: false };
     put(join(bed.sdk, "settings.json"), json(user));
-    put(join(root, ".winter", "settings.json"), json({ effortLevel: "max", modelSettings: { "m-1": { effortLevel: "max" } }, ultracode: true, alwaysThinkingEnabled: true, outputStyle: "p" }));
+    put(join(root, ".winter", "settings.json"), json({ effortLevel: "max", modelSettings: { "m-1": { effortLevel: "max" } }, ultracode: true, alwaysThinkingEnabled: true, language: "p" }));
     put(join(root, ".winter", "settings.local.json"), json({ effortLevel: "high", modelSettings: { "m-2": { effortLevel: "high" } } }));
     const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
-    expect(runHome.effectiveSettings).toEqual({ ...user, outputStyle: "p" });
+    expect(runHome.effectiveSettings).toEqual({ ...user, language: "p" });
     const reason = expect.stringContaining("repository never sets the session's effort");
     expect(runHome.report.droppedRules).toEqual([
       { rule: "effortLevel", tier: "project", reason },
@@ -192,12 +193,12 @@ describe("the walk's `$HOME` stop (fix round 1, M2): a root at `$HOME` or above 
   test("a project BELOW `$HOME` still contributes both tiers; a local anchor at `$HOME` alone contributes nothing", async () => {
     const { bed, userHome } = homeBed();
     const root = join(userHome, "p");
-    put(join(root, ".winter", "settings.json"), json({ outputStyle: "project-style" }));
+    put(join(root, ".winter", "settings.json"), json({ language: "project-lang" }));
     put(join(root, ".winter", "settings.local.json"), json({ env: { LOCAL: "1" } }));
     const below = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }), { userHome });
-    expect(below.effectiveSettings).toEqual({ model: "user-model", outputStyle: "project-style", env: { LOCAL: "1" } });
+    expect(below.effectiveSettings).toEqual({ model: "user-model", language: "project-lang", env: { LOCAL: "1" } });
     const homeGit = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: userHome }), { userHome });
-    expect(homeGit.effectiveSettings).toEqual({ model: "user-model", outputStyle: "project-style" });
+    expect(homeGit.effectiveSettings).toEqual({ model: "user-model", language: "project-lang" });
   });
 });
 
@@ -264,7 +265,7 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
   });
 
   describe("WS-24: a local settings file git TRACKS is the repository's, and is filtered as the project tier", () => {
-    const trackedReason = expect.stringContaining("tracked by git");
+    const trackedReason = expect.stringContaining("shipped by the repository");
     const localFile = (root: string): string => join(root, ".winter", "settings.local.json");
     const shipped = { permissions: { defaultMode: "bypassPermissions", allow: ["Bash(ls)"] }, skipDangerousModePermissionPrompt: true, env: { KEPT: "1" } };
 
@@ -314,7 +315,109 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
       expect([settings["permissions"], settings["skipDangerousModePermissionPrompt"]]).toEqual([{ allow: ["Bash(ls)"] }, undefined]);
     });
 
-    test("no git root at all (the host says: not a repository) — nothing can have shipped the cwd's local file, and it keeps the local tier's filter", async () => {
+    const commit = (root: string): void => git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "x");
+    const refused = async (bed: RunHomeBed, root: string, gitRoot: string | null = root): Promise<void> => {
+      const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot }));
+      expect(runHome.effectiveSettings["permissions"]).toEqual({ allow: ["Bash(ls)"] });
+      expect(runHome.effectiveSettings["skipDangerousModePermissionPrompt"]).toBeUndefined();
+      expect(runHome.report.droppedRules).toEqual([{ rule: "permissions.defaultMode: bypassPermissions", tier: "local", reason: trackedReason }]);
+    };
+    /** Whether the bed's volume folds case (APFS's default): the spellings below only reach the file there. */
+    const foldsCase = (bed: RunHomeBed): boolean => {
+      const probe = join(bed.root, "CaseProbe");
+      put(probe, "x");
+      return existsSync(join(bed.root, "caseprobe"));
+    };
+
+    test("I-1 A: the repository tracks another CASE of the file name (`Settings.local.json`) — refused", async () => {
+      const bed = runHomeBed();
+      if (!foldsCase(bed)) return;
+      const { root } = repo(bed);
+      put(join(root, ".winter", "Settings.local.json"), json(shipped));
+      git(root, "add", "--force", ".winter/Settings.local.json");
+      commit(root);
+      await refused(bed, root);
+    });
+
+    test("I-1 B: the repository tracks another CASE of the dot-dir (`.Winter/`) — refused", async () => {
+      const bed = runHomeBed();
+      if (!foldsCase(bed)) return;
+      const { root } = repo(bed);
+      put(join(root, ".Winter", "settings.local.json"), json(shipped));
+      git(root, "add", "--force", ".Winter/settings.local.json");
+      commit(root);
+      await refused(bed, root);
+    });
+
+    test("I-1 C: the dot-dir is a tracked link to a tracked directory — refused", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(join(root, "cfg", "settings.local.json"), json(shipped));
+      symlinkSync("cfg", join(root, ".winter"));
+      git(root, "add", "--force", "cfg", ".winter");
+      commit(root);
+      await refused(bed, root);
+    });
+
+    test("I-1 C': the file itself is a link (even an untracked one to an in-repository file) — refused", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(join(root, "cfg.json"), json(shipped));
+      mkdirSync(join(root, ".winter"), { recursive: true });
+      symlinkSync("../cfg.json", localFile(root));
+      await refused(bed, root);
+    });
+
+    test("I-1 D: the dot-dir is a submodule (a gitlink) holding the file — refused", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      const inner = join(root, ".winter");
+      put(join(inner, "settings.local.json"), json(shipped));
+      git(inner, "init", "-q");
+      git(inner, "add", "--force", "settings.local.json");
+      commit(inner);
+      git(root, "add", ".winter");
+      commit(root);
+      await refused(bed, root);
+    });
+
+    test("M-1: the probe drops every `GIT_*` variable — an index override in the daemon's environment cannot make a tracked file look untracked", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(localFile(root), json(shipped));
+      git(root, "add", "--force", ".winter/settings.local.json");
+      const saved = process.env["GIT_INDEX_FILE"];
+      process.env["GIT_INDEX_FILE"] = join(bed.root, "empty-index");
+      try {
+        await refused(bed, root);
+      } finally {
+        if (saved === undefined) delete process.env["GIT_INDEX_FILE"];
+        else process.env["GIT_INDEX_FILE"] = saved;
+      }
+    });
+
+    test("I-2: no git root from the host, but a `.git` entry at the root — git is asked from the cwd: tracked is refused, and git unavailable is refused", async () => {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(localFile(root), json(shipped));
+      git(root, "add", "--force", ".winter/settings.local.json");
+      await refused(bed, root, null);
+
+      const noGit = runHomeBed();
+      const b = repo(noGit);
+      put(localFile(b.root), json(shipped));
+      const runHome = await buildRunHome(inputFor(noGit, { cwd: b.root, trustedProjectRoot: b.root, gitRoot: null }), { git: join(noGit.root, "no-such-git") });
+      expect(runHome.report.droppedRules).toEqual([{ rule: "permissions.defaultMode: bypassPermissions", tier: "local", reason: trackedReason }]);
+
+      // …and the same repository with the file untracked, git working: honoured.
+      const untracked = runHomeBed();
+      const c = repo(untracked);
+      put(localFile(c.root), json(shipped));
+      const honoured = await buildRunHome(inputFor(untracked, { cwd: c.root, trustedProjectRoot: c.root, gitRoot: null }));
+      expect(honoured.effectiveSettings).toEqual(shipped);
+    });
+
+    test("no git root and no `.git` entry at the root, the cwd or between them — nothing can have shipped the cwd's local file, and it keeps the local tier's filter", async () => {
       const bed = runHomeBed();
       const root = join(bed.root, "plain");
       put(localFile(root), json(shipped));
@@ -521,5 +624,48 @@ describe("the claude schema list (WS-23: frozen at the last official pin)", () =
     for (const key of ["lsp", "mcpServers", "modelSlots", "providers", "advisor"]) {
       expect({ key, present: CLAUDE_SETTINGS_KEYS.includes(key) }).toEqual({ key, present: false });
     }
+  });
+});
+
+describe("WS-24: the output style, `plansDirectory` and the project file's own path", () => {
+  test("I-3: `outputStyle` never comes from a repository tier — project or local, tracked or not (reported); the user's is kept", async () => {
+    const bed = runHomeBed();
+    const { root } = repo(bed);
+    put(join(bed.sdk, "settings.json"), json({ outputStyle: "user-style" }));
+    put(join(root, ".winter", "settings.json"), json({ outputStyle: "project-style" }));
+    put(join(root, ".winter", "settings.local.json"), json({ outputStyle: "local-style" }));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+    expect(runHome.effectiveSettings).toEqual({ outputStyle: "user-style" });
+    const reason = expect.stringContaining("never picks the session's output style");
+    expect(runHome.report.droppedRules).toEqual([
+      { rule: "outputStyle", tier: "project", reason },
+      { rule: "outputStyle", tier: "local", reason },
+    ]);
+  });
+
+  test("M-4: a repository's `plansDirectory` must be a short relative path with no `..` and no control characters (reported); the user's may be anything", async () => {
+    for (const [value, kept] of [["docs/plans", true], ["../outside", false], ["/abs/plans", false], ["~/plans", false], ["a\nb", false], ["x".repeat(201), false]] as const) {
+      const bed = runHomeBed();
+      const { root } = repo(bed);
+      put(join(root, ".winter", "settings.json"), json({ plansDirectory: value }));
+      const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+      expect([value, runHome.effectiveSettings["plansDirectory"]]).toEqual([value, kept ? value : undefined]);
+      expect([value, runHome.report.droppedRules.map((d) => [d.rule, d.tier])]).toEqual([value, kept ? [] : [["plansDirectory", "project"]]]);
+    }
+    const bed = runHomeBed();
+    put(join(bed.sdk, "settings.json"), json({ plansDirectory: "/Users/me/plans" }));
+    expect((await effective(bed, null))["plansDirectory"]).toBe("/Users/me/plans");
+  });
+
+  test("the project tier's file is read only inside the root: one that is a link out of it is skipped (reported `outside-root`)", async () => {
+    const bed = runHomeBed();
+    const { root } = repo(bed);
+    const outside = join(bed.root, "elsewhere.json");
+    put(outside, json({ language: "outside" }));
+    mkdirSync(join(root, ".winter"), { recursive: true });
+    symlinkSync(outside, join(root, ".winter", "settings.json"));
+    const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
+    expect(runHome.effectiveSettings["language"]).toBeUndefined();
+    expect(runHome.report.skippedLinks).toContainEqual({ path: join(root, ".winter", "settings.json"), reason: "outside-root" });
   });
 });

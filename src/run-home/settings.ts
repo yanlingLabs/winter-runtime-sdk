@@ -10,12 +10,13 @@
 //
 // THE STEPS, in order:
 //   1. read the tiers — project and local only for a trusted project; a local file git TRACKS is the
-//      repository's, and is filtered as the project tier from here on (WS-24, `localTierTrackedByGit`);
+//      repository's, and is filtered as the project tier from here on (WS-24, `localTierShippedByRepository`);
 //   2. drop the keys the runtime refuses from that tier (`PROJECT_TIER_REFUSED_KEYS`, from the pinned
 //      runtime: its trusted-source-only readers and its repo-controllable warnings), a repository's
 //      escalating permission mode (`REFUSED_DEFAULT_MODES`) and the model-routing keys Winter refuses
-//      (`EVERY_TIER_REFUSED_MODEL_KEYS`, `REPOSITORY_TIER_REFUSED_MODEL_KEYS`) and effort keys
-//      (`REPOSITORY_TIER_REFUSED_EFFORT_KEYS`) — the last three reported;
+//      (`EVERY_TIER_REFUSED_MODEL_KEYS`, `REPOSITORY_TIER_REFUSED_MODEL_KEYS`), the effort keys
+//      (`REPOSITORY_TIER_REFUSED_EFFORT_KEYS`), the output style (`REPOSITORY_TIER_REFUSED_STYLE_KEYS`) and a
+//      repository's unsafe `plansDirectory` (`repositoryPlansDirectoryProblem`) — every one of these reported;
 //   3. filter `env` — the runtime's own per-tier sets, plus `CLAUDE_CONFIG_DIR` and every variable the
 //      ROUTER sets (a settings `env` block would otherwise override the process environment the router
 //      built), plus the router's refused execution-indirection list;
@@ -33,6 +34,7 @@
 // off the path its author meant. The runtime's own schema text says project paths are "relative to
 // the settings file root (project root for project settings)".
 import { execFile } from "node:child_process";
+import { lstatSync, realpathSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { envName } from "@yanlinglabs/winter-agent-sdk";
@@ -40,7 +42,7 @@ import { envName } from "@yanlinglabs/winter-agent-sdk";
 import { ALL_AUTH_VARIABLES, isExecutionIndirectionVariable, NEVER_INJECTED_AUTH_VARIABLES, OFFICIAL_RUNTIME_VARIABLES, TRAFFIC_OPT_OUT_VARIABLE_NAMES } from "./env-refusals.ts";
 import type { RunHomeBuildContext } from "./build.ts";
 import { escapeRulePath, fsRootAnchored, type RunHomeBrand } from "./types.ts";
-import { isHomeOrAbove } from "./walk.ts";
+import { isHomeOrAbove, isWithin, projectWalk, readAdmittedFile } from "./walk.ts";
 
 const PRIVATE_FILE = 0o600;
 
@@ -178,6 +180,15 @@ export const REPOSITORY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["model", "
  */
 export const REPOSITORY_TIER_REFUSED_EFFORT_KEYS: readonly string[] = ["effortLevel", "modelSettings", "ultracode", "alwaysThinkingEnabled"];
 
+/**
+ * THE OUTPUT STYLE (WS-24): a repository never picks it — not from the project tier, not from the local
+ * one. A style replaces part of the system prompt, and the Winter runtime lets a PROJECT-tier style add to
+ * the prompt but never replace it; merged into the user tier, a repository's `outputStyle` naming its own
+ * style would skip that rule. Dropped and REPORTED. (A project style the USER selects is still loaded — as
+ * a copy with `keep-coding-instructions: true`, see `items.ts`.)
+ */
+export const REPOSITORY_TIER_REFUSED_STYLE_KEYS: readonly string[] = ["outputStyle"];
+
 /** Why each every-tier key is dropped (the report's `reason`). */
 const EVERY_TIER_MODEL_KEY_REASONS: Readonly<Record<string, string>> = {
   fallbackModel: "Winter never switches model silently: claude falls back to this model on overload, a silent switch away from the session's own model",
@@ -195,7 +206,7 @@ const EVERY_TIER_MODEL_KEY_REASONS: Readonly<Record<string, string>> = {
  *   * local — `auto` only, as before (claude takes `auto` from user, flag or managed settings only); the
  *     project-tier filter does not name the local tier. EXCEPT a local file git TRACKS (WS-24): that one
  *     arrived with the repository, so it is filtered as the project tier — every escalating mode, and every
- *     key `PROJECT_TIER_REFUSED_KEYS.project` names (see `localTierTrackedByGit`).
+ *     key `PROJECT_TIER_REFUSED_KEYS.project` names (see `localTierShippedByRepository`).
  *
  * DIVERGENCE, deliberate: claude drops the EFFECTIVE mode when the highest tier that sets one is the
  * project, so a user's own mode under a project's escalating one becomes no mode at all (`default`).
@@ -305,34 +316,111 @@ type Tier = "user" | "project" | "local";
 /** How long the tracked-file probe may take before it counts as unanswered (and so as tracked). */
 const GIT_PROBE_TIMEOUT_MS = 10_000;
 
+/** The local tier's file name inside the project dot-dir. */
+const LOCAL_SETTINGS_FILE = "settings.local.json";
+
+/** The process environment without a single `GIT_*` variable, so nothing but the repository shapes git's answer. */
+function gitProbeEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) if (!name.toUpperCase().startsWith("GIT_")) env[name] = value;
+  return env;
+}
+
+function lstatKind(path: string): "link" | "missing" | "other" {
+  try {
+    return lstatSync(path).isSymbolicLink() ? "link" : "other";
+  } catch {
+    return "missing";
+  }
+}
+
 /**
- * WS-24: is `<gitRoot>/<relPath>` in the repository's index? A LOCAL settings file is the user's own
- * only while git does not track it; a tracked one arrived with the repository (anyone can commit a file
- * under that name), so `buildEffectiveSettings` filters it exactly as the project tier.
+ * WS-24: did the REPOSITORY ship `<root>/<dirName>/settings.local.json`? A LOCAL settings file is the
+ * user's own only while nothing says otherwise; a shipped one is filtered exactly as the project tier
+ * (`buildEffectiveSettings`). `root` is the git root (or the cwd git is asked from, see there).
  *
- * TRACKED means IN THE INDEX (`git ls-files`, which lists the index): committed, or staged and not yet
- * committed — either way it is the repository's content, not a file git ignores.
+ * SHIPPED when any of these holds — each is checked, and every one fails closed:
  *
- * FAILS CLOSED: the answer is `false` (untracked) ONLY when git runs, exits 0 and lists nothing. Every
- * other outcome — no git executable, a non-zero exit (not a repository, a repository git refuses to read
- * for its owner, a broken index), a timeout — is `true`, so what git cannot vouch for is never promoted.
+ *   1. the dot-dir or the file is a symbolic link, or the file's real path is not exactly
+ *      `<real root>/<dirName>/settings.local.json` (another spelling on a case-insensitive volume, a
+ *      linked directory) — what the name resolves to is then not the plain local file;
+ *   2. git lists an index entry, matched case-insensitively, AT the file, or AT the dot-dir itself (only a
+ *      link or a submodule can be one — either way the directory is the repository's). "In the index" is
+ *      committed, or staged and not yet committed;
+ *   3. git cannot answer: no git executable, a non-zero exit (not a repository, a repository git refuses to
+ *      read for its owner, a broken index), a timeout.
  *
- * The probe reads the index and nothing else: literal pathspecs (a brand dir name is never a glob), and
- * `core.fsmonitor` off so no configured monitor command runs.
+ * The probe reads the index and nothing else: `ls-files -s` with `:(literal,icase)` pathspecs,
+ * `core.fsmonitor` off so no configured monitor command runs, and every `GIT_*` variable removed from its
+ * environment.
+ *
+ * WHAT THIS CANNOT PROVE: a repository delivered together with its `.git` controls its own index, so
+ * "untracked" is git's word about that index, never proof of where the file came from. It closes the
+ * ordinary case — a local file committed to the repository — not every delivery.
  */
-export function localTierTrackedByGit(gitRoot: string, relPath: string, git = "git"): Promise<boolean> {
-  return new Promise((resolveTracked) => {
+export async function localTierShippedByRepository(root: string, dirName: string, git = "git"): Promise<boolean> {
+  const dotDir = join(root, dirName);
+  const file = join(dotDir, LOCAL_SETTINGS_FILE);
+  if (lstatKind(dotDir) !== "other" || lstatKind(file) !== "other") return true;
+  try {
+    if (realpathSync(file) !== join(realpathSync(root), dirName, LOCAL_SETTINGS_FILE)) return true;
+  } catch {
+    return true;
+  }
+  const wantFile = `${dirName}/${LOCAL_SETTINGS_FILE}`.toLowerCase();
+  const wantDir = dirName.toLowerCase();
+  return new Promise((resolveShipped) => {
     try {
       execFile(
         git,
-        ["-C", gitRoot, "--literal-pathspecs", "-c", "core.fsmonitor=false", "ls-files", "-z", "--", relPath],
-        { timeout: GIT_PROBE_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 },
-        (error, stdout) => resolveTracked(error !== null || String(stdout).length > 0),
+        ["-C", root, "-c", "core.fsmonitor=false", "ls-files", "-z", "-s", "--", `:(literal,icase)${dirName}`, `:(literal,icase)${dirName}/${LOCAL_SETTINGS_FILE}`],
+        { timeout: GIT_PROBE_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 * 1024, env: gitProbeEnv() },
+        (error, stdout) => {
+          if (error !== null) return resolveShipped(true);
+          // Each entry: `<mode> <object> <stage>\t<path>`, NUL-terminated.
+          for (const entry of String(stdout).split("\0")) {
+            const tab = entry.indexOf("\t");
+            if (tab < 0) continue;
+            const path = entry.slice(tab + 1).toLowerCase();
+            if (path === wantFile || path === wantDir) return resolveShipped(true);
+          }
+          resolveShipped(false);
+        },
       );
     } catch {
-      resolveTracked(true);
+      resolveShipped(true);
     }
   });
+}
+
+/**
+ * WS-24 (I-2): a `.git` entry (a directory, or a worktree's file) at the trusted root, at the cwd, or on
+ * the walk between them. The host's `gitRoot` is null both for "no repository" and for "git could not
+ * answer"; a `.git` entry here tells the two apart, so the second is probed (and fails closed).
+ */
+function gitEntryNear(cwd: string, trustedProjectRoot: string, userHome: string): boolean {
+  const dirs = new Set([resolve(trustedProjectRoot), resolve(cwd), ...projectWalk(cwd, trustedProjectRoot, userHome)]);
+  for (const dir of dirs) if (lstatKind(join(dir, ".git")) !== "missing") return true;
+  return false;
+}
+
+/**
+ * RULING P5-L's project-tier `plansDirectory` check, ported from the agent SDK
+ * (`packages/sdk/src/settings/resolve.ts`, `validateProjectPlansDirectory`): the value reaches the system
+ * prompt, so a repository's must be a short, relative path with no control characters and no `..`. Merged
+ * into the user tier it would skip that check (the user tier may set any path), so the router applies it.
+ */
+const MAX_PLANS_DIRECTORY_LENGTH = 200;
+
+export function repositoryPlansDirectoryProblem(value: unknown): string | undefined {
+  if (typeof value !== "string") return `"plansDirectory" must be a string, got ${typeof value}`;
+  if (value.length === 0) return `"plansDirectory" must not be empty`;
+  if (value.length > MAX_PLANS_DIRECTORY_LENGTH) return `"plansDirectory" exceeds ${MAX_PLANS_DIRECTORY_LENGTH} characters`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(value)) return `"plansDirectory" contains control characters, which cannot appear in a path`;
+  if (value.startsWith("/") || value.startsWith("~")) return `"plansDirectory" from a repository tier must be RELATIVE to the project root`;
+  if (value.split("/").includes("..")) return `"plansDirectory" from a repository tier must not traverse upward`;
+  return undefined;
 }
 
 /** Rule names whose specifier is a PATH (the runtime's file-permission rules). */
@@ -495,6 +583,18 @@ function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<R
       delete out[key];
       dropped(key, "a repository never sets the session's effort or thinking: the session's effort is the daemon's, and these come from the user's own settings only");
     }
+    for (const key of REPOSITORY_TIER_REFUSED_STYLE_KEYS) {
+      if (!Object.hasOwn(out, key)) continue;
+      delete out[key];
+      dropped(key, "a repository never picks the session's output style: it comes from the user's own settings only");
+    }
+    if (refusals === "project" && Object.hasOwn(out, "plansDirectory")) {
+      const problem = repositoryPlansDirectoryProblem(out["plansDirectory"]);
+      if (problem !== undefined) {
+        delete out["plansDirectory"];
+        dropped("plansDirectory", problem);
+      }
+    }
     const permissions = out["permissions"];
     const mode = isPlainObject(permissions) ? permissions["defaultMode"] : undefined;
     if (isPlainObject(permissions) && typeof mode === "string" && REFUSED_DEFAULT_MODES[refusals].has(mode)) {
@@ -506,7 +606,7 @@ function filterTier(settings: Record<string, unknown>, tier: Tier, brand: Pick<R
         tier === "project"
           ? "a repository never sets the session's permission mode: claude drops an escalating mode (bypassPermissions, auto, acceptEdits) from the project tier, and merged into the user tier it would reach the child unfiltered"
           : repositoryShipped
-            ? "a repository never sets the session's permission mode: this local settings file is tracked by git (or git could not say it is not), so it is the repository's and is filtered as the project tier"
+            ? "a repository never sets the session's permission mode: this local settings file was shipped by the repository (tracked by git, reached through a link, or git could not say otherwise), so it is filtered as the project tier"
             : "the `auto` permission mode is taken from the user's own settings only (claude refuses it from a repository tier)",
       );
     }
@@ -564,6 +664,35 @@ async function readTier(path: string): Promise<Record<string, unknown> | undefin
   } catch {
     return undefined;
   }
+  return parseTier(text);
+}
+
+/**
+ * WS-24: the PROJECT tier's file, read only as the in-root file it is (`readAdmittedFile`): its real path
+ * must lie inside the trusted root; one that leaves it is skipped and reported (`skippedLinks`).
+ */
+function readProjectTier(context: RunHomeBuildContext, path: string, root: string): Record<string, unknown> | undefined {
+  let real: string;
+  let realRoot: string;
+  try {
+    real = realpathSync(path);
+    realRoot = realpathSync(root);
+  } catch {
+    return undefined;
+  }
+  if (!isWithin(real, realRoot)) {
+    context.report.skippedLinks.push({ path, reason: "outside-root" });
+    return undefined;
+  }
+  const read = readAdmittedFile(real, realRoot);
+  if ("refused" in read) {
+    if (read.refused === "outside-root") context.report.skippedLinks.push({ path, reason: "outside-root" });
+    return undefined;
+  }
+  return parseTier(read.text);
+}
+
+function parseTier(text: string): Record<string, unknown> | undefined {
   try {
     const parsed = JSON.parse(text) as unknown;
     return isPlainObject(parsed) ? parsed : undefined;
@@ -575,27 +704,29 @@ async function readTier(path: string): Promise<Record<string, unknown> | undefin
 /** Builds `<run>/settings.json` and returns exactly what it holds. */
 export async function buildEffectiveSettings(context: RunHomeBuildContext): Promise<Record<string, unknown>> {
   const { input, brand, sdkHome, dir } = context;
-  const tiers: Array<{ tier: Tier; path: string; anchor: string; gitRoot?: string }> = [{ tier: "user", path: join(sdkHome, "settings.json"), anchor: sdkHome }];
+  const tiers: Array<{ tier: Tier; path: string; anchor: string; probeRoot?: string }> = [{ tier: "user", path: join(sdkHome, "settings.json"), anchor: sdkHome }];
   // FIX ROUND 1, M2: a root (or a local anchor) at `$HOME` or above it is not a project — its dot-dir is
   // the daemon's own home — so neither repository tier is read from it.
   if (input.trustedProjectRoot !== null && !isHomeOrAbove(input.trustedProjectRoot, context.userHome)) {
     tiers.push({ tier: "project", path: join(input.trustedProjectRoot, brand.projectDirName, "settings.json"), anchor: input.trustedProjectRoot });
     const gitRoot = input.gitRoot ?? input.cwd;
-    // WS-24: the git probe runs only for a real repository (`input.gitRoot`, the host's own
-    // `rev-parse --show-toplevel`). Without one the local file sits at the cwd, no repository can have
-    // shipped it, and it keeps the local tier's filter (DECISION: a null `gitRoot` is the host saying
-    // "not a repository", which is an answer, not git failing to give one).
-    if (!isHomeOrAbove(gitRoot, context.userHome)) tiers.push({ tier: "local", path: join(gitRoot, brand.projectDirName, "settings.local.json"), anchor: gitRoot, ...(input.gitRoot === null ? {} : { gitRoot: input.gitRoot }) });
+    // WS-24: whether the repository shipped the local file is asked of git at the host's `gitRoot`. With
+    // no `gitRoot` it is still asked — from the cwd, failing closed — when a `.git` entry sits at the
+    // trusted root, the cwd or between them: the host's null then may mean "git could not answer", not
+    // "no repository". With no `.git` entry anywhere there, nothing tracks the cwd's local file and it
+    // keeps the local tier's filter.
+    const probeRoot = input.gitRoot ?? (gitEntryNear(input.cwd, input.trustedProjectRoot, context.userHome) ? input.cwd : undefined);
+    if (!isHomeOrAbove(gitRoot, context.userHome)) tiers.push({ tier: "local", path: join(gitRoot, brand.projectDirName, LOCAL_SETTINGS_FILE), anchor: gitRoot, ...(probeRoot === undefined ? {} : { probeRoot }) });
   }
   let merged: Record<string, unknown> = {};
-  for (const { tier, path, anchor, gitRoot } of tiers) {
-    const raw = await readTier(path);
+  for (const { tier, path, anchor, probeRoot } of tiers) {
+    const raw = tier === "project" ? readProjectTier(context, path, anchor) : await readTier(path);
     if (raw === undefined) continue;
     const dropped = (rule: string, reason: string): void => {
       context.report.droppedRules.push({ rule, tier, reason });
     };
     // Probed only once the file has parsed, so a build without one spawns nothing.
-    const repositoryShipped = tier === "local" && gitRoot !== undefined && (await localTierTrackedByGit(gitRoot, join(brand.projectDirName, "settings.local.json"), context.internals.git));
+    const repositoryShipped = tier === "local" && probeRoot !== undefined && (await localTierShippedByRepository(probeRoot, brand.projectDirName, context.internals.git));
     merged = mergeSettings(merged, anchorTier(filterTier(raw, tier, brand, dropped, repositoryShipped), anchor, dropped));
   }
   const settings = stripForMode(merged, input.mode, input.dispatchChild);
