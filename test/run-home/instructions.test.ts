@@ -120,11 +120,11 @@ describe("imports (F17's tier rule)", () => {
 });
 
 describe("the neutraliser is code-blind (R.3, C1 ii): no `@` claude's lexer could read as an import survives", () => {
-  // claude 2.1.250 lexes with marked (`gfm: false`) and skips only true `code`/`codespan` tokens; the
+  // claude skips imports only inside what marked (`gfm: false`) calls a code block or code span; the
   // router's per-line code detection disagreed on these shapes, left the token raw, reported nothing,
-  // and claude imported the file (MEASURED with marked 18.0.6 and claude's own `cYt`). The first three
-  // are the review's; the rest are marked text tokens that START with `@` after an inline token closes
-  // (a fuzz of claude's extractor over 1.1M markdown strings found them; none survive the neutraliser).
+  // and claude imported the file (MEASURED with marked 18.0.6). The first three are the review's; the
+  // rest are marked text tokens that START with `@` after an inline token closes (a fuzz of an import
+  // extractor over 1.1M markdown strings found them; none survive the neutraliser).
   const shapes = (secret: string): Record<string, string> => ({
     "backtick fence whose info string holds a backtick (not a fence)": `\`\`\`x\`\n@${secret}\n`,
     "tab-led fence (an indented line, not a fence)": `\t\`\`\`\n@${secret}\n\`\`\`\n`,
@@ -161,8 +161,8 @@ describe("the neutraliser is code-blind (R.3, C1 ii): no `@` claude's lexer coul
     expect(escapeImportTokens(`@${ZWSP}done and @ alone and trailing @`)).toBe(`@${ZWSP}done and @ alone and trailing @`);
   });
 
-  test("R.3 touch: only an `@` whose NEXT character can begin an import path (claude's own first-character shape) is touched — shell and diff `@`s are left as written", () => {
-    // claude's `cYt` (and the SDK's `isValidImportPath`) accept a path starting `./`, `~/`, `/` or one of
+  test("R.3 touch: only an `@` whose NEXT character can begin an import path (the first characters an import path may have) is touched — shell and diff `@`s are left as written", () => {
+    // claude (and the SDK's `isValidImportPath`) accept an import path starting `./`, `~/`, `/` or one of
     // [A-Za-z0-9._-]; any other first character is never an import.
     for (const untouched of ['echo "$@"', "@@ -1 +1 @@", "${a[@]}", "a @( b", "@#frag", "x @!y"]) expect([untouched, escapeImportTokens(untouched)]).toEqual([untouched, untouched]);
     expect(escapeImportTokens("npm i @scope/pkg\n@decorator\n@media screen\n@./a @~/b @/c @-d @_e @.f")).toBe(`npm i @${ZWSP}scope/pkg\n@${ZWSP}decorator\n@${ZWSP}media screen\n@${ZWSP}./a @${ZWSP}~/b @${ZWSP}/c @${ZWSP}-d @${ZWSP}_e @${ZWSP}.f`);
@@ -286,7 +286,7 @@ describe("project rules' imports (R.3, C1 i): a rule is read at the USER tier in
     expect(runHome.report.droppedImports).toEqual([secret]);
   });
 
-  test("the frontmatter is claude's own split (`fR`), which both runtimes use: a token claude reads as BODY is neutralised even where a line-based split would call it frontmatter; the real frontmatter is left as written", async () => {
+  test("the frontmatter is claude's own split, which both runtimes use: a token claude reads as BODY is neutralised even where a line-based split would call it frontmatter; the real frontmatter is left as written", async () => {
     const bed = runHomeBed();
     const p = project(bed);
     const secret = join(bed.root, "outside", "secret.md");

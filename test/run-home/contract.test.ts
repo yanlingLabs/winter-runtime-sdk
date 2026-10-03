@@ -69,8 +69,8 @@ describe("WS-21 Contract A: helpers and constants", () => {
   test("protectedPathRules: glob metacharacters in a path are escaped the way the pinned matcher reads them (minors round, item 2; the rule-content layer since the escape-table round)", () => {
     // TWO LAYERS, both measured on claude 2.1.250 and on the Winter runtime at ws21/sdk@6170adb: the
     // gitignore layer (`[`/`]` open a class unless backslash-escaped, `*` matches itself exactly only
-    // when escaped, `?` must stay RAW, `(`/`)` are escaped too), then claude's own rule-content escape
-    // `c()` (every backslash doubled, `(`/`)` escaped), because the rule string is unescaped once before
+    // when escaped, `?` must stay RAW, `(`/`)` are escaped too), then the rule-content escape (every
+    // backslash doubled, `(`/`)` escaped), because the rule string is unescaped once before
     // the gitignore layer sees it. `{}`, `!`, `#` and spaces are literal as written.
     const rules = router.protectedPathRules("/h/[s]dk", "/x/[wip] a*b?c{d}!(e)#f");
     expect(rules).toContain(String.raw`Write(//x/\\[wip\\] a\\*b?c{d}!\\\(e\\\)#f/**/.winter/skills/**)`);
@@ -81,19 +81,16 @@ describe("WS-21 Contract A: helpers and constants", () => {
     // The helper itself, exported for a host that spells rules over the same paths.
     expect(router.escapeRulePath(String.raw`/x/[a]*b?\c`)).toBe(String.raw`/x/\\[a\\]\\*b?\\\\c`);
     expect(router.escapeRulePath(String.raw`/p (old)/q\(y`)).toBe(String.raw`/p \\\(old\\\)/q\\\\\\\(y`);
-    // Trailing whitespace is escaped char by char, as claude's own path escaper does (gitignore drops an
-    // unescaped trailing space), so the helper is safe for a path that ENDS the rule.
+    // Trailing whitespace is escaped char by char (gitignore drops an unescaped trailing space), so the
+    // helper is safe for a path that ENDS the rule.
     expect(router.escapeRulePath("/x/sp ")).toBe(String.raw`/x/sp\\ `);
     expect(router.escapeRulePath("/x/tab\t \t")).toBe(`/x/tab${String.raw`\\`}\t${String.raw`\\`} ${String.raw`\\`}\t`);
     expect(router.escapeRulePath("/x/in side/y")).toBe("/x/in side/y");
   });
 
-  test("M1 (R.3): the gitignore layer is claude's own path escaper `I_t` (with `escapeGlobs`), character for character — `| + ^ $` are escaped too, and a LEADING `!`/`#` is backslash-prefixed", () => {
-    // 2.1.250, verbatim: I_t(e,r){let t=e.replaceAll("\\","\\\\").replace(/[[\]()|+^$]/g,(n)=>`\\${n}`);
-    //   if(r?.escapeGlobs)t=t.replaceAll("*","\\*");if(t.startsWith("!")||t.startsWith("#"))t=`\\${t}`;
-    //   return t=t.replace(/\s+$/,(n)=>Array.from(n,(s)=>`\\${s}`).join("")),t}
-    // node-ignore reads a backslash-escaped `| + ^ $` as the literal character, so nothing matches differently;
-    // the table is simply claude's own. Each gitignore-layer `\` is doubled by `c()` on top.
+  test("M1 (R.3): the gitignore layer also escapes `| + ^ $`, and a LEADING `!`/`#` is backslash-prefixed", () => {
+    // node-ignore reads a backslash-escaped `| + ^ $` as the literal character, so nothing matches differently.
+    // Each gitignore-layer `\` is doubled by the rule-content escape on top.
     expect(router.escapeRulePath("/x/a|b+c^d$e")).toBe(String.raw`/x/a\\|b\\+c\\^d\\$e`);
     expect(router.escapeRulePath("!neg")).toBe(String.raw`\\!neg`);
     expect(router.escapeRulePath("#hash")).toBe(String.raw`\\#hash`);
@@ -102,7 +99,7 @@ describe("WS-21 Contract A: helpers and constants", () => {
   });
 
   test("escapeRulePath is claude's rule-content escape over the gitignore-layer escape: the read side's one unescape gives back the gitignore pattern, and the rule's own parens stay findable", () => {
-    // The read side, as claude 2.1.250 does it (L1a's port, ws21/sdk@6170adb): the tool name ends at the
+    // The read side, as both runtimes do it (the Winter runtime since ws21/sdk@6170adb): the tool name ends at the
     // first UNESCAPED `(` and the content at the last unescaped `)` (an even run of backslashes before
     // it), then the content is unescaped once: `\(`→`(`, `\)`→`)`, `\\`→`\`, in that order.
     const unescaped = (index: number, text: string): boolean => {
@@ -119,7 +116,7 @@ describe("WS-21 Contract A: helpers and constants", () => {
       const content = rule.slice(open + 1, close).replaceAll("\\(", "(").replaceAll("\\)", ")").replaceAll("\\\\", "\\");
       return { tool: rule.slice(0, open), content };
     };
-    // claude's `I_t` with `escapeGlobs` (see the M1 test): the gitignore layer escapeRulePath must produce.
+    // The gitignore layer escapeRulePath must produce (see the M1 test).
     const gitignore = (path: string): string => {
       const escaped = path.replace(/[[\]*\\()|+^$]/g, "\\$&");
       return escaped.startsWith("!") || escaped.startsWith("#") ? `\\${escaped}` : escaped;

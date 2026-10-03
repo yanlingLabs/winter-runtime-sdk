@@ -90,7 +90,7 @@ describe("the tiers and claude's merge (F17)", () => {
   });
 
   test("M3 (R.3): `model`, `modelOverrides`, `availableModels`, `advisorModel` and `enforceAvailableModels` never come from a repository tier (reported); the user's own are kept (but `modelOverrides`, which no tier keeps)", async () => {
-    // `enforceAvailableModels` (R.3 touch): the pin's schema text — "if the default model for the user tier
+    // `enforceAvailableModels` (R.3 touch): the runtime's schema text — "if the default model for the user tier
     // is not in availableModels, Default resolves to the first allowed availableModels entry instead" — so
     // a repository setting it would switch the model.
     const bed = runHomeBed();
@@ -229,8 +229,8 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
   });
 
   test("I1 (R.3): an ESCALATING `permissions.defaultMode` (`bypassPermissions`, `auto`, `acceptEdits`) is dropped from the PROJECT tier and reported; the local tier drops only `auto`; the user tier keeps every mode", async () => {
-    // claude's own filter (`filterEscalatingDefaultMode`; 2.1.250 `Dn = {bypassPermissions, auto,
-    // acceptEdits}`, `An = {project}`) never fires once the router has merged the value into the user
+    // claude's own filter (`filterEscalatingDefaultMode`: bypassPermissions, auto and acceptEdits, from
+    // the project tier only) never fires once the router has merged the value into the user
     // tier, and the router sets no `Options.permissionMode`, so the child would take a repository's mode.
     const reason = expect.stringContaining("permission mode");
     for (const mode of ["bypassPermissions", "auto", "acceptEdits"]) {
@@ -248,7 +248,7 @@ describe("per-tier refusals (F17) — a repository cannot promote a key claude o
       const runHome = await buildRunHome(inputFor(bed, { cwd: root, trustedProjectRoot: root, gitRoot: root }));
       expect([mode, runHome.effectiveSettings["permissions"], runHome.report.droppedRules]).toEqual([mode, { defaultMode: mode }, []]);
     }
-    // The LOCAL tier (claude parity: `An` names the project tier only) drops `auto` alone — while git does not track it (WS-24).
+    // The LOCAL tier (claude parity: that filter names the project tier only) drops `auto` alone — while git does not track it (WS-24).
     for (const [mode, kept] of [["auto", false], ["acceptEdits", true], ["bypassPermissions", true]] as const) {
       const bed = runHomeBed();
       const { root } = repo(bed);
@@ -512,7 +512,7 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
     // SV-6): `[w]` is a character class unless escaped, on either leg.
     const bed = runHomeBed();
     // Since the escape-table round the anchor is claude's rule-content spelling over the gitignore
-    // escape (`c()` doubles each backslash and escapes the parens), identical on both legs.
+    // escape (which doubles each backslash and escapes the parens), identical on both legs.
     const root = join(bed.root, "[w] a*b (o)");
     mkdirSync(root, { recursive: true });
     put(join(root, ".winter", "settings.json"), json({ permissions: { deny: ["Read(/secrets)", "Edit(/src/**)"] } }));
@@ -551,8 +551,8 @@ describe("path anchoring (F17: `/x` is relative to the tier's own root; `//x` ab
   test("C-1 (R.3): a sandbox path's anchor is spelled for claude's sandbox glob grammar (`[` → `[[]`) on BOTH legs — the Winter runtime routes every deny entry through claude's glob-shape check (ws21/sdk round 11) — the user's own specifier, absolute paths and additionalDirectories untouched", async () => {
     // MEASURED (claude 2.1.250): a `sandbox.filesystem` entry holding `* ? [ ]` is a glob, rendered as a
     // seatbelt regex; a backslash is taken literally there, so the one escape it honours is a class. The
-    // Winter runtime reads the same grammar since ws21/sdk round 11 (`splitDenyPathsByGlobShape`, claude's
-    // `Rt`), so a LITERAL `[wip] app` anchor is a class there too — a deny that misses the real root.
+    // Winter runtime reads the same grammar since ws21/sdk round 11 (`splitDenyPathsByGlobShape`), so a
+    // LITERAL `[wip] app` anchor is a class there too — a deny that misses the real root.
     const bed = runHomeBed();
     const root = join(bed.root, "[wip] app");
     mkdirSync(root, { recursive: true });

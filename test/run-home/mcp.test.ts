@@ -100,7 +100,7 @@ describe("the generated .winter.json", () => {
     ]);
   });
 
-  test("M5 (R.3): a name that NORMALISES to a reserved one is refused too — claude spells tool names from the normalised server name (`on()`: every char outside [A-Za-z0-9_-] becomes `_`), so `winter..computer` would carry the capability server's own tool names", async () => {
+  test("M5 (R.3): a name that NORMALISES to a reserved one is refused too — claude spells tool names from the normalised server name (every char outside [A-Za-z0-9_-] becomes `_`), so `winter..computer` would carry the capability server's own tool names", async () => {
     const bed = runHomeBed();
     const root = repo(bed);
     put(join(bed.sdk, ".winter.json"), json({ mcpServers: { "winter..computer": server("a"), "winter.computer ": server("b"), "winter__computer-x": server("k") } }));
@@ -115,7 +115,7 @@ describe("the generated .winter.json", () => {
     ]);
   });
 
-  test("M5 (R.3): claude's normaliser, verbatim — a `claude.ai ` name also collapses runs of `_` and trims them", async () => {
+  test("M5 (R.3): the server-name normaliser — a `claude.ai ` name also collapses runs of `_` and trims them", async () => {
     expect(normalizeMcpServerName("winter..browser")).toBe("winter__browser");
     expect(normalizeMcpServerName("a b/c")).toBe("a_b_c");
     expect(normalizeMcpServerName("claude.ai  My Server!")).toBe("claude_ai_My_Server");

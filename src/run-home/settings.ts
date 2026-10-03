@@ -11,8 +11,8 @@
 // THE STEPS, in order:
 //   1. read the tiers — project and local only for a trusted project; a local file git TRACKS is the
 //      repository's, and is filtered as the project tier from here on (WS-24, `localTierShippedByRepository`);
-//   2. drop the keys the runtime refuses from that tier (`PROJECT_TIER_REFUSED_KEYS`, from the pinned
-//      runtime: its trusted-source-only readers and its repo-controllable warnings), a repository's
+//   2. drop the keys the runtime refuses from that tier (`PROJECT_TIER_REFUSED_KEYS`: the keys
+//      the runtime takes only from a trusted source, and the ones it warns a repository can control), a repository's
 //      escalating permission mode (`REFUSED_DEFAULT_MODES`) and the model-routing keys Winter refuses
 //      (`EVERY_TIER_REFUSED_MODEL_KEYS`, `REPOSITORY_TIER_REFUSED_MODEL_KEYS`), the effort keys
 //      (`REPOSITORY_TIER_REFUSED_EFFORT_KEYS`), the output style (`REPOSITORY_TIER_REFUSED_STYLE_KEYS`) and a
@@ -93,7 +93,7 @@ const CLAUDE_SETTINGS_KEY_SET: ReadonlySet<string> = new Set(CLAUDE_SETTINGS_KEY
 
 /**
  * Keys the pinned runtime will not take from a repository tier, so the router drops them from that tier
- * before the merge promotes it to the user tier (F17, extended from the pinned binary):
+ * before the merge promotes it to the user tier (F17, extended with the keys below):
  *
  *   * F17's list — `skipDangerousModePermissionPrompt` (project), `processWrapper`, the credential
  *     helpers (`apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`,
@@ -148,7 +148,7 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
  *
  *   * `fallbackModel` — from EVERY tier, the user's included: claude honours it from settings on
  *     overload, which is exactly a silent switch to another model.
- *   * `modelOverrides` — from EVERY tier too (Touch 4 add-on). The pin's schema: "Override mapping from
+ *   * `modelOverrides` — from EVERY tier too (Touch 4 add-on). The runtime's schema: "Override mapping from
  *     Anthropic model ID … to provider-specific model ID"; measured by the daemon reviewer on the real
  *     child, a USER-tier remap of haiku to opus made claude report haiku at `system/init` while sending
  *     `claude-opus-5` on the wire — a switch no startup model check can see. It became reachable in WS-21
@@ -156,7 +156,7 @@ export const PROJECT_TIER_REFUSED_KEYS: { readonly project: readonly string[]; r
  *   * `model`, `availableModels`, `advisorModel`, `enforceAvailableModels` — from the project and local
  *     tiers. The user tier keeps them: the host's `Options.model` — forwarded to the official child as
  *     `--model` (Touch 4, F1) — outranks any settings `model`, and the rest are the user's own choices.
- *     `enforceAvailableModels` (R.3 touch) is a switch too: the pin's schema text says that with it
+ *     `enforceAvailableModels` (R.3 touch) is a switch too: the runtime's schema text says that with it
  *     "Default resolves to the first allowed availableModels entry".
  */
 export const EVERY_TIER_REFUSED_MODEL_KEYS: readonly string[] = ["fallbackModel", "modelOverrides"];
@@ -199,8 +199,8 @@ const EVERY_TIER_MODEL_KEY_REASONS: Readonly<Record<string, string>> = {
  * `permissions.defaultMode` values a repository tier may not set (R.3, I1), dropped and REPORTED.
  *
  *   * project — every ESCALATING mode: `bypassPermissions`, `auto`, `acceptEdits`. That is claude's own
- *     trust-tier filter (`filterEscalatingDefaultMode`, `sdk.d.ts`; in 2.1.250 `Dn` = those three modes and
- *     `An` = `{project}`). Once the router has merged a tier into the user tier that filter never fires,
+ *     trust-tier filter (`filterEscalatingDefaultMode`, `sdk.d.ts`: those three modes, applied to the
+ *     project tier only). Once the router has merged a tier into the user tier that filter never fires,
  *     and the router sets no `Options.permissionMode` on the official child, so a repository's
  *     `"acceptEdits"` would have the child approve every in-cwd write without asking.
  *   * local — `auto` only, as before (claude takes `auto` from user, flag or managed settings only); the
@@ -221,7 +221,7 @@ export const REFUSED_DEFAULT_MODES: { readonly project: ReadonlySet<string>; rea
 };
 
 /**
- * The pinned runtime's env filter for the project and local tiers (its own set, verbatim; matched
+ * The variable names the official runtime refuses from a project or local tier's `env` block (matched
  * case-insensitively, as it matches them).
  */
 export const CLAUDE_PROJECT_TIER_ENV_DENY: readonly string[] = [
@@ -260,7 +260,7 @@ export const CLAUDE_PROJECT_TIER_ENV_DENY: readonly string[] = [
   "CLAUDE_CODE_DIR_SYNC_STREAM",
 ];
 
-/** The pinned runtime's env filter for EVERY tier (its own set, verbatim). */
+/** The variable names the official runtime refuses from EVERY tier's `env` block. */
 export const CLAUDE_EVERY_TIER_ENV_DENY: readonly string[] = [
   "ANTHROPIC_UNIX_SOCKET",
   "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
@@ -469,7 +469,7 @@ function anchorPath(path: unknown, anchor: string): unknown {
 /**
  * A path spelled for CLAUDE'S SANDBOX grammar (review N-1 minor), which is not the rule grammar — the
  * grammar BOTH runtimes read a `sandbox.filesystem` entry in (the Winter runtime since `ws21/sdk` round
- * 11, which routes every deny entry through claude's glob-shape check, `Rt`).
+ * 11, which routes every deny entry through claude's glob-shape check).
  *
  * MEASURED on the pinned runtime (claude 2.1.250, macOS): a `sandbox.filesystem` entry holding any of
  * `* ? [ ]` is a GLOB — the runtime renders it as a seatbelt `(regex …)` instead of `(subpath …)` — and
@@ -500,7 +500,7 @@ const SANDBOX_UNESCAPABLE = /[*?]/;
  *
  * WHY BOTH LEGS (R.3, C-1). Both runtimes read these entries in claude's sandbox glob grammar: claude
  * always has, and the Winter runtime routes every deny entry through claude's own glob-shape check since
- * `ws21/sdk` round 11 (`splitDenyPathsByGlobShape`, claude's `Rt`). A literal anchor holding `[` is then a
+ * `ws21/sdk` round 11 (`splitDenyPathsByGlobShape`). A literal anchor holding `[` is then a
  * character class on either leg, and a project or home named `[wip] app` defeats the deny.
  *
  * `undefined` = dropped: an ALLOW entry whose anchor part holds an unescapable `*`/`?` (it would widen to

@@ -128,6 +128,12 @@ export function parseClaudeFrontmatter(text: string): ClaudeFrontmatter | undefi
   return { frontmatter: asObject(parsed.value), body, matched: true };
 }
 
+/** The block the strict split captures (its close on a line of its own), or `undefined` when it does not match. */
+export function strictFrontmatterBlock(text: string): string | undefined {
+  const match = STRICT_FRONTMATTER_RE.exec(text);
+  return match === null ? undefined : match[1];
+}
+
 /** A stable deep-equality over parsed YAML values (plain data). */
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -158,7 +164,6 @@ export function serializeClaudeFrontmatter(frontmatter: Record<string, unknown>,
   const text = `---\n${block}\n---\n${body}`;
   const back = parseClaudeFrontmatter(text);
   if (back === undefined || !back.matched || back.error !== undefined || back.body !== body || canonical(back.frontmatter) !== canonical(frontmatter)) return undefined;
-  const strict = STRICT_FRONTMATTER_RE.exec(text);
-  if (strict === null || strict[1] !== block) return undefined;
+  if (strictFrontmatterBlock(text) !== block) return undefined;
   return text;
 }

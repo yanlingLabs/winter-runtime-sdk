@@ -486,7 +486,7 @@ describe("review N-1 on the recovery door: journals are proved byte for byte, ne
     const behind: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_1/journal" };
     const ahead: SessionKey = { ...KEY, subpath: "subagents/workflows/wf_2/journal" };
     const world: SessionKey = { ...KEY, subpath: "world" };
-    // The world journal's lines carry no `type` (measured in the pinned binary: `{k:"put"|"settled"|"retracted",addr,…}`).
+    // The world journal's lines carry no `type` (as the runtime writes them: `{k:"put"|"settled"|"retracted",addr,…}`).
     const worldLine = (topic: string): SessionStoreEntry => ({ k: "put", addr: 0, fact: { topic } }) as unknown as SessionStoreEntry;
     await shared.store.append(KEY, [first]);
     await shared.store.append(behind, [line(1)]);

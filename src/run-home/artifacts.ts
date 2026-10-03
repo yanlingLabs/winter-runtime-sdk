@@ -210,7 +210,7 @@ function metadataPathOf(transcript: LocalTranscript): string {
 const MIRROR_WHEN_DEFINED = ["isFork", "isBuiltIn", "spawnDepth", "planModeRequired", "isObserver", "observerStopped", "observerTaskId", "armingPermissionMode"] as const;
 const MIRROR_WHEN_TRUTHY = ["worktreePath", "worktreeBranch", "cwd", "spawnMode", "description", "name", "toolUseId", "parentAgentId", "taskKind", "teamName", "color", "customAgentType", "model", "permissionMode"] as const;
 
-function mirroredMetadataFields(metadata: Record<string, unknown>): Record<string, unknown> {
+export function mirroredMetadataFields(metadata: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { type: "agent_metadata" };
   if (metadata["agentType"] !== undefined) out["agentType"] = metadata["agentType"];
   for (const field of MIRROR_WHEN_DEFINED) if (metadata[field] !== undefined) out[field] = metadata[field];

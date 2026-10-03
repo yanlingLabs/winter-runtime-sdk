@@ -217,7 +217,7 @@ describe("agents (copied; permissionMode removed; memory project|local → user;
 
 // FIX ROUND 1, I1: the rewrite is made from the RUNTIME'S OWN PARSE, so no YAML spelling of
 // `permissionMode` or of a project/local `memory` reaches either runtime. Each variant below reads, by
-// the pin's own parse, as `permissionMode` set and/or `memory: project` — the copy must read as neither.
+// the runtime's own parse, as `permissionMode` set and/or `memory: project` — the copy must read as neither.
 describe("agents: every YAML spelling of permissionMode / memory is caught (I1)", () => {
   const BOM = String.fromCharCode(0xfeff);
   const variants: Array<[string, string]> = [

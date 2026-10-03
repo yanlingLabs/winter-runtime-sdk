@@ -405,7 +405,7 @@ async function agentCandidates(scope: ResolveScope, dir: string, tier: Tier, fro
 
 /**
  * F19c: an agent's definition, rewritten for the run folder FROM THE RUNTIME'S OWN PARSE of it
- * (`claude-frontmatter.ts` — the pin's split, BOM strip, YAML parse and fallback, step for step).
+ * (`claude-frontmatter.ts` — the runtime's frontmatter split, BOM strip, YAML parse and retry).
  *
  * `permissionMode` is removed (the daemon has always stripped it — an agent must not pick its own
  * approval policy), and a `memory` scope other than `user` is rewritten: `project`/`local` become

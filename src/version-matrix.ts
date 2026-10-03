@@ -61,8 +61,8 @@ import type { RuntimeSdkPeers } from "./sdk.ts";
  * `winterAgentSdk` is a RANGE because the Winter SDK is this repository's sibling and moves with it.
  * WS-23: the `claudeAgentSdk` exact pin is gone with the official runtime it described.
  */
-// R.4 (resolved, 0.0.12): raised to the SDK release that carries ws21/sdk@6170adb (L1a's port of
-// claude's rule-content grammar, which `escapeRulePath`'s two-layer spelling needs on the Winter
+// R.4 (resolved, 0.0.12): raised to the SDK release that carries ws21/sdk@6170adb (L1a's implementation
+// of claude's rule-content grammar, which `escapeRulePath`'s two-layer spelling needs on the Winter
 // leg) plus the two-layer escape table, the sandbox spelling, the MCP rows and the parallel-batch
 // splice this router's 0.0.12 depends on. A Winter runtime older than 0.0.21 misreads `\`, `(`, `)`
 // and the doubled `\\[` in every router-written rule.

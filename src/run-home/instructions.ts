@@ -177,8 +177,8 @@ export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
 
 /**
  * Every `@` the pinned runtime's lexer could read as the start of an import: one NOT preceded by an ASCII
- * letter or digit, and followed by a character an import path can BEGIN with — claude's own first-character
- * shape (`cYt`; the SDK's `isValidImportPath` is the same): `./`, `~/`, `/`, or one of [A-Za-z0-9._-]. Any
+ * letter or digit, and followed by a character an import path can BEGIN with — the import paths claude
+ * accepts start (as the SDK's `isValidImportPath` does) with `./`, `~/`, `/`, or one of [A-Za-z0-9._-]. Any
  * other next character (a quote, `@`, `[`, `(`, `#`, whitespace, an inserted zero-width space) can never
  * begin an import, so `"$@"`, `@@ -1 +1 @@` and `${a[@]}` are left as written (R.3 touch).
  */
@@ -189,17 +189,17 @@ const NEUTRALISABLE_AT = /(?<![A-Za-z0-9])@(?=[A-Za-z0-9._~\/-])/g;
  * no import grammar accepts (the path would start with the zero-width space) and a reader does not see.
  * Only an `@` followed by a possible first character of an import path is touched (see `NEUTRALISABLE_AT`).
  *
- * CODE-BLIND, ON PURPOSE (R.3, C1 ii). claude 2.1.250 lexes a memory file with marked (`gfm: false`) and
- * skips only true `code`/`codespan` tokens, then matches `(?:^|\s)@…` against each TEXT TOKEN's own text.
- * Any per-line guess at "this is code" that disagrees with that lexer leaves a token raw that claude then
- * follows (MEASURED, marked 18.0.6 + claude's `cYt`): a backtick fence whose info string holds a backtick
- * (not a fence), a tab-led fence (an indented line), mismatched backtick runs (not a code span). And a text
+ * CODE-BLIND, ON PURPOSE (R.3, C1 ii). claude skips imports only inside what a markdown lexer (marked,
+ * `gfm: false`) calls a code block or a code span, and reads an import at an `@` that starts a run of
+ * TEXT or follows whitespace in it. Any per-line guess at "this is code" that disagrees with that lexer
+ * leaves a token raw that claude then follows (MEASURED with marked 18.0.6): a backtick fence whose info
+ * string holds a backtick (not a fence), a tab-led fence (an indented line), mismatched backtick runs (not a code span). And a text
  * token can START with `@` after an inline token closes — `>@x`, `**x**@x`, `a<b>@x`, `<!-- c -->@x`,
  * `\*@x` — where the source has no whitespace before the `@` at all. So the test is not the import regex
  * but the character before the `@`: a token boundary never falls between an ASCII letter/digit and an `@`
  * (marked's text tokens end only before markup or after a non-local-part character), which is why an
- * e-mail address (`me@example.com`) is left as written. A fuzz of claude's extractor over generated
- * markdown strings found 837 per 100k importing after a whitespace-only neutraliser and none after this one
+ * e-mail address (`me@example.com`) is left as written. A fuzz of an import extractor built to that
+ * description, over generated markdown strings, found 837 per 100k importing after a whitespace-only neutraliser and none after this one
  * (1.1M strings with the first rule; the narrowed next-character rule re-fuzzed, lane-L2 report "R.3 touch").
  * Inside a real code block the inserted character is invisible too.
  */

@@ -148,7 +148,7 @@ export const TRAFFIC_OPT_OUT_VARIABLE_NAMES: readonly string[] = Object.keys(TRA
  * `CLAUDE_ENV_FILE` was sourced into every Bash call — `BASH_ENV` by another door, which made the
  * `BASH_ENV` refusal decorative. So the list below is the PINNED ARTIFACT'S OWN scrub list (the
  * environment it strips before running its policy helper — the vendor's definition of this class, and
- * therefore the pin's rather than our taste) plus the runtime-specific doors that are not on it. The
+ * therefore the runtime's rather than our taste) plus the runtime-specific doors that are not on it. The
  * drift gate in `test/official/env-allowlist.test.ts` fails when a pin bump adds a registry name of
  * this shape that nothing classifies.
  *
