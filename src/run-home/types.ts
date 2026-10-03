@@ -156,51 +156,22 @@ export function fsRootAnchored(absPath: string): string {
   return `/${absPath}`;
 }
 
-/**
- * A literal PATH, spelled for the content of a permission rule (`Tool(<content>)`): TWO LAYERS.
- *
- * 1. The gitignore layer is claude's OWN path escaper, character for character (`I_t` in claude 2.1.250,
- *    called with `escapeGlobs`, as its "allow this directory" rule builder calls it; R.3 M1):
- *
- *      I_t(e,r){let t=e.replaceAll("\\","\\\\").replace(/[[\]()|+^$]/g,(n)=>`\\${n}`);
- *        if(r?.escapeGlobs)t=t.replaceAll("*","\\*");if(t.startsWith("!")||t.startsWith("#"))t=`\\${t}`;
- *        return t=t.replace(/\s+$/,(n)=>Array.from(n,(s)=>`\\${s}`).join("")),t}
- *
- *    So `\ [ ] ( ) | + ^ $ *` are backslash-escaped (a directory named `[wip] app` is that directory,
- *    not a character class), a LEADING `!` or `#` is backslash-prefixed (never the case for an absolute
- *    path), TRAILING whitespace is escaped char by char (the gitignore layer drops an unescaped trailing
- *    space), and `?` stays RAW. node-ignore reads an escaped `| + ^ $` as the literal character, so those
- *    four match exactly as before; the table is simply claude's own.
- * 2. Claude's own rule-content escape over that (`c()` in claude 2.1.250, verbatim):
- *    `replaceAll("\\","\\\\").replaceAll("(","\\(").replaceAll(")","\\)")`. The read side finds the
- *    content between the first and the last UNESCAPED paren (an even run of backslashes before it) and
- *    unescapes it ONCE (`\(`→`(`, `\)`→`)`, `\\`→`\`) before the gitignore layer sees it; both legs parse
- *    rule strings this way (the Winter runtime since `ws21/sdk`@6170adb, L1a's port).
- *
- * THE TABLE, per character of the path: `\` → `\\\\` (four), `[` → `\\[`, `]` → `\\]`, `*` → `\\*`,
- * `(` → `\\\(`, `)` → `\\\)`, `|` → `\\|`, `+` → `\\+`, `^` → `\\^`, `$` → `\\$`, `?` → `?`; a leading
- * `!`/`#` → `\\!`/`\\#`; trailing whitespace → `\\<char>` each; everything else as written.
- *
- * MEASURED on claude 2.1.250 and on the Winter runtime at 6170adb (a Write under a directory of each
- * name, a user-tier deny rule; the escape-table round): a literal `\` matches only as four; unescaped
- * `[w]` never matched and escaped did; `?` must stay raw (an escaped `\?` never matched); balanced raw
- * `(old)` matched but an UNBALANCED raw paren broke the rule on claude. And WHY `(`/`)` are escaped at the
- * gitignore layer too, not only by `c()`: with `c()` alone, a `\` followed by `(` becomes `\\\\\(`,
- * which unescapes to `\\(` — and both runtimes then fail to compile the rule ("Invalid regular
- * expression: missing )"; claude errors every file tool call, the Winter runtime fails the run). With
- * the paren escaped at both layers (as `I_t` does) the rule compiles and matches on both. `{}`, a
- * mid-path `!`/`#` and inner spaces are literal as written.
- */
+/** Characters the gitignore-pattern layer of `escapeRulePath` puts a backslash before. */
+const GITIGNORE_ESCAPED = new Set(["\\", "[", "]", "(", ")", "|", "+", "^", "$", "*"]);
+
+/** A literal path spelled for the content of a permission rule (`Tool(<content>)`): a gitignore-pattern escape, then a rule-content escape over it. */
 export function escapeRulePath(path: string): string {
-  let gitignore = path
-    .replaceAll("\\", "\\\\")
-    .replace(/[[\]()|+^$]/g, (character) => `\\${character}`)
-    .replaceAll("*", "\\*");
-  if (gitignore.startsWith("!") || gitignore.startsWith("#")) gitignore = `\\${gitignore}`;
-  // Trailing whitespace, char by char: the gitignore layer drops an unescaped trailing space, so a path
-  // that ENDS a rule keeps its last characters.
-  gitignore = gitignore.replace(/\s+$/, (run) => Array.from(run, (character) => `\\${character}`).join(""));
-  return gitignore.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
+  // Layer 1 (gitignore pattern): a backslash and the pattern metacharacters are escaped. `?`, braces,
+  // `!`/`#` mid-path and inner spaces are matched literally as written, so they stay raw.
+  let pattern = "";
+  for (const char of path) pattern += GITIGNORE_ESCAPED.has(char) ? `\\${char}` : char;
+  // A leading `!` (negation) or `#` (comment) would change what the pattern means.
+  if (pattern.startsWith("!") || pattern.startsWith("#")) pattern = `\\${pattern}`;
+  // Trailing whitespace is trimmed by the pattern reader unless each character is escaped.
+  pattern = pattern.replace(/\s+$/, (run) => run.replace(/[\s\S]/g, (c) => `\\${c}`));
+  // Layer 2 (rule content): the content is unescaped once before the pattern is read, so every backslash
+  // is doubled, and parens are escaped so the rule's own `Tool(...)` delimiters stay unambiguous.
+  return pattern.replace(/\\/g, "\\\\").replace(/[()]/g, (paren) => `\\${paren}`);
 }
 
 /** The item directories whose writes are protected (spec §7.2). */

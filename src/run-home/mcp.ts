@@ -42,21 +42,13 @@ async function readObject(path: string): Promise<Record<string, unknown> | undef
   }
 }
 
-/**
- * claude's own MCP server-name normaliser, verbatim (2.1.250, `on()`; its tool names are
- * `mcp__${on(server)}__${on(tool)}`, and its own reserved-name check compares `on()` forms too):
- *
- *   function on(_){let e=_.replace(/[^a-zA-Z0-9_-]/g,"_");
- *     if(_.startsWith("claude.ai "))e=e.replace(/_+/g,"_").replace(/^_|_$/g,"");return e}
- *
- * So a configured `<standing name>..<key>` spells exactly the tool names of the capability server
- * `<standing name>__<key>`. (The Winter runtime spells tool names from the raw server name, so on that
- * leg such a name collides with nothing; it is refused on both, since the run folder is one file.)
- */
+/** The normalised form of an MCP server name, the form tool names are spelled from (`mcp__<server>__<tool>`). */
 export function normalizeMcpServerName(name: string): string {
-  let normalized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-  if (name.startsWith("claude.ai ")) normalized = normalized.replace(/_+/g, "_").replace(/^_|_$/g, "");
-  return normalized;
+  // Each UTF-16 code unit outside [A-Za-z0-9_-] becomes one `_` (no `u` flag: an astral character is two units, so two `_`).
+  const replaced = name.replace(/[^A-Za-z0-9_-]/g, "_");
+  if (!name.startsWith("claude.ai ")) return replaced;
+  // Names of the hosted-connector form are tidied further: `_` runs collapse, and one edge `_` on each side goes.
+  return replaced.replace(/_+/g, "_").replace(/^_/, "").replace(/_$/, "");
 }
 
 /** The global config file's name for a brand: `<home dir name>.json` (`.claude.json`'s twin). */

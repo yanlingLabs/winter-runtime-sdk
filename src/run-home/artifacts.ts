@@ -199,24 +199,48 @@ function metadataPathOf(transcript: LocalTranscript): string {
   return `${transcript.path.slice(0, -".jsonl".length)}${META_JSON}`;
 }
 
-/**
- * The fields claude's LIVE MIRROR sends for an agent's metadata — `persistAgentMetadata`'s mirror shape
- * in 2.1.250, verbatim in its conditions: `agentType` always; `isFork`, `isBuiltIn`, `spawnDepth`,
- * `planModeRequired` and the four carried observer fields when defined; `stoppedByUser` only when true
- * (as `true`); every other field only when truthy. The local `.meta.json` holds MORE (a `false`, an
- * empty string, fields the mirror never sends), so two copies are the same metadata when THIS projection
- * of both agrees — comparing whole objects would report every such agent as different on every exit.
- */
-const MIRROR_WHEN_DEFINED = ["isFork", "isBuiltIn", "spawnDepth", "planModeRequired", "isObserver", "observerStopped", "observerTaskId", "armingPermissionMode"] as const;
-const MIRROR_WHEN_TRUTHY = ["worktreePath", "worktreeBranch", "cwd", "spawnMode", "description", "name", "toolUseId", "parentAgentId", "taskKind", "teamName", "color", "customAgentType", "model", "permissionMode"] as const;
+/** Fields the projection keeps whenever they are present, falsy values included. */
+const MIRRORED_WHEN_DEFINED = [
+  "agentType",
+  "isFork",
+  "isBuiltIn",
+  "spawnDepth",
+  "planModeRequired",
+  "isObserver",
+  "observerStopped",
+  "observerTaskId",
+  "armingPermissionMode",
+] as const;
 
+/** Fields the projection keeps only when they hold a truthy value (the store copy omits empty/false ones). */
+const MIRRORED_WHEN_TRUTHY = [
+  "worktreePath",
+  "worktreeBranch",
+  "cwd",
+  "spawnMode",
+  "description",
+  "name",
+  "toolUseId",
+  "parentAgentId",
+  "taskKind",
+  "teamName",
+  "color",
+  "customAgentType",
+  "model",
+  "permissionMode",
+] as const;
+
+/** The projection of a subagent's metadata on which the working copy's and the store's copies are compared (the fields claude's live mirror sends). */
 export function mirroredMetadataFields(metadata: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { type: "agent_metadata" };
-  if (metadata["agentType"] !== undefined) out["agentType"] = metadata["agentType"];
-  for (const field of MIRROR_WHEN_DEFINED) if (metadata[field] !== undefined) out[field] = metadata[field];
-  for (const field of MIRROR_WHEN_TRUTHY) if (metadata[field]) out[field] = metadata[field];
-  if (metadata["stoppedByUser"]) out["stoppedByUser"] = true;
-  return out;
+  const projection: Record<string, unknown> = { type: "agent_metadata" };
+  for (const field of MIRRORED_WHEN_DEFINED) {
+    if (metadata[field] !== undefined) projection[field] = metadata[field];
+  }
+  for (const field of MIRRORED_WHEN_TRUTHY) {
+    if (metadata[field]) projection[field] = metadata[field];
+  }
+  if (metadata.stoppedByUser) projection.stoppedByUser = true;
+  return projection;
 }
 
 export interface MetadataRepairReport {
@@ -232,7 +256,7 @@ export interface MetadataRepairReport {
  * Repairs the store's copy of a subagent transcript's or a journal's metadata from the working copy.
  *
  * CLAUDE'S IMPORT turns the `.meta.json` beside EVERY `subagents/**.jsonl` — journals included — into an
- * `{ type: "agent_metadata", …parsed }` entry on that key (`importSessionToStore`, 2.1.250), and its
+ * `{ type: "agent_metadata", …parsed }` entry on that key, and its
  * resume materializer writes it back beside the file. The mirror carries an agent's metadata live, but a
  * journal is never mirrored, and a failed metadata batch leaves an agent without it; so after the
  * transcripts are reconciled, each one that came back level (`eligible`) has its `.meta.json` repaired
@@ -241,8 +265,8 @@ export interface MetadataRepairReport {
  *   * the store holds the same — compared on the fields claude's live mirror sends
  *     (`mirroredMetadataFields`), since the local file carries more → left;
  *   * the store holds a DIFFERENT one → never overwritten, reported skipped;
- *   * unreadable, not a JSON object, or carrying a `type` of its own other than `agent_metadata` (claude's
- *     spread would let it replace the entry's type and write it into the transcript) → reported skipped.
+ *   * unreadable, not a JSON object, or carrying a `type` of its own other than `agent_metadata` (claude
+ *     would let it replace the entry's type and write it into the transcript) → reported skipped.
  * Only a REGULAR file is read: a link (or a special file) is the carry-back's to report, never followed.
  */
 export async function repairTranscriptMetadata(
