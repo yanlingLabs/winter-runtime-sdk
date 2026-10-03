@@ -53,6 +53,18 @@ describe("parseClaudeFrontmatter: the split and the result shape", () => {
     expect(fm('description: Use when: foo\ntools: ["Bash(git add, commit)", Read]')).toEqual({ description: "Use when: foo", tools: ["Bash(git add, commit)", "Read"] });
     expect(fm('name: a: "b" \\ c')).toEqual({ name: 'a: "b" \\ c' });
   });
+
+  test("the retry skips a value already wrapped in matching quotes: a double-quoted `a: b` keeps its content", () => {
+    const result = parse('---\nk: "a: b"\nname: x: y\n---\n');
+    expect(result.error).toBeUndefined();
+    expect(result.frontmatter).toEqual({ k: "a: b", name: "x: y" });
+  });
+
+  test("the retry skips a value already wrapped in matching quotes: a single-quoted `a: b` keeps its content", () => {
+    const result = parse("---\nk: 'a: b'\nname: x: y\n---\n");
+    expect(result.error).toBeUndefined();
+    expect(result.frontmatter).toEqual({ k: "a: b", name: "x: y" });
+  });
 });
 
 describe("claudeFrontmatterSplit", () => {
