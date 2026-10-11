@@ -33,6 +33,10 @@
 // subpath for it would name imports a consumer never installed, and the installed-tarball smoke
 // (which walks every declared `exports` entry) would fail on it. Tests reach it by relative path.
 export * from "@yanlinglabs/winter-agent-sdk";
+export { createGuestRuntimeSpawn, GuestRuntimeError, GUEST_PROCESS_PROTOCOL_VERSION, GUEST_PROCESS_CAPABILITY, GUEST_REQUIRED_RUNTIME_CAPABILITIES } from "./guest/process.ts";
+export type { GuestLaunch, GuestRuntimeIdentity, GuestRuntimeOpenRequest, GuestRuntimeConnection, GuestRuntimeEvent, GuestRuntimeProcessChannel, GuestRuntimeErrorCode } from "./guest/process.ts";
+export { createGuestQueryTransport, GUEST_QUERY_TRANSPORT_CONTRACT_VERSION } from "./guest/query.ts";
+export type { GuestQueryOptions, GuestQueryTransport } from "./guest/query.ts";
 
 // --- the constructor, the handle, the door ---------------------------------------------------------
 export { createRuntimeSdk, forwardableOptions, runtimeSdkInternals, ROUTER_ONLY_OPTION_KEYS } from "./sdk.ts";
