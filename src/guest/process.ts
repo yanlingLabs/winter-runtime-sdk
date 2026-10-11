@@ -47,13 +47,20 @@ export interface GuestRuntimeConnection {
 export interface GuestRuntimeProcessChannel {
   /** Builds/validates the guest RunHome and immutable runtime manifest before any process starts. */
   prepareRuntime(launch: GuestLaunch, signal: AbortSignal): Promise<{ identity: GuestRuntimeIdentity; protocolVersion: number; capabilities: readonly string[] }>;
-  /** Authenticates/revalidates identity and grants on the protected channel; no implicit retry. */
+  /** Authenticates/revalidates identity/grants and durably reserves the attempt before launch. */
   openRuntime(request: GuestRuntimeOpenRequest, signal: AbortSignal): Promise<GuestRuntimeConnection>;
   /** Authenticated host owner closes this minted attempt, including admission for a late start.
-   * Never resolve this against an unvalidated returned handle or a bare session/PID. */
+   * Idempotent; resolves only after confirming stopped or never started. Failure leaves durable
+   * ownership retained. Never resolve against an unvalidated returned handle or bare session/PID. */
   cleanupRuntimeAttempt(owner: { identity: GuestRuntimeIdentity; launchAttemptId: string }): Promise<void>;
 }
-export type GuestRuntimeErrorCode = "invalid_launch" | "credential_forwarding_refused" | "unsupported_launch_config" | "binding_mismatch" | "unsupported_protocol" | "unsupported_capability" | "buffer_limit" | "transport_lost" | "startup_timeout";
+export type GuestRuntimeErrorCode = "invalid_launch" | "credential_forwarding_refused" | "unsupported_launch_config" | "binding_mismatch" | "unsupported_protocol" | "unsupported_capability" | "buffer_limit" | "transport_lost" | "startup_timeout" | "runtime_busy";
+export interface GuestCleanupAttempt { identity: GuestRuntimeIdentity; launchAttemptId: string; state: "pending" | "uncertain"; reason?: "cleanup_failed" | "cleanup_timeout" }
+export type GuestRuntimeSpawn = SpawnClaudeCodeProcess & {
+  cleanupAttempts(): readonly GuestCleanupAttempt[];
+  /** Host recovery only; cleanup may be retried, execution may not. */
+  retryCleanup(launchAttemptId: string): Promise<boolean>;
+};
 export class GuestRuntimeError extends Error {
   constructor(readonly code: GuestRuntimeErrorCode, message: string, readonly effectsUncertain = false) {
     super(message); this.name = "GuestRuntimeError";
@@ -106,7 +113,8 @@ export function createGuestRuntimeSpawn(options: {
   channel: GuestRuntimeProcessChannel;
   maxBufferedBytes?: number;
   startupTimeoutMs?: number;
-}): SpawnClaudeCodeProcess {
+  cleanupTimeoutMs?: number;
+}): GuestRuntimeSpawn {
   const launch: GuestLaunch = Object.freeze({ ...options.launch, identity: Object.freeze({ ...options.launch.identity }), environment: Object.freeze({ ...options.launch.environment }) });
   for (const key of ["workspaceId", "sessionId", "incarnationId"] as const) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(launch.identity[key])) throw new GuestRuntimeError("invalid_launch", `invalid ${key}`);
@@ -121,9 +129,14 @@ export function createGuestRuntimeSpawn(options: {
   }
   const limit = options.maxBufferedBytes ?? 4 * 1024 * 1024;
   const timeout = options.startupTimeoutMs ?? 30_000;
-  if (!Number.isSafeInteger(limit) || limit < 1 || !Number.isSafeInteger(timeout) || timeout < 1) throw new GuestRuntimeError("invalid_launch", "invalid transport bounds");
+  const cleanupTimeout = options.cleanupTimeoutMs ?? 10_000;
+  if (!Number.isSafeInteger(limit) || limit < 1 || !Number.isSafeInteger(timeout) || timeout < 1 || !Number.isSafeInteger(cleanupTimeout) || cleanupTimeout < 1) throw new GuestRuntimeError("invalid_launch", "invalid transport bounds");
+  let activeAttempt: string | undefined;
+  const cleanupRecords = new Map<string, GuestCleanupAttempt>();
+  const cleanupRunners = new Map<string, () => Promise<boolean>>();
 
-  return (sdk: SpawnRuntimeOptions): SpawnedRuntimeProcess => {
+  const spawn = (sdk: SpawnRuntimeOptions): SpawnedRuntimeProcess => {
+    if (activeAttempt) throw new GuestRuntimeError("runtime_busy", "guest identity already has a running or uncertain launch attempt", true);
     if (sdk.cwd !== launch.cwd || sdk.args.length !== 3 || sdk.args[0] !== "--run" || sdk.args[1] !== "--config-json") throw new GuestRuntimeError("invalid_launch", "guest runtime accepts only its admitted SDK launch");
     let config: Record<string, unknown>;
     try { config = JSON.parse(sdk.args[2]!) as Record<string, unknown>; }
@@ -133,17 +146,40 @@ export function createGuestRuntimeSpawn(options: {
     for (const key of Object.keys(config)) if (!forwardedConfig.has(key)) throw new GuestRuntimeError("unsupported_launch_config", `guest launch configuration ${key} has no admitted transport contract`);
     const guestConfig = { ...config, executionPosture: "confined-guest", winterHome: launch.runHome, storeHome: launch.storeHome, settingSources: [] };
     const request: GuestRuntimeOpenRequest = Object.freeze({ ...launch, launchAttemptId: randomUUID(), identity: Object.freeze({ ...launch.identity }), environment: Object.freeze({ ...launch.environment }), args: Object.freeze(["--run", "--config-json", JSON.stringify(guestConfig)]) });
+    activeAttempt = request.launchAttemptId;
     const stdout = new ChunkQueue(limit); const stderr = new ChunkQueue(limit);
     const abort = new AbortController();
     let connection: GuestRuntimeConnection | undefined;
     let done = false; let stdinClosed = false; let pendingBytes = 0; let pendingWrites = 0;
     let requestedSignal: "SIGTERM" | "SIGKILL" | undefined;
     let startupPhase: "preparing" | "opening" | "connected" = "preparing";
-    let cleanupRequested = false;
+    let cleanupInFlight: Promise<boolean> | undefined, cleanupConfirmed = false;
+    const cleanupOwner = { identity: request.identity, launchAttemptId: request.launchAttemptId };
+    const runCleanup = (): Promise<boolean> => {
+      if (cleanupConfirmed) return Promise.resolve(true);
+      if (cleanupInFlight) return cleanupInFlight;
+      cleanupRecords.set(request.launchAttemptId, { ...cleanupOwner, state: "pending" });
+      const pending = new Promise<boolean>(resolve => {
+        let completed = false;
+        const uncertain = (reason: "cleanup_failed" | "cleanup_timeout") => {
+          if (completed || cleanupConfirmed) return; completed = true; clearTimeout(deadline);
+          cleanupRecords.set(request.launchAttemptId, { ...cleanupOwner, state: "uncertain", reason }); resolve(false);
+        };
+        const deadline = setTimeout(() => uncertain("cleanup_timeout"), cleanupTimeout);
+        void Promise.resolve().then(() => options.channel.cleanupRuntimeAttempt(cleanupOwner)).then(() => {
+          cleanupConfirmed = true; clearTimeout(deadline); cleanupRecords.delete(request.launchAttemptId); cleanupRunners.delete(request.launchAttemptId);
+          if (activeAttempt === request.launchAttemptId) activeAttempt = undefined;
+          completed = true; resolve(true);
+        }, () => uncertain("cleanup_failed"));
+      });
+      cleanupInFlight = pending;
+      void pending.then(() => { if (cleanupInFlight === pending) cleanupInFlight = undefined; });
+      return pending;
+    };
     const cleanupAttempt = (): void => {
-      if (cleanupRequested || startupPhase === "preparing") return;
-      cleanupRequested = true;
-      void options.channel.cleanupRuntimeAttempt({ identity: request.identity, launchAttemptId: request.launchAttemptId }).catch(() => {});
+      if (startupPhase === "preparing" || cleanupConfirmed) return;
+      cleanupRunners.set(request.launchAttemptId, runCleanup);
+      void runCleanup();
     };
     let resolveExit!: (exit: { code: number | null; signal: string | null }) => void;
     const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => { resolveExit = resolve; });
@@ -151,19 +187,19 @@ export function createGuestRuntimeSpawn(options: {
     const finish = (exit: { code: number | null; signal: string | null }, error?: GuestRuntimeError): void => {
       if (done) return;
       done = true; clearTimeout(timer); abort.abort(); sdk.signal?.removeEventListener("abort", onAbort);
+      if ((!error?.effectsUncertain || startupPhase === "preparing") && activeAttempt === request.launchAttemptId) activeAttempt = undefined;
       stdout.end(error); stderr.end(error); resolveExit(exit);
     };
     const fail = (error: GuestRuntimeError): void => {
       if (done) return;
       requestedSignal = "SIGKILL";
       if (connection) void connection.signal("SIGKILL").catch(() => {});
-      else cleanupAttempt();
+      cleanupAttempt(); // Independent owner cleanup also covers a broken connected transport.
       finish({ code: null, signal: null }, error);
     };
     const signal = (value: string = "SIGTERM"): void => {
       if (done) return;
-      if (value !== "SIGTERM" && value !== "SIGKILL") throw new GuestRuntimeError("invalid_launch", "unsupported guest signal");
-      requestedSignal = requestedSignal === "SIGKILL" ? "SIGKILL" : value;
+      requestedSignal = requestedSignal === "SIGKILL" || value === "SIGKILL" ? "SIGKILL" : "SIGTERM";
       stdinClosed = true;
       if (connection) void connection.signal(requestedSignal).catch(() => fail(new GuestRuntimeError("transport_lost", "guest signal delivery failed", true)));
       else if (startupPhase === "preparing") finish({ code: null, signal: requestedSignal });
@@ -235,4 +271,8 @@ export function createGuestRuntimeSpawn(options: {
       },
     };
   };
+  return Object.assign(spawn, {
+    cleanupAttempts: () => [...cleanupRecords.values()].map(record => ({ ...record, identity: { ...record.identity } })),
+    retryCleanup: async (attemptId: string) => { const retry = cleanupRunners.get(attemptId); return retry ? retry() : false; },
+  });
 }

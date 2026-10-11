@@ -80,6 +80,38 @@ describe("guest process transport", () => {
     const out = collect(proc.stdout); await tick(); f.events.end();
     await expect(out).rejects.toMatchObject({ code: "transport_lost", effectsUncertain: true });
     expect(await proc.exited).toEqual({ code: null, signal: null }); expect(f.requests).toHaveLength(1);
+    await tick(); expect(f.cleanups).toEqual([{ identity: f.input.identity, launchAttemptId: f.requests[0]!.launchAttemptId }]);
+  });
+  test("cleanup failure is retained for host recovery and can be retried without restarting execution", async () => {
+    const f = fake(); let failCleanup = true;
+    f.channel.cleanupRuntimeAttempt = async owner => { f.cleanups.push(owner); if (failCleanup) throw new Error("fixture cleanup unavailable"); };
+    f.connection.signal = async () => { throw new Error("fixture broken connection"); };
+    const spawn = createGuestRuntimeSpawn({ launch: f.input, channel: f.channel });
+    const proc = spawn(f.sdk()); const output = collect(proc.stdout); await tick(); f.events.end();
+    await expect(output).rejects.toMatchObject({ effectsUncertain: true }); await tick();
+    expect(spawn.cleanupAttempts()).toEqual([{ identity: f.input.identity, launchAttemptId: f.requests[0]!.launchAttemptId, state: "uncertain", reason: "cleanup_failed" }]);
+    expect(() => spawn(f.sdk())).toThrow("running or uncertain");
+    failCleanup = false; expect(await spawn.retryCleanup(f.requests[0]!.launchAttemptId)).toBe(true);
+    expect(spawn.cleanupAttempts()).toEqual([]); expect(f.requests).toHaveLength(1);
+  });
+  test("hung cleanup remains observable and a late confirmed cleanup releases only its own attempt", async () => {
+    const f = fake(); let confirm!: () => void;
+    f.channel.cleanupRuntimeAttempt = async owner => { f.cleanups.push(owner); await new Promise<void>(resolve => { confirm = resolve; }); };
+    const spawn = createGuestRuntimeSpawn({ launch: f.input, channel: f.channel, cleanupTimeoutMs: 5 });
+    const proc = spawn(f.sdk()); const output = collect(proc.stdout); await tick(); f.events.end();
+    await expect(output).rejects.toMatchObject({ effectsUncertain: true }); await new Promise(resolve => setTimeout(resolve, 10));
+    expect(spawn.cleanupAttempts()[0]).toMatchObject({ state: "uncertain", reason: "cleanup_timeout" });
+    expect(() => spawn(f.sdk())).toThrow("running or uncertain");
+    confirm(); await tick(); expect(spawn.cleanupAttempts()).toEqual([]);
+  });
+  test("one identity cannot run concurrent queries; unsupported termination signals narrow to TERM", async () => {
+    const f = fake(), spawn = createGuestRuntimeSpawn({ launch: f.input, channel: f.channel });
+    const proc = spawn(f.sdk()); expect(() => spawn(f.sdk())).toThrow("running or uncertain"); await tick();
+    expect(() => proc.kill("SIGINT")).not.toThrow(); expect(f.signals).toEqual(["SIGTERM"]);
+    f.events.push({type:"exit",identity:f.input.identity,code:null,signal:"SIGTERM"}); await proc.exited;
+    const second = spawn(f.sdk()); await tick();
+    expect(f.requests).toHaveLength(2); expect(f.requests[0]!.launchAttemptId).not.toBe(f.requests[1]!.launchAttemptId);
+    f.events.push({type:"exit",identity:f.input.identity,code:0,signal:null}); await second.exited;
   });
   test("queued input/output bounds fail closed and cancellation uses guest signal handles", async () => {
     const f = fake(); const proc = createGuestRuntimeSpawn({ launch: f.input, channel: f.channel, maxBufferedBytes: 4 })(f.sdk());

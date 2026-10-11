@@ -12,21 +12,29 @@ ID, in addition to workspace/session/incarnation/lease and launch revision
 identity. Connections and events must match both. Launch revisions describe the
 admitted launch snapshot; they never replace current authorization checks for
 later tool, source, provider or broker effects.
+Requested permission modes and tool lists are not authority. The authenticated
+opener must clamp them to current saved/live host policy and refuse widening;
+this transport neither grants permissions nor reads authority from guest files.
 
 Cancellation before opening starts no process. Cancellation or timeout during
 an unacknowledged open is uncertain and calls `cleanupRuntimeAttempt` using the
 host's expected identity/attempt. That authenticated channel operation must close
 late-launch admission and retain ownership until cleanup is proven. A foreign or
-stale returned connection is never signalled or sent input. Matching owned stream
-failure requests termination without claiming that the request itself proves
-termination. Lost effects are never blindly replayed.
+stale returned connection is never signalled or sent input. Connected stream
+failure also calls authenticated attempt cleanup; a broken connection's signal
+path is insufficient. Cleanup resolves only on confirmed stopped/never-started
+ownership. Failure or timeout remains observable through `cleanupAttempts()` and
+blocks reuse of that identity. Host recovery can retry cleanup with `retryCleanup`
+without restarting execution. The channel must retain its durable attempt record
+on failure; the transport's in-memory observations are not a replacement for that
+record across daemon crashes. Lost effects are never blindly replayed.
 
 Output and queued input have independent byte and entry bounds; empty chunks
 are no-ops. Input writes are ordered, stop prevents queued/new delivery, and the
 event reader does not wait behind a hung signal acknowledgment. The SDK retains
 its own NDJSON/control framing. Guest handles never pretend to be Mac PIDs.
 
-The 14 focused tests include a real SDK query over a fake authenticated channel,
+The 17 focused tests include a real SDK query over a fake authenticated channel,
 foreign/late handshakes, cancellation races, malformed/stale events and backlog
 limits. They do not run a Linux VM, restore durable guest agents, supply an
 authenticated supervisor or implement confined tools. The runtime's separate
