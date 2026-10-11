@@ -22,13 +22,14 @@ export function createGuestQueryTransport(input: {
   const spawn = createGuestRuntimeSpawn(input);
   const sessionId = input.launch.identity.sessionId;
   const cwd = input.launch.cwd;
+  const brand = input.launch.brand === undefined ? undefined : Object.freeze({ ...input.launch.brand });
   return {
     contractVersion: GUEST_QUERY_TRANSPORT_CONTRACT_VERSION,
     cleanupAttempts: spawn.cleanupAttempts,
     retryCleanup: spawn.retryCleanup,
     query(args) {
       for (const key of Object.keys(args.options ?? {})) if (!acceptedOptions.has(key)) throw new GuestRuntimeError("unsupported_launch_config", `guest query option ${key} requires a separate admitted capability`);
-      return input.peer.query({ prompt: args.prompt, options: { ...args.options, sessionId, cwd, spawnClaudeCodeProcess: spawn } });
+      return input.peer.query({ prompt: args.prompt, options: { ...args.options, ...(brand ? { brand } : {}), sessionId, cwd, spawnClaudeCodeProcess: spawn } });
     },
   };
 }

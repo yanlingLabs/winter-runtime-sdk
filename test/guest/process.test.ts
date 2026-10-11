@@ -202,9 +202,18 @@ describe("guest process transport", () => {
     expect(() => createGuestRuntimeSpawn({ launch: { ...f.input, environment: { OPENAI_API_KEY: "synthetic" } }, channel: f.channel })).toThrow("unadmitted variable");
     expect(f.requests).toEqual([]);
   });
+  test("host brand controls permitted environment names and cannot be replaced by query config", async () => {
+    const input = {...launch(),brand:{envPrefix:"FIXTURE_"},environment:{PATH:"/usr/bin:/bin",FIXTURE_HOME:"/run/fixture"}};
+    const f = fake(input), spawn = createGuestRuntimeSpawn({launch:input,channel:f.channel});
+    expect(() => spawn(f.sdk({brand:{envPrefix:"FOREIGN_"}}))).toThrow("brand differs");
+    expect(() => createGuestRuntimeSpawn({launch:{...input,environment:{WINTER_HOME:"/run/foreign"}},channel:f.channel})).toThrow("unadmitted variable");
+    const proc=spawn(f.sdk({brand:{envPrefix:"FIXTURE_"}}));await tick();
+    expect(JSON.parse(f.requests[0]!.args[2]!).brand.envPrefix).toBe("FIXTURE_");
+    f.events.push({type:"exit",identity:input.identity,code:0,signal:null});await proc.exited;
+  });
   test("separate guest query door carries a real SDK NDJSON round and preserves resume arguments on a new connection", async () => {
-    for (const resume of [undefined, "session"]) {
-      const f = fake();
+    for (const resume of [undefined, "session"]) for (const customBrand of [false, true]) {
+      const f = fake({...launch(),...(customBrand ? {brand:{envPrefix:"FIXTURE_"}} : {})});
       f.connection.writeStdin = async (chunk) => {
         f.writes.push(chunk);
         if (chunk.includes('"type":"user"')) {
@@ -225,6 +234,7 @@ describe("guest process transport", () => {
       for await (const message of door.query({ prompt: "hello", options: { model: "winter-test/echo", ...(resume ? { resume } : {}) } })) messages.push(message);
       expect(messages.some((message) => message.type === "result")).toBe(true);
       expect(JSON.parse(f.requests[0]!.args[2]!).resume).toBe(resume);
+      if (customBrand) expect(JSON.parse(f.requests[0]!.args[2]!).brand.envPrefix).toBe("FIXTURE_");
     }
   });
 });

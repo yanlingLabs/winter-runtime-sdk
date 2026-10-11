@@ -34,7 +34,7 @@ are no-ops. Input writes are ordered, stop prevents queued/new delivery, and the
 event reader does not wait behind a hung signal acknowledgment. The SDK retains
 its own NDJSON/control framing. Guest handles never pretend to be Mac PIDs.
 
-The 17 focused tests include a real SDK query over a fake authenticated channel,
+The 18 focused tests include a real SDK query over a fake authenticated channel,
 foreign/late handshakes, cancellation races, malformed/stale events and backlog
 limits. They do not run a Linux VM, restore durable guest agents, supply an
 authenticated supervisor or implement confined tools. The runtime's separate

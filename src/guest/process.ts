@@ -1,5 +1,6 @@
 /** Guest process transport only. It never builds a local RunHome or starts a host process. */
 import type { SpawnClaudeCodeProcess, SpawnedRuntimeProcess, SpawnRuntimeOptions } from "@yanlinglabs/winter-agent-sdk";
+import { envName, resolveBrand, type BrandProfile } from "@yanlinglabs/winter-agent-sdk";
 import { randomUUID } from "node:crypto";
 
 export const GUEST_PROCESS_PROTOCOL_VERSION = 1;
@@ -18,6 +19,7 @@ export interface GuestRuntimeIdentity {
 }
 export interface GuestLaunch {
   identity: GuestRuntimeIdentity;
+  brand?: Partial<BrandProfile>;
   /** Absolute guest image executable, not a host PATH lookup. */
   executable: string;
   cwd: string;
@@ -75,7 +77,6 @@ function guestPath(value: string, label: string): void {
     throw new GuestRuntimeError("invalid_launch", `${label} must be an absolute admitted guest path without traversal`);
   }
 }
-const allowedEnvironment = new Set(["PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "WINTER_HOME", "WINTER_STORE_HOME", "WINTER_PLUGIN_CACHE_DIR"]);
 const forwardedConfig = new Set(["sessionId", "cwd", "model", "permissionMode", "maxTurns", "resume", "persistSession", "brand", "allowedTools", "disallowedTools", "tools", "executionPosture"]);
 
 class ChunkQueue implements AsyncIterable<string> {
@@ -115,7 +116,11 @@ export function createGuestRuntimeSpawn(options: {
   startupTimeoutMs?: number;
   cleanupTimeoutMs?: number;
 }): GuestRuntimeSpawn {
-  const launch: GuestLaunch = Object.freeze({ ...options.launch, identity: Object.freeze({ ...options.launch.identity }), environment: Object.freeze({ ...options.launch.environment }) });
+  const resolvedBrand = resolveBrand(options.launch.brand);
+  if (!resolvedBrand.ok) throw new GuestRuntimeError("invalid_launch", "invalid host guest brand");
+  const brand = Object.freeze(resolvedBrand.brand);
+  const launch: GuestLaunch = Object.freeze({ ...options.launch, brand, identity: Object.freeze({ ...options.launch.identity }), environment: Object.freeze({ ...options.launch.environment }) });
+  const allowedEnvironment = new Set(["PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", ...["HOME", "STORE_HOME", "PLUGIN_CACHE_DIR"].map(suffix => envName(brand, suffix))]);
   for (const key of ["workspaceId", "sessionId", "incarnationId"] as const) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(launch.identity[key])) throw new GuestRuntimeError("invalid_launch", `invalid ${key}`);
   }
@@ -144,7 +149,11 @@ export function createGuestRuntimeSpawn(options: {
     if (!config || Array.isArray(config) || typeof config !== "object" || config.sessionId !== launch.identity.sessionId || config.cwd !== launch.cwd || (config.resume !== undefined && config.resume !== launch.identity.sessionId)) throw new GuestRuntimeError("binding_mismatch", "SDK session/cwd/resume does not match authenticated guest launch");
     if (config.hostCredentials || config.hostMessaging) throw new GuestRuntimeError("credential_forwarding_refused", "legacy credential/session delegation callbacks are not guest capabilities");
     for (const key of Object.keys(config)) if (!forwardedConfig.has(key)) throw new GuestRuntimeError("unsupported_launch_config", `guest launch configuration ${key} has no admitted transport contract`);
-    const guestConfig = { ...config, executionPosture: "confined-guest", winterHome: launch.runHome, storeHome: launch.storeHome, settingSources: [] };
+    if (config.brand !== undefined) {
+      const requested = resolveBrand(config.brand as Partial<BrandProfile>);
+      if (!requested.ok || JSON.stringify(requested.brand) !== JSON.stringify(brand)) throw new GuestRuntimeError("binding_mismatch", "SDK brand differs from its admitted host guest brand");
+    }
+    const guestConfig = { ...config, brand, executionPosture: "confined-guest", winterHome: launch.runHome, storeHome: launch.storeHome, settingSources: [] };
     const request: GuestRuntimeOpenRequest = Object.freeze({ ...launch, launchAttemptId: randomUUID(), identity: Object.freeze({ ...launch.identity }), environment: Object.freeze({ ...launch.environment }), args: Object.freeze(["--run", "--config-json", JSON.stringify(guestConfig)]) });
     activeAttempt = request.launchAttemptId;
     const stdout = new ChunkQueue(limit); const stderr = new ChunkQueue(limit);
