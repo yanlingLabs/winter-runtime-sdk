@@ -3,7 +3,10 @@
 `src/guest/instruction-reader-entry.ts` is the distinct compiled-role entry. It
 runs only when it is the main module. Ordinary imports, public package exports,
 existing query profiles and the private callable reader are unchanged. This is
-source preparation, not a built/admitted Linux role.
+source preparation, not a built/admitted Linux role. Static transport/SDK brand/type
+and transitive dependencies initialize before main's misuse check. No entry-owned
+stdin consumption or actual loader invocation happens before that check; this is
+not a claim that no dependency initialization occurs.
 
 The initial misuse check requires Linux/PID1, real=eUID>=1000, primary real/eGID
 matching UID, process.execPath=/instruction-reader, process.argv.slice(2) exactly
@@ -33,12 +36,18 @@ closed fields, correlation, limits and paths before its actual loader call.
 The private readInstructionFrame is invoked exactly once. Output is validated as
 one newline-terminated JSON object, capped at320KiB, with exact input echo and the
 actual snapshot's eight keys, then fully synchronously written with partial/EINTR handling
-(no background queue). Interrupt retry is bounded. Errors produce only a fixed
-instruction_reader_unavailable line on stderr and nonzero exit; no exception,
-guidance body, environment or configuration is logged. A partial stdout write
-followed by failure is not success; Root must reject it; EPIPE never retries the partial data as a new frame. Root enforces actual pipe
-byte caps, exit0 plus one valid correlated frame,4s deadline, kill/reap/drain and
-debt retention. The source helper does not simulate or prove cleanup.
+(no background queue). Interrupt retry is bounded. Successful continuation of a
+partial syscall is correct; a frame that ends partial is fatal. CAUGHT entry errors
+emit only a fixed instruction_reader_unavailable line and nonzero exit; the catch
+never serializes the exception, guidance, environment or configuration. Bootstrap,
+module-import or JSC/native failures can occur outside that catch and emit other
+stderr. Root must treat ALL reader stderr as untrusted: cap it at16KiB, normalize
+to a fixed code, and never forward or log raw bytes outside the guest, to Core,
+the model, the user or daemon logs. Process-level handlers are a possible future
+native defence, not implemented by this wording correction. EPIPE never restarts
+partial data as a new frame. Root requires exit0 + EOF + exactly one LF-terminated
+correlated frame + revalidation, plus actual pipe bounds,4s deadline, kill/reap/drain
+and debt retention. The source helper does not simulate or prove cleanup.
 
 The native launcher must provide only fds0/1/2 and independently prove no sockets
 or original source/shared/store/closure handles survive. It must supply the new
@@ -79,7 +88,9 @@ No personal/memory scopes, transport/profile activation, consumer pin, release,
 VM/GUI/native launch or immutable B change follows.
 
 The current C filter permits getrandom; no-dev/JSC entropy and all Bun runtime
-syscall/library/argv compatibility remain explicit native gates. No portable
+syscall/library/argv compatibility remain explicit native gates. In particular,
+process.execPath in the no-proc view may refuse; real compiled compatibility must
+be proved rather than treating a shape check as observed execution. No portable
 framing test establishes that the compiled role can run under that filter.
 
 Source verification: `bun test ./test` passes756 tests /3612 assertions across54

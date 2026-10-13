@@ -1,4 +1,4 @@
-/** Compiled-role entry only. Importing this module never consumes stdin or starts a reader. */
+/** Entry-owned stdin/loader work is main-only. Static dependencies still initialize on import. */
 import { readSync, writeSync } from "node:fs";
 import { readerRoleMatches, runInstructionReaderTransport } from "./instruction-reader-transport.ts";
 
@@ -15,7 +15,9 @@ async function main(): Promise<number> {
     });
     return 0;
   } catch {
-    // Never serialize the error, request, environment, config, guidance or path into stderr.
+    // CAUGHT entry errors emit only this fixed line. Bootstrap/import/JSC/native failures can
+    // occur outside this catch; Root must bound and normalize all untrusted stderr separately.
+    // Never serialize the caught error, request, config, environment, guidance or path here.
     const bytes = Buffer.from("instruction_reader_unavailable\n"); let at = 0, retries = 0;
     while (at < bytes.byteLength) {
       try { const count = writeSync(2, bytes.subarray(at)); if (count < 1) break; at += count; }
