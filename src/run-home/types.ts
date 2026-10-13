@@ -37,6 +37,20 @@ export type RunLeg = "winter";
 /** The brand fields the builder spells names from. Absent = the Winter SDK's own profile. */
 export type RunHomeBrand = Pick<BrandProfile, "homeDirName" | "projectDirName" | "instructionsFile" | "envPrefix" | "mcpServerName">;
 
+/** Host-admitted Cowork plain guidance. This does not admit executable project configuration.
+ * Build in the filesystem that owns the sources (the guest for guest repositories).
+ * The host must obtain these roots from its grants, never model/tool arguments.
+ * Do not set this for ordinary untrusted Code sessions. */
+export interface PlainInstructionContext {
+  /** The selected source's root, containing cwd. null deliberately omits source guidance. */
+  projectRoot: string | null;
+  /** Required shared guidance, loaded independently of cwd. The host creates the
+   * file (empty is valid) during workspace preparation, before the first build.
+   * Imports stay inside this guidance-only root, which must not contain runtime
+   * configuration or SDK stores. Cowork must not omit this to bypass a missing file. */
+  workspace?: { path: string; root: string };
+}
+
 export interface RunHomeInput {
   /** The daemon's home (`WINTER_HOME`). The shared runtime home is `sdkHomeOf(home)`. */
   home: string;
@@ -48,6 +62,9 @@ export interface RunHomeInput {
   cwd: string;
   /** `repoRootFor(cwd)` when the project is trusted, else `null` (no project tier at all). */
   trustedProjectRoot: string | null;
+  /** Explicit plain guidance admission, separate from executable trust. Absent preserves
+   * the normal trustedProjectRoot instruction walk. Does not load settings, MCP or items. */
+  plainInstructions?: PlainInstructionContext;
   /** The canonical git root — the local settings tier's anchor (F17). `null` outside a repository. */
   gitRoot: string | null;
   /** `mcp.disabled`: servers dropped from the generated `.winter.json`, and reported. */
@@ -70,6 +87,9 @@ export interface RunHomeInput {
 
 /** What the builder did not do, and why — surfaced by `winter doctor` (spec §8). */
 export interface RunHomeReport {
+  /** UTF-8 text admitted into the generated instruction snapshot, including expanded imports.
+   * Local provenance only: clients must redact/translate paths before remote projection. */
+  instructionFiles?: { path: string; requestedPath?: string; tier: "user" | "workspace" | "project" | "local"; sha256: string; imported: boolean }[];
   /** A project-tier item whose link target lies outside the project root, or a vanished target. */
   skippedLinks: { path: string; reason: "outside-root" | "missing" }[];
   /** A user-tier item linked although it points outside `sdk/` (linked as-is, spec §3.4.6). */

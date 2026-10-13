@@ -117,6 +117,7 @@ interface RunHomeInput {
   trustedProjectRoot: string | null;     // repoRootFor(cwd) when trusted, else null; at $HOME or above it, no
                                          // project item, instruction, settings tier or project MCP file is read
                                          // (the local MCP scope in <home>/sdk/.winter.json still applies)
+  plainInstructions?: PlainInstructionContext; // optional plain guidance admission, independent of executable trust
   gitRoot: string | null;                // the canonical git root (the local settings tier)
   mcpDisabled: readonly string[];
   reservedMcpServerNames: readonly string[]; // a configured server whose claude-NORMALISED name (`on()`: [^A-Za-z0-9_-] → `_`) equals a
@@ -124,7 +125,12 @@ interface RunHomeInput {
   memoryDir: string;                     // the auto-memory directory for this incarnation
   brand?: RunHomeBrand;                  // optional; absent = the Winter SDK's own profile
 }
-interface RunHomeReport { skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules;
+interface PlainInstructionContext {
+  projectRoot: string | null;            // selected admitted source containing cwd; null omits source guidance
+  workspace?: { path: string; root: string }; // required shared file; imports confined to this guidance-only root
+}
+interface RunHomeReport { instructionFiles?; // canonical path, optional requested alias, tier, text sha256, imported flag; local provenance
+  skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules;
   droppedImports;                        // an @import a project/local instructions file OR a project rule named outside the root (a rule in
                                          // <run>/rules is read at the USER tier, so its body is expanded under the project rule; every project
                                          // rule is a COPY — a snapshot, so a later edit in the repository never reaches the run home);
@@ -193,6 +199,34 @@ type RunHomeFor = (ctx: { sessionId: string; leg: RunLeg; cwd: string; mode: Run
 class RunHomeError extends RuntimeSdkError { code: RunHomeErrorCode }    // forwarded as data.code
 function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; // the one reconcile (read-only for hosts)
 ```
+
+`plainInstructions` adds plain guidance without changing executable trust. The generated
+file contains the user file, the required shared workspace file, then the selected
+source's normal root-to-cwd instruction chain. Settings, hooks, skills, rules, agents
+and MCP still use `trustedProjectRoot`. Source imports stay inside that source;
+shared imports stay inside its separate guidance-only root. A missing, unreadable or
+escaping required shared file refuses the build as `run_home_instruction_refused`.
+Omitting `plainInstructions` preserves ordinary Code behavior.
+Hosts must not set it for ordinary untrusted Code sessions. For Cowork, workspace
+preparation creates the shared file before the first build (an empty file is valid);
+the host must not omit the workspace scope to bypass a missing required file.
+
+The host supplies canonical admitted roots and rebuilds after source, cwd or guidance
+changes and before cold resume. A generated file is an immutable snapshot; this API
+does not refresh a running model request or a fork's inherited request layout.
+Every new build populates `report.instructionFiles`, optional on the public type for
+older report producers. It records the admitted UTF-8 text's digest and import
+provenance for local inspection, with canonical paths and original aliases when they
+differ. Translate paths to authorized source IDs and guest
+paths before exposing them remotely.
+
+For Cowork, run this builder inside the protected guest router with its admitted
+filesystem view; the existing descriptor rechecks are discovery safeguards, not
+Linux confinement or proof against arbitrary concurrent namespace manipulation.
+Keep the guidance root separate from SDK stores and authority-bearing configuration.
+This extension does not widen the bounded guest-query profile, enable Cowork,
+deliver generated publication policy or guarantee guidance reaches every subagent.
+Those require the host/guest integration and current-context refresh contract.
 
 **The attach points.**
 

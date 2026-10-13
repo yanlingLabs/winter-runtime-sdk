@@ -29,6 +29,7 @@
 // in the repository reach the run home unsettled.
 import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { readFileSync, realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -37,6 +38,8 @@ import { claudeFrontmatterSplit } from "./claude-frontmatter.ts";
 import { joinFrontmatter, keyRange, listOf, removeKey, splitFrontmatter } from "./frontmatter.ts";
 import { isWithin, projectRulesOf, projectWalk } from "./items.ts";
 import { readAdmittedFile } from "./walk.ts";
+import { isHomeOrAbove } from "./walk.ts";
+import { RunHomeError } from "./errors.ts";
 
 const PRIVATE_FILE = 0o600;
 /** claude's own import depth cap. */
@@ -53,10 +56,12 @@ const IMPORT_TOKEN = /(^|\s)@((?:[^\s\\]|\\ )+)/g;
 export interface ExpandImportsInput {
   content: string;
   filePath: string;
-  tier: "user" | "project" | "local";
+  tier: "user" | "workspace" | "project" | "local";
   /** The trusted project root — the boundary a project or local file's imports may not leave. */
   projectRoot: string | null;
   maxDepth?: number;
+  /** Local provenance for the bytes actually expanded. Not a file-access authorization hook. */
+  onRead?: (path: string, text: string) => void;
 }
 
 export interface ExpandImportsResult {
@@ -168,6 +173,7 @@ export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
             return whole;
           }
         }
+        input.onRead?.(real, body);
         return lead + expand(body, target, depth + 1, new Set([...seen, real]));
       }),
     );
@@ -227,6 +233,12 @@ function isRegularFile(path: string): boolean {
   }
 }
 
+function realDirectory(path: string): string | undefined {
+  const real = realOrUndefined(path);
+  try { return real !== undefined && statSync(real).isDirectory() ? real : undefined; }
+  catch { return undefined; }
+}
+
 /** A regular file's text, or `undefined` when there is none (missing, a directory, unreadable). */
 async function textOf(path: string): Promise<string | undefined> {
   try {
@@ -250,12 +262,31 @@ function localVariantOf(instructionsFile: string): string {
  */
 export async function buildInstructions(context: RunHomeBuildContext): Promise<void> {
   const { input, brand, sdkHome, dir, report } = context;
-  const sources: Array<{ path: string; tier: "user" | "project" | "local" }> = [{ path: join(sdkHome, brand.instructionsFile), tier: "user" }];
-  if (input.trustedProjectRoot !== null) {
-    for (const walkDir of [...projectWalk(input.cwd, input.trustedProjectRoot, context.userHome)].reverse()) {
-      sources.push({ path: join(walkDir, brand.instructionsFile), tier: "project" });
-      sources.push({ path: join(walkDir, brand.projectDirName, brand.instructionsFile), tier: "project" });
-      sources.push({ path: join(walkDir, localVariantOf(brand.instructionsFile)), tier: "local" });
+  const plain = input.plainInstructions;
+  const sourceRoot = plain === undefined ? input.trustedProjectRoot : plain?.projectRoot;
+  let walkRoot = sourceRoot, walkCwd = input.cwd;
+  const instructionRefusal = () => new RunHomeError("run_home_instruction_refused", "the host-admitted plain instruction scope or required shared file is unavailable");
+  if (plain !== undefined) {
+    if (!plain || (sourceRoot !== null && (typeof sourceRoot !== "string" || !isAbsolute(sourceRoot) || sourceRoot.includes("\0")))) throw instructionRefusal();
+    if (sourceRoot !== null) {
+      const realRoot = realDirectory(sourceRoot!), realCwd = realDirectory(input.cwd);
+      if (!realRoot || !realCwd || isHomeOrAbove(realRoot, context.userHome) || !isWithin(realCwd, realRoot)) throw instructionRefusal();
+      walkRoot = realRoot; walkCwd = realCwd;
+    }
+  }
+  const sources: Array<{ path: string; tier: "user" | "workspace" | "project" | "local"; root: string | null; required?: boolean }> = [{ path: join(sdkHome, brand.instructionsFile), tier: "user", root: null }];
+  if (plain?.workspace !== undefined) {
+    const shared = plain.workspace;
+    if (!shared || typeof shared.path !== "string" || typeof shared.root !== "string" || !isAbsolute(shared.path) || !isAbsolute(shared.root) || shared.path.includes("\0") || shared.root.includes("\0") || !isWithin(resolve(shared.path), resolve(shared.root))) throw instructionRefusal();
+    const realRoot = realDirectory(shared.root);
+    if (!realRoot || isHomeOrAbove(realRoot, context.userHome)) throw instructionRefusal();
+    sources.push({ path: shared.path, tier: "workspace", root: realRoot, required: true });
+  }
+  if (walkRoot !== null) {
+    for (const walkDir of [...projectWalk(walkCwd, walkRoot!, context.userHome)].reverse()) {
+      sources.push({ path: join(walkDir, brand.instructionsFile), tier: "project", root: walkRoot! });
+      sources.push({ path: join(walkDir, brand.projectDirName, brand.instructionsFile), tier: "project", root: walkRoot! });
+      sources.push({ path: join(walkDir, localVariantOf(brand.instructionsFile)), tier: "local", root: walkRoot! });
     }
   }
   const blocks: string[] = [];
@@ -263,27 +294,33 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
     // A project file is read by its REAL path, and only when that stays inside the root — the same
     // boundary the items obey (an instructions file that is a link out of the repository is not the project's).
     // WS-24: and the READ is of that admitted real path, re-checked at the read (`readAdmittedFile`).
-    let text: string | undefined;
+    let text: string | undefined, admittedPath = source.path;
     if (source.tier !== "user") {
       const real = realOrUndefined(source.path);
-      if (real === undefined) continue;
-      const realRoot = realOrSelf(input.trustedProjectRoot as string);
+      if (real === undefined) { if (source.required) throw instructionRefusal(); continue; }
+      const realRoot = realOrSelf(source.root as string);
       if (!isWithin(real, realRoot)) {
         report.skippedLinks.push({ path: source.path, reason: "outside-root" });
+        if (source.required) throw instructionRefusal();
         continue;
       }
       context.internals.beforeRepositoryRead?.(real);
       const read = readAdmittedFile(real, realRoot);
       if ("refused" in read) {
         if (read.refused === "outside-root") report.skippedLinks.push({ path: source.path, reason: "outside-root" });
+        if (source.required) throw instructionRefusal();
         continue;
       }
       text = read.text;
+      admittedPath = real;
     } else {
       text = await textOf(source.path);
+      admittedPath = realOrUndefined(source.path) ?? source.path;
     }
     if (text === undefined) continue;
-    const expanded = expandImports({ content: text, filePath: source.path, tier: source.tier, projectRoot: input.trustedProjectRoot });
+    const record = (path: string, bytes: string, imported: boolean) => report.instructionFiles!.push({ path, ...(!imported && path !== source.path ? { requestedPath: source.path } : {}), tier: source.tier, sha256: createHash("sha256").update(bytes, "utf8").digest("hex"), imported });
+    record(admittedPath, text, false);
+    const expanded = expandImports({ content: text, filePath: source.path, tier: source.tier, projectRoot: source.root, onRead: (path, bytes) => record(path, bytes, true) });
     report.droppedImports.push(...expanded.dropped);
     const body = escapeImportTokens(expanded.content);
     blocks.push(`# ${source.path}\n\n${body.endsWith("\n") ? body : `${body}\n`}`);

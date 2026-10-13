@@ -46,7 +46,7 @@ export type { RouterOnlyOptionKey, RouterOptions, RouterRuntimeInput, RuntimeSdk
 export { buildRunHome } from "./run-home/build.ts";
 export { escapeRulePath, fsRootAnchored, protectedPathRules, PROTECTED_ITEM_DIRS, RUN_HOME_CONTRACT_VERSION, RUN_HOME_PERSISTENT_ENTRIES, sdkHomeOf } from "./run-home/types.ts";
 export { escapeSandboxGlobPath } from "./run-home/settings.ts";
-export type { RunHome, RunHomeBrand, RunHomeFor, RunHomeForContext, RunHomeInput, RunHomeOutcome, RunHomeReport, RunLeg, RunMode } from "./run-home/types.ts";
+export type { PlainInstructionContext, RunHome, RunHomeBrand, RunHomeFor, RunHomeForContext, RunHomeInput, RunHomeOutcome, RunHomeReport, RunLeg, RunMode } from "./run-home/types.ts";
 export type { RecoveryReport, RecoveryTranscriptOutcome } from "./run-home/exit.ts";
 export { RunHomeError } from "./run-home/errors.ts";
 export type { RunHomeErrorCode } from "./run-home/errors.ts";
