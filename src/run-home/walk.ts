@@ -48,9 +48,10 @@ export function isHomeOrAbove(path: string, userHome: string): boolean {
 }
 
 /**
- * WS-24: a REPOSITORY file's text, read only while it is still exactly the file its in-root check
- * admitted — so what reaches the run folder is what discovery approved, whatever happened to the path
- * in between.
+ * WS-24: ordinary Code guardrails for reading a repository file by its admitted spelling.
+ * These independent pathname checks and inode comparisons are not atomic containment:
+ * coordinated ancestor replacement can select outside bytes. A protected reader therefore
+ * needs a separately admitted physical view; this helper alone establishes no confidentiality.
  *
  * `real` is the file's real path (from `realpath`, already checked to lie inside `realRoot`). The read:
  *
@@ -59,8 +60,8 @@ export function isHomeOrAbove(path: string, userHome: string): boolean {
  *   2. checks the OPEN file is a regular file (`fstat`);
  *   3. re-resolves `real` and requires the same real path, still inside `realRoot` — `O_NOFOLLOW` covers
  *      only the last component, so a directory above it is re-checked here;
- *   4. requires the file now at `real` to be the one that was opened (device and inode), so a path that
- *      changed and changed back between steps 1 and 3 is refused too;
+ *   4. compares the file named by that separate `stat` lookup with the opened device/inode.
+ *      This can detect mismatches, but does not defeat outside/inside/outside ancestor swaps;
  *
  * and only then reads from the open descriptor. A refusal is `outside-root` (the path no longer names the
  * admitted in-root file — a link where a file was counts as that) or `missing` (gone, not a regular
