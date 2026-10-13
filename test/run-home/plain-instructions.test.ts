@@ -51,7 +51,7 @@ test("workspace imports cannot read a neighboring source or private runtime file
   const run = await buildRunHome(f.input), text = generated(run);
   expect(text).toContain("SHARED-IMPORT"); expect(text).not.toContain("PRIVATE-CANARY"); expect(text).not.toContain("SOURCE-CANARY");
   expect(run.report.droppedImports).toEqual([secret, other]);
-  expect(run.report.instructionFiles.filter(file => file.imported).map(file => file.path)).toEqual([join(f.shared, "notes.md")]);
+  expect(run.report.instructionFiles!.filter(file => file.imported).map(file => file.path)).toEqual([join(f.shared, "notes.md")]);
   expect(text).toContain(`@\u200b${secret}`);
 });
 
@@ -72,6 +72,21 @@ test("an explicitly required workspace file that disappears or escapes refuses t
     await expect(buildRunHome(f.input)).rejects.toMatchObject({ code: "run_home_instruction_refused" });
     expect(readdirSync(join(f.bed.home, "cache", "runs"))).toEqual([]);
   }
+});
+
+test("a host-created empty shared file permits the first workspace build", async () => {
+  const f = fixture(); put(f.path, "");
+  const run = await buildRunHome(f.input);
+  expect(run.report.instructionFiles).toContainEqual({ path: f.path, tier: "workspace", sha256: digest(""), imported: false });
+});
+
+test("top-level aliases and imports record canonical paths with the requested alias retained", async () => {
+  const f = fixture(), target = join(f.root, "docs", "guide.md"), requested = join(f.root, "WINTER.md");
+  put(target, "ALIASED @./docs/notes.md\n"); put(join(f.root, "docs", "notes.md"), "IMPORTED\n");
+  symlinkSync(target, requested);
+  const run = await buildRunHome(f.input);
+  expect(run.report.instructionFiles).toContainEqual({ path: target, requestedPath: requested, tier: "project", sha256: digest("ALIASED @./docs/notes.md\n"), imported: false });
+  expect(run.report.instructionFiles).toContainEqual({ path: join(f.root, "docs", "notes.md"), tier: "project", sha256: digest("IMPORTED\n"), imported: true });
 });
 
 test("a required workspace file swapped after admission is refused", async () => {

@@ -37,14 +37,17 @@ export type RunLeg = "winter";
 /** The brand fields the builder spells names from. Absent = the Winter SDK's own profile. */
 export type RunHomeBrand = Pick<BrandProfile, "homeDirName" | "projectDirName" | "instructionsFile" | "envPrefix" | "mcpServerName">;
 
-/** Host-admitted plain guidance. This does not admit executable project configuration.
+/** Host-admitted Cowork plain guidance. This does not admit executable project configuration.
  * Build in the filesystem that owns the sources (the guest for guest repositories).
- * The host must obtain these roots from its grants, never model/tool arguments. */
+ * The host must obtain these roots from its grants, never model/tool arguments.
+ * Do not set this for ordinary untrusted Code sessions. */
 export interface PlainInstructionContext {
   /** The selected source's root, containing cwd. null deliberately omits source guidance. */
   projectRoot: string | null;
-  /** Required shared guidance, loaded independently of cwd. Imports stay inside this
-   * guidance-only root, which must not contain runtime configuration or SDK stores. */
+  /** Required shared guidance, loaded independently of cwd. The host creates the
+   * file (empty is valid) during workspace preparation, before the first build.
+   * Imports stay inside this guidance-only root, which must not contain runtime
+   * configuration or SDK stores. Cowork must not omit this to bypass a missing file. */
   workspace?: { path: string; root: string };
 }
 
@@ -86,7 +89,7 @@ export interface RunHomeInput {
 export interface RunHomeReport {
   /** UTF-8 text admitted into the generated instruction snapshot, including expanded imports.
    * Local provenance only: clients must redact/translate paths before remote projection. */
-  instructionFiles: { path: string; tier: "user" | "workspace" | "project" | "local"; sha256: string; imported: boolean }[];
+  instructionFiles?: { path: string; requestedPath?: string; tier: "user" | "workspace" | "project" | "local"; sha256: string; imported: boolean }[];
   /** A project-tier item whose link target lies outside the project root, or a vanished target. */
   skippedLinks: { path: string; reason: "outside-root" | "missing" }[];
   /** A user-tier item linked although it points outside `sdk/` (linked as-is, spec §3.4.6). */

@@ -294,7 +294,7 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
     // A project file is read by its REAL path, and only when that stays inside the root — the same
     // boundary the items obey (an instructions file that is a link out of the repository is not the project's).
     // WS-24: and the READ is of that admitted real path, re-checked at the read (`readAdmittedFile`).
-    let text: string | undefined;
+    let text: string | undefined, admittedPath = source.path;
     if (source.tier !== "user") {
       const real = realOrUndefined(source.path);
       if (real === undefined) { if (source.required) throw instructionRefusal(); continue; }
@@ -312,12 +312,14 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
         continue;
       }
       text = read.text;
+      admittedPath = real;
     } else {
       text = await textOf(source.path);
+      admittedPath = realOrUndefined(source.path) ?? source.path;
     }
     if (text === undefined) continue;
-    const record = (path: string, bytes: string, imported: boolean) => report.instructionFiles.push({ path, tier: source.tier, sha256: createHash("sha256").update(bytes, "utf8").digest("hex"), imported });
-    record(source.path, text, false);
+    const record = (path: string, bytes: string, imported: boolean) => report.instructionFiles!.push({ path, ...(!imported && path !== source.path ? { requestedPath: source.path } : {}), tier: source.tier, sha256: createHash("sha256").update(bytes, "utf8").digest("hex"), imported });
+    record(admittedPath, text, false);
     const expanded = expandImports({ content: text, filePath: source.path, tier: source.tier, projectRoot: source.root, onRead: (path, bytes) => record(path, bytes, true) });
     report.droppedImports.push(...expanded.dropped);
     const body = escapeImportTokens(expanded.content);

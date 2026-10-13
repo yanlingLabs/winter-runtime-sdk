@@ -129,7 +129,7 @@ interface PlainInstructionContext {
   projectRoot: string | null;            // selected admitted source containing cwd; null omits source guidance
   workspace?: { path: string; root: string }; // required shared file; imports confined to this guidance-only root
 }
-interface RunHomeReport { instructionFiles; // path, tier, sha256 of admitted UTF-8 text, imported flag; local provenance
+interface RunHomeReport { instructionFiles?; // canonical path, optional requested alias, tier, text sha256, imported flag; local provenance
   skippedLinks; externalUserLinks; droppedMcpServers; unconditionalRules;
   droppedImports;                        // an @import a project/local instructions file OR a project rule named outside the root (a rule in
                                          // <run>/rules is read at the USER tier, so its body is expanded under the project rule; every project
@@ -207,12 +207,17 @@ and MCP still use `trustedProjectRoot`. Source imports stay inside that source;
 shared imports stay inside its separate guidance-only root. A missing, unreadable or
 escaping required shared file refuses the build as `run_home_instruction_refused`.
 Omitting `plainInstructions` preserves ordinary Code behavior.
+Hosts must not set it for ordinary untrusted Code sessions. For Cowork, workspace
+preparation creates the shared file before the first build (an empty file is valid);
+the host must not omit the workspace scope to bypass a missing required file.
 
 The host supplies canonical admitted roots and rebuilds after source, cwd or guidance
 changes and before cold resume. A generated file is an immutable snapshot; this API
 does not refresh a running model request or a fork's inherited request layout.
-`report.instructionFiles` records the admitted UTF-8 text's digest and import
-provenance for local inspection. Translate paths to authorized source IDs and guest
+Every new build populates `report.instructionFiles`, optional on the public type for
+older report producers. It records the admitted UTF-8 text's digest and import
+provenance for local inspection, with canonical paths and original aliases when they
+differ. Translate paths to authorized source IDs and guest
 paths before exposing them remotely.
 
 For Cowork, run this builder inside the protected guest router with its admitted
