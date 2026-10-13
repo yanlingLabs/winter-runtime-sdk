@@ -62,10 +62,55 @@ export interface InstructionSnapshot {
   droppedImports: string[];
 }
 
+/** The structured API can omit the ordinary personal tier BEFORE any content read. */
+export type StructuredInstructionSnapshotInput = InstructionSnapshotInput & { tiers?: "all" | "admitted-only" };
+export interface InstructionSnapshotBlock {
+  requestedPath: string;
+  admittedPath: string;
+  /** Expanded, import-neutralized body including the legacy trailing-newline rule. */
+  text: string;
+  /** SHA-256 of decoded UTF-8 text, not the original file bytes. */
+  textSha256: string;
+  tier: "user" | "workspace" | "project" | "local";
+}
+export interface InstructionSnapshotProvenance extends InstructionSnapshotBlock {
+  /** Decoded source text before expansion, neutralization or trailing-newline rendering. */
+  text: string;
+  /** Top-level = 0, direct import = 1; at most MAX_IMPORT_DEPTH. */
+  depth: number;
+  /** Requested containing identity, which governs lexical relative import resolution. */
+  importerPath?: string;
+  /** Actual admitted containing identity, carried separately without changing resolution. */
+  importerAdmittedPath?: string;
+}
+export interface StructuredInstructionSnapshot extends Pick<InstructionSnapshot, "text" | "digest"> {
+  readonly tiers: "all" | "admitted-only";
+  readonly files: readonly Readonly<InstructionSnapshot["files"][number]>[];
+  readonly skippedLinks: readonly Readonly<InstructionSnapshot["skippedLinks"][number]>[];
+  readonly droppedImports: readonly string[];
+  readonly blocks: readonly Readonly<InstructionSnapshotBlock>[];
+  readonly provenance: readonly Readonly<InstructionSnapshotProvenance>[];
+}
+interface SnapshotRecorder {
+  blocks: InstructionSnapshotBlock[];
+  provenance: InstructionSnapshotProvenance[];
+}
+interface ImportReadRecord {
+  requestedPath: string; admittedPath: string; text: string;
+  importerPath: string; importerAdmittedPath: string; depth: number;
+}
+interface ImportRecorder {
+  beforeRead?: (path: string) => void;
+  onImport?: (record: ImportReadRecord) => void;
+  rootAdmittedPath?: string;
+}
+
 /** Test-only read-race/home-boundary knobs; no file-access authorization hook. */
 export interface InstructionSnapshotInternals {
   userHome?: string;
   beforeRepositoryRead?: (real: string) => void;
+  /** Test-only observation before a top-level/import content read; never authorization. */
+  beforeInstructionRead?: (path: string) => void;
 }
 
 /**
@@ -163,10 +208,15 @@ function mapOutsideCode(content: string, fn: (text: string) => string): string {
  * stays as literal text; a dropped one stays too, and is reported.
  */
 export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
+  return expandImportsRecorded(input);
+}
+
+/** Private recording observes the same successful reads without changing the public onRead seam. */
+function expandImportsRecorded(input: ExpandImportsInput, recorder?: ImportRecorder): ExpandImportsResult {
   const dropped: string[] = [];
   const maxDepth = input.maxDepth ?? MAX_IMPORT_DEPTH;
   const realRoot = input.projectRoot === null ? undefined : realOrSelf(input.projectRoot);
-  const expand = (content: string, fromFile: string, depth: number, seen: ReadonlySet<string>): string =>
+  const expand = (content: string, fromFile: string, fromAdmitted: string, depth: number, seen: ReadonlySet<string>): string =>
     mapOutsideCode(content, (text) =>
       text.replace(IMPORT_TOKEN, (whole, lead: string, raw: string) => {
         const target = importPathOf(raw, fromFile);
@@ -179,6 +229,7 @@ export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
           return whole;
         }
         let body: string;
+        recorder?.beforeRead?.(real);
         if (input.tier !== "user") {
           // WS-24: a repository import is read under the same re-check as the file that holds it.
           const read = readAdmittedFile(real, realRoot as string);
@@ -195,11 +246,12 @@ export function expandImports(input: ExpandImportsInput): ExpandImportsResult {
           }
         }
         input.onRead?.(real, body);
-        return lead + expand(body, target, depth + 1, new Set([...seen, real]));
+        recorder?.onImport?.({ requestedPath: target, admittedPath: real, text: body, importerPath: fromFile, importerAdmittedPath: fromAdmitted, depth: depth + 1 });
+        return lead + expand(body, target, real, depth + 1, new Set([...seen, real]));
       }),
     );
   const self = realOrUndefined(input.filePath);
-  return { content: expand(input.content, input.filePath, 0, new Set(self === undefined ? [] : [self])), dropped };
+  return { content: expand(input.content, input.filePath, recorder?.rootAdmittedPath ?? self ?? input.filePath, 0, new Set(self === undefined ? [] : [self])), dropped };
 }
 
 /**
@@ -284,6 +336,24 @@ function localVariantOf(instructionsFile: string): string {
  * caller's separate responsibilities.
  */
 export async function loadInstructionSnapshot(input: InstructionSnapshotInput, internals: InstructionSnapshotInternals = {}): Promise<InstructionSnapshot> {
+  return readInstructionSnapshot(input, internals, "all");
+}
+
+/** One current guidance walk, with structured data recorded during those same reads/expansions.
+ * No reader/RPC authority, personal scope admission, memory or run-home creation is added. */
+export async function loadStructuredInstructionSnapshot(input: StructuredInstructionSnapshotInput, internals: InstructionSnapshotInternals = {}): Promise<Readonly<StructuredInstructionSnapshot>> {
+  const tiers = input.tiers ?? "all";
+  if (tiers !== "all" && tiers !== "admitted-only") throw new TypeError("invalid instruction snapshot tiers");
+  const recorder: SnapshotRecorder = { blocks: [], provenance: [] };
+  const snapshot = await readInstructionSnapshot(input, internals, tiers, recorder);
+  const freeze = <T>(value: T): T => {
+    if (value && typeof value === "object") { for (const child of Object.values(value)) freeze(child); Object.freeze(value); }
+    return value;
+  };
+  return freeze({ ...snapshot, tiers, blocks: recorder.blocks, provenance: recorder.provenance });
+}
+
+async function readInstructionSnapshot(input: InstructionSnapshotInput, internals: InstructionSnapshotInternals, tiers: "all" | "admitted-only", recorder?: SnapshotRecorder): Promise<InstructionSnapshot> {
   for (const value of [input.home, input.cwd]) {
     if (typeof value !== "string" || !isAbsolute(value) || value.includes("\0")) throw new TypeError("instruction snapshot home/cwd must be absolute paths");
   }
@@ -302,7 +372,7 @@ export async function loadInstructionSnapshot(input: InstructionSnapshotInput, i
       walkRoot = realRoot; walkCwd = realCwd;
     }
   }
-  const sources: Array<{ path: string; tier: "user" | "workspace" | "project" | "local"; root: string | null; required?: boolean }> = [{ path: join(sdkHome, brand.instructionsFile), tier: "user", root: null }];
+  const sources: Array<{ path: string; tier: "user" | "workspace" | "project" | "local"; root: string | null; required?: boolean }> = tiers === "all" ? [{ path: join(sdkHome, brand.instructionsFile), tier: "user", root: null }] : [];
   if (plain?.workspace !== undefined) {
     const shared = plain.workspace;
     if (!shared || typeof shared.path !== "string" || typeof shared.root !== "string" || !isAbsolute(shared.path) || !isAbsolute(shared.root) || shared.path.includes("\0") || shared.root.includes("\0") || !isWithin(resolve(shared.path), resolve(shared.root))) throw instructionRefusal();
@@ -333,6 +403,7 @@ export async function loadInstructionSnapshot(input: InstructionSnapshotInput, i
         continue;
       }
       internals.beforeRepositoryRead?.(real);
+      internals.beforeInstructionRead?.(real);
       const read = readAdmittedFile(real, realRoot);
       if ("refused" in read) {
         if (read.refused === "outside-root") skippedLinks.push({ path: source.path, reason: "outside-root" });
@@ -342,16 +413,24 @@ export async function loadInstructionSnapshot(input: InstructionSnapshotInput, i
       text = read.text;
       admittedPath = real;
     } else {
+      internals.beforeInstructionRead?.(source.path);
       text = await textOf(source.path);
       admittedPath = realOrUndefined(source.path) ?? source.path;
     }
     if (text === undefined) continue;
     const record = (path: string, bytes: string, imported: boolean) => files.push({ path, ...(!imported && path !== source.path ? { requestedPath: source.path } : {}), tier: source.tier, sha256: createHash("sha256").update(bytes, "utf8").digest("hex"), imported });
     record(admittedPath, text, false);
-    const expanded = expandImports({ content: text, filePath: source.path, tier: source.tier, projectRoot: source.root, onRead: (path, bytes) => record(path, bytes, true) });
+    recorder?.provenance.push({ requestedPath: source.path, admittedPath, text, textSha256: createHash("sha256").update(text, "utf8").digest("hex"), tier: source.tier, depth: 0 });
+    const expanded = expandImportsRecorded({ content: text, filePath: source.path, tier: source.tier, projectRoot: source.root, onRead: (path, bytes) => record(path, bytes, true) }, {
+      rootAdmittedPath: admittedPath,
+      ...(internals.beforeInstructionRead !== undefined ? { beforeRead: internals.beforeInstructionRead } : {}),
+      ...(recorder !== undefined ? { onImport: (read: ImportReadRecord) => recorder.provenance.push({ ...read, textSha256: createHash("sha256").update(read.text, "utf8").digest("hex"), tier: source.tier }) } : {}),
+    });
     droppedImports.push(...expanded.dropped);
     const body = escapeImportTokens(expanded.content);
-    blocks.push(`# ${source.path}\n\n${body.endsWith("\n") ? body : `${body}\n`}`);
+    const renderedBody = body.endsWith("\n") ? body : `${body}\n`;
+    recorder?.blocks.push({ requestedPath: source.path, admittedPath, text: renderedBody, textSha256: createHash("sha256").update(renderedBody, "utf8").digest("hex"), tier: source.tier });
+    blocks.push(`# ${source.path}\n\n${renderedBody}`);
   }
   const text = blocks.join("\n");
   return { text, digest: createHash("sha256").update(text, "utf8").digest("hex"), files, skippedLinks, droppedImports };
