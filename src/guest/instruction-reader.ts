@@ -31,8 +31,8 @@ function closed(value: unknown, names: readonly string[]): Record<string, unknow
   return Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.value]));
 }
 function path(value: unknown): string {
-  if (typeof value !== "string" || value === "/" || utf8(value) > 4096 || !value.startsWith("/") || /[\\\0\r\n]/.test(value)
-    || value.endsWith("/") || value.split("/").some((part, i) => i > 0 && ["", ".", ".."].includes(part))) return fail();
+  if (typeof value !== "string" || value === "/" || utf8(value) > 4096 || !value.startsWith("/") || /[\\\x00-\x1f\x7f]/.test(value)
+    || Buffer.from(value, "utf8").toString("utf8") !== value || value.endsWith("/") || value.split("/").some((part, i) => i > 0 && ["", ".", ".."].includes(part))) return fail();
   return value;
 }
 const within = (value: string, root: string) => value === root || value.startsWith(`${root}/`);

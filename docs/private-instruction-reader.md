@@ -9,7 +9,9 @@ The invocation is a closed, deeply frozen plain/null-prototype Root-created data
 object: version=1, lowercase v4 readId, six owner correlation fields
 (logicalSessionId, backendSessionId, generation, bootId, incarnationId, leaseEpoch),
 four physical view paths (sourceRoot, sourceCwd, sharedRoot, sharedPath), and four
-limits. IDs are bounded to 128 UTF-8 bytes, paths to 4096. Cwd stays within source;
+limits. IDs are bounded to 128 UTF-8 bytes, paths to 4096. Paths refuse C0/DEL,
+backslash and unpaired UTF-16 surrogates; normal spaces and Unicode remain valid.
+Cwd stays within source;
 sharedPath is exactly sharedRoot/WINTER.md. Source/shared/read-home path scopes cannot
 overlap lexically; this is not a physical mount/identity proof. Limits must exactly equal the reviewed 128 KiB file / 256 KiB cumulative
 read / 256 occurrences / 128 KiB expansion constants. No env, cwd-of-process,
@@ -63,9 +65,19 @@ strict tier attribution or an atomic multi-file snapshot. Those require the nati
 view and, for stronger attribution, a separately reviewed kernel resolution adapter.
 No VM/native fixture, profile activation, consumer pin, version or release follows.
 
-Source verification: `bun test ./test` passes 737 tests / 3467 assertions across
-53 files. Reader plus brand-gate fixtures pass 20 tests / 116 assertions. Typecheck
+Source verification: `bun test ./test` passes 739 tests / 3542 assertions across
+53 files. Reader plus brand-gate fixtures pass 22 tests / 191 assertions. Typecheck
 and both existing public package entries build successfully; no reader executable
 or process fixture is built. Logs are retained under uncommitted
-`out/private-reader/{tests,types,build}.log`. Ten reader fixtures use disposable
+`out/private-reader/{tests,types,build}.log`. Twelve reader fixtures use disposable
 files and normal callable source execution only, never a native compartment.
+
+The future entry must JSON-parse its OWN bounded stdin and deep-freeze plain data
+objects before reflecting or calling this function. Frozen Proxy reflection can
+execute traps; this callable function cannot generically detect Proxy objects and
+is not an authority boundary. Its closed frozen-shape checks do not authenticate
+a Root caller or replace the separately admitted native channel/view.
+
+The final path-grammar follow-up logs are retained as
+`out/private-reader/followup-{focused,tests,types}.log`. No fixed reader-home
+filesystem is touched by these tests.

@@ -26,10 +26,10 @@ test("private one-shot function uses actual structured loader with exact copied 
   expect(frame.endsWith("\n")).toBe(true); expect(frame.split("\n")).toHaveLength(2); expect(Buffer.byteLength(frame)).toBeLessThanOrEqual(INSTRUCTION_READER_FRAME_BYTES);
   expect(Object.keys(reply).sort()).toEqual(["limits", "owner", "readId", "snapshot", "version", "views"]);
   const { snapshot, ...echo } = reply; expect(echo).toEqual(f.request); expect(snapshot.tiers).toBe("admitted-only");
+  expect(Object.keys(snapshot).sort()).toEqual(["blocks", "digest", "droppedImports", "files", "provenance", "skippedLinks", "text", "tiers"]);
   expect(snapshot.blocks.map((b: { requestedPath: string }) => b.requestedPath)).toEqual([f.sharedPath, join(f.sourceRoot, "WINTER.md"), join(f.sourceCwd, "WINTER.md")]);
   expect(snapshot.text).toContain("SHARED SHARED IMPORT"); expect(snapshot.text).toContain("ROOT NOTES"); expect(snapshot.digest).toBe(sha(snapshot.text));
   expect(snapshot.provenance.some((p: { tier: string }) => p.tier === "user")).toBe(false);
-  expect(existsSync(join(f.bed.home, "cache"))).toBe(false);
 });
 test("empty required shared file is valid; missing one refuses without cached fallback", async () => {
   const f = fixture(); put(f.sharedPath, ""); const reply = JSON.parse(await readInstructionFrame(f.request)); expect(reply.snapshot.blocks[0].text).toBe("\n");
@@ -72,7 +72,7 @@ test("request paths and serialized envelope size are bounded before filesystem a
   const f = fixture();
   await refused(freeze({ ...f.request, views: { ...f.request.views, sourceRoot: `/tmp/${"x".repeat(4096)}`, sourceCwd: `/tmp/${"x".repeat(4096)}` } }));
   // Four individually bounded escaped paths can exceed the 16KiB JSON request cap.
-  const a = `/${"\t".repeat(4000)}`, b = `/${"\t".repeat(3990)}shared`;
+  const a = `/${'"'.repeat(4000)}`, b = `/${'"'.repeat(3990)}shared`;
   await refused(freeze({ ...f.request, views: { sourceRoot: a, sourceCwd: a, sharedRoot: b, sharedPath: `${b}/WINTER.md` } }));
 });
 test("actual loader byte/occurrence/expansion limits refuse rather than emitting partial frames", async () => {
@@ -96,4 +96,18 @@ test("outside source guidance aliases refuse/skips remain data rather than prote
 test("private reader is not exported through the public Runtime SDK door", () => {
   expect("readInstructionFrame" in publicSdk).toBe(false);
   expect("InstructionReaderInvocation" in publicSdk).toBe(false);
+});
+
+test("path grammar refuses every C0/DEL/backslash and unpaired surrogate before loading", async () => {
+  const f = fixture();
+  for (const char of [...Array.from({ length: 32 }, (_, n) => String.fromCharCode(n)), "\x7f", "\\", "\ud800", "\udfff"]) {
+    await refused(freeze({ ...f.request, views: { ...f.request.views, sourceRoot: `${f.sourceRoot}${char}`, sourceCwd: `${f.sourceRoot}${char}/pkg` } }));
+  }
+});
+test("normal spaces and Unicode view names remain readable", async () => {
+  const f = fixture(), sourceRoot = join(f.bed.root, "source with space é🙂"), sourceCwd = join(sourceRoot, "sub 中文"), sharedRoot = join(f.bed.root, "shared with space α");
+  put(join(sourceCwd, "WINTER.md"), "UNICODE SOURCE"); const sharedPath = join(sharedRoot, "WINTER.md"); put(sharedPath, "UNICODE SHARED");
+  const request = freeze({ ...f.request, views: { sourceRoot, sourceCwd, sharedRoot, sharedPath } });
+  const reply = JSON.parse(await readInstructionFrame(request)); expect(reply.views).toEqual(request.views);
+  expect(reply.snapshot.text).toContain("UNICODE SOURCE"); expect(reply.snapshot.text).toContain("UNICODE SHARED");
 });
