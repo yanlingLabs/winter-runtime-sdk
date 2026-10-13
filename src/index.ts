@@ -44,8 +44,8 @@ export type { RouterOnlyOptionKey, RouterOptions, RouterRuntimeInput, RuntimeSdk
 
 // --- WS-21 Contract A: the run home (the daemon builds one per generation; the router applies it) ---
 export { buildRunHome } from "./run-home/build.ts";
-export { loadInstructionSnapshot } from "./run-home/instructions.ts";
-export type { InstructionSnapshot, InstructionSnapshotInput, InstructionSnapshotInternals } from "./run-home/instructions.ts";
+export { loadInstructionSnapshot, loadStructuredInstructionSnapshot } from "./run-home/instructions.ts";
+export type { InstructionSnapshot, InstructionSnapshotInput, InstructionSnapshotInternals, StructuredInstructionSnapshot, StructuredInstructionSnapshotInput, InstructionSnapshotBlock, InstructionSnapshotProvenance } from "./run-home/instructions.ts";
 export { escapeRulePath, fsRootAnchored, protectedPathRules, PROTECTED_ITEM_DIRS, RUN_HOME_CONTRACT_VERSION, RUN_HOME_PERSISTENT_ENTRIES, sdkHomeOf } from "./run-home/types.ts";
 export { escapeSandboxGlobPath } from "./run-home/settings.ts";
 export type { PlainInstructionContext, RunHome, RunHomeBrand, RunHomeFor, RunHomeForContext, RunHomeInput, RunHomeOutcome, RunHomeReport, RunLeg, RunMode } from "./run-home/types.ts";
