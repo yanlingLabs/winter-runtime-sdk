@@ -3,6 +3,7 @@
 // item dirs at ANY depth under the root (C1), a superset of every walk this root can produce.
 import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { InstructionBudgetFailure, type InstructionReadBudget } from "./instruction-budget.ts";
 
 /** Spec §3.4.2: cwd → trusted root, nearest first, never `$HOME` or above it. */
 export function projectWalk(cwd: string, trustedProjectRoot: string | null, userHome: string): string[] {
@@ -65,7 +66,7 @@ export function isHomeOrAbove(path: string, userHome: string): boolean {
  * admitted in-root file — a link where a file was counts as that) or `missing` (gone, not a regular
  * file, unreadable).
  */
-export function readAdmittedFile(real: string, realRoot: string): { text: string } | { refused: "outside-root" | "missing" } {
+export function readAdmittedFile(real: string, realRoot: string, budget?: InstructionReadBudget): { text: string } | { refused: "outside-root" | "missing" } {
   let fd: number;
   try {
     fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -84,8 +85,9 @@ export function readAdmittedFile(real: string, realRoot: string): { text: string
     if (now !== real || !isWithin(now, realRoot)) return { refused: "outside-root" };
     const named = statSync(now);
     if (named.dev !== opened.dev || named.ino !== opened.ino) return { refused: "outside-root" };
-    return { text: readFileSync(fd, "utf8") };
-  } catch {
+    return { text: budget === undefined ? readFileSync(fd, "utf8") : budget.read(fd) };
+  } catch (error) {
+    if (error instanceof InstructionBudgetFailure) throw error;
     return { refused: "missing" };
   } finally {
     closeSync(fd);

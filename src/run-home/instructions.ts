@@ -28,7 +28,7 @@
 // EVERY project rule is COPIED, so the build is a snapshot (R.3 touch): a link would let a later edit
 // in the repository reach the run home unsettled.
 import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -41,6 +41,8 @@ import { isWithin, projectRulesOf, projectWalk } from "./items.ts";
 import { readAdmittedFile } from "./walk.ts";
 import { isHomeOrAbove } from "./walk.ts";
 import { RunHomeError } from "./errors.ts";
+import { InstructionBudgetFailure, InstructionReadBudget, instructionLimits, type InstructionSnapshotLimits, type InstructionReadChunk } from "./instruction-budget.ts";
+export type { InstructionSnapshotLimits, InstructionReadChunk } from "./instruction-budget.ts";
 
 const PRIVATE_FILE = 0o600;
 /** claude's own import depth cap. */
@@ -63,7 +65,7 @@ export interface InstructionSnapshot {
 }
 
 /** The structured API can omit the ordinary personal tier BEFORE any content read. */
-export type StructuredInstructionSnapshotInput = InstructionSnapshotInput & { tiers?: "all" | "admitted-only" };
+export type StructuredInstructionSnapshotInput = InstructionSnapshotInput & { tiers?: "all" | "admitted-only"; limits?: InstructionSnapshotLimits };
 export interface InstructionSnapshotBlock {
   requestedPath: string;
   admittedPath: string;
@@ -103,6 +105,7 @@ interface ImportRecorder {
   beforeRead?: (path: string) => void;
   onImport?: (record: ImportReadRecord) => void;
   rootAdmittedPath?: string;
+  budget?: InstructionReadBudget;
 }
 
 /** Test-only read-race/home-boundary knobs; no file-access authorization hook. */
@@ -111,6 +114,8 @@ export interface InstructionSnapshotInternals {
   beforeRepositoryRead?: (real: string) => void;
   /** Test-only observation before a top-level/import content read; never authorization. */
   beforeInstructionRead?: (path: string) => void;
+  /** Test-only byte counts; no descriptor or filesystem authority is exposed. */
+  onInstructionReadChunk?: (chunk: Readonly<InstructionReadChunk>) => void;
 }
 
 /**
@@ -174,30 +179,47 @@ function outsideCodeSpans(line: string): Array<{ start: number; text: string }> 
   return out;
 }
 
-/** Applies `fn` to every non-code segment of `content`, preserving fenced blocks and code spans. */
-function mapOutsideCode(content: string, fn: (text: string) => string): string {
-  const lines = content.split("\n");
+function joinText(parts: readonly string[], separator: string, budget?: InstructionReadBudget): string {
+  return budget === undefined ? parts.join(separator) : budget.join(parts, separator);
+}
+function textParts(separator: string, budget?: InstructionReadBudget) {
+  const parts: string[] = []; let size = 0;
+  return {
+    append(piece: string) {
+      size += Buffer.byteLength(piece, "utf8") + (parts.length === 0 ? 0 : Buffer.byteLength(separator, "utf8"));
+      if (budget !== undefined && size > budget.limits.maxExpandedBytes) throw new InstructionBudgetFailure();
+      parts.push(piece);
+    },
+    result: () => joinText(parts, separator, budget),
+  };
+}
+function replaceText(content: string, pattern: RegExp, replace: (match: RegExpMatchArray) => string, budget?: InstructionReadBudget): string {
+  const output = textParts("", budget); let cursor = 0;
+  for (const match of content.matchAll(pattern)) {
+    output.append(content.slice(cursor, match.index)); output.append(replace(match)); cursor = match.index! + match[0].length;
+  }
+  output.append(content.slice(cursor)); return output.result();
+}
+/** Applies `fn` outside code; each segment/line is budgeted before retaining or joining it. */
+function mapOutsideCode(content: string, fn: (text: string) => string, budget?: InstructionReadBudget): string {
+  const output = textParts("\n", budget);
   let fence: string | undefined;
-  return lines
-    .map((line) => {
-      const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
-      if (fence !== undefined) {
-        if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
-        return line;
-      }
-      if (marker !== undefined) {
-        fence = marker;
-        return line;
-      }
-      return outsideCodeSpans(line)
-        .map((segment, i, all) => {
-          const next = all[i + 1];
-          const tail = next === undefined ? "" : line.slice(segment.start + segment.text.length, next.start);
-          return fn(segment.text) + tail;
-        })
-        .join("");
-    })
-    .join("\n");
+  for (const line of content.split("\n")) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence !== undefined) {
+      if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
+      output.append(line); continue;
+    }
+    if (marker !== undefined) { fence = marker; output.append(line); continue; }
+    const segments = outsideCodeSpans(line), rendered = textParts("", budget);
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i]!, next = segments[i + 1];
+      const tail = next === undefined ? "" : line.slice(segment.start + segment.text.length, next.start);
+      rendered.append(fn(segment.text)); rendered.append(tail);
+    }
+    output.append(rendered.result());
+  }
+  return output.result();
 }
 
 /**
@@ -218,7 +240,8 @@ function expandImportsRecorded(input: ExpandImportsInput, recorder?: ImportRecor
   const realRoot = input.projectRoot === null ? undefined : realOrSelf(input.projectRoot);
   const expand = (content: string, fromFile: string, fromAdmitted: string, depth: number, seen: ReadonlySet<string>): string =>
     mapOutsideCode(content, (text) =>
-      text.replace(IMPORT_TOKEN, (whole, lead: string, raw: string) => {
+      replaceText(text, IMPORT_TOKEN, (match) => {
+        const [whole, lead, raw] = match as unknown as [string, string, string];
         const target = importPathOf(raw, fromFile);
         if (target === undefined) return whole;
         if (depth >= maxDepth) return whole;
@@ -232,7 +255,7 @@ function expandImportsRecorded(input: ExpandImportsInput, recorder?: ImportRecor
         recorder?.beforeRead?.(real);
         if (input.tier !== "user") {
           // WS-24: a repository import is read under the same re-check as the file that holds it.
-          const read = readAdmittedFile(real, realRoot as string);
+          const read = readAdmittedFile(real, realRoot as string, recorder?.budget);
           if ("refused" in read) {
             if (read.refused === "outside-root") dropped.push(target);
             return whole;
@@ -240,15 +263,17 @@ function expandImportsRecorded(input: ExpandImportsInput, recorder?: ImportRecor
           body = read.text;
         } else {
           try {
-            body = readFileSync(real, "utf8");
-          } catch {
+            body = recorder?.budget === undefined ? readFileSync(real, "utf8") : boundedUserText(real, recorder.budget);
+          } catch (error) {
+            if (error instanceof InstructionBudgetFailure) throw error;
             return whole;
           }
         }
         input.onRead?.(real, body);
         recorder?.onImport?.({ requestedPath: target, admittedPath: real, text: body, importerPath: fromFile, importerAdmittedPath: fromAdmitted, depth: depth + 1 });
-        return lead + expand(body, target, real, depth + 1, new Set([...seen, real]));
-      }),
+        return joinText([lead, expand(body, target, real, depth + 1, new Set([...seen, real]))], "", recorder?.budget);
+      }, recorder?.budget),
+      recorder?.budget,
     );
   const self = realOrUndefined(input.filePath);
   return { content: expand(input.content, input.filePath, recorder?.rootAdmittedPath ?? self ?? input.filePath, 0, new Set(self === undefined ? [] : [self])), dropped };
@@ -283,7 +308,15 @@ const NEUTRALISABLE_AT = /(?<![A-Za-z0-9])@(?=[A-Za-z0-9._~\/-])/g;
  * Inside a real code block the inserted character is invisible too.
  */
 export function escapeImportTokens(content: string): string {
-  return content.replace(NEUTRALISABLE_AT, `@${ZERO_WIDTH_SPACE}`);
+  return escapeImportTokensBounded(content);
+}
+function escapeImportTokensBounded(content: string, budget?: InstructionReadBudget): string {
+  return replaceText(content, NEUTRALISABLE_AT, () => `@${ZERO_WIDTH_SPACE}`, budget);
+}
+function boundedUserText(path: string, budget: InstructionReadBudget): string {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try { if (!fstatSync(fd).isFile()) throw new Error("instruction file unavailable"); return budget.read(fd); }
+  finally { closeSync(fd); }
 }
 
 function realOrUndefined(path: string): string | undefined {
@@ -345,7 +378,10 @@ export async function loadStructuredInstructionSnapshot(input: StructuredInstruc
   const tiers = input.tiers ?? "all";
   if (tiers !== "all" && tiers !== "admitted-only") throw new TypeError("invalid instruction snapshot tiers");
   const recorder: SnapshotRecorder = { blocks: [], provenance: [] };
-  const snapshot = await readInstructionSnapshot(input, internals, tiers, recorder);
+  const budget = input.limits === undefined ? undefined : new InstructionReadBudget(instructionLimits(input.limits), internals.onInstructionReadChunk);
+  let snapshot: InstructionSnapshot;
+  try { snapshot = await readInstructionSnapshot(input, internals, tiers, recorder, budget); }
+  catch (error) { if (error instanceof InstructionBudgetFailure) throw new RunHomeError("run_home_instruction_over_bound", "structured instruction snapshot exceeded its configured limits"); throw error; }
   const freeze = <T>(value: T): T => {
     if (value && typeof value === "object") { for (const child of Object.values(value)) freeze(child); Object.freeze(value); }
     return value;
@@ -353,7 +389,7 @@ export async function loadStructuredInstructionSnapshot(input: StructuredInstruc
   return freeze({ ...snapshot, tiers, blocks: recorder.blocks, provenance: recorder.provenance });
 }
 
-async function readInstructionSnapshot(input: InstructionSnapshotInput, internals: InstructionSnapshotInternals, tiers: "all" | "admitted-only", recorder?: SnapshotRecorder): Promise<InstructionSnapshot> {
+async function readInstructionSnapshot(input: InstructionSnapshotInput, internals: InstructionSnapshotInternals, tiers: "all" | "admitted-only", recorder?: SnapshotRecorder, budget?: InstructionReadBudget): Promise<InstructionSnapshot> {
   for (const value of [input.home, input.cwd]) {
     if (typeof value !== "string" || !isAbsolute(value) || value.includes("\0")) throw new TypeError("instruction snapshot home/cwd must be absolute paths");
   }
@@ -404,7 +440,7 @@ async function readInstructionSnapshot(input: InstructionSnapshotInput, internal
       }
       internals.beforeRepositoryRead?.(real);
       internals.beforeInstructionRead?.(real);
-      const read = readAdmittedFile(real, realRoot);
+      const read = readAdmittedFile(real, realRoot, budget);
       if ("refused" in read) {
         if (read.refused === "outside-root") skippedLinks.push({ path: source.path, reason: "outside-root" });
         if (source.required) throw instructionRefusal();
@@ -414,7 +450,8 @@ async function readInstructionSnapshot(input: InstructionSnapshotInput, internal
       admittedPath = real;
     } else {
       internals.beforeInstructionRead?.(source.path);
-      text = await textOf(source.path);
+      if (budget === undefined) text = await textOf(source.path);
+      else { try { text = boundedUserText(source.path, budget); } catch (error) { if (error instanceof InstructionBudgetFailure) throw error; text = undefined; } }
       admittedPath = realOrUndefined(source.path) ?? source.path;
     }
     if (text === undefined) continue;
@@ -423,16 +460,18 @@ async function readInstructionSnapshot(input: InstructionSnapshotInput, internal
     recorder?.provenance.push({ requestedPath: source.path, admittedPath, text, textSha256: createHash("sha256").update(text, "utf8").digest("hex"), tier: source.tier, depth: 0 });
     const expanded = expandImportsRecorded({ content: text, filePath: source.path, tier: source.tier, projectRoot: source.root, onRead: (path, bytes) => record(path, bytes, true) }, {
       rootAdmittedPath: admittedPath,
+      ...(budget !== undefined ? { budget } : {}),
       ...(internals.beforeInstructionRead !== undefined ? { beforeRead: internals.beforeInstructionRead } : {}),
       ...(recorder !== undefined ? { onImport: (read: ImportReadRecord) => recorder.provenance.push({ ...read, textSha256: createHash("sha256").update(read.text, "utf8").digest("hex"), tier: source.tier }) } : {}),
     });
     droppedImports.push(...expanded.dropped);
-    const body = escapeImportTokens(expanded.content);
-    const renderedBody = body.endsWith("\n") ? body : `${body}\n`;
+    const body = escapeImportTokensBounded(expanded.content, budget);
+    const renderedBody = body.endsWith("\n") ? body : joinText([body, "\n"], "", budget);
     recorder?.blocks.push({ requestedPath: source.path, admittedPath, text: renderedBody, textSha256: createHash("sha256").update(renderedBody, "utf8").digest("hex"), tier: source.tier });
-    blocks.push(`# ${source.path}\n\n${renderedBody}`);
+    const rendered = joinText(["# ", source.path, "\n\n", renderedBody], "", budget);
+    budget?.addRendered(rendered, blocks.length === 0 ? "" : "\n"); blocks.push(rendered);
   }
-  const text = blocks.join("\n");
+  const text = joinText(blocks, "\n", budget);
   return { text, digest: createHash("sha256").update(text, "utf8").digest("hex"), files, skippedLinks, droppedImports };
 }
 
