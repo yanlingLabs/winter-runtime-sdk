@@ -200,7 +200,28 @@ class RunHomeError extends RuntimeSdkError { code: RunHomeErrorCode }    // forw
 function reconcileLocalWriteRoot(root, { shared }): Promise<ReconcileReport>; // the one reconcile (read-only for hosts)
 ```
 
-`plainInstructions` adds plain guidance without changing executable trust. The generated
+`loadInstructionSnapshot` resolves the current instruction text without constructing
+a run home or reading settings, MCP configuration, hooks, rules or executable items:
+
+```ts
+const snapshot = await loadInstructionSnapshot({
+  home, cwd, trustedProjectRoot, brand, plainInstructions,
+});
+// { text, digest, files, skippedLinks, droppedImports }
+```
+
+`home` is the daemon home, not a previously generated run directory. Every call
+re-reads the original files and imports; nothing is cached, created or rewritten.
+`buildRunHome` uses this exact resolver to materialize its instruction file, so
+filenames, ordering, import escaping and admitted-file checks share one producer.
+`digest` is SHA-256 of the rendered UTF-8 text. `files` records the same local
+canonical-path, alias, tier and per-file/import digest provenance as
+`report.instructionFiles`; these are data/provenance, not access authorization.
+The optional second argument supplies test-only read-race/home-boundary knobs,
+consistent with the builder's internals; it is not an authorization seam.
+
+The following `plainInstructions` rules apply to both snapshot loading and
+run-home construction. Plain guidance does not change executable trust. The generated
 file contains the user file, the required shared workspace file, then the selected
 source's normal root-to-cwd instruction chain. Settings, hooks, skills, rules, agents
 and MCP still use `trustedProjectRoot`. Source imports stay inside that source;
@@ -211,22 +232,25 @@ Hosts must not set it for ordinary untrusted Code sessions. For Cowork, workspac
 preparation creates the shared file before the first build (an empty file is valid);
 the host must not omit the workspace scope to bypass a missing required file.
 
-The host supplies canonical admitted roots and rebuilds after source, cwd or guidance
-changes and before cold resume. A generated file is an immutable snapshot; this API
-does not refresh a running model request or a fork's inherited request layout.
+The host supplies canonical admitted roots and loads a new snapshot after source,
+cwd or guidance changes and before cold resume. A generated run-home file remains
+an immutable snapshot: loading current text does not update it. This resolver does
+not refresh a running model request or a fork's inherited request layout.
 Every new build populates `report.instructionFiles`, optional on the public type for
 older report producers. It records the admitted UTF-8 text's digest and import
 provenance for local inspection, with canonical paths and original aliases when they
 differ. Translate paths to authorized source IDs and guest
 paths before exposing them remotely.
 
-For Cowork, run this builder inside the protected guest router with its admitted
+For Cowork, run this resolver/builder inside the protected guest router with its admitted
 filesystem view; the existing descriptor rechecks are discovery safeguards, not
 Linux confinement or proof against arbitrary concurrent namespace manipulation.
 Keep the guidance root separate from SDK stores and authority-bearing configuration.
 This extension does not widen the bounded guest-query profile, enable Cowork,
 deliver generated publication policy or guarantee guidance reaches every subagent.
 Those require the host/guest integration and current-context refresh contract.
+The text digest is not a host revision or authority token, and loading several
+files is not a globally atomic filesystem transaction or Linux/VM race-proofing.
 
 **The attach points.**
 

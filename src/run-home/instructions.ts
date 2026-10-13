@@ -34,6 +34,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { RunHomeBuildContext } from "./build.ts";
+import { runHomeBrandOf, sdkHomeOf, type RunHomeInput, type RunHomeReport } from "./types.ts";
 import { claudeFrontmatterSplit } from "./claude-frontmatter.ts";
 import { joinFrontmatter, keyRange, listOf, removeKey, splitFrontmatter } from "./frontmatter.ts";
 import { isWithin, projectRulesOf, projectWalk } from "./items.ts";
@@ -46,6 +47,26 @@ const PRIVATE_FILE = 0o600;
 export const MAX_IMPORT_DEPTH = 5;
 /** Inserted after the `@` of every leftover import token. */
 const ZERO_WIDTH_SPACE = "\u200b";
+
+/** Guidance inputs only; executable run-home configuration is deliberately absent. */
+export type InstructionSnapshotInput = Pick<RunHomeInput, "home" | "cwd" | "brand" | "trustedProjectRoot" | "plainInstructions">;
+
+export interface InstructionSnapshot {
+  /** Current rendered UTF-8 guidance, with unresolved imports neutralized. */
+  text: string;
+  /** SHA-256 of text, not authorization or a globally atomic filesystem revision. */
+  digest: string;
+  /** Local read provenance, including imports; redact paths before remote projection. */
+  files: NonNullable<RunHomeReport["instructionFiles"]>;
+  skippedLinks: RunHomeReport["skippedLinks"];
+  droppedImports: string[];
+}
+
+/** Test-only read-race/home-boundary knobs; no file-access authorization hook. */
+export interface InstructionSnapshotInternals {
+  userHome?: string;
+  beforeRepositoryRead?: (real: string) => void;
+}
 
 /**
  * An import token: `@` at the start of a line or after whitespace, then a path with `\ ` as an escaped
@@ -256,12 +277,19 @@ function localVariantOf(instructionsFile: string): string {
 }
 
 /**
- * Builds `<run>/<instructions file>` and the `CLAUDE.md` link, then rewrites the project rules whose
- * `paths:` need it. Every mode gets the user file; a trusted project's files reach every mode (spec
- * §3.2 — mode-blind, as today).
+ * Loads current guidance only. No run home, cache or store is created; settings,
+ * MCP configuration, items and hooks are not discovered. Every call re-reads the
+ * same files/imports the run-home builder consumes, with the same ordering and
+ * admitted-file checks. Filesystem/host revision and guest admission remain the
+ * caller's separate responsibilities.
  */
-export async function buildInstructions(context: RunHomeBuildContext): Promise<void> {
-  const { input, brand, sdkHome, dir, report } = context;
+export async function loadInstructionSnapshot(input: InstructionSnapshotInput, internals: InstructionSnapshotInternals = {}): Promise<InstructionSnapshot> {
+  for (const value of [input.home, input.cwd]) {
+    if (typeof value !== "string" || !isAbsolute(value) || value.includes("\0")) throw new TypeError("instruction snapshot home/cwd must be absolute paths");
+  }
+  if (input.trustedProjectRoot !== null && (typeof input.trustedProjectRoot !== "string" || !isAbsolute(input.trustedProjectRoot) || input.trustedProjectRoot.includes("\0"))) throw new TypeError("instruction snapshot trustedProjectRoot must be an absolute path or null");
+  const brand = runHomeBrandOf(input), sdkHome = sdkHomeOf(input.home), userHome = internals.userHome ?? homedir();
+  const files: InstructionSnapshot["files"] = [], skippedLinks: InstructionSnapshot["skippedLinks"] = [], droppedImports: string[] = [];
   const plain = input.plainInstructions;
   const sourceRoot = plain === undefined ? input.trustedProjectRoot : plain?.projectRoot;
   let walkRoot = sourceRoot, walkCwd = input.cwd;
@@ -270,7 +298,7 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
     if (!plain || (sourceRoot !== null && (typeof sourceRoot !== "string" || !isAbsolute(sourceRoot) || sourceRoot.includes("\0")))) throw instructionRefusal();
     if (sourceRoot !== null) {
       const realRoot = realDirectory(sourceRoot!), realCwd = realDirectory(input.cwd);
-      if (!realRoot || !realCwd || isHomeOrAbove(realRoot, context.userHome) || !isWithin(realCwd, realRoot)) throw instructionRefusal();
+      if (!realRoot || !realCwd || isHomeOrAbove(realRoot, userHome) || !isWithin(realCwd, realRoot)) throw instructionRefusal();
       walkRoot = realRoot; walkCwd = realCwd;
     }
   }
@@ -279,11 +307,11 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
     const shared = plain.workspace;
     if (!shared || typeof shared.path !== "string" || typeof shared.root !== "string" || !isAbsolute(shared.path) || !isAbsolute(shared.root) || shared.path.includes("\0") || shared.root.includes("\0") || !isWithin(resolve(shared.path), resolve(shared.root))) throw instructionRefusal();
     const realRoot = realDirectory(shared.root);
-    if (!realRoot || isHomeOrAbove(realRoot, context.userHome)) throw instructionRefusal();
+    if (!realRoot || isHomeOrAbove(realRoot, userHome)) throw instructionRefusal();
     sources.push({ path: shared.path, tier: "workspace", root: realRoot, required: true });
   }
   if (walkRoot !== null) {
-    for (const walkDir of [...projectWalk(walkCwd, walkRoot!, context.userHome)].reverse()) {
+    for (const walkDir of [...projectWalk(walkCwd, walkRoot!, userHome)].reverse()) {
       sources.push({ path: join(walkDir, brand.instructionsFile), tier: "project", root: walkRoot! });
       sources.push({ path: join(walkDir, brand.projectDirName, brand.instructionsFile), tier: "project", root: walkRoot! });
       sources.push({ path: join(walkDir, localVariantOf(brand.instructionsFile)), tier: "local", root: walkRoot! });
@@ -300,14 +328,14 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
       if (real === undefined) { if (source.required) throw instructionRefusal(); continue; }
       const realRoot = realOrSelf(source.root as string);
       if (!isWithin(real, realRoot)) {
-        report.skippedLinks.push({ path: source.path, reason: "outside-root" });
+        skippedLinks.push({ path: source.path, reason: "outside-root" });
         if (source.required) throw instructionRefusal();
         continue;
       }
-      context.internals.beforeRepositoryRead?.(real);
+      internals.beforeRepositoryRead?.(real);
       const read = readAdmittedFile(real, realRoot);
       if ("refused" in read) {
-        if (read.refused === "outside-root") report.skippedLinks.push({ path: source.path, reason: "outside-root" });
+        if (read.refused === "outside-root") skippedLinks.push({ path: source.path, reason: "outside-root" });
         if (source.required) throw instructionRefusal();
         continue;
       }
@@ -318,14 +346,25 @@ export async function buildInstructions(context: RunHomeBuildContext): Promise<v
       admittedPath = realOrUndefined(source.path) ?? source.path;
     }
     if (text === undefined) continue;
-    const record = (path: string, bytes: string, imported: boolean) => report.instructionFiles!.push({ path, ...(!imported && path !== source.path ? { requestedPath: source.path } : {}), tier: source.tier, sha256: createHash("sha256").update(bytes, "utf8").digest("hex"), imported });
+    const record = (path: string, bytes: string, imported: boolean) => files.push({ path, ...(!imported && path !== source.path ? { requestedPath: source.path } : {}), tier: source.tier, sha256: createHash("sha256").update(bytes, "utf8").digest("hex"), imported });
     record(admittedPath, text, false);
     const expanded = expandImports({ content: text, filePath: source.path, tier: source.tier, projectRoot: source.root, onRead: (path, bytes) => record(path, bytes, true) });
-    report.droppedImports.push(...expanded.dropped);
+    droppedImports.push(...expanded.dropped);
     const body = escapeImportTokens(expanded.content);
     blocks.push(`# ${source.path}\n\n${body.endsWith("\n") ? body : `${body}\n`}`);
   }
-  await writeFile(join(dir, brand.instructionsFile), blocks.join("\n"), { mode: PRIVATE_FILE, flag: "wx" });
+  const text = blocks.join("\n");
+  return { text, digest: createHash("sha256").update(text, "utf8").digest("hex"), files, skippedLinks, droppedImports };
+}
+
+/** Materialization and rule rewriting belong only to run-home construction. */
+export async function buildInstructions(context: RunHomeBuildContext): Promise<void> {
+  const { input, brand, dir, report } = context;
+  const snapshot = await loadInstructionSnapshot(input, { userHome: context.userHome, ...context.internals });
+  (report.instructionFiles ??= []).push(...snapshot.files);
+  report.skippedLinks.push(...snapshot.skippedLinks);
+  report.droppedImports.push(...snapshot.droppedImports);
+  await writeFile(join(dir, brand.instructionsFile), snapshot.text, { mode: PRIVATE_FILE, flag: "wx" });
   // RELATIVE, so the link means the same thing wherever the folder is seen from — including through a
   // resume staging root that links to this file (spec §3.6).
   await symlink(`./${brand.instructionsFile}`, join(dir, "CLAUDE.md"));
