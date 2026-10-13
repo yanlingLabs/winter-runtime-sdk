@@ -20,6 +20,8 @@ export type RunHomeErrorCode =
   | "run_home_store_mismatch"
   /** `cache` or `cache/runs` is a link, or the run folder could not be created privately (spec §3.4.6). */
   | "run_home_link_refused"
+  /** Explicit plain-guidance scope is invalid or its required shared file cannot be admitted. */
+  | "run_home_instruction_refused"
   /** The resume staging dir held more than `projects/` when the proxy came to link the run home in (spec §3.6). */
   | "run_home_staging_not_bare"
   /** A setting source other than `user`, or `user` on a config dir that is not a router-built run folder (spec §3.5). */
