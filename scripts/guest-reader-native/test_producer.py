@@ -172,6 +172,27 @@ class Tests(unittest.TestCase):
             self.assertEqual(op.collect(b'{}'),(b'',b''))
         self.assertEqual(events,['pidfd-ready','reap']);self.assertTrue(op.debt.complete())
 
+    def test_collection_failure_then_confirmed_drain_does_not_erase_uncertainty(self):
+        op,Poll=self.collector_fixture([(b'I',[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[70]).tobytes())],0,None),(b'R'+struct.pack('<I',0),[],0,None),(b'',[],0,None)])
+        def cancel():
+            op.cancelled=True;op.debt.phase='cancelled'
+        op.cancel=cancel
+        real_read=p.os.read;real_close=p.os.close
+        def read(fd,length): return b'' if fd in (24,25) else real_read(fd,length)
+        def close(fd):
+            if fd not in (23,24,25,27,70): real_close(fd)
+        with patch.object(selectors,'DefaultSelector',Poll),patch.object(p.os,'set_blocking'),patch.object(p.os,'read',side_effect=read),patch.object(p.os,'waitpid',return_value=(123,0)),patch.object(p.os,'close',side_effect=close):
+            with self.assertRaisesRegex(p.Refusal,'reader request'):op.collect(b'')
+        self.assertTrue(op.debt.launcher_reaped and op.debt.output_drained and op.debt.descriptor_drained)
+        self.assertTrue(op.debt.uncertain)
+        self.assertEqual(op.debt.phase,'cancelled');self.assertFalse(op.debt.complete())
+
+    def test_cancelled_confirmed_cleanup_is_not_successful_lifetime(self):
+        debt=p.Debt(phase='cancelled',pid=123,wait_status=0)
+        self.assertFalse(p.finish_registered(debt,launcher_reaped=True,
+            output_drained=True,descriptor_drained=True))
+        self.assertEqual(debt.phase,'cancelled')
+
     def test_bounded_capture(self):
         self.assertEqual(p.bounded_capture([b'hello', b'\n']), b'hello\n')
         for chunks in ([b'x' * (p.IO_MAX + 1)], ['wrong']):

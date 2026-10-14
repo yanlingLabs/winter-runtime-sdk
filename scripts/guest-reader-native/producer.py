@@ -97,7 +97,8 @@ class Debt:
     uncertain: bool = False
 
     def complete(self):
-        return (not self.uncertain and self.wait_status is not None
+        return (not self.uncertain and self.phase not in ('cancelled', 'failed-start')
+                and self.wait_status is not None
                 and self.launcher_reaped and self.output_drained
                 and self.descriptor_drained)
 
@@ -577,7 +578,6 @@ class NativeOperation:
             expected_exit = (native_exit >> 8) if native_exit & 0xFF == 0 else 128 + (native_exit & 0x7F)
             require(os.waitstatus_to_exitcode(status) == expected_exit, 'matching launcher/native wait')
             self.debt.output_drained = True
-            self.debt.uncertain = False
             self.recheck(self.root)  # Full held/named runtime bytes after drain.
             return bytes(captures[self.output_fd]), bytes(captures[self.error_fd])
         finally:

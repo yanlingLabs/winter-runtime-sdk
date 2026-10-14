@@ -36,7 +36,9 @@ stderr (16 KiB), native control and launcher exit share an absolute deadline.
 All installed rights are recovered before ancillary refusal; failed descriptor
 closes retain ownership. Cancellation sends `K` or uses the held init pidfd while
 preserving the monitor that emits `R`. A bounded two-second cancellation grace
-does not convert uncertain debt to success. Actual `I`/`R`, matching launcher
+does not convert uncertain debt to success. Uncertainty is monotonic, and a
+cancelled lifetime stays cancelled even when its cleanup is later confirmed.
+Actual `I`/`R`, matching launcher
 wait, pipe EOF and descriptor closure are separate conjunctions. Partial setup
 closes the unreleased gate and boundedly reaps the child; its cleanup is not a
 successful native reader lifetime. Failures retain actual handles and debt.
