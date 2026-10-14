@@ -66,6 +66,9 @@ ERROR_REASONS = (
     'base pin',
     'bootstrap alias occupied',
     'bootstrap alias replaced',
+    'bootstrap pipe drained without failure record',
+    'bootstrap record byte bound',
+    'bootstrap record length',
     'bootstrap source byte bound',
     'bootstrap source descriptors retained',
     'bootstrap source hash/identity',
@@ -93,7 +96,9 @@ ERROR_REASONS = (
     'closed acquisition member',
     'closed acquisition metadata',
     'closed acquisition record required',
+    'closed bootstrap errno',
     'closed bootstrap source path',
+    'closed bootstrap step',
     'closed drain observations',
     'closed external source pins',
     'closed handles',
@@ -111,12 +116,17 @@ ERROR_REASONS = (
     'complete outer mount snapshot',
     'complete request write',
     'confirmed descriptor discharge',
+    'control observation bytes',
     'control source bound',
     'copy shares input inode',
     'data_record',
     'data_record_path',
     'descriptor capacity preflight',
     'descriptor discharge before case deadline',
+    'diagnostic actual owned producer reap',
+    'diagnostic actual producer wait response',
+    'diagnostic owned launcher wait query',
+    'diagnostic stderr bound',
     'directory replaced by leaf',
     'distinct inherited descriptors',
     'distinct noncolliding stdio sources',
@@ -165,6 +175,7 @@ ERROR_REASONS = (
     'held external pin file required',
     'hidden canary leaked',
     'hosted Linux ARM venue required',
+    'independent bootstrap error writer',
     'independent fixture file required',
     'independent init pidfd teardown',
     'independent launcher and pipe teardown',
@@ -235,6 +246,7 @@ ERROR_REASONS = (
     'pidfd observation bound',
     'plain downloader metadata required',
     'pre-bootstrap reap uncertain',
+    'pre-exec failure is not successful lifetime',
     'pre-init unexpected-parent refusal',
     'prefix bound',
     'private Root parent',
@@ -325,12 +337,108 @@ ERROR_CLASSES = ('Refusal', 'Uncertain', 'CaseUncertain', 'ValueError', 'OSError
                  'ProcessLookupError', 'ChildProcessError', 'BrokenPipeError')
 ERRNO_SYMBOLS = ('EACCES', 'EPERM', 'ENOENT', 'EBADF', 'EINVAL', 'EMFILE', 'ENFILE',
                  'ENOMEM', 'ENOSPC', 'EROFS', 'EIO', 'EPIPE', 'ECONNRESET', 'ETIMEDOUT',
-                 'EINTR', 'EAGAIN', 'ENOTDIR', 'ELOOP', 'ESRCH', 'ECHILD', 'EEXIST')
+                 'EINTR', 'EAGAIN', 'ENOTDIR', 'ELOOP', 'ESRCH', 'ECHILD', 'EEXIST', 'ENOSYS', 'EOPNOTSUPP')
 FAILURE_STAGES = ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'fixture',
                   'close', 'source:capture', 'source:copy', 'bootstrap:copy', 'bootstrap:load') + tuple(
     'source:load:' + name for name in ('control', 'producer', 'reader_parent', 'reader_fixture', 'native_cases')) + tuple(
     'case:' + kind + ':' + phase for kind in ('same-owner', 'unexpected-parent', 'parent-exit')
     for phase in ('run', 'verify', 'recheck'))
+
+
+
+# Literal inventory of require labels in SDK f6d88d9a C/header; not output authority.
+NATIVE_STDERR_LABELS = (
+    'bind',
+    'bind flags',
+    'fixture path',
+    'reader Root peer',
+    'reader admitted clone',
+    'reader bounding capabilities',
+    'reader close-on-exec',
+    'reader directory mountpoint',
+    'reader empty readonly cwd',
+    'reader explicit pipe',
+    'reader explicit pipe-only envelope',
+    'reader file mountpoint',
+    'reader immutable exec',
+    'reader immutable file',
+    'reader independent primary gid',
+    'reader independent uid',
+    'reader inherited descriptor',
+    'reader monitor control',
+    'reader monitor control copy',
+    'reader monitor death',
+    'reader monitor init',
+    'reader monitor init copy',
+    'reader monitor originals',
+    'reader monotonic deadline',
+    'reader mount attach',
+    'reader namespace init',
+    'reader namespace kill',
+    'reader namespace pidfd',
+    'reader namespaces',
+    'reader no new privileges',
+    'reader parent pidfd',
+    'reader pipe descriptor',
+    'reader pipe flags',
+    'reader private propagation',
+    'reader private temporary files',
+    'reader readonly skeleton',
+    'reader receipt type',
+    'reader recursive mount flags',
+    'reader resource ceiling',
+    'reader root',
+    'reader seccomp',
+    'reader selected directory',
+    'reader selected workspace group',
+    'reader service death',
+    'reader service pidfd',
+    'reader setup monitor death',
+    'reader shared identity',
+    'reader skeleton',
+    'reader skeleton ancestor',
+    'reader source identity',
+    'reader surviving pipe',
+    'reader view ancestor',
+    'reader view cwd',
+    'reader view ownership',
+    'reader view root',
+    'reader zero capabilities',
+    'seccomp',
+)
+PREINIT_KEYS = ('controlObserved', 'controlBytes', 'controlTag', 'controlRights', 'controlEof', 'stderrBytes', 'stderrEof', 'nativeClassification', 'nativeLabel', 'nativeErrno', 'bootstrapBytes', 'bootstrapRecordObserved', 'bootstrapStep', 'bootstrapErrno', 'bootstrapEof', 'bootstrapClassification', 'launcherExitCode', 'producerExitCode', 'diagnosticsComplete')
+BOOTSTRAP_STEP_NAMES = ('child_setup','gate','root_guard','stdio','unshare','propagation',
+                        'chroot','descriptor_envelope','exec')
+DIAGNOSTIC_ERRNOS = (0,1,2,4,5,9,10,11,12,13,17,20,22,23,24,28,30,32,38,40,95,110)
+
+
+def preinit_record(chain):
+    """Copy only fully validated closed observations. Missing/malformed stays unknown."""
+    raw=None
+    for item in chain:
+        observed=getattr(getattr(item,'handles',None),'preinit_diagnostics',None)
+        if observed is not None:raw=observed;break
+    if type(raw) is not dict or set(raw)!=set(PREINIT_KEYS):return {'available':False}
+    for name in ('controlObserved','controlEof','stderrEof','bootstrapRecordObserved','bootstrapEof','diagnosticsComplete'):
+        if type(raw[name]) is not bool:return {'available':False}
+    for name,limit in (('controlBytes',32),('controlRights',32),('stderrBytes',4097),('bootstrapBytes',9)):
+        if type(raw[name]) is not int or not 0<=raw[name]<=limit:return {'available':False}
+    for name in ('nativeErrno','bootstrapErrno'):
+        if type(raw[name]) is not int or raw[name] not in DIAGNOSTIC_ERRNOS:return {'available':False}
+    for name in ('launcherExitCode','producerExitCode'):
+        if raw[name] is not None and (type(raw[name]) is not int or not -64<=raw[name]<=255):return {'available':False}
+    choices={'controlTag':('I','R','EOF','other','unknown'),
+             'nativeClassification':('empty','audited_perror','unrecognized','overflow'),
+             'nativeLabel':NATIVE_STDERR_LABELS+('unknown',),
+             'bootstrapStep':BOOTSTRAP_STEP_NAMES+('unknown',),
+             'bootstrapClassification':('empty','record','invalid','overflow')}
+    for name,values in choices.items():
+        if type(raw[name]) is not str or raw[name] not in values:return {'available':False}
+    result={name:raw[name] for name in PREINIT_KEYS};result['available']=True
+    for name in ('nativeErrno','bootstrapErrno'):
+        symbol=errno.errorcode.get(raw[name])
+        result[name+'Symbol']=symbol if symbol in ERRNO_SYMBOLS else 'unknown'
+    return result
 
 
 def failure_record(error, *, stage='preflight'):
@@ -360,6 +468,7 @@ def failure_record(error, *, stage='preflight'):
     return {'readerCaseSetPassed':False, 'stage':stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown',
             'reason':reason, 'exceptionClass':name, 'errnoSymbol':symbol,
             'causeClass':cause_name, 'causeReason':cause_reason, 'causeErrnoSymbol':cause_errno,
+            'preInitDiagnostics':preinit_record(chain),
             'nativeCleanupConfirmed':False, 'configEffectProven':False,
             'vmExecutionVerified':False, 'productionActivation':False}
 

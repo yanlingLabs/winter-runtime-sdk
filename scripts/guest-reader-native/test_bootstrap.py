@@ -173,3 +173,52 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result['stage'],'source:load:native_cases')
         self.assertEqual(result['causeReason'],'outer namespace changed while live')
         self.assertEqual(result['reason'],'reader_wrapper_uncertain')
+
+class PreinitProjectionTests(unittest.TestCase):
+    def observation(self):
+        return {'controlObserved':True,'controlBytes':0,'controlTag':'EOF','controlRights':0,
+            'controlEof':True,'stderrBytes':0,'stderrEof':True,'nativeClassification':'empty',
+            'nativeLabel':'unknown','nativeErrno':0,'bootstrapBytes':8,'bootstrapRecordObserved':True,
+            'bootstrapStep':'exec','bootstrapErrno':2,'bootstrapEof':True,'bootstrapClassification':'record',
+            'launcherExitCode':78,'producerExitCode':0,'diagnosticsComplete':True}
+
+    def project(self,record):
+        item=SimpleNamespace(handles=SimpleNamespace(preinit_diagnostics=record))
+        return b.preinit_record([item])
+
+    def test_fixed_record_projection_preserves_observation_but_never_grants_success(self):
+        record=self.observation();result=self.project(record)
+        self.assertTrue(result['available'])
+        self.assertEqual(result['bootstrapErrnoSymbol'],'ENOENT')
+        self.assertEqual(result['launcherExitCode'],78)
+        self.assertNotIn('execConfirmed',result);self.assertNotIn('nativeCleanupConfirmed',result)
+        record['nativeLabel']='reader namespaces';record['nativeClassification']='audited_perror';record['nativeErrno']=1
+        self.assertEqual(self.project(record)['nativeErrnoSymbol'],'EPERM')
+
+    def test_unknown_and_type_confused_observations_never_escape_projection(self):
+        changes={'controlBytes':33,'controlRights':True,'controlEof':1,'stderrBytes':4098,
+            'nativeClassification':'secret','nativeLabel':'/private/secret','nativeErrno':4095,
+            'bootstrapBytes':10,'bootstrapStep':'/private/secret','bootstrapErrno':True,
+            'bootstrapClassification':'secret','launcherExitCode':256,'producerExitCode':False}
+        for key,value in changes.items():
+            with self.subTest(key=key):
+                record=self.observation();record[key]=value
+                self.assertEqual(self.project(record),{'available':False})
+        record=self.observation();record['rawStderr']='/private/secret'
+        self.assertEqual(self.project(record),{'available':False})
+        record=self.observation();del record['diagnosticsComplete']
+        self.assertEqual(self.project(record),{'available':False})
+        self.assertEqual(b.preinit_record([]),{'available':False})
+
+    def test_native_label_projection_matches_hash_checked_case_source_inventory(self):
+        import native_cases
+        self.assertEqual(b.NATIVE_STDERR_LABELS,tuple(sorted(native_cases.STDERR_LABELS)))
+        for value in ('.','mode=0755,size=16m','mode=1777,size=8m'):
+            self.assertNotIn(value,b.NATIVE_STDERR_LABELS)
+        for value in ('reader root','reader skeleton','reader private temporary files'):
+            self.assertIn(value,b.NATIVE_STDERR_LABELS)
+
+    def test_opaque_pipe_contract_matches_the_actual_producer_module(self):
+        import producer
+        self.assertEqual(b.BOOTSTRAP_STEP_NAMES,producer.BOOTSTRAP_STEPS)
+        self.assertEqual(b.DIAGNOSTIC_ERRNOS,producer.BOOTSTRAP_ERRNOS)

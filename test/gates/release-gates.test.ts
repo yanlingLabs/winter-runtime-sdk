@@ -134,11 +134,11 @@ describe("the release workflow", () => {
   test("the native reader source workflow runs only injected and temporary DATA tests", () => {
     const source = parseWorkflow("cowork-reader-native-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-native/**", "test/guest/reader-harness-consumer.test.ts", ".github/workflows/cowork-reader-native-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-readiness"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-exec-diagnostics"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(source.jobs).toEqual({
       "portable-data": {
-        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-readiness'",
+        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-exec-diagnostics'",
         "runs-on": "ubuntu-24.04-arm", "timeout-minutes": 5,
         steps: [
           { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
@@ -154,7 +154,7 @@ describe("the release workflow", () => {
     expect(source.permissions).toEqual({ contents: "read", actions: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["reader-only"]);
     const job = source.jobs?.["reader-only"], steps = job?.steps ?? [];
-    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-readiness' && github.run_attempt == '1'");
+    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-exec-diagnostics' && github.run_attempt == '1'");
     expect(steps.length).toBe(6);
     for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
     expect(steps[0]?.with).toEqual({ ref: "4d5dfcec9454d33e8423713491ced08b58669f58", path: "origins/base", "persist-credentials": false });
@@ -167,8 +167,8 @@ describe("the release workflow", () => {
     expect(text).not.toContain("_SHA_PENDING");
     expect(text).toContain("fs.chmodSync(privateDir,0o700)");
     expect(text).toContain("65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99");
-    expect(text).toContain("9abb320aa7297b6fc511580a613ba2dc497500fc071c5cd6b49926f24d573f0d");
-    expect(text).toContain("4acea09cedb207a303d81df41def3543636ea04bb8f40fbce790e3dec59b1236");
+    expect(text).toContain("5b2196bc43914ff2651b4bb2fcae38e754fe8ce39cf5537a9a9f0f9e62c2b02f");
+    expect(text).toContain("a0005ea7d68592dd54231d49a0767a71148122d9301d9d073bb39769d7710e92");
     expect(text).toContain("sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B");
     expect(text).toContain("checked._compile(raw.toString('utf8'),source)");
     expect(text).toContain("exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module");

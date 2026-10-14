@@ -96,9 +96,11 @@ class ReadinessTests(unittest.TestCase):
         reader, writer = self.pipe()
         high_writer = self.high(writer)
         h = cases.Handles(123, 0, None, stdin=high_writer)
+        h.received_handles = [high_writer]
         self.assertEqual(cases.LinuxEffects().send_request(h, b'fixed request', time.monotonic() + 1), 13)
         self.fds.remove(high_writer)  # send_request closed its own write endpoint.
         self.assertIsNone(h.stdin)
+        self.assertEqual(h.received_handles, [])
         self.assertEqual(os.read(reader, 13), b'fixed request')
         self.close(writer)
         self.assertEqual(os.read(reader, 1), b'')

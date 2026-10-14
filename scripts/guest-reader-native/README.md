@@ -101,3 +101,23 @@ checkout; the compile DATA pin, acquisition and intake remain pinned to merged
 4d5dfcec. Artifact, C, runtime roles, libraries and downloader are unchanged.
 Fresh source/whole-chain review and a new one-run admission are required; the
 failed attempt grants no retry, profile activation, guided turn or VM proof.
+
+The next SOURCE successor preserves both failed hosted attempts and adds a
+registered CLOEXEC exec-error pipe. The fixed eight-byte record contains only a
+closed bootstrap step index and errno; the child writes it on pre-exec refusal
+and exits 78. The writer never enters C argv or survives successful exec. EOF alone
+also follows process death and is not exec proof. The intermediate H packet now
+transfers exactly six descriptors: control, stdin writer, stdout reader, stderr
+reader, launcher pidfd and bootstrap-error reader. Normal observations drain this
+extra pipe within the original deadline; a failure record cannot become success.
+
+Pre-I failure observations retain control packet size/tag/rights/EOF, bounded
+4 KiB stderr classified only by the pinned C/header's exact static require labels
+and closed errno text, and only actually reaped producer/launcher statuses. No raw
+stderr or bootstrap bytes appear in result.json. The diagnostic projection accepts
+an exact bounded typed schema; unknown or malformed snapshots remain unavailable.
+No synthetic R, reset of uncertainty, changed deadline or cleanup success follows.
+The C/table audit corrected three nested-call literals before this source freeze;
+C, the compiled packet, libraries and acquisition/downloader are unchanged.
+Another hosted attempt requires exact source/whole-chain review and fresh one-run
+admission; no retry or activation is granted by these SOURCE changes.

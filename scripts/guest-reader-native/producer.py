@@ -181,14 +181,52 @@ def validate_stdio(pipe_fds, pass_fds, *, get_stat=os.fstat, get_flags=None):
                 'stdio access direction')
 
 
-def child_bootstrap(root_fd, argv, pass_fds, pipe_fds):
+
+BOOTSTRAP_STEPS = ('child_setup', 'gate', 'root_guard', 'stdio', 'unshare',
+                   'propagation', 'chroot', 'descriptor_envelope', 'exec')
+BOOTSTRAP_ERRNOS = (0, 1, 2, 4, 5, 9, 10, 11, 12, 13, 17, 20, 22, 23, 24,
+                    28, 30, 32, 38, 40, 95, 110)
+
+
+def bootstrap_record(step, code):
+    require(type(step) is int and 1 <= step <= len(BOOTSTRAP_STEPS), 'closed bootstrap step')
+    require(type(code) is int and code in BOOTSTRAP_ERRNOS, 'closed bootstrap errno')
+    return struct.pack('<II', step, code)
+
+
+def decode_bootstrap_record(raw):
+    require(type(raw) is bytes and len(raw) in (0, 8), 'bootstrap record length')
+    if not raw:return {'recordObserved':False,'step':'unknown','errno':0}
+    step,code=struct.unpack('<II',raw)
+    bootstrap_record(step,code)
+    return {'recordObserved':True,'step':BOOTSTRAP_STEPS[step-1],'errno':code}
+
+
+def emit_bootstrap_failure(fd, step, error):
+    # One atomic nonblocking PIPE_BUF-sized write. Refusal/death cannot invent EOF exec proof.
+    code=getattr(error,'errno',None)
+    if type(code) is not int:
+        code=ctypes.get_errno() if step in (5,6) else 0
+    if code not in BOOTSTRAP_ERRNOS:code=0
+    return os.write(fd,bootstrap_record(step,code)) == 8
+
+
+def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None):
     """Actual privileged effects. Not called by source/portable tests.
 
     Python/libc are trusted parent tooling, not measured packet runtime objects.
     No PID namespace precedes C's SO_PEERCRED/original-parent check.
     """
+    def mark(index):
+        ctypes.set_errno(0)
+        if stage is not None:stage(index)
+    mark(3)
     root_linux()
+    if error_fd is not None:
+        require(type(error_fd) is int and error_fd >= 3 and error_fd not in pass_fds
+                and error_fd not in pipe_fds and error_fd != root_fd, 'independent bootstrap error writer')
     require(len(set(pass_fds)) == len(pass_fds), 'explicit child fd inventory')
+    mark(4)
     validate_stdio(pipe_fds, pass_fds)
     for target, inherited in enumerate(pipe_fds):
         os.dup2(inherited, target)
@@ -197,22 +235,27 @@ def child_bootstrap(root_fd, argv, pass_fds, pipe_fds):
     libc.unshare.restype = ctypes.c_int
     libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
     libc.mount.restype = ctypes.c_int
+    mark(5)
     require(libc.unshare(0x00020000) == 0, 'private bootstrap mount namespace')
+    mark(6)
     require(libc.mount(None, b'/', None, 0x4000 | 0x40000, None) == 0,
             'private bootstrap propagation')
+    mark(7)
     os.fchdir(root_fd)
     os.chroot('.')
     os.chdir('/')
     # This filesystem was independently sealed before fork: captured loader and
     # six libraries only, never the runner's /lib or /etc/ld.so.preload/cache.
-    keep = sorted(set(pass_fds))
+    mark(8)
+    keep = sorted(set(pass_fds) | ({error_fd} if error_fd is not None else set()))
     begin = 3
     for fd in keep:
         require(fd >= begin, 'child fd ordering')
         os.closerange(begin, fd)
-        os.set_inheritable(fd, True)
+        os.set_inheritable(fd, fd != error_fd)
         begin = fd + 1
     os.closerange(begin, 1 << 20)
+    mark(9)
     os.execve(argv[0], argv, ENV)
     raise Refusal('exec returned')
 
@@ -314,6 +357,8 @@ class NativeOperation:
         self.captures = {}
         self.eof_fds = set()
         self.control_eof = False
+        self.bootstrap_error_fd = None
+        self.bootstrap_error_bytes = bytearray()
 
     def start(self):
         try:
@@ -392,11 +437,12 @@ class NativeOperation:
         a, b = pair_factory(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.control, self.peer = a, b
         pipes = []
-        for _ in range(4):
+        for _ in range(5):
             pair = os.pipe2(os.O_CLOEXEC)
             self.fds.update(pair)
             pipes.append(pair)
-        stdin, stdout, stderr, gate = pipes
+        stdin, stdout, stderr, gate, bootstrap_error = pipes
+        os.set_blocking(bootstrap_error[1], False)
         self.fds.update(fd for pair in pipes for fd in pair)
         reader_fd = self.root.files['artifacts/instructionReader'][0]
         libraries = tuple((self.root.files[path.lstrip('/')][0], path) for path in LIBRARIES)
@@ -407,25 +453,33 @@ class NativeOperation:
         self.recheck(self.root)  # Immediately before owned fork/bootstrap/exec.
         pid = os.fork()
         if pid == 0:
+            step=[1]
+            def stage(index):step[0]=index
             try:
                 a.close()
+                os.close(bootstrap_error[0])
                 os.close(gate[1])
+                stage(2)
                 require(os.read(gate[0], 1) == b'G', 'registered child start gate')
                 os.close(gate[0])
                 child_bootstrap(root_fd, argv, pass_fds,
-                                (stdin[0], stdout[1], stderr[1]))
-            except BaseException:
-                os._exit(78)  # Fixed code; no paths/request/metadata on stderr.
+                                (stdin[0], stdout[1], stderr[1]),
+                                error_fd=bootstrap_error[1], stage=stage)
+            except BaseException as error:
+                try: emit_bootstrap_failure(bootstrap_error[1], step[0], error)
+                except BaseException: pass  # Unknown observation; never claim exec/cleanup.
+                os._exit(78)
         # Child cannot bootstrap until its PID/pidfd are registered here.
         self.debt.pid = pid
         self.pidfd = os.pidfd_open(pid, 0)
         self.fds.add(self.pidfd)
         self.debt.phase = 'running'
         b.close()
-        for fd in (stdin[0], stdout[1], stderr[1], gate[0]):
+        for fd in (stdin[0], stdout[1], stderr[1], gate[0], bootstrap_error[1]):
             os.close(fd)
             self.fds.remove(fd)
         self.input_fd, self.output_fd, self.error_fd = stdin[1], stdout[0], stderr[0]
+        self.bootstrap_error_fd = bootstrap_error[0]
         require(os.write(gate[1], b'G') == 1, 'start gate write')
         self.gate_released = True
         os.close(gate[1])
@@ -495,6 +549,9 @@ class NativeOperation:
                 poll.register(self.control, selectors.EVENT_READ, 'control')
             if request is not None and self.init_pidfd is not None:
                 poll.register(self.input_fd, selectors.EVENT_WRITE, 'input')
+            if self.bootstrap_error_fd is not None and self.bootstrap_error_fd not in self.eof_fds:
+                os.set_blocking(self.bootstrap_error_fd,False)
+                poll.register(self.bootstrap_error_fd,selectors.EVENT_READ,'bootstrap')
             for fd in captures:
                 if fd not in self.eof_fds:
                     os.set_blocking(fd, False)
@@ -514,6 +571,13 @@ class NativeOperation:
                             poll.unregister(self.input_fd)
                             os.close(self.input_fd)
                             self.fds.remove(self.input_fd)
+                    elif key.data == 'bootstrap':
+                        raw=os.read(key.fd,9)
+                        if not raw:
+                            poll.unregister(key.fd);self.eof_fds.add(key.fd)
+                        else:
+                            self.bootstrap_error_bytes.extend(raw)
+                            require(len(self.bootstrap_error_bytes)<=8,'bootstrap record byte bound')
                     elif key.data == 'pipe':
                         data = os.read(key.fd, 65536)
                         if not data:
@@ -573,6 +637,7 @@ class NativeOperation:
             require(waited == self.debt.pid, 'launcher not reaped after native drain')
             self.debt.launcher_reaped = True
             require(self.debt.wait_status is not None, 'missing native reap receipt')
+            require(not self.bootstrap_error_bytes,'pre-exec failure is not successful lifetime')
             native_exit = parse_receipt(b'R' + struct.pack('<I', self.debt.wait_status), ())[1]
             # Compare terminal status directly; C monitor returns namespace-init exit.
             expected_exit = (native_exit >> 8) if native_exit & 0xFF == 0 else 128 + (native_exit & 0x7F)

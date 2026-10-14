@@ -1,7 +1,7 @@
 name: reader-native-source
 on:
   push:
-    branches: [cowork/reader-linux-native-harness, cowork/reader-native-wrapper, cowork/reader-hosted-readiness]
+    branches: [cowork/reader-linux-native-harness, cowork/reader-native-wrapper, cowork/reader-hosted-exec-diagnostics]
     paths:
       - scripts/guest-reader-native/**
       - test/guest/reader-harness-consumer.test.ts
@@ -17,7 +17,7 @@ permissions:
   contents: read
 jobs:
   portable-data:
-    if: github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-readiness'
+    if: github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-exec-diagnostics'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:

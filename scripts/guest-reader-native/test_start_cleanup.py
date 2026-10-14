@@ -59,6 +59,7 @@ class InjectedEffects:
         self.fail_socket = False
         self.fail_pipe_at = None
         self.fail_fork = False
+        self.fail_nonblocking = False
         self.fail_pidfd = False
         self.gate_write = 0
         self.gate_write_error = None
@@ -120,10 +121,16 @@ class InjectedEffects:
         self.live_fds.update(pair)
         return pair
 
+    def set_blocking(self, fd, value):
+        self.effect('nonblocking-error-writer', fd)
+        self.case.assertEqual((fd,value),(49,False))
+        self.case.assertIn(fd,self.operation.fds)
+        if self.fail_nonblocking:raise self.failure
+
     def fork(self):
         self.effect('fork')
         self.case.assertEqual(self.operation.fds, self.live_fds)
-        self.case.assertEqual(len(self.live_fds), 8)
+        self.case.assertEqual(len(self.live_fds), 10)
         if self.fail_fork:
             raise self.failure
         self.child_pid = 123  # Parent branch only; never runs a child/bootstrap.
@@ -138,15 +145,15 @@ class InjectedEffects:
         self.case.assertFalse(self.gate_opened, 'child must still be gate-blocked')
         if self.fail_pidfd:
             raise self.failure
-        self.live_fds.add(48)
-        self.allocated_fds.add(48)
-        return 48
+        self.live_fds.add(60)
+        self.allocated_fds.add(60)
+        return 60
 
     def write(self, fd, data):
         self.effect('gate-write', fd)
         self.case.assertEqual((fd, data), (self.gate_writer, b'G'))
         self.case.assertEqual(self.operation.debt.pid, self.child_pid)
-        self.case.assertIn(48, self.operation.fds)
+        self.case.assertIn(60, self.operation.fds)
         if self.gate_write_error is not None:
             raise self.gate_write_error
         if self.gate_write == 1:
@@ -195,7 +202,7 @@ class InjectedEffects:
                 (p.os, 'getuid', lambda: 0), (p.os, 'geteuid', lambda: 0),
                 (p.os, 'fstat', self.fstat), (p.os, 'scandir', self.scandir),
                 (p.socket, 'socketpair', self.socketpair), (p.os, 'pipe2', self.pipe2),
-                (p.os, 'fork', self.fork), (p.os, 'pidfd_open', self.pidfd_open),
+                (p.os, 'set_blocking', self.set_blocking), (p.os, 'fork', self.fork), (p.os, 'pidfd_open', self.pidfd_open),
                 (p.os, 'write', self.write), (p.os, 'close', self.close),
                 (p.os, 'waitpid', self.waitpid), (p.time, 'monotonic', self.monotonic),
                 (p.time, 'sleep', self.sleep), (p, 'child_bootstrap', self.forbidden),
@@ -245,7 +252,7 @@ class SetupCleanupTests(unittest.TestCase):
         self.assertEqual(table.wait_calls, [])
 
     def test_each_partial_pipe_allocation_closes_all_previously_registered_resources(self):
-        for fail_at in range(4):
+        for fail_at in range(5):
             with self.subTest(pipe=fail_at):
                 table = InjectedEffects(self)
                 table.fail_pipe_at = fail_at
@@ -257,12 +264,28 @@ class SetupCleanupTests(unittest.TestCase):
                 self.assertIsNone(debt.pid)
                 self.assertFalse(any(kind == 'fork' for kind, _ in table.events))
 
+    def test_error_writer_nonblocking_setup_failure_closes_registered_pipe(self):
+        table=InjectedEffects(self);table.fail_nonblocking=True
+        self.fail_with_original(table)
+        self.assert_failed_debt(table,confirmed=True)
+        self.assertFalse(table.live_fds)
+        self.assertFalse(any(kind=='fork' for kind,_ in table.events))
+
+    def test_successful_start_hands_off_read_end_and_closes_writer_before_gate(self):
+        table=InjectedEffects(self);table.gate_write=1
+        debt,op=table.start()
+        self.assertEqual(op.bootstrap_error_fd,48)
+        self.assertIn(48,op.fds);self.assertNotIn(49,op.fds)
+        self.assertLess(table.events.index(('fd-close',49)),table.events.index(('gate-write',47)))
+        self.assertFalse(debt.complete());self.assertFalse(debt.launcher_reaped)
+        self.assertTrue(op.gate_released)
+
     def test_fork_failure_closes_all_prechild_resources(self):
         table = InjectedEffects(self)
         table.fail_fork = True
         self.fail_with_original(table)
         debt = self.assert_failed_debt(table, confirmed=True)
-        self.assertEqual(len(table.allocated_fds), 8)
+        self.assertEqual(len(table.allocated_fds), 10)
         self.assertFalse(table.live_fds)
         self.assertTrue(all(sock.closed for sock in table.sockets))
         self.assertIsNone(debt.pid)
