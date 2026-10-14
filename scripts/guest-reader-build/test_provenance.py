@@ -26,6 +26,21 @@ def elf(needed=(),interpreter=None,rpath=False):
     if interpreter:
         raw=interpreter.encode()+b'\0';struct.pack_into('<IIQQQQQQ',data,176,3,4,600,0,0,len(raw),len(raw),1);data[600:600+len(raw)]=raw
     return bytes(data)
+def standalone_pair(flags=15):
+    body=bytes(64);payload=body+struct.pack('<QIIIIII',64,0,52,0,52,0,flags)+b'\n---- Bun! ----\n';strings=b'\0.bun\0.shstrtab\0'
+    def image(compiled):
+        data=bytearray(3072);data[:7]=b'\x7fELF\x02\x01\x01'
+        struct.pack_into('<HHI',data,16,3,183,1);struct.pack_into('<QQ',data,32,64,2048);struct.pack_into('<HHHHHH',data,52,64,56,1,64,3,2)
+        struct.pack_into('<IIQQQQQQ',data,64,1,6,0,0x400000,0,1536,1536,4096)
+        section_at=1024 if compiled else 512;section_size=8+len(payload) if compiled else 8
+        struct.pack_into('<IIQQQQIIQQ',data,2112,1,1,3,0x400000+section_at,section_at,section_size,0,0,8,0)
+        struct.pack_into('<IIQQQQIIQQ',data,2176,6,3,0,0,1792,len(strings),0,0,1,0);data[1792:1792+len(strings)]=strings
+        if compiled:struct.pack_into('<Q',data,512,0x400000+1024);struct.pack_into('<Q',data,1024,len(payload));data[1032:1032+len(payload)]=payload
+        return bytes(data)
+    return image(False),image(True)
+def decode_standalone_pair(base,output):
+    with tempfile.TemporaryFile() as bf,tempfile.TemporaryFile() as of:
+        bf.write(base);bf.flush();of.write(output);of.flush();return p.standalone_flags(of.fileno(),bf.fileno())
 class PacketTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='winter-reader-data-test-',dir=Path('/var/tmp').resolve());self.root=Path(self.temp.name).resolve()
@@ -136,8 +151,8 @@ class PacketTests(unittest.TestCase):
     def test_actual_builder_injected_compiler_refusal_retains_measured_stage(self):
         tools={}
         for name in ('compiler','base','cc'):
-            path=self.root/name;path.write_bytes(b'inert tool bytes');tools[name]=path
-        pin={**p.BASE,'executableSha256':p.digest(b'inert tool bytes')};calls=[]
+            path=self.root/name;path.write_bytes(standalone_pair()[0]);tools[name]=path
+        pin={**p.BASE,'executableSha256':p.digest(standalone_pair()[0])};calls=[]
         def refusal(*args):calls.append(args);raise p.Refusal('injected compiler refusal')
         with self.assertRaisesRegex(p.Refusal,'injected compiler refusal'):
             b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=refusal,heads=self.heads,base_pin=pin,builder_root=self.builder)
@@ -148,17 +163,23 @@ class PacketTests(unittest.TestCase):
         import shlex
         tools={}
         for name in ('compiler','base','cc'):
-            path=self.root/name;path.write_bytes(b'inert tool bytes');tools[name]=path
-        pin={**p.BASE,'executableSha256':p.digest(b'inert tool bytes')};calls=[]
+            path=self.root/name;path.write_bytes(standalone_pair()[0]);tools[name]=path
+        pin={**p.BASE,'executableSha256':p.digest(standalone_pair()[0])};calls=[]
         def runner(argv,cwd,timeout,pass_fds):
             calls.append(argv)
             if argv[-1]=='--version':return (b'1.3.14\n' if len(calls)==1 else b'FixtureCC 1.0\n'),b''
-            if '--winter-reader-build-option-must-refuse' in argv:raise b.CommandFailure(1,b'',b'error: Invalid flag: --winter-reader-build-option-must-refuse\n')
             if 'build' in argv:
-                put(self.output,'artifacts/instructionReader',elf())
+                for negative,positive in zip(p.AUTOLOAD_FLAGS,b.POSITIVE_AUTOLOAD):
+                    if negative in argv and positive in argv:raise b.CommandFailure(1,b'',('error: Cannot use both '+positive+' and '+negative+'\n').encode())
+                if '--allow-unresolved=*' in argv:raise b.CommandFailure(1,b'',b'error: --reject-unresolved and --allow-unresolved cannot be used together\n')
+                opaque=any(str(arg).endswith('/opaque-import.ts') for arg in argv)
+                if opaque and '--reject-unresolved' in argv:raise b.CommandFailure(1,b'',b.opaque_diagnostic(Path(next(str(arg) for arg in argv if str(arg).endswith('/opaque-import.ts')))))
+                outfile=Path(argv[argv.index('--outfile')+1]);metafile=Path(next(arg.split('=',1)[1] for arg in argv if arg.startswith('--metafile=')))
+                nibble=15 if all(flag in argv for flag in p.AUTOLOAD_FLAGS) else 0 if all(flag in argv for flag in b.POSITIVE_AUTOLOAD) else 12
+                outfile.write_bytes(standalone_pair(nibble)[1])
                 names=['source/runtime/'+p.READER_ENTRY,'source/sdk/packages/sdk/src/index.ts']
-                data={'inputs':{str(self.output/name):{'bytes':(self.output/name).stat().st_size} for name in names},'outputs':{str(self.output/'artifacts/instructionReader'):{}}}
-                put(self.output,'artifacts/instructionReader.metafile.json',json.dumps(data).encode())
+                data={'inputs':{str(self.output/name):{'bytes':(self.output/name).stat().st_size} for name in names},'outputs':{str(outfile):{}}}
+                metafile.write_bytes(json.dumps(data).encode())
             else:
                 put(self.output,'artifacts/instructionReaderLauncher',elf())
                 source=str(self.output/'source/overlay'/p.C_SOURCE)
@@ -170,7 +191,7 @@ class PacketTests(unittest.TestCase):
         return result,calls
     def test_actual_builder_synthetic_outputs_bind_closed_receipt(self):
         result,calls=self.synthetic_build()
-        self.assertEqual(len(calls),5);self.assertEqual(set(result['artifacts']),{'instructionReader','instructionReaderLauncher'})
+        self.assertEqual(len(calls),13);self.assertEqual(set(result['artifacts']),{'instructionReader','instructionReaderLauncher'})
         self.assertNotIn(str(self.root),p.canonical(result));self.assertFalse(result['linuxExecutionVerified']);self.assertFalse(result['base']['archiveAcquisitionVerified'])
         b.check_inputs(self.output,json.loads((self.output/'inputs.json').read_bytes()))
     def test_staged_base_tamper_refuses_after_injected_compilation(self):
@@ -219,16 +240,48 @@ class PacketTests(unittest.TestCase):
         put(self.builder,b.BUILDER_FILES[0],b'changed builder')
         with self.assertRaisesRegex(p.Refusal,'git'):self.prepare()
         self.assertFalse(self.output.exists())
-    def test_unknown_flag_probe_rejects_unrelated_error_and_output(self):
-        self.output.mkdir();(self.output/'stage').mkdir();recipe=b.compiler_recipe(self.output)
-        for stderr in (b'missing dependency: --winter-reader-build-option-must-refuse',b'error: Invalid flag: --a-legitimate-flag',b'compiler failed'):
-            def runner(*args):raise b.CommandFailure(1,b'',stderr)
-            with self.assertRaisesRegex(p.Refusal,'refusal mismatch'):b.unknown_flag_probe(runner,123,self.output,recipe)
-            (self.output/'stage/negative').rmdir()
-        def runner(*args):
-            put(self.output,'stage/negative/reader',b'inert output')
-            raise b.CommandFailure(1,b'',b'error: Invalid flag: --winter-reader-build-option-must-refuse')
-        with self.assertRaisesRegex(p.Refusal,'created output'):b.unknown_flag_probe(runner,123,self.output,recipe)
+    def test_semantic_negative_rejects_unrelated_errors_and_records_before_refusal(self):
+        self.output.mkdir();(self.output/'stage').mkdir();scratch=self.root/'scratch';scratch.mkdir();recipe=b.compiler_recipe(self.output)
+        expected='error: Cannot use both --compile-autoload-bunfig and --no-compile-autoload-bunfig'
+        def runner(*args):raise b.CommandFailure(1,b'',(expected+'\nerror: unrelated failure\n').encode())
+        record,stderr,_=b.run_measurement(runner,123,self.output,scratch,'wrong',recipe)
+        with self.assertRaisesRegex(p.Refusal,'diagnostic'):b.exact_negative(record,stderr,expected)
+        observed=json.loads((self.output/'diagnostics/wrong.json').read_bytes())
+        self.assertEqual(observed['stderrSha256'],p.digest(stderr));self.assertEqual(observed['outputs'],{})
+        self.assertFalse((self.output/'receipt.json').exists())
+    def test_semantic_negative_rejects_zero_or_created_output(self):
+        line='error: fixed conflict';record={'exitCode':0,'stdoutBytes':0,'outputs':{}}
+        with self.assertRaises(p.Refusal):b.exact_negative(record,(line+'\n').encode(),line)
+        record={'exitCode':1,'stdoutBytes':0,'outputs':{'instructionReader':{'sha256':'x','bytes':1}}}
+        with self.assertRaises(p.Refusal):b.exact_negative(record,(line+'\n').encode(),line)
+    def test_conflict_exact_bytes_and_nonstandard_exit_refuse(self):
+        line='error: fixed conflict';record={'exitCode':1,'stdoutBytes':0,'outputs':{}}
+        b.exact_negative(record,(line+'\n').encode(),line)
+        for wrong in ((line+' \n').encode(),(' '+line+'\n').encode(),(line+'\n\n').encode(),(line+'\nerror: unrelated\n').encode()):
+            with self.assertRaises(p.Refusal):b.exact_negative(record,wrong,line)
+        for code in (-6,2,True):
+            with self.assertRaises(p.Refusal):b.exact_negative({**record,'exitCode':code},(line+'\n').encode(),line)
+    def test_parsed_control_hash_mismatch_refuses(self):
+        directory=self.root/'control';directory.mkdir();base,output=standalone_pair();(directory/'instructionReader').write_bytes(output)
+        fd=os.open(self.root/'base',os.O_WRONLY|os.O_CREAT,0o600);os.write(fd,base);os.close(fd);fd=os.open(self.root/'base',os.O_RDONLY)
+        try:
+            with self.assertRaisesRegex(p.Refusal,'hash mismatch'):b.parsed_output({'exitCode':0,'outputs':{'instructionReader':{'sha256':'0'*64}}},directory,fd,15)
+        finally:os.close(fd)
+    def test_opaque_fixed_envelope_and_nonstandard_exit_refuse(self):
+        opaque=self.root/'opaque-import.ts';record={'exitCode':1,'stdoutBytes':0,'outputs':{}};stderr=b.opaque_diagnostic(opaque)
+        b.exact_opaque_negative(record,stderr,opaque)
+        for wrong in (stderr+b'error: unrelated\n',stderr.replace(b':1:14',b':1:7'),stderr.replace(b'                 ^',b'                ^')):
+            with self.assertRaises(p.Refusal):b.exact_opaque_negative(record,wrong,opaque)
+        for exit_code in (-6,2,True):
+            with self.assertRaises(p.Refusal):b.exact_opaque_negative({**record,'exitCode':exit_code},stderr,opaque)
+    def test_malformed_and_overbound_measurement_still_records_refusal(self):
+        self.output.mkdir();(self.output/'stage').mkdir();scratch=self.root/'scratch';scratch.mkdir()
+        from unittest.mock import patch
+        def runner(*args):return b'too much',b''
+        with patch.object(b,'MAX_OUTPUT',1):
+            with self.assertRaisesRegex(p.Refusal,'observation refused'):b.run_measurement(runner,123,self.output,scratch,'overflow',b.compiler_recipe(self.output))
+        record=json.loads((self.output/'diagnostics/overflow.json').read_bytes());self.assertTrue(record['captureRefused']);self.assertFalse(record['captureHashesComplete'])
+        self.assertFalse((self.output/'receipt.json').exists())
     def test_candidate_export_must_resolve_source(self):
         manifest=self.sdk/'packages/sdk/package.json'
         value=json.loads(manifest.read_bytes());value['exports']['.']['bun']='./dist/index.js';manifest.write_text(json.dumps(value))
@@ -392,6 +445,33 @@ class PrimitiveTests(unittest.TestCase):
                 with self.assertRaises(p.Refusal):p.inventory(fd)
             finally:os.close(fd)
         with self.assertRaises(p.Refusal):p.validate_links({'a':{'kind':'file','bytes':1,'sha256':'x'},'a/b':{'kind':'file','bytes':1,'sha256':'x'}})
+    def test_standalone_all_nibbles(self):
+        for flags in range(16):
+            result=decode_standalone_pair(*standalone_pair(flags));self.assertEqual(result['flagsNibble'],flags)
+            self.assertEqual(result['outputSha256'],p.digest(standalone_pair(flags)[1]));self.assertEqual(result['baseSha256'],p.digest(standalone_pair(flags)[0]))
+            self.assertEqual(result['payload']['compileExecArgvBytes'],0);self.assertEqual(result['payload']['bytes'],112)
+    def test_standalone_scalar_corruption(self):
+        mutations=[('reserved','<I',1124,16),('reserved-high','<I',1124,1<<31),('length','<Q',1024,110),('section-size','<Q',2144,121),('byte-count','<Q',1096,63),('modules-size','<I',1108,53),('entry','<I',1112,1),('argv-pointer','<I',1116,65),('argv-nonempty','<I',1120,1),('module-length','<I',1036,65),('original-pointer','<Q',512,0x400401),('original-va-map','<Q',80,0x401000),('unmapped-payload','<Q',96,1030),('section-count','<H',60,513),('strings-size','<Q',2208,1024*1024+1),('section-name','<I',2112,1024*1024),('no-load','<I',64,4),('machine','<H',18,62),('not-progbits','<I',2116,8)]
+        mutations += [(f'module-pointer-{slot}','<I',1032+slot*8,65) for slot in range(6)]
+        for name,fmt,at,value in mutations:
+            with self.subTest(name=name):
+                base,output=standalone_pair();output=bytearray(output);struct.pack_into(fmt,output,at,value)
+                with self.assertRaises(p.Refusal):decode_standalone_pair(base,output)
+    def test_standalone_overlap_trailer_original_slot_and_missing_argv_nul(self):
+        for name in ('duplicate-output','duplicate-base','overlap','trailer','base-slot','class','endian','section-pointer','missing-nul','absent-section'):
+            with self.subTest(name=name):
+                base,output=map(bytearray,standalone_pair())
+                if name.startswith('duplicate'):
+                    data=base if name=='duplicate-base' else output;struct.pack_into('<H',data,60,4);data[2240:2304]=data[2112:2176]
+                elif name=='overlap':struct.pack_into('<H',output,56,2);output[120:176]=output[64:120]
+                elif name=='trailer':output[1143]=0
+                elif name=='base-slot':struct.pack_into('<Q',base,512,1)
+                elif name=='class':output[4]=1
+                elif name=='endian':output[5]=2
+                elif name=='missing-nul':output[1084]=1
+                elif name=='absent-section':struct.pack_into('<I',output,2112,6)
+                else:struct.pack_into('<Q',output,2128,0x400500);struct.pack_into('<Q',output,512,0x400500)
+                with self.assertRaises(p.Refusal):decode_standalone_pair(base,output)
     def test_bounded_ELF_dependency_data_no_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);path=root/'reader';path.write_bytes(elf(['libc.so.6'],'/lib/ld-linux-aarch64.so.1'));fd=os.open(path,os.O_RDONLY)
