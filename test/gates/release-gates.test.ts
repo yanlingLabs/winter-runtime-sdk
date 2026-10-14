@@ -179,6 +179,8 @@ describe("the release workflow", () => {
     expect(text).toContain("os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)");
     expect(text).toContain("os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)");
     expect(text).toContain("causeReason");
+    for (const reason of ["outer namespace changed before launch", "outer namespace changed while live", "outer namespace changed after teardown", "actual child handle envelope", "actual initial I required", "negative teardown before C deadline"])
+      expect(text).toContain(`'${reason}'`);
     expect(steps[5].with?.path).toBe("${{ steps.download.outputs.private }}/result.json");
   });
 
