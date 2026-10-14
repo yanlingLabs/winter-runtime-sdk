@@ -71,7 +71,7 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "release.yml"]);
+    expect(workflows).toEqual(["ci.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "cowork-reader-native-source.yml", "release.yml"]);
     for (const name of workflows.filter((name) => name !== "release.yml")) {
       const source = readWorkflow(name);
       // Non-release workflows may explain this rule in comments, but cannot run publication.
@@ -128,6 +128,23 @@ describe("the release workflow", () => {
         { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
         { name: "Synthetic packet data checks", run: "python3 -I -S -B -m unittest discover -s scripts/guest-reader-intake -p 'test_intake.py'" },
       ],
+    });
+  });
+
+  test("the native reader source workflow runs only injected and temporary DATA tests", () => {
+    const source = parseWorkflow("cowork-reader-native-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
+    const paths = ["scripts/guest-reader-native/**", "test/guest/reader-harness-consumer.test.ts", ".github/workflows/cowork-reader-native-source.yml", "test/gates/release-gates.test.ts"];
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness"], paths }, pull_request: { paths } });
+    expect(source.permissions).toEqual({ contents: "read" });
+    expect(source.jobs).toEqual({
+      "portable-data": {
+        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness'",
+        "runs-on": "ubuntu-24.04-arm", "timeout-minutes": 5,
+        steps: [
+          { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
+          { name: "Injected lifetime and temporary data checks", run: "python3 -I -S -B -m unittest discover -s scripts/guest-reader-native -p 'test_*.py'" },
+        ],
+      },
     });
   });
 
