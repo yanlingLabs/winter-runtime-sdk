@@ -106,6 +106,7 @@ class Registry:
     """Registration precedes effects; a failure cannot imply teardown."""
     def __init__(self):
         self.debts = []
+        self.operation = None
 
     def register(self):
         require(not self.debts, 'one reader lifetime per producer')
@@ -118,6 +119,7 @@ def start_registered(registry, operation_factory):
     debt = registry.register()
     try:
         operation = operation_factory(debt)
+        registry.operation = operation  # Retain real cleanup ownership on start refusal.
         require(operation.debt is debt, 'one registered debt identity')
         pid = operation.start()
         require(type(pid) is int and pid > 1, 'owned launcher pid')

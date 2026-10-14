@@ -18,7 +18,10 @@ The full packet capture needs 1629 descriptors; the actual parent preflights
 only its own soft limit within a fixed allowed bound before capture.
 
 `producer.py` registers one debt before effects and uses that same object for
-the operation. A gated child cannot bootstrap before its PID and pidfd are held.
+the operation. The registry retains the actual operation before start, including
+on failures; cleanup ownership never depends on traceback retention. Factories
+must return the registered operation before effects or throw with none. A gated
+child cannot bootstrap before its PID and pidfd are held.
 The trusted single-thread Python child makes a private mount namespace and
 minimal chroot before executing the dynamic launcher, so the launcher also uses
 only packet libraries. Python, libc and the bootstrap are trusted host tooling,

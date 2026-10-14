@@ -55,6 +55,22 @@ class Tests(unittest.TestCase):
         with self.assertRaises(p.Refusal):p.start_registered(wrong,Foreign)
         self.assertTrue(wrong.debts[0].uncertain)
 
+    def test_failed_lambda_factory_operation_remains_explicitly_owned(self):
+        registry = p.Registry()
+        class Op:
+            def __init__(self, debt):
+                self.debt = debt
+                self.cleanup_handles = {90, 91}  # Inert owned resources.
+            def start(self):
+                self.debt.pid = 123
+                raise OSError('injected uncertain start')
+        with self.assertRaises(OSError):
+            p.start_registered(registry, lambda debt: Op(debt))
+        self.assertIs(registry.operation.debt, registry.debts[0])
+        self.assertEqual(registry.operation.cleanup_handles, {90, 91})
+        self.assertEqual(registry.operation.debt.pid, 123)
+        self.assertTrue(registry.operation.debt.uncertain)
+
     def test_exact_receipt_and_all_drain_observations_required(self):
         d = p.Debt(phase='running', pid=123)
         p.observe_native(d, b'I', (80,))
