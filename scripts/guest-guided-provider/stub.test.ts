@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createGuidedFixturePort, encodeFrame, LIMITS, SELECTION, sha256 } from "./stub.ts";
 
 const scope = { homeId: "home", workspaceId: "workspace", sessionId: "logical", backendSessionId: "backend", taskId: "task", incarnationId: "incarnation", bootId: "boot", leaseEpoch: 1, grantRevision: 2, accountRevision: 3, modelRevision: 4 };
-function script() { return { version: 1, scope: { ...scope }, selection: SELECTION, steps: [{ system: ["FACT:workspace", "HOST:publication"], user: ["SHARED:old", "SOURCE:root", "SOURCE:cwd"], response: "guided-one" }, { system: ["FACT:workspace", "HOST:publication"], user: ["SHARED:new", "SOURCE:root", "SOURCE:cwd"], response: "guided-two" }] }; }
+function script() { return { version: 1, scope: { ...scope }, selection: SELECTION, steps: [{ system: ["FACT:workspace", "HOST:publication"], user: ["SHARED:old", "SOURCE:root", "SOURCE:cwd"], absentSystem: [], absentUser: ["SHARED:new"], response: "guided-one" }, { system: ["FACT:workspace", "HOST:publication"], user: ["SHARED:new", "SOURCE:root", "SOURCE:cwd"], absentSystem: [], absentUser: ["SHARED:old"], response: "guided-two" }] }; }
 function port(value: unknown = script()) { const bytes = Buffer.from(JSON.stringify(value)); return createGuidedFixturePort(bytes, sha256(bytes)); }
 function turn(second = false) { return { model: SELECTION.providerModelId, system: "FACT:workspace\n\nHOST:publication", systemBlocks: [{ text: "FACT:workspace", cacheScope: "org" }, { text: "HOST:publication", cacheScope: null }], messages: [{ role: "user", isMeta: true, content: [{ type: "text", text: `SHARED:${second ? "new" : "old"}\nSOURCE:root\nSOURCE:cwd` }] }, { role: "user", content: "question" }], cacheKey: "runtime-generated" }; }
 function request(operation = "begin", sequence = 0, ordinal = 1, id = "invocation-one"): Record<string, unknown> { return { version: 1, operation, invocationId: id, invocationOrdinal: ordinal, scope, sequence, ...(operation === "begin" ? { turn: turn(ordinal === 2) } : {}) }; }
@@ -38,11 +38,44 @@ test("hash/closed script/refused selection cannot create a port", () => {
 
 test("zero after close is observed only when no ingress occurs; closed begins still count", async () => {
   const p = port(); await finish(p); await finish(p, 2, "invocation-two"); p.close();
-  const baseline = p.receipt(); expect(p.receipt().receivedBegins - baseline.receivedBegins).toBe(0);
+  const baseline = p.receipt(); expect(baseline).toMatchObject({ receivedFrames: 6, receivedBegins: 2, completed: 2, closed: true });
   await expect(p.exchange(encodeFrame(request("begin", 0, 3, "third")))).rejects.toThrow("fixture refused");
   expect(p.receipt().receivedBegins - baseline.receivedBegins).toBe(1);
   expect(p.receipt().receivedFrames - baseline.receivedFrames).toBe(1);
   expect(p.receipt().acceptedBegins).toBe(2); expect(baseline.receivedBegins).toBe(2);
+});
+
+test("current guidance excludes old markers and matches only complete delimited lines", async () => {
+  const mixed = port(); await finish(mixed);
+  const second = request("begin", 0, 2, "two") as any;
+  second.turn.messages[0].content[0].text = "SHARED:old\nSHARED:new\nSOURCE:root\nSOURCE:cwd";
+  await expect(mixed.exchange(encodeFrame(second))).rejects.toThrow("fixture refused");
+  expect(mixed.receipt().acceptedBegins).toBe(1);
+  for (const marker of ["SHARED:older", "prefix SHARED:old", "SHARED:old suffix"]) {
+    const p = port(), r = request() as any;
+    r.turn.messages[0].content[0].text = `${marker}\nSOURCE:root\nSOURCE:cwd`;
+    await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused");
+  }
+});
+
+test("enum arrays refuse, and every closed or malformed ingress remains counted", async () => {
+  for (const mutate of [
+    (r: any) => { r.turn.effort = ["low"]; },
+    (r: any) => { r.turn.thinking = { type: ["enabled"] }; },
+    (r: any) => { r.turn.toolChoice = { type: ["auto"] }; },
+    (r: any) => { r.turn.messages[1].role = ["user"]; },
+    (r: any) => { r.turn.cacheTtl = ["5m"]; },
+  ]) { const p = port(), r = request(); mutate(r); await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused"); }
+  const p = port(); p.close();
+  for (const frame of [null, encodeFrame(request("next", 1)), encodeFrame(request())]) {
+    const before = p.receipt();
+    await expect(p.exchange(frame as Uint8Array)).rejects.toThrow("fixture refused");
+    const after = p.receipt();
+    expect(after.receivedFrames).toBe(before.receivedFrames + 1);
+    expect(after.receivedBegins).toBeGreaterThanOrEqual(before.receivedBegins);
+    expect(after.acceptedBegins).toBe(0);
+  }
+  expect(p.receipt()).toMatchObject({ receivedFrames: 3, receivedBegins: 1, closed: true });
 });
 
 test("malformed framing, UTF8, duplicates and oversize count ingress and fail closed", async () => {

@@ -21,9 +21,11 @@ checks the digest before constructing the port. Script shape:
   steps: [
     { system: ["host fact", "host publication obligation"],
       user: ["old shared guidance", "source root", "source cwd"],
+      absentSystem: [], absentUser: ["edited shared guidance"],
       response: "first deterministic answer" },
     { system: ["host fact", "host publication obligation"],
       user: ["edited shared guidance", "source root", "source cwd"],
+      absentSystem: [], absentUser: ["old shared guidance"],
       response: "second deterministic answer" }
   ]
 }
@@ -47,7 +49,10 @@ integration must route the actual engine through those real implementations.
 SYSTEM expectations match the actual normalized `turn.system`; provided cache
 blocks must join to exactly those bytes. USER expectations match only message 0,
 which must be the current `userContext` (`role:user`, `isMeta:true`). Markers must
-occur in the Root-selected order. Historical user/assistant messages cannot meet
+occur as complete LF/CRLF-delimited lines in the Root-selected order. Each step
+also declares `absentSystem` and `absentUser` lines, so a refreshed context that
+retains the old shared marker refuses. A marker suffix cannot satisfy its shorter
+marker. Historical user/assistant messages cannot meet
 the current-guidance requirement. The initial fixture accepts text-only content
 and ordinary tool declarations; it does not support tool-result/image/thinking
 content, native-state continuation, midconversation system roles or tool events.
@@ -69,7 +74,7 @@ hold the verified script digest and monotonically increasing ingress counters:
 
 Neither script nor request can supply those counters. To prove the later
 post-revocation zero case, the independent future parent must retain this port's
-receipt before refusal and compare received counters after actual attempted
+receipt before refusal and compare `receivedFrames` after actual attempted
 engine work. Closing the port and observing no calls in an injected unit test
 does not demonstrate required-context enforcement. A received closed begin still
 increments both ingress counters. `close`/abort/cancel fence this deliberately

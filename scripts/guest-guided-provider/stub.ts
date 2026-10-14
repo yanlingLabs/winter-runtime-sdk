@@ -25,9 +25,9 @@ function decodeFrame(bytes: Uint8Array): ObjectValue {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 5 || bytes.byteLength > LIMITS.requestBytes + 4) refuse();
   const frame = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength); if (frame.readUInt32BE() !== frame.length - 4) refuse(); return json(frame.subarray(4));
 }
-interface Step { system: string[]; user: string[]; response: string }
+interface Step { system: string[]; user: string[]; absentSystem: string[]; absentUser: string[]; response: string }
 interface Script { scope: ObjectValue; steps: Step[] }
-function markers(value: unknown): string[] { if (!Array.isArray(value) || !value.length || value.length > LIMITS.markers) refuse(); return value.map(item => text(item, LIMITS.textBytes)); }
+function markers(value: unknown, allowEmpty = false): string[] { if (!Array.isArray(value) || !allowEmpty && !value.length || value.length > LIMITS.markers) refuse(); return value.map(item => { const marker = text(item, LIMITS.textBytes); if (/[\r\n]/.test(marker)) refuse(); return marker; }); }
 function readScript(bytes: Uint8Array, expectedHash: string): Script {
   if (!(bytes instanceof Uint8Array) || bytes.length > LIMITS.scriptBytes || !/^[a-f0-9]{64}$/.test(expectedHash) || sha256(bytes) !== expectedHash) refuse();
   const script = json(bytes); keys(script, ["version", "scope", "selection", "steps"]);
@@ -35,10 +35,11 @@ function readScript(bytes: Uint8Array, expectedHash: string): Script {
   const scope = object(script.scope); keys(scope, SCOPE);
   for (const key of SCOPE) { const value = scope[key]; if (key.endsWith("Id")) text(value); else if (!Number.isSafeInteger(value) || Number(value) < 1) refuse(); }
   if (!Array.isArray(script.steps) || script.steps.length !== 2) refuse();
-  const steps = script.steps.map(value => { const step = object(value); keys(step, ["system", "user", "response"]); return { system: markers(step.system), user: markers(step.user), response: text(step.response, LIMITS.textBytes) }; });
+  const steps = script.steps.map(value => { const step = object(value); keys(step, ["system", "user", "absentSystem", "absentUser", "response"]); return { system: markers(step.system), user: markers(step.user), absentSystem: markers(step.absentSystem, true), absentUser: markers(step.absentUser, true), response: text(step.response, LIMITS.textBytes) }; });
   return frozen({ scope, steps });
 }
-function ordered(haystack: string, needles: string[]): void { let at = 0; for (const needle of needles) { const found = haystack.indexOf(needle, at); if (found < 0) refuse(); at = found + needle.length; } }
+function ordered(haystack: string, needles: string[]): void { const lines = haystack.split(/\r?\n/); let at = 0; for (const needle of needles) { const found = lines.indexOf(needle, at); if (found < 0) refuse(); at = found + 1; } }
+function absent(haystack: string, needles: string[]): void { const lines = haystack.split(/\r?\n/); if (needles.some(needle => lines.includes(needle))) refuse(); }
 function content(value: unknown): string {
   if (typeof value === "string") return value;
   if (!Array.isArray(value)) refuse();
@@ -46,15 +47,15 @@ function content(value: unknown): string {
 }
 function optionalTurnFields(turn: ObjectValue): void {
   for (const key of ["cacheKey"]) if (turn[key] !== undefined) text(turn[key], LIMITS.requestBytes);
-  if (turn.effort !== undefined && !(typeof turn.effort === "number" && Number.isFinite(turn.effort)) && !["low", "medium", "high", "xhigh", "max"].includes(String(turn.effort))) refuse();
+  if (turn.effort !== undefined && !(typeof turn.effort === "number" && Number.isFinite(turn.effort)) && !(typeof turn.effort === "string" && ["low", "medium", "high", "xhigh", "max"].includes(turn.effort))) refuse();
   if (turn.maxOutputTokens !== undefined && (!Number.isSafeInteger(turn.maxOutputTokens) || Number(turn.maxOutputTokens) < 1)) refuse();
   if (turn.requestSummary !== undefined && typeof turn.requestSummary !== "boolean") refuse();
   for (const key of ["toolChanges", "resumesPausedTurn"]) if (turn[key] !== undefined && turn[key] !== true) refuse();
-  if (turn.cacheTtl !== undefined && !["5m", "1h"].includes(String(turn.cacheTtl))) refuse();
+  if (turn.cacheTtl !== undefined && !(typeof turn.cacheTtl === "string" && ["5m", "1h"].includes(turn.cacheTtl))) refuse();
   if (turn.allowedTools !== undefined) { if (!Array.isArray(turn.allowedTools)) refuse(); for (const name of turn.allowedTools) text(name); }
   if (turn.cacheDiagnostics !== undefined) { const value = object(turn.cacheDiagnostics); keys(value, ["previousMessageId"]); if (value.previousMessageId !== null) text(value.previousMessageId); }
-  if (turn.thinking !== undefined) { const value = object(turn.thinking); keys(value, ["type"], value.type === "enabled" ? ["budgetTokens"] : []); if (!["enabled", "disabled", "adaptive"].includes(String(value.type))) refuse(); if (value.budgetTokens !== undefined && (!Number.isSafeInteger(value.budgetTokens) || Number(value.budgetTokens) < 1)) refuse(); }
-  if (turn.toolChoice !== undefined) { const value = object(turn.toolChoice); keys(value, ["type"], value.type === "tool" ? ["name"] : []); if (!["auto", "any", "tool"].includes(String(value.type))) refuse(); if (value.type === "tool") text(value.name); }
+  if (turn.thinking !== undefined) { const value = object(turn.thinking); keys(value, ["type"], value.type === "enabled" ? ["budgetTokens"] : []); if (!(typeof value.type === "string" && ["enabled", "disabled", "adaptive"].includes(value.type))) refuse(); if (value.budgetTokens !== undefined && (!Number.isSafeInteger(value.budgetTokens) || Number(value.budgetTokens) < 1)) refuse(); }
+  if (turn.toolChoice !== undefined) { const value = object(turn.toolChoice); keys(value, ["type"], value.type === "tool" ? ["name"] : []); if (!(typeof value.type === "string" && ["auto", "any", "tool"].includes(value.type))) refuse(); if (value.type === "tool") text(value.name); }
   if (turn.tools !== undefined) {
     if (!Array.isArray(turn.tools)) refuse();
     for (const item of turn.tools) { const tool = object(item); keys(tool, ["name", "description", "inputSchema"], ["deferLoading", "namespace", "toolSearch"]); text(tool.name); if (typeof tool.description !== "string") refuse(); object(tool.inputSchema); if (tool.namespace !== undefined) text(tool.namespace); for (const key of ["deferLoading", "toolSearch"]) if (tool[key] !== undefined && tool[key] !== true) refuse(); }
@@ -71,10 +72,10 @@ function validateTurn(value: unknown, step: Step): ObjectValue {
   }
   for (const value of turn.messages) {
     const message = object(value); keys(message, ["role", "content"], ["uuid", "origin", "decoration", "meta", "isMeta"]);
-    if (!["user", "assistant"].includes(String(message.role)) || message.isMeta !== undefined && message.isMeta !== true) refuse();
+    if (!(typeof message.role === "string" && ["user", "assistant"].includes(message.role)) || message.isMeta !== undefined && message.isMeta !== true) refuse();
     if (message.uuid !== undefined) text(message.uuid);
     if (message.origin !== undefined) { const origin = object(message.origin); keys(origin, ["providerId", "modelKey", "family"], ["continuationDomain"]); for (const value of Object.values(origin)) text(value); }
-    if (message.decoration !== undefined) { const decoration = object(message.decoration); keys(decoration, ["text", "door"]); if (typeof decoration.text !== "string" || !["tag", "thinking-channel"].includes(String(decoration.door))) refuse(); }
+    if (message.decoration !== undefined) { const decoration = object(message.decoration); keys(decoration, ["text", "door"]); if (typeof decoration.text !== "string" || !(typeof decoration.door === "string" && ["tag", "thinking-channel"].includes(decoration.door))) refuse(); }
     if (message.meta !== undefined) { const meta = object(message.meta); keys(meta, ["attachment"]); text(object(meta.attachment).type); }
     content(message.content);
   }
@@ -83,6 +84,7 @@ function validateTurn(value: unknown, step: Step): ObjectValue {
   // cannot satisfy the next-dispatch guidance oracle.
   if (current.role !== "user" || current.isMeta !== true) refuse();
   ordered(turn.system, step.system); ordered(content(current.content), step.user);
+  absent(turn.system, step.absentSystem); absent(content(current.content), step.absentUser);
   return frozen(turn);
 }
 export interface CapturedTurn { readonly invocationId: string; readonly ordinal: number; readonly sha256: string; readonly turn: Readonly<ObjectValue> }
