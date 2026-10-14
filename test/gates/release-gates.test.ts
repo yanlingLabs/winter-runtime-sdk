@@ -157,10 +157,10 @@ describe("the release workflow", () => {
     expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-bootstrap' && github.run_attempt == '1'");
     expect(steps.length).toBe(6);
     for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
-    expect(steps[0].with).toEqual({ ref: "4d5dfcec9454d33e8423713491ced08b58669f58", path: "origins/base", "persist-credentials": false });
-    expect(steps[1].with).toEqual({ ref: "${{ github.sha }}", path: "origins/bootstrap", "persist-credentials": false });
-    expect(steps[2].uses).toBe("actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b");
-    expect(steps[2].with?.["github-token"]).toBe("${{ github.token }}");
+    expect(steps[0]?.with).toEqual({ ref: "4d5dfcec9454d33e8423713491ced08b58669f58", path: "origins/base", "persist-credentials": false });
+    expect(steps[1]?.with).toEqual({ ref: "${{ github.sha }}", path: "origins/bootstrap", "persist-credentials": false });
+    expect(steps[2]?.uses).toBe("actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b");
+    expect(steps[2]?.with?.["github-token"]).toBe("${{ github.token }}");
     const text = readWorkflow("cowork-reader-native-reviewed.yml");
     expect(text.match(/\$\{\{ github.token \}\}/g)?.length).toBe(1);
     expect(text).not.toContain("GITHUB_ENV");
@@ -181,7 +181,7 @@ describe("the release workflow", () => {
     expect(text).toContain("causeReason");
     for (const reason of ["outer namespace changed before launch", "outer namespace changed while live", "outer namespace changed after teardown", "actual child handle envelope", "actual initial I required", "negative teardown before C deadline"])
       expect(text).toContain(`'${reason}'`);
-    expect(steps[5].with?.path).toBe("${{ steps.download.outputs.private }}/result.json");
+    expect(steps[5]?.with?.path).toBe("${{ steps.download.outputs.private }}/result.json");
   });
 
   test("the reader compile fixture has exact feature triggers and no output execution", () => {
