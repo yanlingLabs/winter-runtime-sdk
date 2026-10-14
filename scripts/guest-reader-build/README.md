@@ -1,6 +1,6 @@
 # Reader-only compile packet — source prerequisite
 
-This new unprivileged builder captures RuntimeSDK 0394, SDK 8603 and only the exact
+This new unprivileged builder captures RuntimeSDK 0394, SDK 8603, the four builder source files and only the exact
 SDK19 f6 reader C/header overlay. The main SDK header must equal the overlay header.
 Source bytes must match the pinned Git trees, and all dependencies and relative
 alias resolutions remain inside the new packet. SDK-family aliases select all six
@@ -48,3 +48,46 @@ resolver fallback. The normalized metafile proves only its recorded static input
 receipts explicitly leave dynamicRuntimeImportsVerified false. Captured sources
 are immutable copies by default modes, with complete byte/resolver rechecks; the
 unprivileged owner can still change them, so this packet is not a Root admission.
+
+The CLI requires an externally pinned `--builder-head`; its exact four source
+files must match that Git tree and the current checkout. This is provenance data,
+not self-granted trust. All source origins record the requested head, checkout head
+and tree and recheck them after capture. Every ancestor of the new packet must
+lack node_modules, package.json, tsconfig*.json, jsconfig.json, bunfig.toml and .env;
+a bounded stream checks this before staging and on input revalidation.
+
+`--resolver-map` supplies a bounded plain JSON map of third-party package names to
+measured relative directories in the dependency store. It is explicit data, not a
+version-selection fallback. The current reader has no third-party bare runtime
+imports; an empty captured dependency tree/map works without a dangling .pnpm link.
+Any supplied third-party alias must contribute actual new metafile inputs, and
+unknown externals/global/unmeasured inputs refuse. Bare import spellings come from
+the NEW compiler's bounded import records (including original when present);
+missing-original ambiguity is recorded, and no comment-scanning parser invents a
+source graph. This remains static compilation evidence, not runtime graph proof.
+
+The first ordinary build must run the same recipe/parser/held compiler with one
+unique bogus flag and a separate fresh negative output directory. Only exit1 and
+a closed diagnostic line naming that exact unknown flag satisfy the negative;
+unrelated failures or outputs refuse. The normal positive compilation follows. No
+probe/compiler/output is executed by the portable tests. The copied Linux base is
+rehashed after compilation as well as its original held file.
+
+Directory intake streams before count limits. Capture timeout/overflow/setup errors
+signal the still-unreaped owned process group before a bounded one-second wait;
+uncertain reaping refuses, with both pipes closed. After normal EOF and a reaped
+leader, including a nonzero exit, no later numeric PGID signal occurs and no
+descendant-termination proof is claimed. Inert mock regressions cover these cases.
+
+The compile recipe uses gnu11; SDK19's historical full-role object source proof used
+c11. This is a distinct recipe requiring fresh ordinary build review. Native cc1/as/ld
+and compiler-opened headers are not a sealed or measured complete toolchain. Each
+ELF's runtime dependency path list is separate from the union; both-role union stays
+within the native reader's 32-dependency ceiling. Sysroot absolute symlinks refuse;
+only bounded relative public-library resolution is supported.
+
+Closed environment/HOME omission does not prove global Bun config execution was
+disabled: pinned Bun documentation describes global/local merging. Enforceable
+recipe facts are the empty cwd, explicit empty config, no-env-file and four
+compiled-autoload-off flags. Global configuration execution remains unverified;
+first real pinned-runner probes remain owed.

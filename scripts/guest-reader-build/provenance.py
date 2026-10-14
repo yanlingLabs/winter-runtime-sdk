@@ -45,6 +45,51 @@ def leaf(root,name):
         result=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=fd)
         return result
     finally:os.close(fd)
+def sysroot_leaf(root,name):
+    """Resolve bounded internal sysroot links without following host-absolute paths."""
+    pending=list(PurePosixPath(relative(name)).parts);done=[];seen=set();hops=0
+    if len(pending)>64:refuse('sysroot path depth')
+    ancestors=[os.dup(root)]
+    try:
+        if not stat.S_ISDIR(os.fstat(ancestors[0]).st_mode):refuse('sysroot directory root')
+        while pending:
+            part=pending.pop(0)
+            if part in ('','.'):continue
+            if part=='..':
+                if not done:refuse('sysroot link escaped')
+                done.pop();os.close(ancestors.pop());continue
+            parent=ancestors[-1];info=os.stat(part,dir_fd=parent,follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                current='/'.join(done+[part])
+                if current in seen or hops>=32:refuse('sysroot link cycle or hops')
+                target=os.readlink(part,dir_fd=parent)
+                if identity(info)!=identity(os.stat(part,dir_fd=parent,follow_symlinks=False)):refuse('sysroot link replacement')
+                if not target or target.startswith('/') or len(target.encode())>4096 or '\\' in target or any(ord(c)<32 or ord(c)==127 for c in target):refuse('sysroot bounded relative link')
+                seen.add(current);hops+=1;pending=target.split('/')+pending
+                if len(done)+len(pending)>64 or len('/'.join(done+pending).encode())>4096:refuse('sysroot path bound')
+                continue
+            if pending:
+                if not stat.S_ISDIR(info.st_mode):refuse('sysroot directory ancestor')
+                child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+                try:
+                    if identity(info)!=identity(os.fstat(child)) or identity(info)!=identity(os.stat(part,dir_fd=parent,follow_symlinks=False)):refuse('sysroot directory replacement')
+                except BaseException:os.close(child);raise
+                ancestors.append(child);done.append(part);continue
+            resolved='/'.join(done+[part])
+            if not resolved.startswith(('lib/','usr/lib/')):refuse('sysroot public library path')
+            if not stat.S_ISREG(info.st_mode):refuse('sysroot regular file')
+            result=os.open(part,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=parent)
+            try:
+                held=os.fstat(result)
+                if not stat.S_ISREG(held.st_mode) or identity(info)!=identity(held) or identity(info)!=identity(os.stat(part,dir_fd=parent,follow_symlinks=False)):refuse('sysroot file replacement')
+                for index,component in enumerate(done):
+                    named=os.stat(component,dir_fd=ancestors[index],follow_symlinks=False)
+                    if not stat.S_ISDIR(named.st_mode) or identity(named)!=identity(os.fstat(ancestors[index+1])):refuse('sysroot ancestor replacement')
+            except BaseException:os.close(result);raise
+            return result,resolved
+        refuse('sysroot regular file')
+    finally:
+        for ancestor in reversed(ancestors):os.close(ancestor)
 def read_fd(fd,limit=MAX_FILE):
     before=os.fstat(fd)
     if not stat.S_ISREG(before.st_mode) or before.st_size>limit:refuse('regular bounded file')
@@ -100,33 +145,37 @@ def inventory(root,top_names=None):
     def walk(fd,prefix=''):
         nonlocal total,visits
         if len(PurePosixPath(prefix).parts)>64:refuse('directory depth')
-        for item in sorted(os.scandir(fd),key=lambda item:item.name):
-            if not prefix and top_names is not None and item.name not in top_names:continue
-            visits+=1
-            if visits>MAX_ENTRIES*3:refuse('directory visit count')
-            name=relative(prefix+item.name);info=item.stat(follow_symlinks=False)
-            if len(result)>=MAX_ENTRIES:refuse('entry count')
-            if stat.S_ISDIR(info.st_mode):
-                child=os.open(item.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
-                try:
-                    if identity(info)!=identity(os.fstat(child)):refuse('directory replacement')
-                    walk(child,name+'/')
-                finally:os.close(child)
-            elif stat.S_ISLNK(info.st_mode):result[name]={'kind':'symlink','target':os.readlink(item.name,dir_fd=fd)}
-            elif stat.S_ISREG(info.st_mode):
-                measured=measure(root,name);total+=measured['bytes'];result[name]=measured
-                if total>MAX_SOURCE:refuse('source aggregate')
-            else:refuse('special input')
+        items=os.scandir(fd)
+        try:
+            for item in items:
+                visits+=1
+                if visits>MAX_ENTRIES*3:refuse('directory visit count')
+                if not prefix and top_names is not None and item.name not in top_names:continue
+                name=relative(prefix+item.name);info=item.stat(follow_symlinks=False)
+                if len(result)>=MAX_ENTRIES:refuse('entry count')
+                if stat.S_ISDIR(info.st_mode):
+                    child=os.open(item.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+                    try:
+                        if identity(info)!=identity(os.fstat(child)):refuse('directory replacement')
+                        walk(child,name+'/')
+                    finally:os.close(child)
+                elif stat.S_ISLNK(info.st_mode):result[name]={'kind':'symlink','target':os.readlink(item.name,dir_fd=fd)}
+                elif stat.S_ISREG(info.st_mode):
+                    measured=measure(root,name);total+=measured['bytes'];result[name]=measured
+                    if total>MAX_SOURCE:refuse('source aggregate')
+                else:refuse('special input')
+        finally:items.close()
     walk(root)
     if identity(root_info)!=identity(os.fstat(root)):refuse('root changed')
     validate_links(result);return dict(sorted(result.items()))
 def git(root,*args):
     # Even Git data commands use bounded pipes and never load personal/global config.
     proc=subprocess.Popen(['git','-C',str(root),*args],env=ENV,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
-    poll=selectors.DefaultSelector();chunks={};deadline=time.monotonic()+30
-    for stream in (proc.stdout,proc.stderr):
-        os.set_blocking(stream.fileno(),False);poll.register(stream,selectors.EVENT_READ);chunks[stream.fileno()]=bytearray()
+    poll=None;chunks={};failed=True;leader_reaped=False
     try:
+        poll=selectors.DefaultSelector();deadline=time.monotonic()+30
+        for stream in (proc.stdout,proc.stderr):
+            os.set_blocking(stream.fileno(),False);poll.register(stream,selectors.EVENT_READ);chunks[stream.fileno()]=bytearray()
         while poll.get_map():
             if time.monotonic()>=deadline:refuse('git timeout')
             for key,_ in poll.select(min(.1,max(0,deadline-time.monotonic()))):
@@ -135,13 +184,26 @@ def git(root,*args):
                 limit=MAX_JSON if key.fd==proc.stdout.fileno() else 4096
                 if len(chunks[key.fd])+len(data)>limit:refuse('git output bound')
                 chunks[key.fd].extend(data)
-        if proc.wait(timeout=max(.001,deadline-time.monotonic())):refuse('git capture failed')
-        return bytes(chunks[proc.stdout.fileno()])
+        try:code=proc.wait(timeout=max(.001,deadline-time.monotonic()))
+        except subprocess.TimeoutExpired:refuse('git wait timeout')
+        leader_reaped=True
+        if code:refuse('git capture failed')
+        result=bytes(chunks[proc.stdout.fileno()]);failed=False
+        return result
     finally:
-        poll.close()
-        if proc.poll() is None:
-            os.killpg(proc.pid,signal.SIGKILL);proc.wait()
-        proc.stdout.close();proc.stderr.close()
+        try:
+            if failed and not leader_reaped:
+                try:os.killpg(proc.pid,signal.SIGKILL)
+                except ProcessLookupError:pass
+                finally:
+                    try:proc.wait(timeout=1)
+                    except Exception:refuse('git cleanup reap uncertain')
+        finally:
+            try:
+                if poll is not None:poll.close()
+            finally:
+                try:proc.stdout.close()
+                finally:proc.stderr.close()
 def git_entries(path,head):
     if not isinstance(head,str) or len(head)!=40 or any(c not in '0123456789abcdef' for c in head):refuse('git head')
     if git(path,'rev-parse','--show-object-format').strip()!=b'sha1':refuse('git object format')

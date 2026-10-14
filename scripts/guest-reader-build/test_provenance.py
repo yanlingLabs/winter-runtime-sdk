@@ -28,23 +28,24 @@ def elf(needed=(),interpreter=None,rpath=False):
     return bytes(data)
 class PacketTests(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory(prefix='winter-reader-data-test-');self.root=Path(self.temp.name).resolve()
-        self.runtime=self.root/'runtime';self.sdk=self.root/'sdk';self.overlay=self.root/'overlay';self.deps=self.root/'deps'
-        for directory in (self.runtime,self.sdk,self.overlay,self.deps):directory.mkdir()
+        self.temp=tempfile.TemporaryDirectory(prefix='winter-reader-data-test-',dir=Path('/var/tmp').resolve());self.root=Path(self.temp.name).resolve()
+        self.runtime=self.root/'runtime';self.sdk=self.root/'sdk';self.overlay=self.root/'overlay';self.builder=self.root/'builder';self.deps=self.root/'deps'
+        for directory in (self.runtime,self.sdk,self.overlay,self.builder,self.deps):directory.mkdir()
         put(self.runtime,'package.json',b'{"name":"runtime-fixture"}');put(self.runtime,p.READER_ENTRY,b'export const reader = true;\n')
         put(self.sdk,'package.json',b'{"name":"sdk-fixture"}');put(self.sdk,p.HEADER,b'/* same header */\n')
         for name,folder in p.SDK_PACKAGES.items():
             put(self.sdk,'packages/'+folder+'/package.json',json.dumps({'name':'@yanlinglabs/'+name,'version':'0.0.53','exports':{'.':{'bun':'./src/index.ts'}}}).encode())
             put(self.sdk,'packages/'+folder+'/src/index.ts',b'export const WINTER_BRAND = {};\n')
         put(self.overlay,p.HEADER,b'/* same header */\n');put(self.overlay,p.C_SOURCE,b'#include "linux-compartment.h"\n')
+        for name in b.BUILDER_FILES:put(self.builder,name,b'inert builder source data\n')
         put(self.deps,'typescript/lib/index.js',b'/* inert dependency */\n')
-        self.heads={name:git_commit(path) for name,path in [('runtime',self.runtime),('sdk',self.sdk),('overlay',self.overlay)]}
+        self.heads={name:git_commit(path) for name,path in [('runtime',self.runtime),('sdk',self.sdk),('overlay',self.overlay),('builder',self.builder)]}
         self.output=self.root/'packet'
     def tearDown(self):self.temp.cleanup()
-    def prepare(self):return b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads)
+    def prepare(self):return b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder)
     def test_actual_staging_and_candidate_aliases(self):
         manifest=self.prepare();b.check_inputs(self.output,manifest)
-        self.assertEqual(len(manifest['origins']),3);self.assertEqual(len(manifest['resolverBindings']),12)
+        self.assertEqual(len(manifest['origins']),4);self.assertEqual(len(manifest['resolverBindings']),12)
         for alias in manifest['resolverBindings']:
             self.assertTrue((self.output/alias).resolve().is_relative_to(self.output/'source/sdk/packages'))
         leaf=self.output/'source/runtime'/p.READER_ENTRY
@@ -92,10 +93,10 @@ class PacketTests(unittest.TestCase):
         pin={**p.BASE,'executableSha256':p.digest(b'inert tool bytes')};calls=[]
         def refusal(*args):calls.append(args);raise p.Refusal('injected compiler refusal')
         with self.assertRaisesRegex(p.Refusal,'injected compiler refusal'):
-            b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=refusal,heads=self.heads,base_pin=pin)
+            b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=refusal,heads=self.heads,base_pin=pin,builder_root=self.builder)
         self.assertEqual(len(calls),1);self.assertTrue((self.output/'inputs.json').is_file());self.assertFalse((self.output/'receipt.json').exists())
         manifest=json.loads((self.output/'inputs.json').read_bytes());b.check_inputs(self.output,manifest)
-    def test_actual_builder_synthetic_outputs_bind_closed_receipt(self):
+    def synthetic_build(self,tamper_base=False):
         # The injected runner writes inert ELF data; no compiler/output is invoked.
         import shlex
         tools={}
@@ -105,6 +106,7 @@ class PacketTests(unittest.TestCase):
         def runner(argv,cwd,timeout,pass_fds):
             calls.append(argv)
             if argv[-1]=='--version':return (b'1.3.14\n' if len(calls)==1 else b'FixtureCC 1.0\n'),b''
+            if '--winter-reader-build-option-must-refuse' in argv:raise b.CommandFailure(1,b'',b'error: Invalid flag: --winter-reader-build-option-must-refuse\n')
             if 'build' in argv:
                 put(self.output,'artifacts/instructionReader',elf())
                 names=['source/runtime/'+p.READER_ENTRY,'source/sdk/packages/sdk/src/index.ts']
@@ -114,14 +116,72 @@ class PacketTests(unittest.TestCase):
                 put(self.output,'artifacts/instructionReaderLauncher',elf())
                 source=str(self.output/'source/overlay'/p.C_SOURCE)
                 put(self.output,'artifacts/native.d',('reader: '+shlex.quote(source)+'\n').encode())
+                if tamper_base:
+                    staged=self.output/'stage/linux-bun-base';staged.chmod(0o600);staged.write_bytes(b'tampered base')
             return b'',b''
-        result=b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=runner,heads=self.heads,base_pin=pin)
-        self.assertEqual(len(calls),4);self.assertEqual(set(result['artifacts']),{'instructionReader','instructionReaderLauncher'})
+        result=b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=runner,heads=self.heads,base_pin=pin,builder_root=self.builder)
+        return result,calls
+    def test_actual_builder_synthetic_outputs_bind_closed_receipt(self):
+        result,calls=self.synthetic_build()
+        self.assertEqual(len(calls),5);self.assertEqual(set(result['artifacts']),{'instructionReader','instructionReaderLauncher'})
         self.assertNotIn(str(self.root),p.canonical(result));self.assertFalse(result['linuxExecutionVerified']);self.assertFalse(result['base']['archiveAcquisitionVerified'])
         b.check_inputs(self.output,json.loads((self.output/'inputs.json').read_bytes()))
+    def test_staged_base_tamper_refuses_after_injected_compilation(self):
+        with self.assertRaisesRegex(p.Refusal,'staged base changed'):self.synthetic_build(tamper_base=True)
+        self.assertFalse((self.output/'receipt.json').exists())
+    def test_dist_rejection_covers_every_sdk_family(self):
+        for folder in p.SDK_PACKAGES.values():put(self.sdk,'packages/'+folder+'/dist/index.js',b'foreign SDK emit')
+        self.heads['sdk']=git_commit(self.sdk);manifest=self.prepare()
+        entries=['source/runtime/'+p.READER_ENTRY,'source/sdk/packages/sdk/src/index.ts']
+        for folder in p.SDK_PACKAGES.values():
+            names=entries+['source/sdk/packages/'+folder+'/dist/index.js']
+            metadata={'inputs':{str(self.output/name):{'bytes':manifest['stagedInputs'][name]['bytes']} for name in names}}
+            with self.assertRaisesRegex(p.Refusal,'SDK emit'):b.normalized_metafile(metadata,self.output,manifest)
     def test_manifest_tamper_and_inherited_old_peer_refuse(self):
         manifest=self.prepare();path=self.output/'inputs.json';path.chmod(0o600);path.write_text('{}')
         with self.assertRaisesRegex(p.Refusal,'manifest changed'):b.check_inputs(self.output,manifest)
+    def test_explicit_third_party_aliases_are_measured_and_unused_refuses(self):
+        put(self.deps,'fixture-pkg@1/node_modules/fixture-pkg/package.json',b'{"name":"fixture-pkg","version":"1"}')
+        put(self.deps,'fixture-pkg@1/node_modules/fixture-pkg/index.js',b'export default 1;')
+        manifest=b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,resolver_map={'fixture-pkg':'fixture-pkg@1/node_modules/fixture-pkg'})
+        self.assertEqual(len(manifest['resolverBindings']),14)
+        entry='source/runtime/'+p.READER_ENTRY;dependency='dependencies/fixture-pkg@1/node_modules/fixture-pkg/index.js'
+        metadata={'inputs':{entry:{'imports':[]}}}
+        with self.assertRaisesRegex(p.Refusal,'unused'):b.graph_evidence(metadata,self.output,manifest)
+        metadata['inputs'][entry]['imports']=[{'kind':'import-statement','original':'fixture-pkg','path':dependency,'external':False}]
+        metadata['inputs'][dependency]={'imports':[]}
+        graph=b.graph_evidence(metadata,self.output,manifest)
+        self.assertEqual(graph['bareReferences'][0]['specifier'],'fixture-pkg');b.check_inputs(self.output,manifest)
+    def test_empty_dependencies_do_not_make_dangling_pnpm_alias(self):
+        (self.deps/'typescript/lib/index.js').unlink();(self.deps/'typescript/lib').rmdir();(self.deps/'typescript').rmdir()
+        manifest=self.prepare();b.check_inputs(self.output,manifest)
+        self.assertEqual(manifest['dependencies'],{})
+        for origin in ('runtime','sdk'):self.assertFalse((self.output/'source'/origin/'node_modules/.pnpm').is_symlink())
+    def test_actual_metafile_import_records_reject_unknown_externals(self):
+        manifest=self.prepare();entry='source/runtime/'+p.READER_ENTRY
+        metadata={'inputs':{entry:{'imports':[{'kind':'import-statement','original':'node:fs','path':'fs','external':True}]}}}
+        graph=b.graph_evidence(metadata,self.output,manifest);self.assertEqual(graph['bareReferences'][0]['specifier'],'node:fs')
+        metadata['inputs'][entry]['imports'][0]={'kind':'import-statement','original':'unresolved-package','path':'unresolved-package','external':True}
+        with self.assertRaisesRegex(p.Refusal,'external'):b.graph_evidence(metadata,self.output,manifest)
+    def test_ancestor_config_refuses_without_output(self):
+        for name in ('node_modules','package.json','tsconfig.x.json','jsconfig.json','bunfig.toml','.env'):
+            path=self.root/name;path.touch()
+            with self.assertRaisesRegex(p.Refusal,'ancestor resolver'):self.prepare()
+            self.assertFalse(self.output.exists());path.unlink()
+    def test_builder_self_source_requires_pinned_clean_bytes(self):
+        put(self.builder,b.BUILDER_FILES[0],b'changed builder')
+        with self.assertRaisesRegex(p.Refusal,'git'):self.prepare()
+        self.assertFalse(self.output.exists())
+    def test_unknown_flag_probe_rejects_unrelated_error_and_output(self):
+        self.output.mkdir();(self.output/'stage').mkdir();recipe=b.compiler_recipe(self.output)
+        for stderr in (b'missing dependency: --winter-reader-build-option-must-refuse',b'error: Invalid flag: --a-legitimate-flag',b'compiler failed'):
+            def runner(*args):raise b.CommandFailure(1,b'',stderr)
+            with self.assertRaisesRegex(p.Refusal,'refusal mismatch'):b.unknown_flag_probe(runner,123,self.output,recipe)
+            (self.output/'stage/negative').rmdir()
+        def runner(*args):
+            put(self.output,'stage/negative/reader',b'inert output')
+            raise b.CommandFailure(1,b'',b'error: Invalid flag: --winter-reader-build-option-must-refuse')
+        with self.assertRaisesRegex(p.Refusal,'created output'):b.unknown_flag_probe(runner,123,self.output,recipe)
     def test_candidate_export_must_resolve_source(self):
         manifest=self.sdk/'packages/sdk/package.json'
         value=json.loads(manifest.read_bytes());value['exports']['.']['bun']='./dist/index.js';manifest.write_text(json.dumps(value))
@@ -163,9 +223,113 @@ class PrimitiveTests(unittest.TestCase):
                 with patch.object(p,'MAX_SOURCE',1):
                     with self.assertRaises(p.Refusal):p.inventory(rootfd)
             finally:os.close(rootfd)
+    def test_inventory_stops_streaming_and_closes(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        class Scan:
+            visits=0;closed=False
+            def __iter__(self):return self
+            def __next__(self):self.visits+=1;return SimpleNamespace(name='excluded')
+            def close(self):self.closed=True
+        scan=Scan();info=SimpleNamespace(st_dev=1,st_ino=2,st_size=0,st_mtime_ns=3,st_ctime_ns=4)
+        with patch.object(p,'MAX_ENTRIES',2),patch.object(p.os,'fstat',return_value=info),patch.object(p.os,'scandir',return_value=scan):
+            with self.assertRaisesRegex(p.Refusal,'directory visit count'):p.inventory(123,top_names={'wanted'})
+        self.assertEqual(scan.visits,7);self.assertTrue(scan.closed)
+    def test_capture_cleanup_owns_unreaped_group_and_always_closes(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        for module,function,args in ((p,p.git,('/inert','status')),(b,b.command,(['inert-compiler'],'/inert',30))):
+            for mode in ('timeout','output','selector','setup','reap-timeout','reap-error','wait-timeout','nonzero'):
+                with self.subTest(module=module.__name__,mode=mode):
+                    events=[];clock_calls=0
+                    class Stream:
+                        def __init__(self,fd):self.fd=fd;self.closed=False
+                        def fileno(self):return self.fd
+                        def close(self):self.closed=True
+                    class Proc:
+                        pid=12345
+                        def __init__(self):self.stdout=Stream(101);self.stderr=Stream(102);self.waits=0
+                        def poll(self):raise AssertionError('poll may release PGID ownership')
+                        def wait(self,timeout=None):
+                            self.waits+=1;events.append(('wait',timeout))
+                            if mode=='reap-timeout' or (mode=='wait-timeout' and self.waits==1):raise subprocess.TimeoutExpired('fixture',timeout)
+                            if mode=='reap-error':raise OSError('inert reap error')
+                            return 1 if mode=='nonzero' else 0
+                    class Selector:
+                        def __init__(self):self.keys={};self.closed=False
+                        def register(self,stream,event):
+                            if mode=='setup':raise OSError('inert setup error')
+                            self.keys[stream.fd]=SimpleNamespace(fd=stream.fd,fileobj=stream)
+                        def get_map(self):return self.keys
+                        def select(self,timeout):
+                            if mode=='selector':raise OSError('inert select error')
+                            return [(key,module.selectors.EVENT_READ) for key in list(self.keys.values())]
+                        def unregister(self,stream):del self.keys[stream.fd]
+                        def close(self):self.closed=True
+                    proc=Proc();selector=Selector()
+                    def clock():
+                        nonlocal clock_calls
+                        clock_calls+=1
+                        return 31 if clock_calls>1 and mode in ('timeout','reap-timeout','reap-error') else 0
+                    def killpg(pid,sig):events.append(('kill',pid,sig))
+                    bound='MAX_JSON' if module is p else 'MAX_OUTPUT'
+                    expected=OSError if mode in ('selector','setup') else p.Refusal
+                    with patch.object(module.subprocess,'Popen',return_value=proc),patch.object(module.selectors,'DefaultSelector',return_value=selector),patch.object(module.os,'set_blocking'),patch.object(module.os,'read',return_value=b'' if mode in ('nonzero','wait-timeout') else b'x'),patch.object(module.os,'killpg',side_effect=killpg),patch.object(module.time,'monotonic',side_effect=clock),patch.object(module,bound,0):
+                        with self.assertRaises(expected) as failure:function(*args)
+                    if mode.startswith('reap-'):self.assertIn('cleanup reap uncertain',str(failure.exception))
+                    if mode=='nonzero':self.assertEqual(events,[('wait',30)])
+                    elif mode=='wait-timeout':self.assertEqual(events,[('wait',30),('kill',proc.pid,module.signal.SIGKILL),('wait',1)])
+                    else:self.assertEqual(events,[('kill',proc.pid,module.signal.SIGKILL),('wait',1)])
+                    self.assertTrue(selector.closed);self.assertTrue(proc.stdout.closed);self.assertTrue(proc.stderr.closed)
     def test_symlink_escape_cycle_and_dangling(self):
         for graph in ({'a':{'kind':'symlink','target':'../outside'}},{'a':{'kind':'symlink','target':'b'},'b':{'kind':'symlink','target':'a'}},{'a':{'kind':'symlink','target':'missing'}}):
             with self.assertRaises(p.Refusal):p.validate_links(graph)
+    def test_sysroot_relative_library_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp).resolve();(root/'usr/lib').mkdir(parents=True);(root/'usr/lib/file').write_bytes(b'inert library bytes')
+            (root/'lib').symlink_to('usr/lib');(root/'usr/lib/alias').symlink_to('file');held=p.root_fd(root)
+            try:
+                fd,name=p.sysroot_leaf(held,'lib/alias')
+                try:self.assertEqual(name,'usr/lib/file');self.assertEqual(p.read_fd(fd),b'inert library bytes')
+                finally:os.close(fd)
+            finally:os.close(held)
+    def test_sysroot_forbidden_targets_cycles_and_hops(self):
+        for mode in ('absolute','internal','escape','cycle','hops'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp).resolve();(root/'lib').mkdir();(root/'etc').mkdir();(root/'etc/file').write_bytes(b'inert')
+                target={'absolute':'/usr/lib/file','internal':'../etc/file','escape':'../../outside','cycle':'b','hops':'link0'}[mode]
+                (root/'lib/a').symlink_to(target)
+                if mode=='cycle':(root/'lib/b').symlink_to('a')
+                if mode=='hops':
+                    for index in range(33):(root/f'lib/link{index}').symlink_to(f'link{index+1}')
+                    (root/'lib/link33').write_bytes(b'inert')
+                held=p.root_fd(root)
+                try:
+                    with self.assertRaises(p.Refusal):p.sysroot_leaf(held,'lib/a')
+                finally:os.close(held)
+    def test_sysroot_shape_identity_and_owned_descriptors(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp).resolve();(root/'lib').mkdir();(root/'lib/file').write_bytes(b'inert');(root/'lib/directory').mkdir();os.mkfifo(root/'lib/fifo');held=p.root_fd(root)
+            try:
+                for name in ('lib/directory','lib/fifo'):
+                    with self.assertRaises(p.Refusal):p.sysroot_leaf(held,name)
+                real_fstat=p.os.fstat;real_open=p.os.open;real_dup=p.os.dup;opened=[]
+                def capture_open(*args,**kwargs):
+                    fd=real_open(*args,**kwargs);opened.append(fd);return fd
+                def capture_dup(*args,**kwargs):
+                    fd=real_dup(*args,**kwargs);opened.append(fd);return fd
+                def mismatch(fd):
+                    value=real_fstat(fd)
+                    if opened and fd==opened[-1] and p.stat.S_ISREG(value.st_mode):
+                        altered=list(value);altered[1]+=1;return os.stat_result(altered)
+                    return value
+                with patch.object(p.os,'open',side_effect=capture_open),patch.object(p.os,'dup',side_effect=capture_dup),patch.object(p.os,'fstat',side_effect=mismatch):
+                    with self.assertRaises(p.Refusal):p.sysroot_leaf(held,'lib/file')
+                for fd in opened:
+                    with self.assertRaises(OSError):real_fstat(fd)
+                self.assertTrue(p.stat.S_ISDIR(real_fstat(held).st_mode))
+            finally:os.close(held)
     def test_relative_link_and_hardlink_copies_are_independent(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);source=root/'source';source.mkdir();put(source,'one',b'one');os.link(source/'one',source/'two');(source/'alias').symlink_to('one')
@@ -196,7 +360,7 @@ class PrimitiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp).resolve();sysroot=root/'sysroot';sysroot.mkdir();put(sysroot,'lib/ld-linux-aarch64.so.1',elf());put(sysroot,'lib/aarch64-linux-gnu/libc.so.6',elf())
             path=root/'reader';path.write_bytes(elf(['libc.so.6'],'/lib/ld-linux-aarch64.so.1'))
-            bodies,closure=b.dependency_closure({'reader':path},sysroot,root/'env');self.assertEqual(len(closure),2)
+            bodies,closure=b.dependency_closure({'reader':path},sysroot,root/'env');self.assertEqual(len(closure),2);self.assertEqual(set(bodies['reader']['runtimeDependencyPaths']),set(closure))
             (sysroot/'lib/aarch64-linux-gnu/libc.so.6').unlink()
             with self.assertRaises(p.Refusal):b.dependency_closure({'reader':path},sysroot,root/'other-env')
 if __name__=='__main__':unittest.main()
