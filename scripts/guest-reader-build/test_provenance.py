@@ -267,6 +267,19 @@ class PacketTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(p.Refusal,'hash mismatch'):b.parsed_output({'exitCode':0,'outputs':{'instructionReader':{'sha256':'0'*64}}},directory,fd,15)
         finally:os.close(fd)
+    def test_parsed_control_base_read_refusal_closes_output(self):
+        from unittest.mock import patch
+        directory=self.root/'control';directory.mkdir();(directory/'instructionReader').write_bytes(standalone_pair()[1])
+        real_input=b.file_input;real_read=p.read_fd;held=[]
+        def tracked_input(*args):
+            fd,meta=real_input(*args);held.append(fd);return fd,meta
+        def refuse_base(fd,limit):
+            if fd==123:raise p.Refusal('injected base read')
+            return real_read(fd,limit)
+        with patch.object(b,'file_input',side_effect=tracked_input),patch.object(p,'read_fd',side_effect=refuse_base):
+            with self.assertRaisesRegex(p.Refusal,'base read'):b.parsed_output({'exitCode':0,'outputs':{'instructionReader':{'sha256':'0'*64}}},directory,123,15)
+        self.assertEqual(len(held),1)
+        with self.assertRaises(OSError):os.fstat(held[0])
     def test_opaque_fixed_envelope_and_nonstandard_exit_refuse(self):
         opaque=self.root/'opaque-import.ts';record={'exitCode':1,'stdoutBytes':0,'outputs':{}};stderr=b.opaque_diagnostic(opaque)
         b.exact_opaque_negative(record,stderr,opaque)

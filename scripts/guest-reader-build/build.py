@@ -375,8 +375,9 @@ def exact_opaque_negative(record,stderr,opaque):
 def parsed_output(record,directory,base_fd,expected_nibble):
     if record['exitCode']!=0 or 'instructionReader' not in record['outputs']:p.refuse('measurement compile outcome')
     fd,_=file_input(directory/'instructionReader',p.MAX_ELF)
-    base_hash=p.digest(p.read_fd(base_fd,p.MAX_ELF))
-    try:decoded=p.standalone_flags(fd,base_fd)
+    try:
+        base_hash=p.digest(p.read_fd(base_fd,p.MAX_ELF))
+        decoded=p.standalone_flags(fd,base_fd)
     finally:os.close(fd)
     if decoded['baseSha256']!=base_hash or decoded['outputSha256']!=record['outputs']['instructionReader']['sha256']:p.refuse('measurement decoded hash mismatch')
     if decoded['flagsNibble']!=expected_nibble or decoded['payload']['compileExecArgvBytes']!=0:p.refuse('measurement embedded flags')
