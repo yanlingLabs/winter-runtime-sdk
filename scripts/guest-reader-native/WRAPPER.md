@@ -68,7 +68,9 @@ The closed report-family classifier lives in `native_cases.py` (a pinned module)
 `wrapper.py`: it labels the retained same-owner stderr capture and does not consult, relax
 or replace the exporter's full-capture scrub, whose regex, provenance checks and
 `postInitStderrSample` shapes are unchanged. Its separate `postInitReportFamily` value is
-non-secret and appears in both `result.json` and `log_result_projection`. Because it changes
+non-secret and appears in both `result.json` and `log_result_projection`. It mirrors the case
+kind and capture presence of the sample reason, not its provenance: only a closed enum leaves, so
+the family deliberately skips the exporter's provenance gate. Because it changes
 `native_cases.py`, the `SOURCE_PINS` entry for that module in `wrapper.py` and the reviewed
 workflow's `bootstrap.py` and `wrapper.py` pins are recomputed together; the compile-packet
 and acquisition pins and every workflow branch name are untouched. The grammar, gating and

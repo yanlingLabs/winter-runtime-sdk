@@ -528,10 +528,11 @@ SAMPLE_REASONS=('not_same_owner_failure','scrub_rejected','provenance_unverified
 
 
 # Closed crash-report-family enum (native_cases.REPORT_FAMILIES, asserted equal by tests) plus the two
-# non-classified markers: the failure was not a same-owner case failure (including failures before any
-# case ran), or it was a same-owner failure without a complete bounded capture (before the existing
-# Observation/Reaps, or stderr not bytes). Both mirror the sample reasons of the same name. The enum
-# is the whole output: nothing derived from stderr content except the family itself.
+# non-classified markers: not_same_owner_failure (another case kind, or a failure before any case
+# stage) and capture_absent (a same-owner stage without a complete bounded capture: before the existing
+# Observation/Reaps, no handles after a launch or later-phase failure, or stderr not bytes). They mirror
+# the sample reasons of the same names by case kind and capture presence, NOT by provenance: the family
+# deliberately skips the exporter's provenance gate because only a closed enum leaves, never content.
 REPORT_FAMILIES=('bun_report_shape','webkit_assertion_shape','loader_error_shape','unknown','incomplete','classification_error')
 REPORT_FAMILY_ABSENT=('not_same_owner_failure','capture_absent')
 
@@ -627,6 +628,10 @@ def failure_record(error, *, stage='preflight'):
     except BaseException:family='classification_error'
     if family in REPORT_FAMILIES[:3]+('incomplete',) and postinit.get('available') is True and postinit.get('stderrBytes')==0:
         family='classification_error'  # A report cannot come from an empty capture.
+    # A same-owner stage without handles (launch failed, or a later phase failed after a passing case)
+    # has no capture either: say what the sample says, not that the case kind differed.
+    if family=='not_same_owner_failure' and type(stage) is str and stage in FAILURE_STAGES and stage.startswith('case:same-owner:'):
+        family='capture_absent'
     name,reason,symbol=closed(error)
     cause_name,cause_reason,cause_errno=closed(chain[-1])
     return {'readerCaseSetPassed':False, 'stage':stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown',

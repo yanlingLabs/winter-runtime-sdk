@@ -29,6 +29,122 @@ URL = b' https://bun.report/1.3.14/La10d9b296izhgEqko4C_mo0zmBmo0zmBm0guqB29zjtB
 SEND = [b'', b"To send a redacted crash report to Bun's team,", b'please file a GitHub issue using the link below:', b'']
 OH_NO = b'oh no: Bun has crashed. This indicates a bug in Bun, not your code.'
 
+# Real public banners, verbatim from oven-sh/bun issues (issue number, then the pasted lines). Two changes only: the
+# line ending is LF, and a Features:/Builtins: line whose paste lost the trailing space that analytics.zig:133-161 writes
+# after every token has it back (marked RESTORED). The closing blank line (crash_handler.zig:454) is added where the paste dropped it.
+REAL = (
+    (32418, 'Linux arm64, Bun 1.3.14, short report', (
+        '============================================================',
+        'Bun v1.3.14 (2a41ca97) Linux arm64',
+        'Linux Kernel v6.12.62 | glibc v2.41',
+        'CPU: neon fp aes crc32 atomics',
+        'Args: "claude"',
+        'Elapsed: 2ms | User: 3ms | Sys: 0ms',
+        'RSS: 18.15MB | Peak: 7.57MB | Commit: 18.15MB | Faults: 0',
+        '',
+        'panic(main thread): Bus error at address 0xF1B8830',
+        'oh no: Bun has crashed. This indicates a bug in Bun, not your code.',
+        '',
+        "To send a redacted crash report to Bun's team,",
+        'please file a GitHub issue using the link below:',
+        '',
+        ' https://bun.report/1.3.14/L_12a41ca9AA+gEuuy3nCmtn3nC2lxI2zxImjl3nCA4AgjkujP',
+    )),
+    (25105, 'Linux x64 baseline, Bun 1.3.2, panic(main thread), trailing spaces as pasted', (
+        '============================================================',
+        'Bun v1.3.2 (b131639c) Linux x64 (baseline)',
+        'Linux Kernel v6.1.0 | glibc v2.36',
+        'CPU: sse42 popcnt avx avx2',
+        'Args: "claude" "--resume"',
+        'Features: Bun.stderr(2) Bun.stdin(2) Bun.stdout(2) dotenv fetch jsc spawn(15) standalone_executable ',
+        'Builtins: "bun:main" "node:assert" "node:async_hooks" "node:buffer" "node:child_process" "node:constants" "node:crypto" "node:domain" "node:events" "node:fs" "node:fs/promises" "node:http" "node:https" "node:module" "node:net" "node:os" "node:path" "node:path/win32" "node:perf_hooks" "node:process" "node:querystring" "node:stream" "node:timers/promises" "node:tls" "node:tty" "node:url" "node:util" "node:zlib" "node:worker_threads" "undici" "ws" "node-fetch" "node:inspector" "node:http2" ',
+        'Elapsed: 410ms | User: 594ms | Sys: 144ms',
+        'RSS: 1.22GB | Peak: 0.37GB | Commit: 1.22GB | Faults: 1 | Machine: 33.28GB',
+        '',
+        'panic(main thread): Segmentation fault at address 0x7F5955555554',
+        'oh no: Bun has crashed. This indicates a bug in Bun, not your code.',
+        '',
+        "To send a redacted crash report to Bun's team,",
+        'please file a GitHub issue using the link below:',
+        '',
+        ' https://bun.report/1.3.2/B_1b131639Azv7v//Bkm29vE+kgPmx6zhE__y95ohE_y95ohEy95ohEy95ohE_0r3ghEq14plF4mimvFi7j02F49k9jE__0r3ghEq14plFA2y1/Bo1q1q1C',
+    )),
+    (28648, 'Linux x64, Bun Canary 1.3.11, panic without a thread tag, Machine in TB', (
+        '============================================================',
+        'Bun Canary v1.3.11-canary.1 (9e93bfa1) Linux x64',
+        'Linux Kernel v5.10.0 | glibc v2.35',
+        'CPU: sse42 popcnt avx avx2',
+        'Args: "bun" "run" "index.cjs"',
+        'Features: jsc workers_spawned ',  # RESTORED
+        'Builtins: "bun:main" "node:path" "node:worker_threads" ',  # RESTORED
+        'Elapsed: 36ms | User: 48ms | Sys: 9ms',
+        'RSS: 1.11GB | Peak: 32.08MB | Commit: 1.11GB | Faults: 0 | Machine: 2.15TB',
+        '',
+        'panic: Uncaught exception while handling uncaught exception',
+        'oh no: Bun has crashed. This indicates a bug in Bun, not your code.',
+        '',
+        "To send a redacted crash report to Bun's team,",
+        'please file a GitHub issue using the link below:',
+        '',
+        ' https://bun.report/1.3.11/lr29e93bfagQggggCw/qo2C+mq2iDghr7gEq3nrsEqhkhoE0/p2iDk/x72D4444rEw1l72DksllBA0eNoLzUtOLE3PKFFIrUhOLSjJzM9TKM/IzElVyEjMS8nJzEtXKMVQAQAURxQ7',
+    )),
+    (24290, 'Linux x64 baseline, Bun 1.3.1, the x64 AVX warning line', (
+        '============================================================',
+        'Bun v1.3.1 (89fa0f34) Linux x64 (baseline)',
+        'Linux Kernel v6.8.0 | glibc v2.39',
+        'CPU: sse42 popcnt',
+        'Args: "claude"',
+        'Features: jsc no_avx2 no_avx ',
+        'Elapsed: 16ms | User: 1ms | Sys: 18ms',
+        'RSS: 33.56MB | Peak: 22.54MB | Commit: 33.56MB | Faults: 0',
+        '',
+        'CPU lacks AVX support. Please consider upgrading to a newer CPU.',
+        'panic(main thread): Illegal instruction at address 0x606F8BF',
+        'oh no: Bun has crashed. This indicates a bug in Bun, not your code.',
+        '',
+        "To send a redacted crash report to Bun's team,",
+        'please file a GitHub issue using the link below:',
+        '',
+        ' https://bun.report/1.3.1/B_189fa0f3AgggwgYk9/+8CA3A+r87gG',
+    )),
+    (44276, 'Linux x64, Bun 1.4.2: a different banner generation (see the grammar comment)', (
+        '============================================================',
+        'Bun v1.4.2 (744846f84) Linux x64',
+        'Linux Kernel v7.0.0 | glibc v2.39',
+        'CPU: sse42 popcnt avx avx2',
+        'Args: "bun" "-e" "import \\"node:events\\"; console.log(\\"events-ok\\")"',
+        'Features: bunfig jsc tsconfig(2) ',  # RESTORED
+        'Builtins: "bun:main" "node:events" ',  # RESTORED
+        '',
+        'Elapsed: 4ms | User: 3ms | Sys: 1ms',
+        'RSS: 14.82 MB | Peak: 14.65 MB | Commit: 34.34 MB | Faults: 0 | Machine: 67.12 GB',
+        '',
+        'panic(main thread): Segmentation fault at address 0xFFFFFFFFC24036E4',
+        'oh no: Bun has crashed. This indicates a bug in Bun, not your code.',
+        '',
+        "To send a redacted crash report to Bun's team,",
+        'please file a GitHub issue using the link below:',
+        '',
+        ' https://bun.report/1.4.2/la1744846fgCgkggC_6q833Bi4593B_i903vBms1vvBsgyk2Bsnn43B8j533Bin033Bi1nryByv+oyB6t8oyBmrpsxBq50oyBmwwoyB46uoyB0lkiyBmp+hyBwonqvBA2D5xk/39B',
+    )),
+)
+
+# oven-sh/bun#32701 (Linux arm64, 1.3.14) pastes a hand-trimmed banner: no Elapsed:/RSS: pair, blank lines, send text or URL. Verbatim,
+# Features:/Builtins: trailing spaces RESTORED. Not a whole report, so it must not get a family; its Args: line and URL are real.
+TRIMMED_32701 = (
+    '============================================================',
+    'Bun v1.3.14 (0d9b296a) Linux arm64',
+    'Linux Kernel v7.0.11 | glibc v2.36',
+    'CPU: neon fp aes crc32 atomics',
+    'Args: "bun" "-e" "import alchemy from \\"alchemy\\"; const app = await alchemy(\\"slayer-platform-debug\\", { stage: \\"development\\", phase: \\"read\\", noTrack: true }); await app.finalize(); console.log(\\"alchemy init ok\\")"...',
+    'Features: Bun.stderr(2) Bun.stdin(2) Bun.stdout(2) bunfig jsc tsconfig ',  # RESTORED
+    'Builtins: "bun:main" "node:async_hooks" "node:child_process" "node:crypto" "node:events" "node:fs" "node:fs/promises" "node:http" "node:https" "node:os" "node:path" "node:process" "node:url" "node:util" ',  # RESTORED
+    'panic(main thread): Segmentation fault at address 0x10',
+    'oh no: Bun has crashed. This indicates a bug in Bun, not your code.',
+)
+URL_32701 = ' https://bun.report/1.3.14/La10d9b296gCukggCmw2wqE+rEu3s2rFu3s2rF+k6x6D_um9zoCms6poC+ppn+Em6srjFmkij6Dm7943DmzsorCm3vltC2spjtCm783lD2z47pC2mqhgEm0p+qC2l6zpCA2AgB'
+
+
 
 def join(lines): return b'\n'.join(lines) + b'\n'
 
@@ -36,7 +152,7 @@ def join(lines): return b'\n'.join(lines) + b'\n'
 def bun_lines(*, cpu=b'CPU: neon fp aes crc32 atomics', args=b'Args: "/instruction-reader"', features=b'Features: jsc ',
               builtins=None, usage=True, avx=False, arch=b'arm64', version=b'Bun v1.3.14 (0d9b296a) Linux ',
               kernel=b'Linux Kernel v6.11.0 | glibc v2.39', panic=b'panic(main thread): Segmentation fault at address 0x0',
-              action=None, memory=False, url=URL):
+              action=None, memory=False, panic_lf=False, url=URL):
     lines = [b'=' * 60, version + arch, kernel]
     if cpu: lines.append(cpu)
     lines.append(args)
@@ -48,12 +164,19 @@ def bun_lines(*, cpu=b'CPU: neon fp aes crc32 atomics', args=b'Args: "/instructi
     lines.append(b'')
     if avx: lines.append(b'CPU lacks AVX support. Please consider upgrading to a newer CPU.')
     if not memory: lines.append(panic)
+    if panic_lf: lines.append(b'')
     if action: lines.append(action)
     lines.append(b'oh no: Bun has run out of memory.' if memory else OH_NO)
     return lines + SEND + [url, b'']
 
 
 def bun(**options): return join(bun_lines(**options))
+
+
+def real(number):
+    """One real banner (REAL) as the whole stderr buffer: its lines plus the closing blank line."""
+    lines = next(lines for issue, _, lines in REAL if issue == number)
+    return join([line.encode('ascii') for line in lines] + [b''])
 
 
 def webkit(kind='assert', frames=3, no_stack=False, message=None):
@@ -89,6 +212,9 @@ def fixtures():
                                       builtins=b'Builtins: "bun:ffi" "node:fs" ', features=b'Features: fetch(12) jsc spawn(3) ',
                                       panic=b'panic: reached unreachable code', args=b'Args: "a" "b c"...'))):
         out.append((name, raw, 'bun_report_shape', 61, {len(raw)}))
+    extra = [('bun-panic-lf', bun(panic=b'panic: Failed to initialize argv: OutOfMemory', panic_lf=True, action=b'Crashed while parsing /a.js'))]
+    extra += [('real-%d' % issue, real(issue)) for issue, _, _ in REAL[:-1]]
+    for name, raw in extra: out.append((name, raw, 'bun_report_shape', 61, {len(raw)}))
     for name, raw, call_site_line in (('webkit-assert', webkit('assert'), 1), ('webkit-never', webkit('never'), 1), ('webkit-message', webkit('message'), 2),
                                       ('webkit-bare', webkit(frames=0), 1), ('webkit-nostack', webkit(frames=0, no_stack=True), 1)):
         out.append((name, raw, 'webkit_assertion_shape', raw.index(b'\n') + 1, set(line_ends(raw)[call_site_line:]) | {len(raw)}))
@@ -102,13 +228,17 @@ class Capture:
     """The wrapper's real exporter bound to inert lease DATA (as test_fixture_stderr does)."""
     @staticmethod
     def export(raw, kind='same-owner'):
+        return Capture.export_error(SimpleNamespace(handles=SimpleNamespace(fixture_stderr_capture=raw)), kind)
+
+    @staticmethod
+    def export_error(error, kind):
         lease = object.__new__(w.SourceLease)
         lease.path = Path('/run/fixed/sources'); lease.synthetic = False; lease.closed = False; lease.unresolved = False
         lease.snapshot = object(); lease.runtime = object(); lease.fixture = SimpleNamespace(path=lease.path.parent / 'fixture')
         modules = {'reader_fixture': f, 'producer': p, 'reader_parent': object(), 'control': object(), 'native_cases': cases}
         lease.modules = modules
         export = w._fixture_stderr_exporter(lease, SimpleNamespace(sha256=w.COMPILE_PIN_SHA256), modules, p.selected_host_exec_environment())
-        return export(SimpleNamespace(handles=SimpleNamespace(fixture_stderr_capture=raw)), kind)
+        return export(error, kind)
 
 
 def failed_case(stderr, kind='same-owner'):
@@ -234,8 +364,9 @@ class Grammar(unittest.TestCase):
         for index in range(len(lines) + 1):
             for label in (b'bun_report_shape', b'loader_error_shape', b'webkit_assertion_shape', b'ASSERTION FAILED: x', b'x: error while loading shared libraries: y', b''):
                 inserted = lines[:index] + [label] + lines[index:]
-                if inserted != lines:  # An empty line beside an existing blank can only repeat it.
-                    self.assertEqual(cases.classify_report_family(join(inserted)), 'unknown', (index, label))
+                if inserted == lines: continue  # An empty line beside an existing blank can only repeat it.
+                allowed = label == b'' and index == 12  # The one variant: an LF-ending panic message, see PanicLine.
+                self.assertEqual(cases.classify_report_family(join(inserted)), 'bun_report_shape' if allowed else 'unknown', (index, label))
         for index in range(len(lines)):
             self.assertEqual(cases.classify_report_family(join(lines[:index + 1] + lines[index:])), 'unknown', index)
             if index in required:  # Losing the closing blank line is a truncated report, not a different one.
@@ -293,12 +424,15 @@ class Grammar(unittest.TestCase):
                 else: raw[index:index] = raw[:index]
             corpus.append(bytes(raw[:16384]))
         corpus += [rng.randbytes(rng.randrange(0, 900)) for _ in range(1500)]
-        started = time.monotonic()
+        started = time.monotonic(); slowest = 0
         for raw in corpus:
+            begun = time.monotonic()
             label = cases.classify_report_family(raw)
+            slowest = max(slowest, time.monotonic() - begun)
             self.assertIn(label, CLOSED); self.assertIsNot(type(label), bytes)
             self.assertNotEqual(label, 'classification_error')
-        self.assertLess(time.monotonic() - started, 30)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertLess(slowest, 0.5)
         source = ''.join(inspect.getsource(function) for function in (cases.classify_report_family, cases.report_family_for_case, cases._walk))
         for forbidden in ('decode', 'hashlib', 'sha256', 'base64', 'json', 'print', 'str(', 'hex(', 'repr('):
             self.assertNotIn(forbidden, source)
@@ -314,7 +448,7 @@ class Grammar(unittest.TestCase):
                   b'ASSERTION FAILED: ' + b'(' * 4000 + b'\n' + b'x' * 4000 + b'\n' + b'(' * 4000]
         started = time.monotonic()
         for raw in cases_: cases.classify_report_family(raw[:16384])
-        self.assertLess(time.monotonic() - started, 10)
+        self.assertLess(time.monotonic() - started, 0.5)
 
 
 class Exceptions(unittest.TestCase):
@@ -392,8 +526,8 @@ class Gating(unittest.TestCase):
 
 
 class Projection(unittest.TestCase):
-    def record(self, family, *, diagnostics=None, sample=None):
-        chain_error = w.Uncertain(SimpleNamespace(stage='case:same-owner:run', **({'fixture_stderr_sample': sample} if sample else {})),
+    def record(self, family, *, diagnostics=None, sample=None, stage='case:same-owner:run'):
+        chain_error = w.Uncertain(SimpleNamespace(stage=stage, **({'fixture_stderr_sample': sample} if sample else {})),
                                   SimpleNamespace(handles=SimpleNamespace(postinit_report_family=family, postinit_diagnostics=diagnostics), cause=None))
         return b.failure_record(chain_error)
 
@@ -406,14 +540,17 @@ class Projection(unittest.TestCase):
 
     def test_failure_record_validates_strictly_and_never_echoes_foreign_values(self):
         for value in b.REPORT_FAMILIES + b.REPORT_FAMILY_ABSENT:
-            self.assertEqual(self.record(value)['postInitReportFamily'], value)
+            self.assertEqual(self.record(value, stage='case:parent-exit:run')['postInitReportFamily'], value)
+            self.assertEqual(self.record(value)['postInitReportFamily'], 'capture_absent' if value == 'not_same_owner_failure' else value)
         for value in ('/private/path', 'Bun_report_shape', 'bun_report_shape ', '', 'missing_urandom', 'missing_maps', b'bun_report_shape', 1, True, 0.5, [], {}, ('unknown',),
                       {'reportFamily': 'unknown'}, 'bun_report_shape\n', 'unknown\x00', 'Kunknown', 'ＵＮＫＮＯＷＮ'):
             record = self.record(value)
             self.assertEqual(record['postInitReportFamily'], 'classification_error', value)
             if isinstance(value, str) and value: self.assertNotIn(json.dumps(value), json.dumps(record))
         self.assertEqual(b.failure_record(w.Refusal('x'))['postInitReportFamily'], 'not_same_owner_failure')
-        self.assertEqual(self.record(None)['postInitReportFamily'], 'not_same_owner_failure')
+        self.assertEqual(self.record(None, stage='preflight')['postInitReportFamily'], 'not_same_owner_failure')
+        self.assertEqual(self.record(None, stage='case:parent-exit:run')['postInitReportFamily'], 'not_same_owner_failure')
+        self.assertEqual(self.record(None)['postInitReportFamily'], 'capture_absent')  # A same-owner stage with no handles.
         chain = [SimpleNamespace(handles=SimpleNamespace(postinit_report_family=None)), SimpleNamespace(handles=SimpleNamespace(postinit_report_family='unknown')),
                  SimpleNamespace(handles=SimpleNamespace(postinit_report_family='incomplete'))]
         self.assertEqual(b.report_family_record(chain), 'unknown')
@@ -518,6 +655,172 @@ class Scrub(unittest.TestCase):
             before = Capture.export(raw)
             with patch.object(cases, 'classify_report_family', side_effect=RuntimeError('private')):
                 self.assertEqual(Capture.export(raw), before)
+
+
+class PanicLine(unittest.TestCase):
+    """A panic message that itself ends in LF (Output.panic("...\\n")) prints one extra empty line."""
+    def test_exactly_one_empty_line_after_the_panic_line_is_allowed(self):
+        for options in ({}, {'action': b'Crashed while parsing /a.js'}, {'panic': b'panic: ' + b'x' * 1024}, {'panic': b'panic: '}, {'panic': b'panic(main thread): Failed to initialize argv: OutOfMemory'}):
+            self.assertEqual(cases.classify_report_family(bun(panic_lf=True, **options)), 'bun_report_shape', options)
+            self.assertEqual(cases.classify_report_family(bun(**options)), 'bun_report_shape', options)
+        lines = bun_lines(panic_lf=True)
+        self.assertEqual(lines[9:12], [b'panic(main thread): Segmentation fault at address 0x0', b'', OH_NO])
+        self.assertEqual(cases.classify_report_family(join(lines[:11] + [b''] + lines[11:])), 'unknown')
+
+    def test_the_variant_stays_bounded_printable_and_single_line(self):
+        for panic in (b'panic: caf\xc3\xa9', b'panic: ' + b'x' * 1025, b'panic: a\rb', b'panic: \xff', b'panic: \x00', b'panic: a\x1b[0mb'):
+            self.assertEqual(cases.classify_report_family(bun(panic=panic, panic_lf=True)), 'unknown', panic)
+            self.assertEqual(cases.classify_report_family(bun(panic=panic)), 'unknown', panic)
+        # A message with an embedded LF is two lines, the second of which is not a banner line.
+        self.assertEqual(cases.classify_report_family(bun(panic=b'panic: first\nsecond', panic_lf=True)), 'unknown')
+        self.assertEqual(cases.classify_report_family(bun(panic=b'panic: first\nsecond')), 'unknown')
+        # The empty line belongs right after the panic line and nowhere else.
+        lines = bun_lines()
+        self.assertEqual(lines[9], b'panic(main thread): Segmentation fault at address 0x0')
+        for index in range(len(lines) + 1):
+            self.assertEqual(cases.classify_report_family(join(lines[:index] + [b''] + lines[index:])), 'bun_report_shape' if index == 10 else 'unknown', index)
+        memory = bun_lines(memory=True)  # The out-of-memory variant prints no panic line, so no empty line follows it.
+        for index in range(len(memory) + 1):
+            self.assertEqual(cases.classify_report_family(join(memory[:index] + [b''] + memory[index:])), 'unknown', index)
+        # An LF-ending message never turns a truncated report into a whole one.
+        raw = bun(panic_lf=True)
+        cut = raw.index(b'at address 0x0\n') + len(b'at address 0x0\n')
+        self.assertEqual(cases.classify_report_family(raw[:cut]), 'incomplete')
+        self.assertEqual(cases.classify_report_family(raw[:cut + 1]), 'incomplete')
+
+
+class RealBanners(unittest.TestCase):
+    def test_real_public_linux_reports_are_recognised_whole_buffer(self):
+        self.assertEqual([issue for issue, _, _ in REAL[:-1]], [32418, 25105, 28648, 24290])
+        for issue, what, lines in REAL[:-1]:
+            raw = real(issue)
+            self.assertEqual(cases.classify_report_family(raw), 'bun_report_shape', (issue, what))
+            self.assertRegex(raw, rb'[A-Za-z0-9+/=_-]{40,}')  # Each trips the unchanged scrub through its 60-equals line.
+            self.assertEqual(Capture.export(raw), {'available': False, 'reason': 'scrub_rejected'}, issue)
+            # The same bytes through the real gate: a family and a rejected sample, nothing else from the content.
+            fx, error = failed_case(raw)
+            self.assertEqual(fx.h.postinit_report_family, 'bun_report_shape')
+            self.assertEqual(error.handles.fixture_stderr_capture, raw)
+
+    def test_real_reports_keep_exactly_the_trailing_spaces_bun_writes(self):
+        restored = [line for _, _, lines in REAL for line in lines if line.startswith(('Features: ', 'Builtins: '))]
+        self.assertTrue(restored and all(line.endswith(' ') and not line.endswith('  ') for line in restored))
+        for issue, _, lines in REAL[:-1]:
+            for index, line in enumerate(lines):
+                if line.startswith(('Features: ', 'Builtins: ')):  # analytics.zig:133-161 writes a space after every token.
+                    stripped = [line.encode('ascii') if i != index else line.rstrip().encode('ascii') for i, line in enumerate(lines)]
+                    self.assertEqual(cases.classify_report_family(join(stripped + [b''])), 'unknown', (issue, index))
+        # Real pastes also exercise optional lines: no Features, a Canary version, Machine in TB, a thread-less panic, the AVX line.
+        self.assertNotIn('Features', ''.join(REAL[0][2])); self.assertIn('Canary', REAL[2][2][1]); self.assertIn('TB', REAL[2][2][8]); self.assertTrue(REAL[3][2][9].startswith('CPU lacks AVX'))
+
+    def test_real_args_line_with_escapes_and_truncation_marker(self):
+        args = TRIMMED_32701[4].encode('ascii')
+        self.assertTrue(args.startswith(b'Args: "bun" "-e" "import alchemy from \\"alchemy\\"') and args.endswith(b'"...'))
+        self.assertEqual(cases.classify_report_family(bun(args=args, url=URL_32701.encode(), version=b'Bun v1.3.14 (0d9b296a) Linux ',
+                                                          kernel=b'Linux Kernel v7.0.11 | glibc v2.36', features=TRIMMED_32701[5].encode(),
+                                                          builtins=TRIMMED_32701[6].encode(), panic=TRIMMED_32701[7].encode())), 'bun_report_shape')
+
+    def test_a_hand_trimmed_paste_is_never_a_report(self):
+        trimmed = join([line.encode('ascii') for line in TRIMMED_32701])
+        self.assertEqual(cases.classify_report_family(trimmed), 'unknown')  # No blank line, send text or URL: not Bun's output.
+        self.assertEqual(cases.classify_report_family(trimmed + b'\n'), 'unknown')
+        for end in range(1, len(TRIMMED_32701)):  # Its leading lines are a valid prefix until the missing blank line.
+            partial = join([line.encode('ascii') for line in TRIMMED_32701[:end]])
+            self.assertEqual(cases.classify_report_family(partial), 'incomplete' if end < 8 else 'unknown', end)
+
+    def test_bun_1_4_banner_is_a_different_grammar_and_unknown(self):
+        number, _, lines = REAL[4]
+        self.assertEqual(number, 44276)
+        raw = join([line.encode('ascii') for line in lines] + [b''])
+        self.assertEqual(cases.classify_report_family(raw), 'unknown')
+        # Each 1.4 trait alone, in an otherwise 1.3 banner.
+        base = bun()
+        for old, new in ((b'(0d9b296a)', b'(744846f84)'), (b'RSS: 52.30MB | Peak: 52.30MB | Commit: 38.10MB', b'RSS: 52.30 MB | Peak: 52.30 MB | Commit: 38.10 MB'),
+                         (b'Features: jsc \n', b'Features: jsc \n\n'), (b'Elapsed:', b'\nElapsed:')):
+            self.assertEqual(cases.classify_report_family(base.replace(old, new, 1)), 'unknown', old)
+        # The panic text itself is free: `panic: abort() called` alone does not make a 1.3 banner unknown.
+        self.assertEqual(cases.classify_report_family(bun(panic=b'panic: abort() called')), 'bun_report_shape')
+
+    def test_x64_avx_warning_preamble_makes_the_buffer_two_things(self):
+        warning = (b'warn: CPU lacks AVX support, strange crashes may occur. Reinstall Bun or use *-baseline build:\n'
+                   b'  https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-baseline.zip\n')  # c-bindings.cpp:33-40
+        for raw in (real(24290), real(25105), bun(arch=b'x64 (baseline)', avx=True)):
+            self.assertEqual(cases.classify_report_family(raw), 'bun_report_shape')
+            self.assertEqual(cases.classify_report_family(warning + raw), 'unknown')
+            self.assertEqual(cases.classify_report_family(raw + warning), 'unknown')
+            self.assertEqual(cases.classify_report_family(warning[:-1] + raw), 'unknown')
+        self.assertEqual(cases.classify_report_family(warning), 'unknown')
+        self.assertEqual(cases.classify_report_family(warning + warning), 'unknown')
+        self.assertEqual(cases.classify_report_family(warning[:90]), 'unknown')
+
+    def test_ansi_coloured_banner_built_from_the_source_is_unknown(self):
+        reset, dim, red, cyan = b'\x1b[0m', b'\x1b[2m', b'\x1b[31m', b'\x1b[36m'  # output.zig:964-981
+        lines = bun_lines()
+        coloured = list(lines)
+        coloured[1] = reset + dim + coloured[1]                                          # printMetadata :991-993
+        coloured[8] = reset                                                              # :1086-1088
+        coloured[9] = red + b'panic' + reset + dim + b'(main thread): ' + reset + b'Segmentation fault at address 0x0'  # :302-331
+        coloured[10] = b'oh no' + reset + dim + b':' + reset + b' ' + OH_NO[len(b'oh no: '):]                         # :383-386
+        coloured[15] = cyan + lines[15]                                                  # :434-436
+        coloured[16] = reset                                                             # :451-453
+        self.assertEqual(cases.classify_report_family(join(coloured)), 'unknown')
+        for index in (1, 8, 9, 10, 15, 16):  # Each coloured line alone is enough.
+            single = list(lines); single[index] = coloured[index]
+            self.assertEqual(cases.classify_report_family(join(single)), 'unknown', index)
+        for index in range(len(lines)):  # And a stray escape on any line of the plain report.
+            stray = list(lines); stray[index] = reset + stray[index]
+            self.assertEqual(cases.classify_report_family(join(stray)), 'unknown', index)
+        self.assertEqual(cases.classify_report_family(real(32418).replace(b'panic(main thread)', red + b'panic' + reset + dim + b'(main thread)')), 'unknown')
+
+
+class StageAlignment(unittest.TestCase):
+    """The family mirrors case kind and capture presence, as the sample reason does; it never consults provenance."""
+    def sample_reason(self, error, kind): return Capture.export_error(error, kind)['reason']
+
+    def family(self, error, stage): return b.failure_record(w.Uncertain(SimpleNamespace(stage=stage), error))['postInitReportFamily']
+
+    def test_a_launch_failure_has_no_handles_and_says_what_the_sample_says(self):
+        for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
+            fx = InertEffects(kind)
+            def fail_launch(*_): raise p.Refusal('injected launch failure')
+            fx.launch = fail_launch
+            with self.assertRaises(p.Refusal) as caught:
+                cases.run_case(kind, None, b'{}' if kind == 'same-owner' else b'', effects=fx)
+            self.assertFalse(hasattr(caught.exception, 'handles'))
+            want = 'capture_absent' if kind == 'same-owner' else 'not_same_owner_failure'
+            self.assertEqual(self.family(caught.exception, 'case:%s:run' % kind), want, kind)
+            self.assertEqual(self.sample_reason(caught.exception, kind), want, kind)
+
+    def test_a_later_phase_failure_after_a_passing_same_owner_case_has_no_capture(self):
+        for phase in ('verify', 'recheck'):
+            error = w.Refusal('injected %s failure' % phase)
+            self.assertEqual(self.family(error, 'case:same-owner:' + phase), 'capture_absent', phase)
+            self.assertEqual(self.sample_reason(error, 'same-owner'), 'capture_absent', phase)
+            self.assertEqual(self.family(error, 'case:parent-exit:' + phase), 'not_same_owner_failure', phase)
+
+    def test_family_and_sample_reason_agree_for_every_stage_without_handles(self):
+        error = w.Refusal('injected')
+        for stage in b.FAILURE_STAGES:
+            kind = stage.split(':')[1] if stage.startswith('case:') else None
+            self.assertEqual(self.family(error, stage), self.sample_reason(error, kind), stage)
+        for stage in (None, 7, 'case:same-owner', 'case:same-owner:unknown', 'unknown'):  # Not a stage of the closed list: no kind is claimed.
+            self.assertEqual(b.failure_record(w.Uncertain(SimpleNamespace(stage=stage), error))['postInitReportFamily'], 'not_same_owner_failure', stage)
+
+    def test_only_the_not_same_owner_marker_is_rewritten_and_only_for_a_same_owner_stage(self):
+        for value in b.REPORT_FAMILIES + b.REPORT_FAMILY_ABSENT:
+            for stage in ('case:same-owner:run', 'case:parent-exit:run', 'preflight'):
+                handles = SimpleNamespace(postinit_report_family=value, postinit_diagnostics=None)
+                error = w.Uncertain(SimpleNamespace(stage=stage), SimpleNamespace(handles=handles, cause=None))
+                want = 'capture_absent' if value == 'not_same_owner_failure' and stage == 'case:same-owner:run' else value
+                self.assertEqual(b.failure_record(error)['postInitReportFamily'], want, (value, stage))
+
+    def test_the_family_does_not_consult_provenance(self):
+        raw = bun()
+        fx, error = failed_case(raw)
+        lease = SimpleNamespace(stage='case:same-owner:run', fixture_stderr_sample={'available': False, 'reason': 'provenance_unverified'})
+        record = b.failure_record(w.Uncertain(lease, error))
+        self.assertEqual(record['postInitStderrSample'], {'available': False, 'reason': 'provenance_unverified'})
+        self.assertEqual(record['postInitReportFamily'], 'bun_report_shape')  # Only a closed enum leaves, so the gate is not needed.
 
 
 class Pins(unittest.TestCase):

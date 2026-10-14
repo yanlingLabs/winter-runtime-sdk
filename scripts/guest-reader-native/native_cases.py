@@ -397,11 +397,18 @@ def _walk(items, at, lines, row, tail):
 
 # --- bun_report_shape: Bun's crash banner on Linux, plain (non-ANSI) stderr. --------------
 # Written by crashHandler (crash_handler.zig:260-261, 301-336, 383-456) and printMetadata
-# (986-1096), release build, `bun.Environment.os == .linux`, enable_ansi_colors_stderr false
-# (Output.zig sets it from the stderr TTY after stdio init; a pipe is not a TTY). ANSI
-# (ESC bytes), Debug builds, macOS/Windows/FreeBSD/Android/WSL, native-plugin and libuv
-# message blocks, "multiple threads are crashing", and "panicked during a panic" are not in
-# the grammar and therefore classify as `unknown`.
+# (986-1096), release build, `bun.Environment.os == .linux`, enable_ansi_colors_stderr false.
+# That flag defaults to true (output.zig:425) until Output.Source.Stdio.init runs (main.zig:58)
+# and then follows the stderr TTY (output.zig:381-408) unless FORCE_COLOR is set (output.zig:
+# 103-119): a crash in the pre-init window, or under FORCE_COLOR, is coloured (ESC bytes) and
+# is `unknown`; the harness's pipe and six-variable environment give the plain form after init.
+# Version scope: the line shapes are those of 1.3.x (derived at tag bun-v1.3.14 and read against
+# public 1.3.0-1.3.14 reports). 1.4.x prints `RSS: 14.82 MB` with a space, a 9-hex sha and a blank
+# line before `Elapsed:` (and reasons like `panic: abort() called`, which are free text and would
+# pass on their own): it is `unknown`, so a Bun bump needs the grammar re-derived. Also `unknown`: Debug builds, macOS/Windows/FreeBSD/Android/WSL, native-
+# plugin and libuv message blocks, "multiple threads are crashing", "panicked during a panic",
+# and any text before the banner (such as c-bindings.cpp:26-41's x64 `warn: CPU lacks AVX
+# support` preamble, written to the same stderr before the crash).
 _DEC = _cls('0-9', 1, 20)
 _SIZE = (_cls('0-9', 1, 12), _opt(_lit('.'), _cls('0-9', 1, 3)), _cls('A-Za-z', 1, 4), _cls(' ', 0, 4))  # {B:<3.2}, :1072-1080
 _SEMVER = (_cls('0-9', 1, 4), _lit('.'), _cls('0-9', 1, 4), _lit('.'), _cls('0-9', 1, 4))
@@ -428,6 +435,10 @@ _USAGE = _block((_lit('Elapsed: '), _DEC, _lit('ms | User: '), _DEC, _lit('ms | 
 _BLANK = _line()
 _NO_AVX = _maybe(_lit('CPU lacks AVX support. Please consider upgrading to a newer CPU.'))  # :1091-1094 (x64 only)
 _PANIC = _line(_lit('panic'), _opt(_lit('(main thread)')), _lit(': '), _cls(_PRINT, 0, 1024))  # :306-332; reason text is free (@panic message)
+# A message that itself ends in LF (Output.panic("...\n"), output.zig:535, main.zig:55; panicImpl
+# crash_handler.zig:816) prints that LF and then :332's own, so one empty line may follow the panic
+# line. It is the only variant: still one line of printable ASCII, no embedded LF.
+_PANIC_LF = _maybe()
 _ACTION = _maybe(_lit('Crashed while '), _any((_lit('parsing '),), (_lit('visiting '),), (_lit('printing '),),
                  (_lit('loading native module: '),)), _cls(_PRINT, 1, 4096))                # :336, Action.format :130-162
 _OH_NO = _line(_lit('oh no: Bun has crashed. This indicates a bug in Bun, not your code.'))  # :383-386, :424
@@ -463,6 +474,10 @@ _WEBKIT_COMMIT = re.compile(rb'(?:ASSERTION FAILED: [\x20-\x7e]{0,4096}|SHOULD N
 # dl-lookup.c:813 and dl-version.c:147, or one or more rtld.c "PROG: OBJECT: version `V'
 # not found (required by REQUIRER)" lines (dl-version.c:142-144). PROG is rtld_progname or
 # "<program name unknown>" (ldsodefs.h:179). One report is one such line group, nothing else.
+# Bounds: at most 16 missing-version lines; PROG is [A-Za-z0-9_./+@%-]{1,255} (no space or colon);
+# the remainder of an occasion line is printable ASCII, 1-2048 bytes. Other ld.so fatal shapes
+# (e.g. "cannot execute binary file", ELF-class, `--list`/`LD_DEBUG` output, weak-version lines,
+# or a program name outside that charset) are `unknown`.
 _PROG = _any((_lit('<program name unknown>'),), (_cls('A-Za-z0-9_./+@%-', 1, 255),))
 _LOADER = _line(_PROG, _lit(': '), _any((_lit('error while loading shared libraries'),), (_lit('symbol lookup error'),),
                 (_lit('version lookup error'),)), _lit(': '), _cls(_PRINT, 1, 2048))
@@ -474,7 +489,7 @@ _VERSIONS_COMMIT = re.compile(rb'[^\n]*: version `')
 
 _GRAMMAR = (
     ('bun_report_shape', (
-        (_BUN_HEAD + (_PANIC, _ACTION, _OH_NO) + _BUN_TAIL, _BUN_COMMIT),
+        (_BUN_HEAD + (_PANIC, _PANIC_LF, _ACTION, _OH_NO) + _BUN_TAIL, _BUN_COMMIT),
         (_BUN_HEAD + (_ACTION, _OH_NO_MEMORY) + _BUN_TAIL, _BUN_COMMIT))),
     ('webkit_assertion_shape', tuple(
         (head + (_CALLSITE, tail), _WEBKIT_COMMIT)
