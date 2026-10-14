@@ -1,0 +1,26 @@
+name: reader-abi-source
+on:
+  push:
+    branches: [cowork/reader-guest-abi]
+    paths:
+      - scripts/guest-reader-abi/**
+      - .github/workflows/cowork-reader-abi-source.yml
+      - test/gates/release-gates.test.ts
+  pull_request:
+    paths:
+      - scripts/guest-reader-abi/**
+      - .github/workflows/cowork-reader-abi-source.yml
+      - test/gates/release-gates.test.ts
+permissions:
+  contents: read
+jobs:
+  portable-data:
+    if: github.event_name == 'push' || github.head_ref == 'cowork/reader-guest-abi'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Synthetic ELF data checks
+        run: python3 -I -S -B -m unittest discover -s scripts/guest-reader-abi -p 'test_*.py'
