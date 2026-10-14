@@ -162,6 +162,11 @@ class PacketTests(unittest.TestCase):
         with self.assertRaisesRegex(p.Refusal,'evidence collision'):b.normalized_metafile(data,self.output,manifest)
         del item['capturedBareExport'];del data['inputs'][str(self.output/names[3])]
         with self.assertRaisesRegex(p.Refusal,'unbundled'):b.normalized_metafile(data,self.output,manifest)
+    def test_raw_derived_export_evidence_collision_refuses_all_path_classes(self):
+        manifest,names,data=self.bare_fixture();imports=data['inputs'][str(self.output/names[0])]['imports']
+        for item in ({'path':str(self.output/names[2])},{'path':'../../node_modules/@yanlinglabs/winter-agent-sdk/src/index.ts'},{'path':'fs','external':True}):
+            imports[0]={'kind':'import-statement','capturedBareExport':{'rawPath':'forged'},**item}
+            with self.assertRaisesRegex(p.Refusal,'evidence collision'):b.normalized_metafile(data,self.output,manifest)
     def test_bare_sdk_manifest_conditions_and_byte_binding_refuse(self):
         manifest,names,data=self.bare_fixture();name='source/sdk/packages/sdk/package.json';path=self.output/name;original=path.read_bytes();value=json.loads(original);path.chmod(0o600)
         path.write_bytes(original+b' ')

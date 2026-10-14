@@ -302,6 +302,7 @@ def normalized_metafile(data,packet,manifest):
         for item in imports:
             edge_count+=1
             if edge_count>p.MAX_ENTRIES or type(item)!=dict or type(item.get('path'))!=str or type(item.get('external',False))!=bool:p.refuse('metafile import record')
+            if 'capturedBareExport' in item:p.refuse('bare SDK evidence collision')
             copy=remap(item)
             # Original spelling is evidence; it must not be treated as a filesystem path.
             if 'original' in item:copy['original']=item['original']
@@ -313,7 +314,6 @@ def normalized_metafile(data,packet,manifest):
                     resolved=manifest_target(target,packet,measured,str(Path(mapped[raw]).parent))
                 elif target in mapped:resolved=mapped[target]
                 else:
-                    if 'capturedBareExport' in item:p.refuse('bare SDK evidence collision')
                     resolved,evidence=captured_bare_export(target,mapped[raw],packet,manifest,bundled)
                     copy['capturedBareExport']=evidence
                 if resolved not in bundled:p.refuse('outside/non-bundled import target')
