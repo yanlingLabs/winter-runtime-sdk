@@ -121,12 +121,12 @@ class PreinitTests(unittest.TestCase):
             self.assertEqual((value['classification'], value['label']), ('unrecognized', 'unknown'))
 
     def test_exact_bootstrap_records_and_malformed_bounds(self):
-        for step in range(1, 10):
+        for step in range(1, len(BOOTSTRAP_STEPS) + 1):
             h, _, _ = self.diagnose(stderr=b'', bootstrap=bootstrap_record(step, 13))
             d = h.preinit_diagnostics
             self.assertEqual((d['bootstrapStep'], d['bootstrapErrno'], d['bootstrapBytes']), (BOOTSTRAP_STEPS[step - 1], 13, 8))
             self.assertTrue(d['bootstrapRecordObserved'] and d['bootstrapEof'])
-        for raw in (b'x', struct.pack('<II', 10, 1), struct.pack('<II', 1, 999), b'x' * 9):
+        for raw in (b'x', struct.pack('<II', 11, 1), struct.pack('<II', 1, 999), b'x' * 9):
             h, _, _ = self.diagnose(stderr=b'', bootstrap=raw)
             self.assertIn(h.preinit_diagnostics['bootstrapClassification'], ('invalid', 'overflow'))
             self.assertFalse(h.preinit_diagnostics['diagnosticsComplete']); self.assertTrue(h.retained)

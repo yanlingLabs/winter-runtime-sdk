@@ -13,6 +13,7 @@ import platform
 import socket
 import stat
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -183,7 +184,7 @@ def validate_stdio(pipe_fds, pass_fds, *, get_stat=os.fstat, get_flags=None):
 
 
 BOOTSTRAP_STEPS = ('child_setup', 'gate', 'root_guard', 'stdio', 'unshare',
-                   'propagation', 'chroot', 'descriptor_envelope', 'exec')
+                   'propagation', 'chroot', 'descriptor_envelope', 'exec', 'mount_identity')
 BOOTSTRAP_ERRNOS = (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
                     18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 36, 38, 40,
                     75, 80, 87, 95, 110)
@@ -207,12 +208,82 @@ def emit_bootstrap_failure(fd, step, error):
     # One atomic nonblocking PIPE_BUF-sized write. Refusal/death cannot invent EOF exec proof.
     code=getattr(error,'errno',None)
     if type(code) is not int:
-        code=ctypes.get_errno() if step in (5,6) else 0
+        code=ctypes.get_errno() if step in (5,6,10) else 0
     if code not in BOOTSTRAP_ERRNOS:code=0
     return os.write(fd,bootstrap_record(step,code)) == 8
 
 
-def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None):
+
+STATX_MNT_ID = 0x1000
+MOUNTINFO_MAX = 1024 * 1024
+
+
+def mount_ids(raw):
+    """Bounded current-namespace mountinfo DATA; no path is used as authority."""
+    require(type(raw) is bytes and 0 < len(raw) <= MOUNTINFO_MAX and raw.endswith(b'\n'),
+            'complete bounded bootstrap mountinfo')
+    result=set()
+    for line in raw.splitlines():
+        fields=line.split()
+        require(len(fields)>=10 and b'-' in fields[6:] and len(fields[0])<=10
+                and fields[0].isdigit(), 'bootstrap mountinfo shape')
+        value=int(fields[0])
+        require(0 < value <= 0x7fffffff and value not in result,
+                'unique bootstrap mount IDs')
+        result.add(value)
+        require(len(result)<=20000,'bootstrap mount count bound')
+    return result
+
+
+def statx_mount_id(raw):
+    # Linux UAPI statx: 256-byte struct, mask@0, ordinary stx_mnt_id@0x90.
+    require(type(raw) is bytes and len(raw)==256,'bootstrap statx shape')
+    mask=struct.unpack_from('<I',raw,0)[0]
+    value=struct.unpack_from('<Q',raw,0x90)[0]
+    require(mask & STATX_MNT_ID and not mask & 0x4000
+            and 0 < value <= 0x7fffffff,'ordinary bootstrap mount ID required')
+    return value
+
+
+def require_mount_membership(fds, raw, observe):
+    require(type(fds) is tuple and 1<=len(fds)<=16
+            and all(type(fd) is int and fd>=3 for fd in fds) and len(set(fds))==len(fds), 'closed bootstrap mount FDs')
+    ids=mount_ids(raw)
+    for fd in fds:
+        observed=observe(fd)
+        require(type(observed) is int and observed in ids,
+                'bootstrap FD outside current mount namespace')
+
+
+def verify_mount_namespace(fds):
+    """Unexecuted Linux observation. No unshare/mount or path reopen fallback."""
+    require(sys.byteorder=='little','bootstrap statx endian')
+    libc=ctypes.CDLL(None,use_errno=True)
+    try: call=libc.statx
+    except AttributeError:raise Refusal('bootstrap statx unavailable') from None
+    call.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_uint,ctypes.c_void_p]
+    call.restype=ctypes.c_int
+    def observe(fd):
+        raw=ctypes.create_string_buffer(256)
+        ctypes.set_errno(0)
+        require(call(fd,b'',0x1000,STATX_MNT_ID,ctypes.byref(raw))==0,'bootstrap statx syscall')
+        return statx_mount_id(raw.raw)
+    def read_current():
+        held=os.open('/proc/self/mountinfo',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            raw=bytearray()
+            while True:
+                chunk=os.read(held,min(65536,MOUNTINFO_MAX+1-len(raw)))
+                if not chunk:break
+                raw.extend(chunk);require(len(raw)<=MOUNTINFO_MAX,'bootstrap mountinfo byte bound')
+            return bytes(raw)
+        finally:os.close(held)
+    before=read_current()
+    require_mount_membership(fds,before,observe)
+    require(read_current()==before,'bootstrap mount namespace changed during check')
+
+
+def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None, mount_fds=None):
     """Actual privileged effects. Not called by source/portable tests.
 
     Python/libc are trusted parent tooling, not measured packet runtime objects.
@@ -231,16 +302,12 @@ def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=N
     validate_stdio(pipe_fds, pass_fds)
     for target, inherited in enumerate(pipe_fds):
         os.dup2(inherited, target)
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.unshare.argtypes = [ctypes.c_int]
-    libc.unshare.restype = ctypes.c_int
-    libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
-    libc.mount.restype = ctypes.c_int
-    mark(5)
-    require(libc.unshare(0x00020000) == 0, 'private bootstrap mount namespace')
-    mark(6)
-    require(libc.mount(None, b'/', None, 0x4000 | 0x40000, None) == 0,
-            'private bootstrap propagation')
+    # Keep plan filesystem FDs in the original namespace through C's clone phase.
+    # The receipt socket is sockfs/internal; C separately authenticates its peer.
+    mark(10)
+    require(type(mount_fds) is tuple and root_fd in mount_fds,
+            'explicit bootstrap mount scope')
+    verify_mount_namespace(mount_fds)
     mark(7)
     os.fchdir(root_fd)
     os.chroot('.')
@@ -451,6 +518,8 @@ class NativeOperation:
         pass_fds = (reader_fd, b.fileno(), self.source_fd, self.shared_fd,
                     *(fd for fd, _ in libraries))
         root_fd = self.root.directories[''][0]
+        mount_fds=(root_fd,self.root.files['artifacts/instructionReaderLauncher'][0],
+                   reader_fd,self.source_fd,self.shared_fd,*(fd for fd,_ in libraries))
         self.recheck(self.root)  # Immediately before owned fork/bootstrap/exec.
         pid = os.fork()
         if pid == 0:
@@ -465,7 +534,7 @@ class NativeOperation:
                 os.close(gate[0])
                 child_bootstrap(root_fd, argv, pass_fds,
                                 (stdin[0], stdout[1], stderr[1]),
-                                error_fd=bootstrap_error[1], stage=stage)
+                                error_fd=bootstrap_error[1], stage=stage, mount_fds=mount_fds)
             except BaseException as error:
                 try: emit_bootstrap_failure(bootstrap_error[1], step[0], error)
                 except BaseException: pass  # Unknown observation; never claim exec/cleanup.

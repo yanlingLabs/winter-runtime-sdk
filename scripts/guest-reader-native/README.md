@@ -133,3 +133,33 @@ For bootstrap observations, `recordObserved:false` with errno 0 means no record;
 `recordObserved:true` with errno 0 means an observed record with unknown errno.
 Neither means that exec or cleanup succeeded. The correction changes no deadline,
 case oracle, C bytes or compiled artifact.
+
+The mount-identity SOURCE successor removes Python's pre-exec NEWNS/unshare and
+propagation mount only. The sealed eight-file loader chroot, C peer checks,
+C detached clones then NEWNS/private propagation, UID/filter/limits and all case
+oracles remain unchanged. Before chroot, every tree-clone filesystem descriptor
+(reader/source/shared/six libraries) plus sealed root/launcher must return ordinary
+STATX_MNT_ID in a bounded current mountinfo snapshot. The socket is internal sockfs,
+not a filesystem clone input; its existing C peer/shape guards remain independent.
+A second snapshot refuses concurrent namespace change. There is no unsupported
+statx, missing-mask, unique-ID or pathname fallback. Failure emits the appended
+closed bootstrap step `mount_identity` (index 10); existing step numbers are stable.
+
+Kernel basis: Linux v6.12's [check_mnt and detached clone path](https://github.com/torvalds/linux/blob/v6.12/fs/namespace.c#L906)
+compare an ordinary supplied mount with the current namespace; `open_detached_copy`
+passes through `__do_loopback`, which can return EINVAL when that check fails.
+[Namespace copying](https://github.com/torvalds/linux/blob/v6.12/fs/namespace.c#L3699)
+clones mounts and updates filesystem root/cwd references, leaving earlier file
+references attached to their old mount objects. This explains the SOURCE defect;
+it is an inference for the hosted run, not a complete measured causal proof.
+[statx implementation](https://github.com/torvalds/linux/blob/v6.12/fs/stat.c#L231)
+returns the supplied path mount's ordinary ID for this mask. The
+[UAPI layout](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/stat.h#L94)
+places the mask at byte 0 and mount ID at byte 0x90 in a 256-byte structure.
+
+Portable regressions model old descriptor IDs versus copied namespace IDs, test
+actual child-bootstrap ordering with every privileged operation replaced, verify
+all supplied filesystem roles, and inject bounded statx/mountinfo results/failures.
+They execute no mount, namespace, chroot, helper or compiled packet. Runtime
+compatibility and the namespace hypothesis require a freshly reviewed hosted run.
+All old experiment branches remain frozen; no retrospective cleanup claim follows.

@@ -69,7 +69,7 @@ class InjectedEffects:
         self.wait_error = None
         self.wait_calls = []
         self.root = SimpleNamespace(
-            files={'artifacts/instructionReader': (100,)} |
+            files={'artifacts/instructionReader': (100,), 'artifacts/instructionReaderLauncher': (108,)} |
                   {path.lstrip('/'): (101 + index,) for index, path in enumerate(p.LIBRARIES)},
             directories={'': (10,)})
 
@@ -376,3 +376,21 @@ class SetupCleanupTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class MountScopeTests(unittest.TestCase):
+    def test_actual_start_supplies_all_filesystem_roles_and_excludes_socket(self):
+        table=InjectedEffects(self);debt=table.registry.register()
+        table.operation=p.NativeOperation(debt,table.root,20,21,table.guard,table.recheck)
+        class ChildEnded(BaseException):pass
+        seen=[]
+        def bootstrap(root,argv,pass_fds,pipe_fds,**kwargs):
+            seen.append((root,argv,pass_fds,kwargs))
+            raise ValueError('inert pre-exec stop')
+        with table.patches(),patch.object(p.os,'fork',return_value=0),patch.object(p.os,'read',return_value=b'G'),patch.object(p,'child_bootstrap',side_effect=bootstrap),patch.object(p,'emit_bootstrap_failure',return_value=True),patch.object(p.os,'_exit',side_effect=ChildEnded):
+            with self.assertRaises(ChildEnded):table.operation._start()
+        root,argv,pass_fds,kwargs=seen[0]
+        expected=(10,108,100,20,21,101,102,103,104,105,106)
+        self.assertEqual(kwargs['mount_fds'],expected)
+        self.assertNotIn(31,expected)  # Receipt socket has internal sockfs mount, C-authenticated.
+        self.assertEqual(set(pass_fds)-{31},set(expected)-{10,108})
+        self.assertEqual(kwargs['error_fd'],49)

@@ -64,8 +64,13 @@ ERROR_REASONS = (
     'artifact expired or clock unavailable',
     'artifact pin',
     'base pin',
+    'bootstrap FD outside current mount namespace',
     'bootstrap alias occupied',
     'bootstrap alias replaced',
+    'bootstrap mount count bound',
+    'bootstrap mount namespace changed during check',
+    'bootstrap mountinfo byte bound',
+    'bootstrap mountinfo shape',
     'bootstrap pipe drained without failure record',
     'bootstrap record byte bound',
     'bootstrap record length',
@@ -73,6 +78,10 @@ ERROR_REASONS = (
     'bootstrap source descriptors retained',
     'bootstrap source hash/identity',
     'bootstrap source replaced',
+    'bootstrap statx endian',
+    'bootstrap statx shape',
+    'bootstrap statx syscall',
+    'bootstrap statx unavailable',
     'bootstrap_copy',
     'bootstrap_final_pin',
     'bootstrap_source',
@@ -97,6 +106,7 @@ ERROR_REASONS = (
     'closed acquisition metadata',
     'closed acquisition record required',
     'closed bootstrap errno',
+    'closed bootstrap mount FDs',
     'closed bootstrap source path',
     'closed bootstrap step',
     'closed drain observations',
@@ -113,6 +123,7 @@ ERROR_REASONS = (
     'compile DATA pin replaced',
     'compile pin digest',
     'compile pin version',
+    'complete bounded bootstrap mountinfo',
     'complete outer mount snapshot',
     'complete request write',
     'confirmed descriptor discharge',
@@ -141,6 +152,7 @@ ERROR_REASONS = (
     'exact staged inputs',
     'exec returned',
     'explicit FIFO stdio',
+    'explicit bootstrap mount scope',
     'explicit child fd inventory',
     'external compile DATA pin mismatch',
     'external compile pin hash',
@@ -225,6 +237,7 @@ ERROR_REASONS = (
     'one registered debt identity',
     'only actual terminal R',
     'only checked lease modules may be reused',
+    'ordinary bootstrap mount ID required',
     'origin inventory digest',
     'origin leaf mismatch',
     'outer mount snapshot bound',
@@ -250,8 +263,6 @@ ERROR_REASONS = (
     'pre-init unexpected-parent refusal',
     'prefix bound',
     'private Root parent',
-    'private bootstrap mount namespace',
-    'private bootstrap propagation',
     'private source parent required',
     'proc observation bound',
     'proc observation identity changed',
@@ -329,6 +340,7 @@ ERROR_REASONS = (
     'unexpected native rights after I or pre-init negative',
     'unexpected reader stderr',
     'unexpected-parent exact native refusal',
+    'unique bootstrap mount IDs',
     'validated init required',
 )
 
@@ -410,7 +422,7 @@ NATIVE_STDERR_LABELS = (
 )
 PREINIT_KEYS = ('controlObserved', 'controlBytes', 'controlTag', 'controlRights', 'controlEof', 'stderrBytes', 'stderrEof', 'nativeClassification', 'nativeLabel', 'nativeErrno', 'bootstrapBytes', 'bootstrapRecordObserved', 'bootstrapStep', 'bootstrapErrno', 'bootstrapEof', 'bootstrapClassification', 'launcherExitCode', 'producerExitCode', 'diagnosticsComplete')
 BOOTSTRAP_STEP_NAMES = ('child_setup','gate','root_guard','stdio','unshare','propagation',
-                        'chroot','descriptor_envelope','exec')
+                        'chroot','descriptor_envelope','exec','mount_identity')
 DIAGNOSTIC_ERRNOS = (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
                     18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 36, 38, 40,
                     75, 80, 87, 95, 110)
