@@ -1,0 +1,10 @@
+{
+  "kind": "protocol-source-data-only",
+  "repository": "winter-agent-sdk",
+  "commit": "92b87080b0932a6b0eb22ca4575139d5b36ef95b",
+  "files": {
+    "packages/runtime/src/guest/provider-client.ts": "bdf5a82c31d54416d73fff2871b902d564ebe7762c96cafe6c8cf3bdf16afd49",
+    "packages/provider-runtime/src/types.ts": "222df1c881b536951fb134df0a1fe28e3a2f5f8a3ebfc9bd1dfa856adeb9491f"
+  },
+  "executionAuthorized": false
+}
