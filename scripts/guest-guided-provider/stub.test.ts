@@ -49,12 +49,49 @@ test("current guidance excludes old markers and matches only complete delimited 
   const mixed = port(); await finish(mixed);
   const second = request("begin", 0, 2, "two") as any;
   second.turn.messages[0].content[0].text = "SHARED:old\nSHARED:new\nSOURCE:root\nSOURCE:cwd";
-  await expect(mixed.exchange(encodeFrame(second))).rejects.toThrow("fixture refused");
+  await expect(mixed.exchange(encodeFrame(second))).rejects.toThrow("fixture refused: absent_marker");
   expect(mixed.receipt().acceptedBegins).toBe(1);
   for (const marker of ["SHARED:older", "prefix SHARED:old", "SHARED:old suffix"]) {
+    const control = port(); await finish(control);
     const p = port(), r = request() as any;
     r.turn.messages[0].content[0].text = `${marker}\nSOURCE:root\nSOURCE:cwd`;
-    await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused");
+    await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused: ordered_marker");
+  }
+});
+
+test("absence refuses stale substrings in either role while ordered markers stay line-exact", async () => {
+  for (const leak of ["note: SHARED:old", "SHARED:old suffix", "SHARED:older"]) {
+    const control = port(); await finish(control); await finish(control, 2, "two");
+    const p = port(); await finish(p); const r = request("begin", 0, 2, "two") as any;
+    r.turn.messages[0].content[0].text += `\n${leak}`;
+    await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused: absent_marker");
+    expect(p.receipt()).toMatchObject({ acceptedBegins: 1, receivedBegins: 2, closed: true });
+  }
+  const s = script(); (s.steps[0] as { absentSystem: string[] }).absentSystem = ["STALE:fact"];
+  const control = port(s); await finish(control);
+  const p = port(s), r = request() as any; r.turn.system += "\nnote: STALE:fact suffix"; delete r.turn.systemBlocks;
+  await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused: absent_marker");
+});
+
+test("multiple text blocks preserve marker lines and cannot hide old guidance", async () => {
+  const p = port(), r = request() as any;
+  r.turn.messages[0].content = ["SHARED:old", "SOURCE:root", "SOURCE:cwd"].map(text => ({ type: "text", text }));
+  expect(decode(await p.exchange(encodeFrame(r))).kind).toBe("accepted");
+  const control = port(); await finish(control); await finish(control, 2, "two");
+  const mixed = port(); await finish(mixed); const second = request("begin", 0, 2, "two") as any;
+  second.turn.messages[0].content = ["SHARED:new", "SOURCE:root", "SOURCE:cwd", "note: SHARED:old"].map(text => ({ type: "text", text }));
+  await expect(mixed.exchange(encodeFrame(second))).rejects.toThrow("fixture refused: absent_marker");
+});
+
+test("CRLF and first-line markers work, absent arrays may be empty but must exist", async () => {
+  const p = port(), r = request() as any;
+  r.turn.messages[0].content[0].text = "SHARED:old\r\nSOURCE:root\r\nSOURCE:cwd";
+  r.turn.system = "FACT:workspace\r\n\r\nHOST:publication"; delete r.turn.systemBlocks;
+  expect(decode(await p.exchange(encodeFrame(r))).kind).toBe("accepted");
+  const empty = script(); empty.steps[0]!.absentUser = []; const control = port(empty); await finish(control);
+  for (const key of ["absentSystem", "absentUser"]) {
+    const s = script() as any; delete s.steps[0][key];
+    expect(() => port(s)).toThrow("fixture refused: invalid");
   }
 });
 
@@ -65,14 +102,15 @@ test("enum arrays refuse, and every closed or malformed ingress remains counted"
     (r: any) => { r.turn.toolChoice = { type: ["auto"] }; },
     (r: any) => { r.turn.messages[1].role = ["user"]; },
     (r: any) => { r.turn.cacheTtl = ["5m"]; },
+    (r: any) => { r.turn.messages[1].decoration = { text: "tag", door: ["tag"] }; },
   ]) { const p = port(), r = request(); mutate(r); await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused"); }
   const p = port(); p.close();
-  for (const frame of [null, encodeFrame(request("next", 1)), encodeFrame(request())]) {
+  for (const [frame, begins] of [[null, 0], [encodeFrame(request("next", 1)), 0], [encodeFrame(request()), 1]] as const) {
     const before = p.receipt();
     await expect(p.exchange(frame as Uint8Array)).rejects.toThrow("fixture refused");
     const after = p.receipt();
     expect(after.receivedFrames).toBe(before.receivedFrames + 1);
-    expect(after.receivedBegins).toBeGreaterThanOrEqual(before.receivedBegins);
+    expect(after.receivedBegins).toBe(before.receivedBegins + begins);
     expect(after.acceptedBegins).toBe(0);
   }
   expect(p.receipt()).toMatchObject({ receivedFrames: 3, receivedBegins: 1, closed: true });

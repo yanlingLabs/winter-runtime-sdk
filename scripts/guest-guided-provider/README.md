@@ -52,13 +52,19 @@ which must be the current `userContext` (`role:user`, `isMeta:true`). Markers mu
 occur as complete LF/CRLF-delimited lines in the Root-selected order. Each step
 also declares `absentSystem` and `absentUser` lines, so a refreshed context that
 retains the old shared marker refuses. A marker suffix cannot satisfy its shorter
-marker. Historical user/assistant messages cannot meet
+marker. Absence checks conservatively refuse a marker appearing anywhere as a
+substring, including inline annotations or suffixes. Text blocks join with a
+newline so block boundaries cannot merge marker lines. Historical user/assistant messages cannot meet
 the current-guidance requirement. The initial fixture accepts text-only content
 and ordinary tool declarations; it does not support tool-result/image/thinking
 content, native-state continuation, midconversation system roles or tool events.
 JSON schema/attachment payloads remain inert data. Marker matching is an oracle
 for selected facts/guidance, not a complete semantic validation or provenance,
 atomic-snapshot, personal/settings-read or publication-policy proof.
+Numeric effort is accepted only as finite transport data, matching the measured
+`TurnRequest` number type; this inert fixture does not validate a model's numeric
+effort range or map it to provider behavior. Refusal diagnostics use fixed codes
+(`invalid`, `ordered_marker`, `absent_marker`) and never echo request text.
 
 `receipt()` returns frozen snapshots containing each complete ACTUALLY RECEIVED
 accepted turn and its SHA256 over recursive key-sorted JSON. Turn digesting retains

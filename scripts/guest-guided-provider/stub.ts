@@ -6,7 +6,12 @@ export const LIMITS = Object.freeze({ requestBytes: 2 * 1024 * 1024 + 4096, scri
 export const SELECTION = Object.freeze({ providerId: "openai", modelKey: "openai/gpt-5.6", providerModelId: "gpt-5.6", family: "openai", protocol: "openai-responses", continuationDomain: "openai/gpt-5.6", capabilities: Object.freeze({ toolCalling: "native", readableState: "summary" }) });
 const SCOPE = ["homeId", "workspaceId", "sessionId", "backendSessionId", "taskId", "incarnationId", "bootId", "leaseEpoch", "grantRevision", "accountRevision", "modelRevision"];
 const TURN = ["model", "messages", "system", "systemBlocks", "tools", "toolChoice", "effort", "thinking", "maxOutputTokens", "requestSummary", "cacheTtl", "cacheDiagnostics", "cacheKey", "allowedTools", "toolChanges", "resumesPausedTurn"];
-function refuse(): never { throw new Error("guided fixture refused"); }
+class FixtureRefusal extends Error {
+  constructor(code: "invalid" | "ordered_marker" | "absent_marker" = "invalid") {
+    super(`guided fixture refused: ${code}`);
+  }
+}
+function refuse(code?: "invalid" | "ordered_marker" | "absent_marker"): never { throw new FixtureRefusal(code); }
 function object(value: unknown): ObjectValue { if (!value || typeof value !== "object" || Array.isArray(value)) refuse(); return value as ObjectValue; }
 function keys(value: ObjectValue, required: string[], optional: string[] = []): void { if (required.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) refuse(); }
 function text(value: unknown, limit = 256): string { if (typeof value !== "string" || !value.length || Buffer.byteLength(value) > limit) refuse(); return value; }
@@ -38,12 +43,12 @@ function readScript(bytes: Uint8Array, expectedHash: string): Script {
   const steps = script.steps.map(value => { const step = object(value); keys(step, ["system", "user", "absentSystem", "absentUser", "response"]); return { system: markers(step.system), user: markers(step.user), absentSystem: markers(step.absentSystem, true), absentUser: markers(step.absentUser, true), response: text(step.response, LIMITS.textBytes) }; });
   return frozen({ scope, steps });
 }
-function ordered(haystack: string, needles: string[]): void { const lines = haystack.split(/\r?\n/); let at = 0; for (const needle of needles) { const found = lines.indexOf(needle, at); if (found < 0) refuse(); at = found + 1; } }
-function absent(haystack: string, needles: string[]): void { const lines = haystack.split(/\r?\n/); if (needles.some(needle => lines.includes(needle))) refuse(); }
+function ordered(haystack: string, needles: string[]): void { const lines = haystack.split(/\r?\n/); let at = 0; for (const needle of needles) { const found = lines.indexOf(needle, at); if (found < 0) refuse("ordered_marker"); at = found + 1; } }
+function absent(haystack: string, needles: string[]): void { if (needles.some(needle => haystack.includes(needle))) refuse("absent_marker"); }
 function content(value: unknown): string {
   if (typeof value === "string") return value;
   if (!Array.isArray(value)) refuse();
-  return value.map(item => { const block = object(item); keys(block, ["type", "text"]); if (block.type !== "text" || typeof block.text !== "string") refuse(); return block.text; }).join("");
+  return value.map(item => { const block = object(item); keys(block, ["type", "text"]); if (block.type !== "text" || typeof block.text !== "string") refuse(); return block.text; }).join("\n");
 }
 function optionalTurnFields(turn: ObjectValue): void {
   for (const key of ["cacheKey"]) if (turn[key] !== undefined) text(turn[key], LIMITS.requestBytes);
@@ -126,7 +131,7 @@ export function createGuidedFixturePort(scriptBytes: Uint8Array, expectedScriptS
         if (request.sequence !== 2) refuse();
         active = undefined; completed++;
         return reply({ kind: "event", event: { type: "done", stopReason: "end_turn" } });
-      } catch { closed = true; active = undefined; return refuse(); }
+      } catch (error) { closed = true; active = undefined; if (error instanceof FixtureRefusal) throw error; return refuse(); }
     },
     close(): void { closed = true; active = undefined; },
     receipt() { return frozen({ scriptSha256: expectedScriptSha256, receivedFrames, receivedBegins, acceptedBegins, completed, closed, turns: [...turns], engineDispatchProven: false as const, nativeAdmissionProven: false as const }); },
