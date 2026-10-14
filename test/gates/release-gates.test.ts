@@ -82,11 +82,12 @@ describe("the release workflow", () => {
   });
 
   test("the reader source workflow is credential-free portable data checking only", () => {
-    const source = parseWorkflow("cowork-reader-build-source.yml") as { permissions?: unknown; jobs?: Record<string, unknown> };
+    const source = parseWorkflow("cowork-reader-build-source.yml") as { on?: { push?: { branches?: unknown } }; permissions?: unknown; jobs?: Record<string, unknown> };
+    expect(source.on?.push?.branches).toEqual(["cowork/instruction-reader-build", "cowork/reader-compile-semantics"]);
     expect(source.permissions).toEqual({ contents: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["portable-data"]);
     expect(source.jobs?.["portable-data"]).toEqual({
-      if: "github.event_name == 'push' || github.head_ref == 'cowork/instruction-reader-build'",
+      if: "github.event_name == 'push' || github.head_ref == 'cowork/instruction-reader-build' || github.head_ref == 'cowork/reader-compile-semantics'",
       "runs-on": "ubuntu-24.04-arm",
       "timeout-minutes": 5,
       steps: [

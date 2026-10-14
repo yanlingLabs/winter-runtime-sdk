@@ -1,7 +1,7 @@
 name: reader-build-source
 on:
   push:
-    branches: [cowork/instruction-reader-build]
+    branches: [cowork/instruction-reader-build, cowork/reader-compile-semantics]
     paths:
       - scripts/guest-reader-build/**
       - .github/workflows/cowork-reader-build-source.yml
@@ -13,7 +13,7 @@ permissions:
   contents: read
 jobs:
   portable-data:
-    if: github.event_name == 'push' || github.head_ref == 'cowork/instruction-reader-build'
+    if: github.event_name == 'push' || github.head_ref == 'cowork/instruction-reader-build' || github.head_ref == 'cowork/reader-compile-semantics'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
