@@ -249,3 +249,92 @@ artifact before offline canonical decoding. No raw or Base64 sample is printed.
 New branch cowork/reader-hosted-fixture-stderr requires fresh exact Root/45/Astra
 source review and separate one-run admission; no push, native execution, retry or
 availability follows from portable tests or this source.
+
+
+Closed crash-report-family classifier (source, no run admission)
+
+The consumed fixture-stderr attempt returned an unrecognized 718-byte stderr whose
+public sample was `scrub_rejected`: Bun's standard crash banner starts with a 60-character
+`=` line, which the unchanged 40+ character long-run scrub rejects. That scrub, the
+`postInitStderrSample` semantics, the twelve-key `postInitDiagnostics` and every existing
+key, flag, stage, debt, hash, deadline and close ordering stay as they were. This slice adds
+one orthogonal label that exports no content. It is not a cause, not an authenticated
+reached-phase receipt and not a success oracle; a runtime report is untrusted text.
+
+`native_cases.classify_report_family` reads only `handles.fixture_stderr_capture` (the
+complete bounded same-owner capture, at most 16384 bytes) and returns exactly one literal
+of `bun_report_shape`, `webkit_assertion_shape`, `loader_error_shape`, `unknown`,
+`incomplete` or `classification_error`. It never decodes the bytes and derives nothing else
+from them: no line, token, address, function, path, URL, count, length or hash. It never
+emits a specific cause such as a missing device or `/proc` file. It runs inside the same
+`kind == 'same-owner'` failure gate, after the existing Observation and Reaps were captured,
+in its own `try` after the unchanged diagnostics, so neither can alter the other, the
+original refusal, the retained handles or cleanup. The wrapper's exporter does not call it.
+
+Recognition is a fixed grammar over whole lines, matched against the whole buffer. A family
+is reported only when the buffer is exactly one complete report of that grammar. Extra,
+missing, reordered or duplicated lines, a second report, ANSI escapes, CR, NUL, any byte
+outside 0x20-0x7e (so any malformed UTF-8), text before or after the report, and a lookalike
+inserted label are `unknown`. `incomplete` means the family's opening frame matched in full
+(Bun: the 60-`=` line with its LF; WebKit: the complete first line; ld.so: the program name
+and the occasion literal, or the `: version \`` prefix of a missing-version line) and the buffer then stops inside the grammar, at a line boundary or
+inside a line that is a prefix of the next expected line. Empty input is `unknown`. Any
+exception, a non-`bytes` value or more than 16384 bytes is `classification_error`.
+
+`bun_report_shape` is Bun 1.3.14's Linux, plain-stderr banner (oven-sh/bun tag bun-v1.3.14,
+src/crash_handler/crash_handler.zig; the long-run `=` line and the bun.report URL are the
+reason the sample is rejected): 60 `=` (260); `Bun [Canary ]v<semver>[-canary.N][ (<sha>)]
+Linux arm64|x64[ (baseline)]` (850-864, Global.zig:20-27); `Linux Kernel v<d>.<d>.<d> | glibc
+v<ver>|musl` (1009, 1013); optional `CPU:` with the CPUFeatures flags in field order
+(1029-1031); `Args: "..."` (1033-1043); optional `Features:` and `Builtins:` lines
+(analytics.zig:129-161); optional `Elapsed:`/`RSS:` pair (1066-1083); a blank line (1089);
+optional x64 AVX warning (1091-1094); `panic[(main thread)]: <printable reason>` (306-332),
+absent only for the out-of-memory variant (301); optional `Crashed while ...` (336); `oh no:
+Bun has crashed. This indicates a bug in Bun, not your code.` or `oh no: Bun has run out of
+memory.` (424, 415); blank, the two `To send a redacted crash report...` lines and a blank
+(424-430); ` https://bun.report/<semver>/<L|l|B><command char><1|2><7 hex|unknown><trace>`
+(438-446, 1358-1368); a final blank line (448, 454). ANSI-coloured banners (a crash before
+stdio initialisation leaves `enable_ansi_colors_stderr` at its default, src/bun_core/output.zig:408,425), Debug,
+non-Linux and WSL banners, native-plugin and libuv message blocks, "multiple threads are
+crashing" and "panicked during a panic" are outside it and are `unknown`.
+
+`webkit_assertion_shape` is WTF's assertion text (oven-sh/WebKit 5488984d,
+Source/WTF/wtf/Assertions.cpp, StackTrace.cpp): `ASSERTION FAILED: <expr>` or `SHOULD NEVER
+BE REACHED` (275-282), or the formatted-message form with a following assertion line
+(284-292); the call site `<file>(<n>) : <function>` (265); then either no backtrace, frame
+lines `%-3d %p <name>` numbered 1..N with N at most 31 (StackTrace.cpp:162, StackTrace.h:149,
+Assertions.cpp:315), or the unterminated `no stacktrace available` (357). Release `CRASH()` is
+`std::abort()` (Assertions.h:353), which Bun does not catch. The source has no end marker, so
+a buffer cut exactly after the call site or after a frame line is indistinguishable from a
+shorter trace and reads as complete; only the existing complete bounded capture excludes that
+case. A developer-mode crash that adds a Bun banner is two reports and is `unknown`.
+
+`loader_error_shape` is glibc 2.39's ld.so (bminor/glibc ef321e23): the single fatal line
+`<program>: error while loading shared libraries|symbol lookup error|version lookup error:
+<printable text>` (elf/dl-catch.c:79-91, with the occasions at dl-catch.c:85,
+dl-lookup.c:813 and dl-version.c:147), or one to sixteen rtld.c lines `<program>: <object>:
+version \`<v>' not found (required by <requirer>)` (rtld.c:2422-2427, dl-version.c:142-144).
+`<program>` is a path-like name or `<program name unknown>` (ldsodefs.h:179).
+
+`failure_record` adds the always-present key `postInitReportFamily`, a single string from
+the six values above plus `not_same_owner_failure` (not a same-owner case failure, including
+failures before any case ran) and `capture_absent` (a same-owner failure before the existing
+Observation and Reaps, or without a bytes capture inside the bound); both mirror the
+`postInitStderrSample` reasons of the same name. Any other value, a read failure, or a
+recognized family beside post-init evidence of an empty stderr becomes `classification_error`.
+`log_result_projection` passes only those values. The sample can still be `scrub_rejected` for
+a recognized report, and then no sample bytes, Base64, hash or content-derived value exist
+outside the pre-existing `stderrSha256`.
+
+Portable fixtures are synthetic whole buffers. `test_report_family.py` covers each family,
+all CPU flag subsets and optional-line combinations, truncation at every byte boundary,
+single-line insertion, deletion, duplication and swapping, inserted family labels, ANSI,
+lookalikes, malformed UTF-8 and non-printable bytes at every position, multiple reports,
+empty/oversized/non-bytes input, forbidden secret tokens in every free-text region (family
+reported, sample still `scrub_rejected`), classifier exceptions in both directions, the gate
+for every case kind, bounded time on adversarial input, and that every source-hash pin names
+the bytes present. The classifier changed `native_cases.py`, so `wrapper.py`'s pin for it, the
+reviewed workflow's `bootstrap.py` and `wrapper.py` pins and the release-gate test were
+recomputed together. Branch `cowork/reader-report-classifier` is not named by the reviewed
+workflow, which still admits only `cowork/reader-hosted-fixture-stderr`; no push, native
+execution, retry, workflow change or run admission follows from this source.

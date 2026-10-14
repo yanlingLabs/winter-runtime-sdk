@@ -64,7 +64,7 @@ jobs:
               if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
               raw=os.read(fd,65537)
           finally:os.close(fd)
-          if hashlib.sha256(raw).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('bootstrap_source_pin')
+          if hashlib.sha256(raw).hexdigest()!='b980ecf3f86a5ae712106157ca2a0837d49db73de43e205495e55d419a8a1332':raise ValueError('bootstrap_source_pin')
           module=types.ModuleType('_reader_data_bootstrap');module.__file__=str(source);sys.modules[module.__name__]=module
           exec(compile(raw,str(source),'exec'),module.__dict__)
           fd=os.open(record,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -102,7 +102,7 @@ jobs:
                   if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
                   raw=os.read(fd,65537)
               finally:os.close(fd)
-              if hashlib.sha256(raw).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('bootstrap_source_pin')
+              if hashlib.sha256(raw).hexdigest()!='b980ecf3f86a5ae712106157ca2a0837d49db73de43e205495e55d419a8a1332':raise ValueError('bootstrap_source_pin')
               protected=root/'bootstrap.py'
               fd=os.open(protected,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
               try:
@@ -116,7 +116,7 @@ jobs:
               fd=os.open(protected,os.O_RDONLY|os.O_NOFOLLOW)
               try:checked=os.read(fd,65537)
               finally:os.close(fd)
-              if hashlib.sha256(checked).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('protected_bootstrap_pin')
+              if hashlib.sha256(checked).hexdigest()!='b980ecf3f86a5ae712106157ca2a0837d49db73de43e205495e55d419a8a1332':raise ValueError('protected_bootstrap_pin')
               checked_module=types.ModuleType('_reader_root_bootstrap');checked_module.__file__=str(protected);sys.modules[checked_module.__name__]=checked_module
               exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module
               if data_file.parent!=result_file.parent or data_file.name!='data.json':raise ValueError('data_record_path')
@@ -126,8 +126,8 @@ jobs:
                   if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>1048576:raise ValueError('data_record')
                   data=json.loads(os.read(fd,1048577))
               finally:os.close(fd)
-              result=module.run_root(base,root,data,'8d33597828b183d4fa171dbb4496cf63b1964e742a59358abee9c886f21ec4b6',wrapper_source=wrapper,harness_source=harness_source)
-              if hashlib.sha256(protected.read_bytes()).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('bootstrap_final_pin')
+              result=module.run_root(base,root,data,'3473e294d400153c8a31b084a68dc32b215c7020a9dccdcdc2b40e5829bdaeae',wrapper_source=wrapper,harness_source=harness_source)
+              if hashlib.sha256(protected.read_bytes()).hexdigest()!='b980ecf3f86a5ae712106157ca2a0837d49db73de43e205495e55d419a8a1332':raise ValueError('bootstrap_final_pin')
           except BaseException as error:
               if module is not None:
                   result=module.failure_record(error)

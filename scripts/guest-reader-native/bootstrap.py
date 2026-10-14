@@ -527,6 +527,26 @@ SAMPLE_REASONS=('not_same_owner_failure','scrub_rejected','provenance_unverified
                 'capture_absent','projection_error')
 
 
+# Closed crash-report-family enum (native_cases.REPORT_FAMILIES, asserted equal by tests) plus the two
+# non-classified markers: the failure was not a same-owner case failure (including failures before any
+# case ran), or it was a same-owner failure without a complete bounded capture (before the existing
+# Observation/Reaps, or stderr not bytes). Both mirror the sample reasons of the same name. The enum
+# is the whole output: nothing derived from stderr content except the family itself.
+REPORT_FAMILIES=('bun_report_shape','webkit_assertion_shape','loader_error_shape','unknown','incomplete','classification_error')
+REPORT_FAMILY_ABSENT=('not_same_owner_failure','capture_absent')
+
+
+def report_family_record(chain):
+    """One closed string. A malformed or foreign value never reaches result.json or logs."""
+    raw=None
+    for item in chain:
+        observed=getattr(getattr(item,'handles',None),'postinit_report_family',None)
+        if observed is not None:raw=observed;break
+    if raw is None:return 'not_same_owner_failure'
+    if type(raw) is str and raw in REPORT_FAMILIES+REPORT_FAMILY_ABSENT:return raw
+    return 'classification_error'
+
+
 def stderr_sample_record(chain):
     """Fixture-only PUBLIC bytes; strict additive projection, never general guidance."""
     raw=None
@@ -564,6 +584,10 @@ def log_result_projection(result):
             projected['postInitStderrSample']={'available':False}
             if type(sample) is dict and sample.get('reason') in SAMPLE_REASONS:
                 projected['postInitStderrSample']['reason']=sample['reason']
+    if 'postInitReportFamily' in projected:
+        family=projected['postInitReportFamily']
+        if type(family) is not str or family not in REPORT_FAMILIES+REPORT_FAMILY_ABSENT:
+            projected['postInitReportFamily']='classification_error'
     return projected
 
 
@@ -599,6 +623,10 @@ def failure_record(error, *, stage='preflight'):
                 or len(base64.b64decode(sample['bytesBase64']))!=min(size,4096)
                 or (not sample['truncated'] and sample['sampleSha256']!=postinit['stderrSha256'])):
             sample={'available':False,'reason':'projection_error'}
+    try:family=report_family_record(chain)
+    except BaseException:family='classification_error'
+    if family in REPORT_FAMILIES[:3]+('incomplete',) and postinit.get('available') is True and postinit.get('stderrBytes')==0:
+        family='classification_error'  # A report cannot come from an empty capture.
     name,reason,symbol=closed(error)
     cause_name,cause_reason,cause_errno=closed(chain[-1])
     return {'readerCaseSetPassed':False, 'stage':stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown',
@@ -607,6 +635,7 @@ def failure_record(error, *, stage='preflight'):
             'preInitDiagnostics':preinit_record(chain),
             'postInitDiagnostics':postinit,
             'postInitStderrSample':sample,
+            'postInitReportFamily':family,
             'nativeCleanupConfirmed':False, 'configEffectProven':False,
             'vmExecutionVerified':False, 'productionActivation':False}
 

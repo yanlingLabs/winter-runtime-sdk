@@ -167,8 +167,8 @@ describe("the release workflow", () => {
     expect(text).not.toContain("_SHA_PENDING");
     expect(text).toContain("fs.chmodSync(privateDir,0o700)");
     expect(text).toContain("65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99");
-    expect(text).toContain("d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a");
-    expect(text).toContain("8d33597828b183d4fa171dbb4496cf63b1964e742a59358abee9c886f21ec4b6");
+    expect(text).toContain("b980ecf3f86a5ae712106157ca2a0837d49db73de43e205495e55d419a8a1332");
+    expect(text).toContain("3473e294d400153c8a31b084a68dc32b215c7020a9dccdcdc2b40e5829bdaeae");
     expect(text).toContain("sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B");
     expect(text).toContain("checked._compile(raw.toString('utf8'),source)");
     expect(text).toContain("exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module");

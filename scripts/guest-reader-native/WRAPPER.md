@@ -63,3 +63,13 @@ SDK19 merge, release or consumer pin follows. Actual no-dev Bun/libc behavior,
 owner/view/parent-death/reap/drain, canonical tool alias and atomic per-root
 attribution remain required future gates. `configEffectProven`, guided turn, VM,
 production activation and removal flags stay false.
+
+The closed report-family classifier lives in `native_cases.py` (a pinned module), not in
+`wrapper.py`: it labels the retained same-owner stderr capture and does not consult, relax
+or replace the exporter's full-capture scrub, whose regex, provenance checks and
+`postInitStderrSample` shapes are unchanged. Its separate `postInitReportFamily` value is
+non-secret and appears in both `result.json` and `log_result_projection`. Because it changes
+`native_cases.py`, the `SOURCE_PINS` entry for that module in `wrapper.py` and the reviewed
+workflow's `bootstrap.py` and `wrapper.py` pins are recomputed together; the compile-packet
+and acquisition pins and every workflow branch name are untouched. The grammar, gating and
+non-claims are in `README.md`.
