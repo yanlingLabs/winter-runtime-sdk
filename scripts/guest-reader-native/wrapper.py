@@ -32,6 +32,11 @@ ACQUISITION_METADATA = {
     'artifact_id': 11866353126, 'artifact_name': 'reader-compile-packet-38502659264',
     'size_in_bytes': 81095921, 'expired': False, 'expires_at': '2026-10-21T02:45:33Z',
 }
+ACQUISITION_MEMBERS = {
+    'reader-packet.tar.gz': (81359155, 'e3863c0ebe91a7cbe4efc0c63cf5adb232dbb5bddd1c897cd447045b8c96482b'),
+    'packet-inventory.json': (243499, '21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f'),
+}
+OUTER_ZIP_SHA256 = 'bd586bafdcffeca4c4fbdfcdd65b4f8b807b2ff2b7ba8adfebbacf067874dfcd'
 
 
 class Refusal(ValueError):
@@ -142,6 +147,10 @@ class SourceLease:
                     'source hash changed')
         for name, module in self.modules.items():
             require(sys.modules.get(name) is module, 'trusted module alias replaced')
+            filename = dict(MODULE_ORDER)[name]
+            require(type(module) is types.ModuleType
+                    and vars(module).get('__file__') == str(self.path/filename),
+                    'trusted module source path replaced')
 
     def close(self):
         require(not self.unresolved, 'uncertain resources must remain owned')
@@ -299,14 +308,48 @@ def check_acquisition_metadata(metadata, now):
             'artifact expired or clock unavailable')
 
 
+def check_acquisition_record(record, now):
+    """Cross-check the DATA intake record, never promote it to authority."""
+    keys = {'metadata','checked_at','directory','directory_identity','outer_zip_sha256',
+            'outer_zip_identity','members','packet_data_validated','packet_code_imported',
+            'native_execution','source_admission','execution_admission','vm_execution'}
+    require(type(record) is dict and all(type(key) is str for key in record)
+            and set(record) == keys, 'closed acquisition record required')
+    check_acquisition_metadata(record['metadata'], now)
+    require(type(record['outer_zip_sha256']) is str and record['outer_zip_sha256'] == OUTER_ZIP_SHA256
+            and record['packet_data_validated'] is True and all(record[key] is False
+                for key in ('packet_code_imported','native_execution','source_admission',
+                            'execution_admission','vm_execution')), 'acquisition observation flags')
+    require(type(record['checked_at']) is str and len(record['checked_at']) <= 64,
+            'acquisition observation time')
+    try:
+        checked = datetime.fromisoformat(record['checked_at'].replace('Z','+00:00'))
+    except ValueError as error:
+        raise Refusal('acquisition observation time') from error
+    require(checked.tzinfo is not None and checked.utcoffset() is not None and checked <= now,
+            'acquisition observation time')
+    members = record['members']
+    require(type(members) in (list,tuple) and len(members) == 2, 'two acquisition members')
+    seen = set()
+    for member in members:
+        require(type(member) is dict and set(member) == {'name','path','size','sha256','identity'}
+                and type(member['name']) is str and member['name'] in ACQUISITION_MEMBERS
+                and member['name'] not in seen, 'closed acquisition member')
+        seen.add(member['name'])
+        size, digest = ACQUISITION_MEMBERS[member['name']]
+        require(type(member['size']) is int and member['size'] == size
+                and type(member['sha256']) is str and member['sha256'] == digest,
+                'acquisition member pin mismatch')
+
+
 def run_cases(lease, packet_directory, inventory_file, launch_destination, fixture_destination,
-              *, acquisition_metadata, now=None):
+              *, acquisition_record, now=None):
     """Unexecuted privileged orchestration, not granted by input shape.
 
     Exact external-parent/source/artifact/workflow admission remains required.
     On uncertainty this function retains every context; it cannot print a pass.
     """
-    check_acquisition_metadata(acquisition_metadata, datetime.now(timezone.utc) if now is None else now)
+    check_acquisition_record(acquisition_record, datetime.now(timezone.utc) if now is None else now)
     native_guard(lease)
     require(Path(launch_destination) == lease.path.parent/'runtime'
             and Path(fixture_destination) == lease.path.parent/'fixture',

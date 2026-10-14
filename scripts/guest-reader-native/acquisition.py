@@ -12,7 +12,6 @@ from pathlib import Path
 import secrets
 import stat
 import struct
-import zipfile
 import zlib
 
 
@@ -235,7 +234,7 @@ def _hash_fd(fd, size):
 
 
 def _zip_directory(fd, size, pins):
-    """Validate bounded directory DATA before ZipFile can allocate its inventory.
+    """Capture only two bounded member ranges; never reparse mutable metadata.
 
     Closed format: two contiguous local entries, one bounded central directory,
     comment-free EOCD; stored/deflated regular DATA only. ZIP64, extras, comments,
@@ -285,7 +284,8 @@ def _zip_directory(fd, size, pins):
             _refuse("zip-name")
         names.add(name)
         pin = next(p for p in pins.members if p.name == name)
-        if uncompressed != pin.size or compressed > central_offset:
+        if uncompressed != pin.size or compressed > central_offset or (
+                method == 0 and compressed != uncompressed):
             _refuse("zip-member-size")
         unix_mode = external >> 16
         if external & 0x10 or stat.S_IFMT(unix_mode) not in (0, stat.S_IFREG):
@@ -333,29 +333,85 @@ def _zip_directory(fd, size, pins):
             local_cursor += descriptor_size
     if local_cursor != central_offset:
         _refuse("zip-local-shape")
-    return records
+    return tuple(_MemberRange(name, method, crc, compressed, uncompressed,
+                              offset + 30 + len(raw_name))
+                 for name, _flags, method, crc, compressed, uncompressed, offset,
+                 raw_name in records)
+
+
+@dataclass(frozen=True)
+class _MemberRange:
+    name: str
+    method: int
+    crc: int
+    compressed_size: int
+    size: int
+    data_offset: int
+
+
+@dataclass(frozen=True)
+class _BoundedArchive:
+    fd: int
+    members: tuple[_MemberRange, _MemberRange]
 
 
 def _stream_member(archive, pin, output_fd=None):
+    """Read only captured compressed ranges, with bounded output and exact CRC.
+
+    No EOCD, directory, local header or descriptor is reread. Raw DEFLATE output
+    is capped on every decoder call; EOF must consume the entire declared range.
+    """
+    member = next(record for record in archive.members if record.name == pin.name)
     digest = hashlib.sha256()
     count = 0
-    with archive.open(pin.name, "r") as member:
-        while True:
-            data = member.read(min(CHUNK, pin.size - count + 1))
-            if not data:
-                break
-            count += len(data)
-            if count > pin.size:
-                _refuse("member-stream-size")
-            digest.update(data)
-            if output_fd is not None:
-                view = memoryview(data)
-                while view:
-                    written = os.write(output_fd, view)
-                    if written <= 0:
-                        _refuse("copy-write")
-                    view = view[written:]
-    if count != pin.size or digest.hexdigest() != pin.sha256:
+    crc = 0
+
+    def accept(data):
+        nonlocal count, crc
+        count += len(data)
+        if count > pin.size:
+            _refuse("member-stream-size")
+        digest.update(data)
+        crc = zlib.crc32(data, crc)
+        if output_fd is not None:
+            view = memoryview(data)
+            while view:
+                written = os.write(output_fd, view)
+                if written <= 0:
+                    _refuse("copy-write")
+                view = view[written:]
+
+    decoder = zlib.decompressobj(-zlib.MAX_WBITS) if member.method == 8 else None
+    offset = member.data_offset
+    remaining = member.compressed_size
+    while remaining:
+        raw = _read_at(archive.fd, offset, min(CHUNK, remaining))
+        offset += len(raw)
+        remaining -= len(raw)
+        if decoder is None:
+            accept(raw)
+            continue
+        pending = raw
+        while pending:
+            if decoder.eof:
+                _refuse("member-deflate-trailing")
+            data = decoder.decompress(pending, min(CHUNK, pin.size - count + 1))
+            accept(data)
+            if decoder.unused_data:
+                _refuse("member-deflate-trailing")
+            tail = decoder.unconsumed_tail
+            if tail and len(tail) == len(pending) and not data:
+                _refuse("member-deflate-progress")
+            pending = tail
+        if decoder.eof and remaining:
+            _refuse("member-deflate-trailing")
+    if decoder is not None and not decoder.eof:
+        _refuse("member-deflate-truncated")
+    if count != member.size or count != pin.size:
+        _refuse("member-stream-size")
+    if crc & 0xffffffff != member.crc:
+        _refuse("member-stream-crc")
+    if digest.hexdigest() != pin.sha256:
         _refuse("member-stream-hash")
 
 
@@ -378,92 +434,88 @@ def acquire_local_zip(zip_path, destination_parent, metadata, *, now,
         if outer_hash != pins.outer_sha256:
             _refuse("outer-hash-pin")
         _same(source.fd, outer_identity)
-        _zip_directory(source.fd, outer_identity.size, pins)
-        with os.fdopen(os.dup(source.fd), "rb") as held_file:
-            with zipfile.ZipFile(held_file, "r") as archive:
-                if len(archive.infolist()) != 2 or set(archive.namelist()) != set(NAMES):
-                    _refuse("zip-parser-shape")
-                # Crucially, verify BOTH streams before any destination bytes.
-                for pin in pins.members:
-                    _stream_member(archive, pin)
-                source.recheck()
-                _same(source.fd, outer_identity)
-                if _hash_fd(source.fd, outer_identity.size) != outer_hash:
-                    _refuse("outer-hash-changed")
-                _same(source.fd, outer_identity)
-                destination = _HeldPath(destination_parent, directory=True)
-                parent_stat = os.fstat(destination.fd)
-                if parent_stat.st_uid != os.geteuid() or stat.S_IMODE(parent_stat.st_mode) & 0o022:
-                    _refuse("destination-parent-owner-mode")
-                name = "reader-data-" + secrets.token_hex(16)
-                os.mkdir(name, 0o700, dir_fd=destination.fd)
-                directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
-                                       os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=destination.fd)
-                os.fchmod(directory_fd, 0o700)
-                directory_path = str(Path(destination_parent) / name)
-                members = []
-                for pin in pins.members:
-                    fd = os.open(pin.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                                 os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory_fd)
-                    try:
-                        os.fchmod(fd, 0o600)
-                        _file(fd, mode=0o600)
-                        _stream_member(archive, pin, fd)
-                        os.fsync(fd)
-                        copy_identity = _file(fd, pin.size, 0o600)
-                    finally:
-                        os.close(fd)
-                    read_fd = os.open(pin.name, os.O_RDONLY | os.O_NOFOLLOW |
-                                      os.O_NONBLOCK, dir_fd=directory_fd)
-                    try:
-                        _same(read_fd, copy_identity)
-                        if _hash_fd(read_fd, pin.size) != pin.sha256:
-                            _refuse("copy-hash")
-                        _same(read_fd, copy_identity)
-                    finally:
-                        os.close(read_fd)
-                    members.append(CopiedMember(pin.name, str(Path(directory_path) / pin.name),
-                                                pin.size, pin.sha256, copy_identity))
-                source.recheck()
-                destination.recheck()
-                _same(source.fd, outer_identity)
-                directory_identity = _identity(directory_fd)
-                link_stat = os.stat(name, dir_fd=destination.fd, follow_symlinks=False)
-                if (link_stat.st_dev, link_stat.st_ino) != (
-                        directory_identity.device, directory_identity.inode) or (
-                        not stat.S_ISDIR(directory_identity.mode) or
-                        stat.S_IMODE(directory_identity.mode) != 0o700 or
-                        directory_identity.uid != os.geteuid()):
-                    _refuse("destination-directory-identity")
-                for member in members:
-                    fd = os.open(member.name, os.O_RDONLY | os.O_NOFOLLOW |
-                                 os.O_NONBLOCK, dir_fd=directory_fd)
-                    try:
-                        _same(fd, member.identity)
-                        if _hash_fd(fd, member.size) != member.sha256:
-                            _refuse("copy-hash")
-                        _same(fd, member.identity)
-                    finally:
-                        os.close(fd)
-                if _hash_fd(source.fd, outer_identity.size) != outer_hash:
-                    _refuse("outer-hash-changed")
-                _same(source.fd, outer_identity)
-                source.recheck()
-                destination.recheck()
-                _same(directory_fd, directory_identity)
-                final_link = os.stat(name, dir_fd=destination.fd, follow_symlinks=False)
-                if (final_link.st_dev, final_link.st_ino) != (
-                        directory_identity.device, directory_identity.inode) or (
-                        not stat.S_ISDIR(final_link.st_mode)):
-                    _refuse("destination-directory-identity")
-                if sorted(os.listdir(directory_fd)) != sorted(NAMES):
-                    _refuse("destination-inventory")
-                return AcquisitionRecord(metadata, now.astimezone(timezone.utc).isoformat(),
-                                         directory_path, directory_identity, outer_hash,
-                                         outer_identity, tuple(members))
+        archive = _BoundedArchive(source.fd, _zip_directory(source.fd, outer_identity.size, pins))
+        # Crucially, verify BOTH streams before any destination bytes.
+        for pin in pins.members:
+            _stream_member(archive, pin)
+        source.recheck()
+        _same(source.fd, outer_identity)
+        if _hash_fd(source.fd, outer_identity.size) != outer_hash:
+            _refuse("outer-hash-changed")
+        _same(source.fd, outer_identity)
+        destination = _HeldPath(destination_parent, directory=True)
+        parent_stat = os.fstat(destination.fd)
+        if parent_stat.st_uid != os.geteuid() or stat.S_IMODE(parent_stat.st_mode) & 0o022:
+            _refuse("destination-parent-owner-mode")
+        name = "reader-data-" + secrets.token_hex(16)
+        os.mkdir(name, 0o700, dir_fd=destination.fd)
+        directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
+                               os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=destination.fd)
+        os.fchmod(directory_fd, 0o700)
+        directory_path = str(Path(destination_parent) / name)
+        members = []
+        for pin in pins.members:
+            fd = os.open(pin.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory_fd)
+            try:
+                os.fchmod(fd, 0o600)
+                _file(fd, mode=0o600)
+                _stream_member(archive, pin, fd)
+                os.fsync(fd)
+                copy_identity = _file(fd, pin.size, 0o600)
+            finally:
+                os.close(fd)
+            read_fd = os.open(pin.name, os.O_RDONLY | os.O_NOFOLLOW |
+                              os.O_NONBLOCK, dir_fd=directory_fd)
+            try:
+                _same(read_fd, copy_identity)
+                if _hash_fd(read_fd, pin.size) != pin.sha256:
+                    _refuse("copy-hash")
+                _same(read_fd, copy_identity)
+            finally:
+                os.close(read_fd)
+            members.append(CopiedMember(pin.name, str(Path(directory_path) / pin.name),
+                                        pin.size, pin.sha256, copy_identity))
+        source.recheck()
+        destination.recheck()
+        _same(source.fd, outer_identity)
+        directory_identity = _identity(directory_fd)
+        link_stat = os.stat(name, dir_fd=destination.fd, follow_symlinks=False)
+        if (link_stat.st_dev, link_stat.st_ino) != (
+                directory_identity.device, directory_identity.inode) or (
+                not stat.S_ISDIR(directory_identity.mode) or
+                stat.S_IMODE(directory_identity.mode) != 0o700 or
+                directory_identity.uid != os.geteuid()):
+            _refuse("destination-directory-identity")
+        for member in members:
+            fd = os.open(member.name, os.O_RDONLY | os.O_NOFOLLOW |
+                         os.O_NONBLOCK, dir_fd=directory_fd)
+            try:
+                _same(fd, member.identity)
+                if _hash_fd(fd, member.size) != member.sha256:
+                    _refuse("copy-hash")
+                _same(fd, member.identity)
+            finally:
+                os.close(fd)
+        if _hash_fd(source.fd, outer_identity.size) != outer_hash:
+            _refuse("outer-hash-changed")
+        _same(source.fd, outer_identity)
+        source.recheck()
+        destination.recheck()
+        _same(directory_fd, directory_identity)
+        final_link = os.stat(name, dir_fd=destination.fd, follow_symlinks=False)
+        if (final_link.st_dev, final_link.st_ino) != (
+                directory_identity.device, directory_identity.inode) or (
+                not stat.S_ISDIR(final_link.st_mode)):
+            _refuse("destination-directory-identity")
+        if sorted(os.listdir(directory_fd)) != sorted(NAMES):
+            _refuse("destination-inventory")
+        return AcquisitionRecord(metadata, now.astimezone(timezone.utc).isoformat(),
+                                 directory_path, directory_identity, outer_hash,
+                                 outer_identity, tuple(members))
     except AcquisitionError:
         raise
-    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError,
+    except (OSError, RuntimeError, NotImplementedError, EOFError,
             struct.error, zlib.error) as error:
         raise AcquisitionError("local-data-refused") from error
     finally:

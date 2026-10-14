@@ -10,7 +10,13 @@ import unittest
 from unittest.mock import patch
 import wrapper as w
 OBSERVED_TIME=datetime(2026,10,14,tzinfo=timezone.utc)
-ACQUISITION={'acquisition_metadata':dict(w.ACQUISITION_METADATA),'now':OBSERVED_TIME}
+RECORD={'metadata':dict(w.ACQUISITION_METADATA),'checked_at':OBSERVED_TIME.isoformat(),
+    'directory':'/unprivileged/data','directory_identity':{},'outer_zip_sha256':w.OUTER_ZIP_SHA256,
+    'outer_zip_identity':{},'members':[{'name':name,'path':'/unprivileged/data/'+name,
+        'size':size,'sha256':digest,'identity':{}} for name,(size,digest) in w.ACQUISITION_MEMBERS.items()],
+    'packet_data_validated':True,'packet_code_imported':False,'native_execution':False,
+    'source_admission':False,'execution_admission':False,'vm_execution':False}
+ACQUISITION={'acquisition_record':RECORD,'now':OBSERVED_TIME}
 
 
 class SyntheticOwner(w.OwnerOps):
@@ -212,13 +218,27 @@ class Tests(unittest.TestCase):
             metadata=dict(w.ACQUISITION_METADATA);metadata[key]=value
             with patch.object(w,'native_guard') as guard,patch.object(w,'load_external_modules') as loader:
                 with self.assertRaises(w.Refusal):
-                    w.run_cases(lease,'packet','inventory','launch','fixture',acquisition_metadata=metadata,now=OBSERVED_TIME)
+                    w.run_cases(lease,'packet','inventory','launch','fixture',acquisition_record=dict(RECORD,metadata=metadata),now=OBSERVED_TIME)
                 guard.assert_not_called();loader.assert_not_called()
         for now in (datetime(2026,10,21,2,45,33,tzinfo=timezone.utc),datetime(2026,10,14)):
             with patch.object(w,'native_guard') as guard:
                 with self.assertRaises(w.Refusal):
-                    w.run_cases(lease,'packet','inventory','launch','fixture',acquisition_metadata=dict(w.ACQUISITION_METADATA),now=now)
+                    w.run_cases(lease,'packet','inventory','launch','fixture',acquisition_record=RECORD,now=now)
                 guard.assert_not_called()
+
+    def test_record_member_hash_and_module_file_path_cannot_drift(self):
+        members=[dict(member) for member in RECORD['members']]
+        members[0]['sha256']='0'*64
+        with self.assertRaises(w.Refusal):w.check_acquisition_record(dict(RECORD,members=members),OBSERVED_TIME)
+        with tempfile.TemporaryDirectory() as temporary:
+            _,lease,_=self.data(temporary)
+            try:
+                with patch.dict(sys.modules):
+                    for name,_ in w.MODULE_ORDER:sys.modules.pop(name,None)
+                    modules=w.load_external_modules(lease)
+                    modules['producer'].__file__='/foreign/producer.py'
+                    with self.assertRaises(w.Refusal):lease.recheck()
+            finally:self.cleanup(lease)
 
 
 if __name__=='__main__':unittest.main()

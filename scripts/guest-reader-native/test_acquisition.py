@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 import warnings
 import zipfile
+import zlib
 
 import acquisition as a
 
@@ -104,7 +105,7 @@ class Tests(unittest.TestCase):
                          artifact_id=2, artifact_name="foreign", size_in_bytes=22,
                          expires_at="2026-10-22T02:45:33Z", expired=True)
         for field, value in mutations.items():
-            with self.subTest(field=field), patch.object(a.zipfile, "ZipFile") as parser:
+            with self.subTest(field=field), patch.object(zipfile, "ZipFile") as parser:
                 with self.assertRaises(a.AcquisitionError):
                     a.acquire_local_zip(self.source, self.destination,
                                         replace(self.metadata, **{field: value}),
@@ -151,6 +152,31 @@ class Tests(unittest.TestCase):
                 self.install(build(method=method, descriptor=descriptor))
                 self.acquire()
 
+    def test_production_descriptor_layout_in_tiny_real_zip_fixture(self):
+        raw = build(descriptor=True)
+        self.install(raw)
+        eocd = struct.unpack("<4s4H2IH", raw[-22:])
+        self.assertEqual(eocd[5], 133)  # Exact two central records/name lengths.
+        central_offset = eocd[6]
+        self.assertEqual(central_offset + 133, len(raw) - 22)
+        fd = os.open(self.source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            records = a._zip_directory(fd, len(raw), self.pins)
+        finally:
+            os.close(fd)
+        local_offset = 0
+        for record in sorted(records, key=lambda r: r.data_offset):
+            fields = struct.unpack("<4s5H3I2H", raw[local_offset:local_offset + 30])
+            self.assertEqual(fields[2:4], (8, 8))  # Descriptor flag + deflate.
+            self.assertEqual(fields[6:9], (0, 0, 0))  # CRC and both sizes deferred.
+            descriptor_offset = record.data_offset + record.compressed_size
+            descriptor = raw[descriptor_offset:descriptor_offset + 16]
+            self.assertEqual(struct.unpack("<4s3I", descriptor),
+                             (b"PK\x07\x08", record.crc, record.compressed_size, record.size))
+            local_offset = descriptor_offset + 16
+        self.assertEqual(local_offset, central_offset)
+        self.acquire()
+
     def test_extra_duplicate_directory_traversal_names_refuse(self):
         entries = list(DATA.items())
         variants = [entries + [("extra", b"x")], [entries[0], entries[0]],
@@ -177,7 +203,7 @@ class Tests(unittest.TestCase):
             with self.subTest(offset=offset):
                 self.install(build())
                 self.mutate(b"PK\x05\x06", offset, fmt, value)
-                with patch.object(a.zipfile, "ZipFile") as parser:
+                with patch.object(zipfile, "ZipFile") as parser:
                     self.refuse()
                     parser.assert_not_called()
 
@@ -198,7 +224,7 @@ class Tests(unittest.TestCase):
             with self.subTest(signature=signature, offset=offset, value=value):
                 self.install(build())
                 self.mutate(signature, offset, fmt, value)
-                with patch.object(a.zipfile, "ZipFile") as parser:
+                with patch.object(zipfile, "ZipFile") as parser:
                     self.refuse()
                     parser.assert_not_called()
 
@@ -220,6 +246,121 @@ class Tests(unittest.TestCase):
         self.install(raw)
         self.refuse("local-data-refused")
         self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_mutated_metadata_after_capture_is_not_reparsed_or_used_for_reads(self):
+        original_directory, original_read = a._zip_directory, a._read_at
+        captured = None
+        reads = []
+
+        def capture_then_mutate(fd, size, pins):
+            nonlocal captured
+            records = original_directory(fd, size, pins)
+            # Simulate the original review race at the same held inode. These
+            # unvalidated counts/offsets must never reach any inventory parser.
+            raw = bytearray(self.source.read_bytes())
+            central = raw.index(b"PK\x01\x02")
+            struct.pack_into("<H", raw, central + 28, 65535)
+            struct.pack_into("<HHII", raw, len(raw) - 14,
+                             65535, 65535, 0xffffffff, 0)
+            self.source.write_bytes(raw)
+            captured = records
+            return records
+
+        def bounded_read(fd, offset, size):
+            if captured is not None:
+                self.assertLessEqual(size, a.CHUNK)
+                self.assertTrue(any(record.data_offset <= offset and
+                                    offset + size <= record.data_offset + record.compressed_size
+                                    for record in captured), "unvalidated metadata reread")
+                reads.append((offset, size))
+            return original_read(fd, offset, size)
+
+        with patch.object(a, "_zip_directory", capture_then_mutate), \
+                patch.object(a, "_read_at", bounded_read), \
+                patch.object(zipfile, "ZipFile", side_effect=AssertionError("ZIP reparse")):
+            self.refuse("identity-changed")
+        self.assertTrue(reads)  # Both bounded streams ran before identity refusal.
+        for record in captured:
+            self.assertEqual(sum(size for offset, size in reads
+                                 if record.data_offset <= offset <
+                                 record.data_offset + record.compressed_size), record.compressed_size)
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_direct_decoder_truncated_trailing_crc_size_and_empty_refusals(self):
+        data = b"bounded deflate DATA" * 30000
+        compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        compressed = compressor.compress(data) + compressor.flush()
+        digest = hashlib.sha256(data).hexdigest()
+        cases = [
+            (compressed[:-1], len(data), zlib.crc32(data), "member-deflate-truncated"),
+            (compressed + b"trailing", len(data), zlib.crc32(data), "member-deflate-trailing"),
+            (compressed + compressed, len(data), zlib.crc32(data), "member-deflate-trailing"),
+            (compressed, len(data), zlib.crc32(data) ^ 1, "member-stream-crc"),
+            (compressed, 2, zlib.crc32(data), "member-stream-size"),
+            (compressed, len(data) + 1, zlib.crc32(data), "member-stream-size"),
+            (b"", 0, 0, "member-deflate-truncated"),
+        ]
+        for raw, size, crc, code in cases:
+            with self.subTest(code=code, size=size):
+                self.source.write_bytes(b"prefix" + raw + b"outside captured range")
+                fd = os.open(self.source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                try:
+                    record = a._MemberRange(a.NAMES[0], 8, crc, len(raw), size, 6)
+                    archive = a._BoundedArchive(fd, (record,))
+                    pin = a.MemberPin(a.NAMES[0], size, digest)
+                    with self.assertRaises(a.AcquisitionError) as caught:
+                        a._stream_member(archive, pin)
+                    self.assertEqual(str(caught.exception), code)
+                finally:
+                    os.close(fd)
+
+    def test_direct_decoder_reads_exact_range_and_caps_all_decode_outputs(self):
+        original_decoder, original_read = zlib.decompressobj, a._read_at
+        data = (bytes(range(256)) * 2400) + b"tail"
+        compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        compressed = compressor.compress(data) + compressor.flush()
+        requests, reads = [], []
+
+        class ObservedDecoder:
+            def __init__(self, *args):
+                self.decoder = original_decoder(*args)
+
+            def decompress(self, raw, limit):
+                self_outer.assertGreater(limit, 0)
+                self_outer.assertLessEqual(limit, a.CHUNK)
+                result = self.decoder.decompress(raw, limit)
+                self_outer.assertLessEqual(len(result), limit)
+                requests.append((len(raw), limit, len(result)))
+                return result
+
+            def __getattr__(self, name):
+                return getattr(self.decoder, name)
+
+        self_outer = self
+        for method, raw in ((0, data), (8, compressed)):
+            with self.subTest(method=method):
+                self.source.write_bytes(b"prefix" + raw + b"outside captured range")
+                fd = os.open(self.source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                record = a._MemberRange(a.NAMES[0], method, zlib.crc32(data), len(raw), len(data), 6)
+
+                def bounded_read(held_fd, offset, size):
+                    self.assertEqual(held_fd, fd)
+                    self.assertLessEqual(size, a.CHUNK)
+                    self.assertGreaterEqual(offset, 6)
+                    self.assertLessEqual(offset + size, 6 + len(raw))
+                    reads.append(size)
+                    return original_read(held_fd, offset, size)
+
+                try:
+                    reads.clear()
+                    with patch.object(a.zlib, "decompressobj", ObservedDecoder), \
+                            patch.object(a, "_read_at", bounded_read):
+                        a._stream_member(a._BoundedArchive(fd, (record,)),
+                                         a.MemberPin(a.NAMES[0], len(data), hashlib.sha256(data).hexdigest()))
+                    self.assertEqual(sum(reads), len(raw))
+                finally:
+                    os.close(fd)
+        self.assertGreater(len(requests), 1)  # One small compressed chunk expands in bounded steps.
 
     def test_symlink_file_ancestor_destination_and_dot_paths_refuse(self):
         link = self.root / "link.zip"

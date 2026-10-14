@@ -3,7 +3,9 @@
 `acquisition.py` is unprivileged, local ZIP DATA handling. It has no downloader,
 token or entrypoint. Production metadata and outer hash are fixed to artifact
 11866353126/run38502659264. Its bounded central/local parser admits exactly
-`reader-packet.tar.gz` and `packet-inventory.json`; both inner streams are hashed
+`reader-packet.tar.gz` and `packet-inventory.json`. The inflater uses only captured
+bounded ranges, never a second mutable metadata parser; exact termination, CRC
+and output caps precede SHA checks. Both inner streams are hashed
 before creating output. Copying repeats the hash checks and retains an incomplete
 private directory on failure, without calling it valid. Expiry at
 2026-10-21T02:45:33Z refuses; no reupload/retention workaround. This validates the
@@ -30,8 +32,11 @@ The external pin is passed by its explicit copied path, so relocation cannot
 fall back to a nonexistent sibling checkout.
 
 Owner/pin injection only supports portable DATA tests. Synthetic leases cannot
-run native cases. The callable case set checks fixed acquisition metadata and
-expiry before imports/effects, then requires actual isolated Linux Root. That
+run native cases. The callable case set consumes the acquisition DATA record,
+cross-checks its metadata, outer hash, both member hashes/sizes and observation
+flags against pins, and checks expiry before imports/effects. This is record
+correlation, not stronger provenance or native authority. It then requires actual
+isolated Linux Root. That
 predicate is not hosted-runner provenance or a production native capability.
 The future external chain must independently bind the download, complete packet,
 source bootstrap and approved venue before choosing to invoke this function.
