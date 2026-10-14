@@ -71,7 +71,7 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "cowork-reader-build-source.yml", "release.yml"]);
+    expect(workflows).toEqual(["ci.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "release.yml"]);
     for (const name of workflows.filter((name) => name !== "release.yml")) {
       const source = readWorkflow(name);
       // Non-release workflows may explain this rule in comments, but cannot run publication.
@@ -95,6 +95,54 @@ describe("the release workflow", () => {
         { name: "Portable source and data checks", run: "python3 -I -S -B scripts/guest-reader-build/test_provenance.py" },
       ],
     });
+  });
+
+  test("the reader compile fixture has exact feature triggers and no output execution", () => {
+    const source = parseWorkflow("cowork-reader-compile-fixture.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ name?: string; if?: string; uses?: string; run?: string; with?: Record<string, unknown> }> }> };
+    expect(source.on).toEqual({
+      push: { branches: ["cowork/instruction-reader-compile-fixture"], paths: [".github/workflows/cowork-reader-compile-fixture.yml", "scripts/guest-reader-build/**", "test/gates/release-gates.test.ts"] },
+      workflow_dispatch: {},
+    });
+    expect(source.permissions).toEqual({ contents: "read" });
+    expect(Object.keys(source.jobs ?? {})).toEqual(["compile-only"]);
+    const job = source.jobs?.["compile-only"];
+    expect(job?.if).toBe("github.ref == 'refs/heads/cowork/instruction-reader-compile-fixture'");
+    expect(job?.steps?.length).toBe(10);
+    for (const step of job?.steps ?? []) {
+      if (step.uses?.startsWith("actions/checkout")) expect(step.with?.["persist-credentials"]).toBe(false);
+      if (step.run) expect(step.run).not.toMatch(/sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher)?(?:\s|$)/);
+    }
+    const checkouts = job?.steps?.filter((step) => step.uses?.startsWith("actions/checkout")) ?? [];
+    expect(checkouts.map((step) => step.with?.ref)).toEqual([
+      "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
+      "0394b36f674765c942f8db07f009b7ad20787dba",
+      "8603da22d9fe7f1695166891cd29ccd254b1d21e",
+      "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
+    ]);
+    const uploads = job?.steps?.filter((step) => step.uses === "actions/upload-artifact@v4") ?? [];
+    expect(uploads.length).toBe(2);
+    expect(uploads[1]).toEqual({
+      name: "Retain bounded compiler refusal diagnostics",
+      if: "failure() && env.READER_FIXTURE != '' && steps.reader_metafile_check.outcome == 'success'",
+      uses: "actions/upload-artifact@v4",
+      with: {
+        name: "reader-compile-diagnostics-${{ github.run_id }}",
+        path: "${{ env.READER_FIXTURE }}/packet/diagnostics/*.json\n${{ env.READER_FIXTURE }}/packet/artifacts/instructionReader.metafile.json\n",
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+      },
+    });
+    const rawCheck = job?.steps?.find((step) => step.name === "Bound raw reader metadata for this public-source diagnostic");
+    expect(rawCheck?.if).toBe("failure() && env.READER_FIXTURE != ''");
+    expect(rawCheck?.run).toContain("limit=16*1024*1024");
+    expect(rawCheck?.run).toContain("stat.S_ISREG(before.st_mode)");
+    expect(rawCheck?.run).toContain("os.O_NOFOLLOW|os.O_NONBLOCK");
+    expect(rawCheck?.run).toContain("diagnostic-only, unadmitted, public-source fixture");
+    const text = readWorkflow("cowork-reader-compile-fixture.yml");
+    expect(text).toContain("--builder-head 1c867727a8a8519bff75cf78e857ddd60bf1b0da");
+    expect(text).toContain("if name=='artifacts/native.d':continue");
+    expect(text).toContain("tar.addfile(record,io.BytesIO(data))");
+    expect(text).not.toContain("tar.addfile(record,incoming)");
   });
 
   test("the npm leg is token-gated and carries provenance; the GitHub Packages leg carries `packages: write`", () => {

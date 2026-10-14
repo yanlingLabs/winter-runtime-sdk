@@ -1,0 +1,207 @@
+name: reader-compile-fixture
+on:
+  push:
+    branches: [cowork/instruction-reader-compile-fixture]
+    paths:
+      - .github/workflows/cowork-reader-compile-fixture.yml
+      - scripts/guest-reader-build/**
+      - test/gates/release-gates.test.ts
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  compile-only:
+    if: github.ref == 'refs/heads/cowork/instruction-reader-compile-fixture'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1c867727a8a8519bff75cf78e857ddd60bf1b0da
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-runtime-sdk
+          ref: 0394b36f674765c942f8db07f009b7ad20787dba
+          path: origins/runtime
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: 8603da22d9fe7f1695166891cd29ccd254b1d21e
+          path: origins/sdk
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: f6d88d9a2f8ae15bb50afb98868183ae769e3b11
+          path: origins/overlay
+          persist-credentials: false
+      - name: Prepare pinned compiler as bounded data
+        shell: bash
+        run: |
+          set -euo pipefail
+          reader_fixture=$(mktemp -d /var/tmp/winter-reader-compile.XXXXXXXX)
+          printf 'READER_FIXTURE=%s\n' "$reader_fixture" >> "$GITHUB_ENV"
+          mkdir -m 700 "$reader_fixture/dependencies"
+          printf '{}\n' > "$reader_fixture/resolver-map.json"
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 --max-filesize 134217728 \
+            'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip' \
+            --output "$reader_fixture/bun.zip"
+          python3 -I -S -B - "$reader_fixture" <<'PY'
+          import hashlib, json, os, stat, sys, zipfile
+          from pathlib import Path
+          root=Path(sys.argv[1]);archive=root/'bun.zip';limit=128*1024*1024
+          identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+          expected_archive='a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b'
+          expected_base='37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086'
+          fd=os.open(archive,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+          try:
+              before=os.fstat(fd)
+              if not stat.S_ISREG(before.st_mode) or before.st_size>limit:raise ValueError('archive bound')
+              with os.fdopen(os.dup(fd),'rb') as source:
+                  digest=hashlib.file_digest(source,'sha256').hexdigest()
+              if digest!=expected_archive or identity(os.fstat(fd))!=identity(before):raise ValueError('archive pin or identity')
+              os.lseek(fd,0,os.SEEK_SET)
+              with os.fdopen(os.dup(fd),'rb') as source,zipfile.ZipFile(source) as zipped:
+                  members=zipped.infolist()
+                  if len(members)>2 or {item.filename for item in members} not in ({'bun-linux-aarch64/bun'},{'bun-linux-aarch64/','bun-linux-aarch64/bun'}):raise ValueError('archive inventory')
+                  item=zipped.getinfo('bun-linux-aarch64/bun')
+                  if item.file_size>limit or item.flag_bits&1 or not stat.S_ISREG(item.external_attr>>16):raise ValueError('archive regular base')
+                  output=os.open(root/'linux-bun',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o500)
+                  total=0;base_hash=hashlib.sha256()
+                  try:
+                      with zipped.open(item) as incoming:
+                          while True:
+                              chunk=incoming.read(min(65536,limit-total+1))
+                              if not chunk:break
+                              total+=len(chunk)
+                              if total>limit:raise ValueError('base expanded bound')
+                              base_hash.update(chunk);at=0
+                              while at<len(chunk):at+=os.write(output,chunk[at:])
+                      if total!=item.file_size or base_hash.hexdigest()!=expected_base or os.fstat(output).st_nlink!=1:raise ValueError('base pin or identity')
+                  finally:os.close(output)
+              if identity(os.fstat(fd))!=identity(before):raise ValueError('archive changed')
+          finally:os.close(fd)
+          record={'formatVersion':1,'kind':'winter-reader-compiler-acquisition','archiveSha256':digest,'archiveBytes':before.st_size,'baseSha256':base_hash.hexdigest(),'baseBytes':total,'archivePinMatched':True,'basePinMatched':True,'outputsExecuted':False,'nativeAdmission':False}
+          out=os.open(root/'acquisition.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
+          with os.fdopen(out,'w') as target:json.dump(record,target,sort_keys=True);target.write('\n')
+          PY
+      - name: Compile reader roles without executing outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          reader_cc=$(python3 -I -S -B -c 'import pathlib,shutil; print(pathlib.Path(shutil.which("cc")).resolve())')
+          python3 -I -S -B scripts/guest-reader-build/build.py \
+            --runtime "$GITHUB_WORKSPACE/origins/runtime" \
+            --sdk "$GITHUB_WORKSPACE/origins/sdk" \
+            --overlay "$GITHUB_WORKSPACE/origins/overlay" \
+            --dependencies "$READER_FIXTURE/dependencies" \
+            --compiler "$READER_FIXTURE/linux-bun" --base "$READER_FIXTURE/linux-bun" \
+            --cc "$reader_cc" --sysroot / --out "$READER_FIXTURE/packet" \
+            --builder-head 1c867727a8a8519bff75cf78e857ddd60bf1b0da --resolver-map "$READER_FIXTURE/resolver-map.json"
+          cp "$READER_FIXTURE/acquisition.json" "$READER_FIXTURE/packet/compiler-acquisition.json"
+      - name: Capture packet archive and fresh inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S -B - "$GITHUB_WORKSPACE" "$READER_FIXTURE" <<'PY'
+          import hashlib, importlib.util, io, json, os, stat, sys, tarfile
+          from pathlib import Path
+          checkout=Path(sys.argv[1]);fixture=Path(sys.argv[2]);packet=fixture/'packet'
+          spec=importlib.util.spec_from_file_location('reviewed_reader_data',checkout/'scripts/guest-reader-build/provenance.py')
+          p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p)
+          root=p.root_fd(packet);inventory={};total=0;visits=0
+          def walk(fd,prefix='',depth=0):
+              global total,visits
+              if depth>64:raise ValueError('packet depth')
+              with os.scandir(fd) as entries:
+                  for entry in entries:
+                      visits+=1
+                      if visits>60000 or len(inventory)>=20000:raise ValueError('packet count')
+                      name=p.relative(prefix+entry.name)
+                      if name=='artifacts/native.d':continue
+                      info=entry.stat(follow_symlinks=False)
+                      if stat.S_ISDIR(info.st_mode):
+                          child=os.open(entry.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                          try:
+                              if p.identity(info)!=p.identity(os.fstat(child)):raise ValueError('packet directory changed')
+                              walk(child,name+'/',depth+1)
+                          finally:os.close(child)
+                      elif stat.S_ISLNK(info.st_mode):inventory[name]={'kind':'symlink','target':os.readlink(entry.name,dir_fd=fd)}
+                      elif stat.S_ISREG(info.st_mode):
+                          file=p.leaf(root,name)
+                          try:data=p.read_fd(file,p.MAX_ELF)
+                          finally:os.close(file)
+                          total+=len(data)
+                          if total>512*1024*1024:raise ValueError('packet bytes')
+                          inventory[name]={'kind':'file','sha256':p.digest(data),'bytes':len(data)}
+                      else:raise ValueError('packet special file')
+          try:
+              walk(root);p.validate_links(inventory)
+              archive=fixture/'reader-packet.tar.gz'
+              output=os.open(archive,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
+              with os.fdopen(output,'wb') as wire,tarfile.open(fileobj=wire,mode='w:gz',format=tarfile.PAX_FORMAT) as tar:
+                  for name,item in sorted(inventory.items()):
+                      record=tarfile.TarInfo(name);record.uid=record.gid=0;record.mtime=0
+                      if item['kind']=='symlink':record.type=tarfile.SYMTYPE;record.linkname=item['target'];record.mode=0o777;tar.addfile(record)
+                      else:
+                          file=p.leaf(root,name)
+                          with os.fdopen(file,'rb') as incoming:
+                              data=p.read_fd(incoming.fileno(),p.MAX_ELF)
+                              if p.digest(data)!=item['sha256']:raise ValueError('packet leaf changed')
+                              record.size=len(data);record.mode=0o400;tar.addfile(record,io.BytesIO(data))
+          finally:os.close(root)
+          with archive.open('rb') as incoming:archive_hash=hashlib.file_digest(incoming,'sha256').hexdigest()
+          evidence={'formatVersion':1,'kind':'winter-reader-compile-packet','builderHead':'1c867727a8a8519bff75cf78e857ddd60bf1b0da','workflowHead':os.environ['GITHUB_SHA'],'excludedScratch':['artifacts/native.d'],'files':inventory,'fileCount':len(inventory),'fileBytes':total,'archiveSha256':archive_hash,'archiveBytes':archive.stat().st_size,'outputsExecuted':False,'nativeAdmission':False,'vmExecutionVerified':False,'activationEnabled':False}
+          with (fixture/'packet-inventory.json').open('x') as target:json.dump(evidence,target,sort_keys=True,separators=(',',':'));target.write('\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reader-compile-packet-${{ github.run_id }}
+          path: |
+            ${{ env.READER_FIXTURE }}/reader-packet.tar.gz
+            ${{ env.READER_FIXTURE }}/packet-inventory.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Bound raw reader metadata for this public-source diagnostic
+        id: reader_metafile_check
+        if: failure() && env.READER_FIXTURE != ''
+        shell: bash
+        run: |
+          python3 -I -S -B - "$READER_FIXTURE" <<'PY'
+          import os, stat, sys
+          limit=16*1024*1024;held=[]
+          identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+          try:
+              fd=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);held.append(fd)
+              try:
+                  for name in ('packet','artifacts'):
+                      fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd);held.append(fd)
+                  fd=os.open('instructionReader.metafile.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=fd);held.append(fd)
+              except FileNotFoundError:
+                  print('Raw reader metadata absent; bounded diagnostic records only.')
+              else:
+                  before=os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit:raise ValueError('raw reader metadata bound')
+                  total=0
+                  while True:
+                      chunk=os.read(fd,min(65536,limit-total+1))
+                      if not chunk:break
+                      total+=len(chunk)
+                      if total>limit:raise ValueError('raw reader metadata grew')
+                  if total!=before.st_size or identity(before)!=identity(os.fstat(fd)):raise ValueError('raw reader metadata changed')
+                  print('Raw reader metadata observed bounded; diagnostic-only, unadmitted, public-source fixture.')
+          finally:
+              for fd in reversed(held):os.close(fd)
+          PY
+      - name: Retain bounded compiler refusal diagnostics
+        if: failure() && env.READER_FIXTURE != '' && steps.reader_metafile_check.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reader-compile-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ env.READER_FIXTURE }}/packet/diagnostics/*.json
+            ${{ env.READER_FIXTURE }}/packet/artifacts/instructionReader.metafile.json
+          if-no-files-found: ignore
+          retention-days: 7
