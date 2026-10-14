@@ -30,6 +30,16 @@ def handles():
 
 
 class PreinitTests(unittest.TestCase):
+    def test_audited_label_survives_unmapped_errno_without_remainder_text(self):
+        result = cases.classify_stderr(b'reader namespaces: PRIVATE-UNMAPPED-TEXT\n')
+        self.assertEqual(result['classification'], 'audited_label')
+        self.assertEqual(result['label'], 'reader namespaces')
+        self.assertEqual(result['errno'], 0)
+        self.assertNotIn('PRIVATE', json.dumps(result))
+        for raw in (b'reader namespaces: private\nextra\n',
+                    b'reader namespaces: private', b'unknown: private\n'):
+            self.assertEqual(cases.classify_stderr(raw)['classification'], 'unrecognized')
+
     def diagnose(self, h=None, stderr=None, bootstrap=None, wait=(123, 0)):
         h = h or handles()
         chunks = {24: iter([stderr if stderr is not None else b'reader namespaces: ' + os.strerror(1).encode() + b'\n', b'']),
@@ -86,7 +96,7 @@ class PreinitTests(unittest.TestCase):
             raw = b'reader namespaces: ' + os.strerror(code).encode() + b'\n'
             value = cases.classify_stderr(raw)
             self.assertEqual((value['classification'], value['label'], value['errno']), ('audited_perror', 'reader namespaces', code))
-        for raw in (b'/PRIVATE/PATH: Permission denied\n', b'reader namespaces: unknown\n', b'reader namespaces: Permission denied\nextra', b'reader namespace: Permission denied\n'):
+        for raw in (b'/PRIVATE/PATH: Permission denied\n', b'reader namespaces: Permission denied\nextra', b'reader namespace: Permission denied\n'):
             value = cases.classify_stderr(raw); self.assertEqual(value['classification'], 'unrecognized')
             self.assertNotIn('PRIVATE', json.dumps(value))
         with self.assertRaises(cases.Refusal): cases.classify_stderr(b'x' * 4097)

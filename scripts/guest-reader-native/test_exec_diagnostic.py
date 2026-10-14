@@ -23,6 +23,20 @@ class Tests(unittest.TestCase):
         for step,code in ((True,0),(1,True),(1,-1),(1,1.0)):
             with self.assertRaises(p.Refusal):p.bootstrap_record(step,code)
 
+    def test_added_errno_codes_remain_observed_without_raw_error_text(self):
+        added=(3,7,8,14,16,18,19,21,26,36,75,80,87)
+        for code in added:
+            with self.subTest(code=code):
+                raw=p.bootstrap_record(9,code)
+                self.assertEqual(p.decode_bootstrap_record(raw)['errno'],code)
+                with patch.object(p.os,'write',return_value=8) as write:
+                    p.emit_bootstrap_failure(90,9,OSError(code,'private path'))
+                self.assertEqual(write.call_args.args[1],raw)
+        with patch.object(p.os,'write',return_value=8) as write:
+            p.emit_bootstrap_failure(90,9,OSError(4095,'private path'))
+        self.assertEqual(p.decode_bootstrap_record(write.call_args.args[1]),
+            {'recordObserved':True,'step':'exec','errno':0})
+
     def test_failure_writes_only_fixed_record_no_exception_rendering(self):
         class Hidden(OSError):
             def __str__(self):raise AssertionError('no raw text')

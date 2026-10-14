@@ -184,8 +184,9 @@ def validate_stdio(pipe_fds, pass_fds, *, get_stat=os.fstat, get_flags=None):
 
 BOOTSTRAP_STEPS = ('child_setup', 'gate', 'root_guard', 'stdio', 'unshare',
                    'propagation', 'chroot', 'descriptor_envelope', 'exec')
-BOOTSTRAP_ERRNOS = (0, 1, 2, 4, 5, 9, 10, 11, 12, 13, 17, 20, 22, 23, 24,
-                    28, 30, 32, 38, 40, 95, 110)
+BOOTSTRAP_ERRNOS = (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+                    18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 36, 38, 40,
+                    75, 80, 87, 95, 110)
 
 
 def bootstrap_record(step, code):

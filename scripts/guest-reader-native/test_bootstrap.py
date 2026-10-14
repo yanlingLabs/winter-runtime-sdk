@@ -195,6 +195,23 @@ class PreinitProjectionTests(unittest.TestCase):
         record['nativeLabel']='reader namespaces';record['nativeClassification']='audited_perror';record['nativeErrno']=1
         self.assertEqual(self.project(record)['nativeErrnoSymbol'],'EPERM')
 
+    def test_audited_label_with_unmapped_errno_and_exact_linux_alias(self):
+        record=self.observation()
+        record.update(nativeClassification='audited_label',nativeLabel='reader namespaces',nativeErrno=0)
+        result=self.project(record)
+        self.assertTrue(result['available'])
+        self.assertEqual(result['nativeClassification'],'audited_label')
+        self.assertEqual(result['nativeLabel'],'reader namespaces')
+        self.assertEqual(result['nativeErrnoSymbol'],'unknown')
+        record.update(nativeClassification='audited_perror',nativeErrno=95,bootstrapErrno=95)
+        result=self.project(record)
+        self.assertEqual(result['nativeErrnoSymbol'],'ENOTSUP')
+        self.assertEqual(result['bootstrapErrnoSymbol'],'ENOTSUP')
+        error=OSError(95,'unserialized private path')
+        self.assertEqual(b.failure_record(error)['errnoSymbol'],'ENOTSUP')
+        record['bootstrapErrno']=80
+        self.assertTrue(self.project(record)['available'])
+
     def test_unknown_and_type_confused_observations_never_escape_projection(self):
         changes={'controlBytes':33,'controlRights':True,'controlEof':1,'stderrBytes':4098,
             'nativeClassification':'secret','nativeLabel':'/private/secret','nativeErrno':4095,

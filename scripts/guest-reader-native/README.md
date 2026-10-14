@@ -121,3 +121,15 @@ The C/table audit corrected three nested-call literals before this source freeze
 C, the compiled packet, libraries and acquisition/downloader are unchanged.
 Another hosted attempt requires exact source/whole-chain review and fresh one-run
 admission; no retry or activation is granted by these SOURCE changes.
+
+
+Diagnostic errno coverage includes the fixed Linux exec/FD/mount error codes used
+by this source recipe. A one-line, exact audited C label remains `audited_label`
+when its errno text has no closed mapping; the text is discarded. Numeric native
+errno 0 is interpreted with `nativeClassification`: `empty` has no error line,
+`audited_label` has unmapped text, and `audited_perror` matched the fixed errno
+renderer (including code 0). Linux errno 95 projects explicitly to `ENOTSUP`.
+For bootstrap observations, `recordObserved:false` with errno 0 means no record;
+`recordObserved:true` with errno 0 means an observed record with unknown errno.
+Neither means that exec or cleanup succeeded. The correction changes no deadline,
+case oracle, C bytes or compiled artifact.

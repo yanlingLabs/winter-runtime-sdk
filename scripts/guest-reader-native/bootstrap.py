@@ -337,7 +337,9 @@ ERROR_CLASSES = ('Refusal', 'Uncertain', 'CaseUncertain', 'ValueError', 'OSError
                  'ProcessLookupError', 'ChildProcessError', 'BrokenPipeError')
 ERRNO_SYMBOLS = ('EACCES', 'EPERM', 'ENOENT', 'EBADF', 'EINVAL', 'EMFILE', 'ENFILE',
                  'ENOMEM', 'ENOSPC', 'EROFS', 'EIO', 'EPIPE', 'ECONNRESET', 'ETIMEDOUT',
-                 'EINTR', 'EAGAIN', 'ENOTDIR', 'ELOOP', 'ESRCH', 'ECHILD', 'EEXIST', 'ENOSYS', 'EOPNOTSUPP')
+                 'EINTR', 'EAGAIN', 'ENOTDIR', 'ELOOP', 'ESRCH', 'ECHILD', 'EEXIST', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP',
+                 'E2BIG', 'ENOEXEC', 'EFAULT', 'EBUSY', 'EXDEV', 'ENODEV', 'EISDIR',
+                 'ETXTBSY', 'ENAMETOOLONG', 'EOVERFLOW', 'ELIBBAD', 'EUSERS')
 FAILURE_STAGES = ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'fixture',
                   'close', 'source:capture', 'source:copy', 'bootstrap:copy', 'bootstrap:load') + tuple(
     'source:load:' + name for name in ('control', 'producer', 'reader_parent', 'reader_fixture', 'native_cases')) + tuple(
@@ -409,7 +411,9 @@ NATIVE_STDERR_LABELS = (
 PREINIT_KEYS = ('controlObserved', 'controlBytes', 'controlTag', 'controlRights', 'controlEof', 'stderrBytes', 'stderrEof', 'nativeClassification', 'nativeLabel', 'nativeErrno', 'bootstrapBytes', 'bootstrapRecordObserved', 'bootstrapStep', 'bootstrapErrno', 'bootstrapEof', 'bootstrapClassification', 'launcherExitCode', 'producerExitCode', 'diagnosticsComplete')
 BOOTSTRAP_STEP_NAMES = ('child_setup','gate','root_guard','stdio','unshare','propagation',
                         'chroot','descriptor_envelope','exec')
-DIAGNOSTIC_ERRNOS = (0,1,2,4,5,9,10,11,12,13,17,20,22,23,24,28,30,32,38,40,95,110)
+DIAGNOSTIC_ERRNOS = (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+                    18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 36, 38, 40,
+                    75, 80, 87, 95, 110)
 
 
 def preinit_record(chain):
@@ -428,7 +432,7 @@ def preinit_record(chain):
     for name in ('launcherExitCode','producerExitCode'):
         if raw[name] is not None and (type(raw[name]) is not int or not -64<=raw[name]<=255):return {'available':False}
     choices={'controlTag':('I','R','EOF','other','unknown'),
-             'nativeClassification':('empty','audited_perror','unrecognized','overflow'),
+             'nativeClassification':('empty','audited_perror','audited_label','unrecognized','overflow'),
              'nativeLabel':NATIVE_STDERR_LABELS+('unknown',),
              'bootstrapStep':BOOTSTRAP_STEP_NAMES+('unknown',),
              'bootstrapClassification':('empty','record','invalid','overflow')}
@@ -436,7 +440,7 @@ def preinit_record(chain):
         if type(raw[name]) is not str or raw[name] not in values:return {'available':False}
     result={name:raw[name] for name in PREINIT_KEYS};result['available']=True
     for name in ('nativeErrno','bootstrapErrno'):
-        symbol=errno.errorcode.get(raw[name])
+        symbol='ENOTSUP' if raw[name]==95 else errno.errorcode.get(raw[name])
         result[name+'Symbol']=symbol if symbol in ERRNO_SYMBOLS else 'unknown'
     return result
 
@@ -459,7 +463,7 @@ def failure_record(error, *, stage='preflight'):
         name=type(item).__name__
         reason=item.args[0] if isinstance(item, BaseException) and len(item.args)==1 else None
         code=getattr(item, 'errno', None)
-        symbol=errno.errorcode.get(code) if type(code) is int else None
+        symbol=('ENOTSUP' if code==95 else errno.errorcode.get(code)) if type(code) is int else None
         return (name if name in ERROR_CLASSES else 'Other',
                 reason if type(reason) is str and reason in ERROR_REASONS else 'unclassified',
                 symbol if symbol in ERRNO_SYMBOLS else 'unknown')

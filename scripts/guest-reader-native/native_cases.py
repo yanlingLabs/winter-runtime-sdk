@@ -223,10 +223,20 @@ def classify_stderr(raw):
     require(type(raw) is bytes and len(raw) <= 4096, 'diagnostic stderr bound')
     result = {'byteCount': len(raw), 'classification': 'empty' if not raw else 'unrecognized',
               'label': 'unknown', 'errno': 0}
+    if not raw.endswith(b'\n') or raw.count(b'\n') != 1:
+        return result
+    parts = raw[:-1].split(b': ', 1)
+    if len(parts) != 2:
+        return result
     for label in STDERR_LABELS:
+        if parts[0] != label.encode('utf-8'):
+            continue
         for code in BOOTSTRAP_ERRNOS:
-            if raw == (label + ': ' + os.strerror(code) + '\n').encode('utf-8'):
+            if parts[1] == os.strerror(code).encode('utf-8'):
                 return {**result, 'classification': 'audited_perror', 'label': label, 'errno': code}
+        # Preserve the audited step even when libc's errno text has no closed
+        # mapping. The remainder is never returned or rendered.
+        return {**result, 'classification': 'audited_label', 'label': label}
     return result
 
 

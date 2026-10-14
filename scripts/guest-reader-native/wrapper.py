@@ -14,10 +14,10 @@ import types
 
 SOURCE_PINS = {
     'parent.py': '856dc389f06ae973b1c1a65149671d984288cf558d7a461e32c89758036c63af',
-    'producer.py': '4129ee4b31ba8f7e1f27d7b177b259d3be3a0c123a4641215e3c338f1995c691',
+    'producer.py': '5435e6891995f5b9f73089dfbcea02782c344914c3510a7e7d00067b961aaf45',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
-    'native_cases.py': 'dfb906ed4a7c6ba357414900f857307c74d410e4450111849ca2ed78247f22df',
+    'native_cases.py': '567743f70a7b5a7b1142d052db4ea6766b6f74a7907f80c2b96018acc6dd0230',
 }
 MODULE_ORDER = (('control', 'control.py'), ('producer', 'producer.py'),
                 ('reader_parent', 'parent.py'), ('reader_fixture', 'fixture.py'),
