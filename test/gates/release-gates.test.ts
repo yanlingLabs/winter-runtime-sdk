@@ -71,12 +71,29 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "release.yml"]);
-    const ci = readWorkflow("ci.yml");
-    // The word appears in ci.yml only inside the comment that says this very thing.
-    const publishLines = ci.split("\n").filter((line) => /publish/i.test(line));
-    for (const line of publishLines) expect(line.trimStart().startsWith("#")).toBe(true);
-    expect(ci).not.toMatch(/^\s*-\s*run:.*publish/m);
+    expect(workflows).toEqual(["ci.yml", "cowork-reader-build-source.yml", "release.yml"]);
+    for (const name of workflows.filter((name) => name !== "release.yml")) {
+      const source = readWorkflow(name);
+      // Non-release workflows may explain this rule in comments, but cannot run publication.
+      const publishLines = source.split("\n").filter((line) => /publish/i.test(line));
+      for (const line of publishLines) expect(line.trimStart().startsWith("#")).toBe(true);
+      expect(source).not.toMatch(/^\s*-\s*run:.*publish/m);
+    }
+  });
+
+  test("the reader source workflow is credential-free portable data checking only", () => {
+    const source = parseWorkflow("cowork-reader-build-source.yml") as { permissions?: unknown; jobs?: Record<string, unknown> };
+    expect(source.permissions).toEqual({ contents: "read" });
+    expect(Object.keys(source.jobs ?? {})).toEqual(["portable-data"]);
+    expect(source.jobs?.["portable-data"]).toEqual({
+      if: "github.event_name == 'push' || github.head_ref == 'cowork/instruction-reader-build'",
+      "runs-on": "ubuntu-24.04-arm",
+      "timeout-minutes": 5,
+      steps: [
+        { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
+        { name: "Portable source and data checks", run: "python3 -I -S -B scripts/guest-reader-build/test_provenance.py" },
+      ],
+    });
   });
 
   test("the npm leg is token-gated and carries provenance; the GitHub Packages leg carries `packages: write`", () => {

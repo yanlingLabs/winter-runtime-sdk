@@ -1,0 +1,24 @@
+name: reader-build-source
+on:
+  push:
+    branches: [cowork/instruction-reader-build]
+    paths:
+      - scripts/guest-reader-build/**
+      - .github/workflows/cowork-reader-build-source.yml
+  pull_request:
+    paths:
+      - scripts/guest-reader-build/**
+      - .github/workflows/cowork-reader-build-source.yml
+permissions:
+  contents: read
+jobs:
+  portable-data:
+    if: github.event_name == 'push' || github.head_ref == 'cowork/instruction-reader-build'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Portable source and data checks
+        run: python3 -I -S -B scripts/guest-reader-build/test_provenance.py
