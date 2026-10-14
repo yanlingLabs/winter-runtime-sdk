@@ -171,8 +171,9 @@ class Tests(unittest.TestCase):
             NativeOperation=lambda *args,**kw:SimpleNamespace(debt=args[0]))
         data=SimpleNamespace(create_fixture=lambda _:fixture,request_bytes=lambda:b'compact-input',
             verify_response=lambda out,err:events.append('frame-check'))
-        def case(kind,factory,request):
+        def case(kind,factory,request,**kwargs):
             events.append(kind)
+            if kwargs:events.append(('effects',kwargs['effects']))
             self.assertEqual(request,b'compact-input' if kind=='same-owner' else b'')
             debt=object();self.assertIs(factory(debt,None).debt,debt)
             if kind==failure:raise ValueError('inert uncertain case')
@@ -211,6 +212,22 @@ class Tests(unittest.TestCase):
         with patch.object(w,'native_guard'),patch.object(w,'load_external_modules') as loader:
             with self.assertRaises(w.Refusal):w.run_cases(lease,'packet','inventory','/tmp/other','/tmp/fixture',**ACQUISITION)
             loader.assert_not_called()
+
+    def test_only_exact_checked_modules_and_trusted_effects_are_reused(self):
+        lease,modules,events,_=self.orchestrator()
+        modules['control']=object()
+        lease.modules=modules
+        with patch.object(w,'native_guard'):
+            result=w.run_cases(lease,'packet','inventory',lease.path.parent/'runtime',lease.path.parent/'fixture',
+                **ACQUISITION,loaded_modules=dict(modules),effects_factory=lambda kind:'instrument-'+kind)
+        self.assertTrue(result['readerCaseSetPassed'])
+        self.assertEqual([event for event in events if isinstance(event,tuple)],
+            [('effects','instrument-same-owner'),('effects','instrument-unexpected-parent'),('effects','instrument-parent-exit')])
+        foreign=dict(modules,producer=object())
+        with patch.object(w,'native_guard'):
+            with self.assertRaises(w.Refusal):
+                w.run_cases(lease,'packet','inventory',lease.path.parent/'runtime',lease.path.parent/'fixture',
+                    **ACQUISITION,loaded_modules=foreign)
 
     def test_expired_foreign_and_bool_metadata_refuse_before_any_import_or_effect(self):
         lease,_,_,_=self.orchestrator()

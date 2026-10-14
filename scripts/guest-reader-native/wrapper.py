@@ -343,7 +343,7 @@ def check_acquisition_record(record, now):
 
 
 def run_cases(lease, packet_directory, inventory_file, launch_destination, fixture_destination,
-              *, acquisition_record, now=None):
+              *, acquisition_record, now=None, effects_factory=None, loaded_modules=None):
     """Unexecuted privileged orchestration, not granted by input shape.
 
     Exact external-parent/source/artifact/workflow admission remains required.
@@ -354,7 +354,15 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
     require(Path(launch_destination) == lease.path.parent/'runtime'
             and Path(fixture_destination) == lease.path.parent/'fixture',
             'fixed protected fixture siblings required')
-    modules = load_external_modules(lease)
+    if loaded_modules is None:
+        modules = load_external_modules(lease)
+    else:
+        lease.recheck()
+        require(type(loaded_modules) is dict and set(loaded_modules) ==
+                {name for name, _ in MODULE_ORDER} and all(loaded_modules[name] is
+                    lease.modules.get(name) for name, _ in MODULE_ORDER),
+                'only checked lease modules may be reused')
+        modules = loaded_modules
     parent, producer = modules['reader_parent'], modules['producer']
     data, cases = modules['reader_fixture'], modules['native_cases']
     try:
@@ -372,8 +380,11 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
                 control_pair_factory=pair_factory)
         outcomes = []
         for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
-            observed = cases.run_case(kind, factory,
-                data.request_bytes() if kind == 'same-owner' else b'')
+            request = data.request_bytes() if kind == 'same-owner' else b''
+            if effects_factory is None:
+                observed = cases.run_case(kind, factory, request)
+            else:
+                observed = cases.run_case(kind, factory, request, effects=effects_factory(kind))
             if kind == 'same-owner':
                 data.verify_response(observed.observation.stdout, observed.observation.stderr)
             lease.fixture.recheck(); parent.recheck_runtime(lease.runtime); lease.recheck()
