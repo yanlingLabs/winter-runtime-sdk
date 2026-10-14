@@ -134,11 +134,11 @@ describe("the release workflow", () => {
   test("the native reader source workflow runs only injected and temporary DATA tests", () => {
     const source = parseWorkflow("cowork-reader-native-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-native/**", "test/guest/reader-harness-consumer.test.ts", ".github/workflows/cowork-reader-native-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-bootstrap"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-readiness"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(source.jobs).toEqual({
       "portable-data": {
-        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-bootstrap'",
+        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-readiness'",
         "runs-on": "ubuntu-24.04-arm", "timeout-minutes": 5,
         steps: [
           { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
@@ -154,7 +154,7 @@ describe("the release workflow", () => {
     expect(source.permissions).toEqual({ contents: "read", actions: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["reader-only"]);
     const job = source.jobs?.["reader-only"], steps = job?.steps ?? [];
-    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-bootstrap' && github.run_attempt == '1'");
+    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-readiness' && github.run_attempt == '1'");
     expect(steps.length).toBe(6);
     for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
     expect(steps[0]?.with).toEqual({ ref: "4d5dfcec9454d33e8423713491ced08b58669f58", path: "origins/base", "persist-credentials": false });
@@ -167,11 +167,11 @@ describe("the release workflow", () => {
     expect(text).not.toContain("_SHA_PENDING");
     expect(text).toContain("fs.chmodSync(privateDir,0o700)");
     expect(text).toContain("65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99");
-    expect(text).toContain("6375274c90772356b1ab307d836146586ce8e1561eeceb9bf642a30ffabb5e81");
-    expect(text).toContain("399928685ca16702699f021cd410c397324e4264b1bb8ec99090d6279c7b9fa4");
+    expect(text).toContain("9abb320aa7297b6fc511580a613ba2dc497500fc071c5cd6b49926f24d573f0d");
+    expect(text).toContain("4acea09cedb207a303d81df41def3543636ea04bb8f40fbce790e3dec59b1236");
     expect(text).toContain("sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B");
     expect(text).toContain("checked._compile(raw.toString('utf8'),source)");
-    expect(text).toContain("exec(compile(checked,str(protected),'exec'),module.__dict__)");
+    expect(text).toContain("exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module");
     expect(text).toContain("group: reader-native-reviewed");
     expect(text).toContain("cancel-in-progress: false");
     expect(text).toContain("Buffer.alloc(65537)");
@@ -179,8 +179,11 @@ describe("the release workflow", () => {
     expect(text).toContain("os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)");
     expect(text).toContain("os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)");
     expect(text).toContain("causeReason");
+    expect(text).toContain("module.failure_record(error)");
+    expect(text).toContain("wrapper_source=wrapper,harness_source=harness_source");
+    const bootstrap = readFileSync(resolve(import.meta.dir, "../../scripts/guest-reader-native/bootstrap.py"), "utf8");
     for (const reason of ["outer namespace changed before launch", "outer namespace changed while live", "outer namespace changed after teardown", "actual child handle envelope", "actual initial I required", "negative teardown before C deadline"])
-      expect(text).toContain(`'${reason}'`);
+      expect(bootstrap).toContain(`'${reason}'`);
     expect(steps[5]?.with?.path).toBe("${{ steps.download.outputs.private }}/result.json");
   });
 

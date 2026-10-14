@@ -260,7 +260,7 @@ class CasesTests(unittest.TestCase):
         # Inert readiness and EOF: no os fd is read, opened, polled or closed.
         with patch.object(cases.os, 'set_blocking'), \
              patch.object(cases.os, 'read', return_value=b''), \
-             patch.object(cases.select, 'select', side_effect=lambda read, *_: (list(read), [], [])), \
+             patch.object(cases, 'poll_ready', side_effect=lambda read, **_: (list(read), [])), \
              patch.object(cases, 'recv_rights', return_value=(b'', [])), \
              patch.object(cases.time, 'monotonic', return_value=0):
             observation = cases.LinuxEffects().observe(h, 3)

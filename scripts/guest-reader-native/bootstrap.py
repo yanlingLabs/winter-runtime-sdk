@@ -4,6 +4,7 @@ The new externally reviewed workflow must admit these bytes before execution.
 Tests inject tables; no privileged/native case executes during source validation.
 """
 import hashlib
+import errno
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,343 @@ class Refusal(ValueError): pass
 
 def require(value, reason):
     if not value: raise Refusal(reason)
+
+
+
+# Generated from literal require/Refusal/ValueError messages in the seven reviewed modules.
+ERROR_REASONS = (
+    'Root fixture directory scope',
+    'Root producer required',
+    'Root readonly bootstrap source',
+    'Root wrapper copy',
+    'Root-owned 0700 launch parent required',
+    'Root-owned protected launch ancestry required',
+    'UID reservation process bound',
+    'acquisition member pin mismatch',
+    'acquisition observation flags',
+    'acquisition observation time',
+    'actual Linux Root caller required',
+    'actual Root ownership required',
+    'actual child handle envelope',
+    'actual handle transfer',
+    'actual initial I required',
+    'actual intermediate launcher reap',
+    'actual producer reap',
+    'adopted init actually reaped',
+    'adopted launcher actually reaped',
+    'alias SDK identity',
+    'alias ancestor hazard',
+    'alias component',
+    'alias cycle',
+    'alias escape',
+    'alias outside captured SDK package directories',
+    'alias spelling',
+    'alias target',
+    'alias type/link',
+    'ancestor socket shape',
+    'ancestor subreaper',
+    'ancestor traversal',
+    'artifact expired or clock unavailable',
+    'artifact pin',
+    'base pin',
+    'bootstrap alias occupied',
+    'bootstrap alias replaced',
+    'bootstrap source byte bound',
+    'bootstrap source descriptors retained',
+    'bootstrap source hash/identity',
+    'bootstrap source replaced',
+    'bootstrap_copy',
+    'bootstrap_final_pin',
+    'bootstrap_source',
+    'bootstrap_source_pin',
+    'both native processes live at parent-exit trigger',
+    'bounded case before native deadline',
+    'bounded fixed reader request',
+    'bounded independent bootstrap source',
+    'bounded independent source file',
+    'cancel control write',
+    'cancelled owned reader',
+    'case absolute deadline',
+    'case ancillary envelope',
+    'case descriptor close failures retained',
+    'case input shape',
+    'case pipe bound',
+    'case receipt truncation',
+    'casefold alias collision',
+    'child fd ordering',
+    'cleanup root replaced',
+    'closed acquisition member',
+    'closed acquisition metadata',
+    'closed acquisition record required',
+    'closed bootstrap source path',
+    'closed drain observations',
+    'closed external source pins',
+    'closed handles',
+    'closed native case kind',
+    'closed packet library inventory',
+    'closed pidfd observation',
+    'closed sealed root',
+    'closed snapshot',
+    'closed source copy inventory',
+    'closed source directory path',
+    'closed source lease',
+    'compile DATA pin replaced',
+    'compile pin digest',
+    'compile pin version',
+    'complete outer mount snapshot',
+    'complete request write',
+    'confirmed descriptor discharge',
+    'control source bound',
+    'copy shares input inode',
+    'data_record',
+    'data_record_path',
+    'descriptor capacity preflight',
+    'descriptor discharge before case deadline',
+    'directory replaced by leaf',
+    'distinct inherited descriptors',
+    'distinct noncolliding stdio sources',
+    'duplicate JSON key',
+    'duplicate reader key',
+    'duplicate/late init',
+    'duplicated control and stdin write endpoints alive',
+    'empty base configuration',
+    'exact acquisition metadata required',
+    'exact downloader metadata conversion',
+    'exact origin identities',
+    'exact staged inputs',
+    'exec returned',
+    'explicit FIFO stdio',
+    'explicit child fd inventory',
+    'external compile DATA pin mismatch',
+    'external compile pin hash',
+    'external control changed',
+    'external control source pin',
+    'external inventory pin',
+    'external parent supports packet layout only',
+    'external pin digest required',
+    'external pin file changed',
+    'external source pin mismatch',
+    'extra physical directory entry',
+    'extra/missing alias',
+    'extra/missing metadata or environment',
+    'file bounds/digest',
+    'file changed during read',
+    'file grew during hash/copy',
+    'file hash/identity changed',
+    'file type/link/size changed',
+    'fixed descriptor capacity unavailable',
+    'fixed protected Root parent venue',
+    'fixed protected fixture siblings required',
+    'fixture directory replaced',
+    'fixture directory seal changed',
+    'fixture file bytes changed',
+    'fixture file identity changed',
+    'fixture write incomplete',
+    'four origins',
+    'fresh source destination',
+    'get subreaper',
+    'held descriptor capacity preflight',
+    'held descriptor count bound',
+    'held external pin file required',
+    'hidden canary leaked',
+    'hosted Linux ARM venue required',
+    'independent fixture file required',
+    'independent init pidfd teardown',
+    'independent launcher and pipe teardown',
+    'independent source/shared scope',
+    'input execution/authority claim',
+    'intermediate reap observation',
+    'invalid JSON',
+    'invalid destination',
+    'inventory authority claim',
+    'inventory format',
+    'isolated actual Root bootstrap required',
+    'isolated actual Root stage required',
+    'isolated unprivileged data stage required',
+    'launcher attribution',
+    'launcher exit deadline',
+    'launcher not reaped after native drain',
+    'launcher parent',
+    'launcher pid',
+    'launcher pidfd type',
+    'launcher proc bound',
+    'leaf ancestor collision',
+    'leaf count bound',
+    'leaf race during capture',
+    'leaf schema',
+    'library pin',
+    'live init and launcher before case trigger',
+    'live pidfd target required',
+    'live sealed root required',
+    'live snapshot required',
+    'matching launcher/native wait',
+    'metadata bindings',
+    'metadata format',
+    'missing native reap receipt',
+    'missing physical directory entry',
+    'module alias already occupied',
+    'named object replaced',
+    'native ancillary envelope',
+    'native case uncertain; ownership retained',
+    'native control data refused',
+    'native receipt truncated',
+    'negative teardown before C deadline',
+    'nonfinite JSON',
+    'one ancestor pair lifetime',
+    'one bounded reader frame required',
+    'one init pidfd',
+    'one reader lifetime per producer',
+    'one registered debt identity',
+    'only actual terminal R',
+    'only checked lease modules may be reused',
+    'origin inventory digest',
+    'origin leaf mismatch',
+    'outer mount snapshot bound',
+    'outer namespace changed after teardown',
+    'outer namespace changed before launch',
+    'outer namespace changed while live',
+    'output_parent',
+    'output_parent_replaced',
+    'owned launcher pid',
+    'owned private PID namespace init',
+    'owned running reader',
+    'packet directory not sealed',
+    'packet file not DATA sealed',
+    'parent exit command',
+    'path characters',
+    'path length',
+    'path traversal/depth',
+    'physical alias spelling',
+    'pidfd observation bound',
+    'plain downloader metadata required',
+    'pre-bootstrap reap uncertain',
+    'pre-init unexpected-parent refusal',
+    'prefix bound',
+    'private Root parent',
+    'private bootstrap mount namespace',
+    'private bootstrap propagation',
+    'private source parent required',
+    'proc observation bound',
+    'proc observation identity changed',
+    'proc observation regular file',
+    'producer actually reaped exit zero',
+    'producer death killed launcher and adopted init',
+    'producer fixed command',
+    'protected Root source ancestry required',
+    'protected bootstrap source ancestry',
+    'protected source ancestry changed',
+    'protected source file changed',
+    'protected source root changed',
+    'protected_bootstrap_pin',
+    'read bound',
+    'reader UID already in use',
+    'reader capture bound',
+    'reader fixture/correlation mismatch',
+    'reader lifetime deadline',
+    'reader lifetime state',
+    'reader request write',
+    'reader stream bound',
+    'reader_wrapper_uncertain',
+    'real filesystem owner observations required',
+    'reap command after pidfd readiness',
+    'reap without owned init',
+    'receipt execution/authority claim',
+    'receipt pin',
+    'received descriptor cleanup uncertain',
+    'received descriptor is not pidfd',
+    'recipe execution claim',
+    'registered child start gate',
+    'registration before effects',
+    'regular single-link bounded file required',
+    'request bytes',
+    'request deadline',
+    'request progress',
+    'restore subreaper',
+    'result_identity',
+    'result_write',
+    'reviewed inventory identity',
+    'reviewed pin bytes changed',
+    'runtime directory mode',
+    'runtime object mode',
+    'same-owner native control outcome',
+    'scratch exclusion',
+    'sealed reopen race',
+    'separately reviewed pin required',
+    'short copy',
+    'single-threaded bootstrap required',
+    'six exact libraries',
+    'source ancestry replaced',
+    'source changed before copy',
+    'source completeness',
+    'source copy write',
+    'source hash changed',
+    'source import pin',
+    'source input descriptors retained',
+    'source leaf replaced',
+    'source read bound',
+    'source read identity changed',
+    'source reopen changed',
+    'source traversal descriptors retained',
+    'start gate write',
+    'static metadata markers',
+    'stdio access direction',
+    'total byte bound',
+    'trusted module alias replaced',
+    'trusted module source path replaced',
+    'twelve exact aliases',
+    'two acquisition members',
+    'two artifact roles',
+    'uncertain resources must remain owned',
+    'uncertain source lease',
+    'unexpected dependency installation',
+    'unexpected native rights after I or pre-init negative',
+    'unexpected reader stderr',
+    'unexpected-parent exact native refusal',
+    'validated init required',
+)
+
+ERROR_CLASSES = ('Refusal', 'Uncertain', 'CaseUncertain', 'ValueError', 'OSError',
+                 'PermissionError', 'FileNotFoundError', 'TimeoutError', 'BlockingIOError',
+                 'ProcessLookupError', 'ChildProcessError', 'BrokenPipeError')
+ERRNO_SYMBOLS = ('EACCES', 'EPERM', 'ENOENT', 'EBADF', 'EINVAL', 'EMFILE', 'ENFILE',
+                 'ENOMEM', 'ENOSPC', 'EROFS', 'EIO', 'EPIPE', 'ECONNRESET', 'ETIMEDOUT',
+                 'EINTR', 'EAGAIN', 'ENOTDIR', 'ELOOP', 'ESRCH', 'ECHILD', 'EEXIST')
+FAILURE_STAGES = ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'fixture',
+                  'close', 'source:capture', 'source:copy', 'bootstrap:copy', 'bootstrap:load') + tuple(
+    'source:load:' + name for name in ('control', 'producer', 'reader_parent', 'reader_fixture', 'native_cases')) + tuple(
+    'case:' + kind + ':' + phase for kind in ('same-owner', 'unexpected-parent', 'parent-exit')
+    for phase in ('run', 'verify', 'recheck'))
+
+
+def failure_record(error, *, stage='preflight'):
+    """Closed observations only. Never serialize exception text or native output."""
+    chain=[error]
+    for _ in range(2):
+        nested=getattr(chain[-1], 'cause', None)
+        if nested is None:break
+        chain.append(nested)
+    for item in chain:
+        lease=getattr(item, 'lease', None)
+        observed=getattr(lease, 'stage', None)
+        if type(observed) is str and observed in FAILURE_STAGES:
+            stage=observed;break
+        observed=getattr(item, 'reader_stage', None)
+        if type(observed) is str and observed in FAILURE_STAGES:stage=observed
+    def closed(item):
+        name=type(item).__name__
+        reason=item.args[0] if isinstance(item, BaseException) and len(item.args)==1 else None
+        code=getattr(item, 'errno', None)
+        symbol=errno.errorcode.get(code) if type(code) is int else None
+        return (name if name in ERROR_CLASSES else 'Other',
+                reason if type(reason) is str and reason in ERROR_REASONS else 'unclassified',
+                symbol if symbol in ERRNO_SYMBOLS else 'unknown')
+    name,reason,symbol=closed(error)
+    cause_name,cause_reason,cause_errno=closed(chain[-1])
+    return {'readerCaseSetPassed':False, 'stage':stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown',
+            'reason':reason, 'exceptionClass':name, 'errnoSymbol':symbol,
+            'causeClass':cause_name, 'causeReason':cause_reason, 'causeErrnoSymbol':cause_errno,
+            'nativeCleanupConfirmed':False, 'configEffectProven':False,
+            'vmExecutionVerified':False, 'productionActivation':False}
 
 
 def stable_identity(info):
@@ -155,39 +493,47 @@ def observed_effects(cases,snapshot=snapshot_mounts):
     return lambda kind:Observed(kind),observations,baseline
 
 
-def run_root(repository,protected_parent,data,wrapper_digest,*,wrapper_source,loader=load_checked):
+def run_root(repository,protected_parent,data,wrapper_digest,*,wrapper_source,harness_source,loader=load_checked):
     """Unexecuted Root stage. Caller must externally admit this bootstrap first."""
     require(sys.platform=='linux' and os.getuid()==0 and os.geteuid()==0
             and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
             'isolated actual Root stage required')
-    repository=Path(repository);protected_parent=Path(protected_parent)
-    raw=checked_bytes(wrapper_source,wrapper_digest)
-    # Parent is fresh, Root-owned0700, created by the reviewed inline workflow.
-    require(protected_parent.is_absolute() and protected_parent.parent==Path('/run'),
-            'fixed protected Root parent venue')
-    parent=os.open(protected_parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    stage='preflight'
     try:
-        info=os.fstat(parent)
-        require(info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700,'private Root parent')
-        target=protected_parent/'wrapper.py'
-        fd=os.open('wrapper.py',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+        repository=Path(repository);protected_parent=Path(protected_parent)
+        stage='bootstrap:copy'
+        raw=checked_bytes(wrapper_source,wrapper_digest)
+        # Parent is fresh, Root-owned0700, created by the reviewed inline workflow.
+        require(protected_parent.is_absolute() and protected_parent.parent==Path('/run'),
+                'fixed protected Root parent venue')
+        parent=os.open(protected_parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         try:
-            at=0
-            while at<len(raw):
-                count=os.write(fd,raw[at:]);require(count>0,'Root wrapper copy');at+=count
-            os.fsync(fd);os.fchmod(fd,0o400)
-        finally:os.close(fd)
-    finally:os.close(parent)
-    wrapper=loader('_reader_root_wrapper',target,wrapper_digest,root_copy=True)
-    wrapper.check_acquisition_record(data['acquisition'],datetime.now(timezone.utc))
-    lease=wrapper.copy_external_sources(repository/'scripts/guest-reader-native',protected_parent/'sources')
-    # Default effects receive an optional trusted instrumentation factory only;
-    # this seam never supplies scope or native authority.
-    modules=wrapper.load_external_modules(lease)
-    factory,observations,baseline=observed_effects(modules['native_cases'])
-    result=wrapper.run_cases(lease,data['packet'],data['inventory'],protected_parent/'runtime',
-        protected_parent/'fixture',acquisition_record=data['acquisition'],effects_factory=factory,
-        loaded_modules=modules)
-    lease.recheck();checked_bytes(target,wrapper_digest,root_copy=True)
-    result['outerMountsSha256']=baseline;result['outerObservations']=observations
-    return result
+            info=os.fstat(parent)
+            require(info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o700,'private Root parent')
+            target=protected_parent/'wrapper.py'
+            fd=os.open('wrapper.py',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+            try:
+                at=0
+                while at<len(raw):
+                    count=os.write(fd,raw[at:]);require(count>0,'Root wrapper copy');at+=count
+                os.fsync(fd);os.fchmod(fd,0o400)
+            finally:os.close(fd)
+        finally:os.close(parent)
+        stage='bootstrap:load'
+        wrapper=loader('_reader_root_wrapper',target,wrapper_digest,root_copy=True)
+        wrapper.check_acquisition_record(data['acquisition'],datetime.now(timezone.utc))
+        lease=wrapper.copy_external_sources(harness_source,protected_parent/'sources',
+            compile_pin_path=repository/'scripts/guest-reader-intake/compile-38502659264.pin.json')
+        # Default effects receive an optional trusted instrumentation factory only;
+        # this seam never supplies scope or native authority.
+        modules=wrapper.load_external_modules(lease)
+        factory,observations,baseline=observed_effects(modules['native_cases'])
+        result=wrapper.run_cases(lease,data['packet'],data['inventory'],protected_parent/'runtime',
+            protected_parent/'fixture',acquisition_record=data['acquisition'],effects_factory=factory,
+            loaded_modules=modules)
+        lease.recheck();checked_bytes(target,wrapper_digest,root_copy=True)
+        result['outerMountsSha256']=baseline;result['outerObservations']=observations
+        return result
+    except BaseException as error:
+        error.reader_stage=stage
+        raise

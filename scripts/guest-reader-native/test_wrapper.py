@@ -190,7 +190,7 @@ class Tests(unittest.TestCase):
         lease,modules,events,resources=self.orchestrator()
         with patch.object(w,'native_guard'),patch.object(w,'load_external_modules',return_value=modules):
             result=w.run_cases(lease,'packet','inventory',lease.path.parent/'runtime',lease.path.parent/'fixture',**ACQUISITION)
-        self.assertTrue(result['readerCaseSetPassed'])
+        self.assertTrue(result['readerCaseSetPassed']);self.assertEqual(lease.stage,'close')
         self.assertEqual([case['kind'] for case in result['cases']],['same-owner','unexpected-parent','parent-exit'])
         self.assertEqual(events[-4:],['close-fixture','close-runtime','close-snapshot','source-check'])
         self.assertTrue(all(resource.closed for resource in resources))
@@ -203,9 +203,22 @@ class Tests(unittest.TestCase):
             with self.assertRaises(w.Uncertain) as caught:
                 w.run_cases(lease,'packet','inventory',lease.path.parent/'runtime',lease.path.parent/'fixture',**ACQUISITION)
         self.assertIs(caught.exception.lease,lease)
+        self.assertEqual(lease.stage,'case:unexpected-parent:run')
         self.assertIs(lease.snapshot,resources[0]);self.assertIs(lease.runtime,resources[1]);self.assertIs(lease.fixture,resources[2])
         self.assertTrue(lease.unresolved);self.assertFalse(any(resource.closed for resource in resources))
         self.assertNotIn('parent-exit',events)
+
+    def test_preflight_failure_retains_closed_stage_before_any_capture(self):
+        lease,modules,events,resources=self.orchestrator()
+        def fail():raise OSError(24,'unserialized private path')
+        modules['producer'].descriptor_preflight=fail
+        with patch.object(w,'native_guard'),patch.object(w,'load_external_modules',return_value=modules):
+            with self.assertRaises(w.Uncertain) as caught:
+                w.run_cases(lease,'packet','inventory',lease.path.parent/'runtime',lease.path.parent/'fixture',**ACQUISITION)
+        self.assertEqual(caught.exception.lease.stage,'preflight')
+        self.assertNotIn('capture',events)
+        self.assertTrue(lease.unresolved)
+        self.assertFalse(any(resource.closed for resource in resources))
 
     def test_wrong_sibling_path_refuses_before_import_or_capture(self):
         lease,modules,events,_=self.orchestrator()

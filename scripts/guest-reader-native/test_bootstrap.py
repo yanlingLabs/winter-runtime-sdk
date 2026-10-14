@@ -73,7 +73,7 @@ class Tests(unittest.TestCase):
     def test_nonroot_run_refuses_before_source_or_effect(self):
         with patch.object(b.os,'getuid',return_value=1001),patch.object(b.sys,'platform','linux'):
             loader=lambda *_:self.fail('native source import after unavailable guard')
-            with self.assertRaises(b.Refusal):b.run_root('/repo','/run/private',{},'0'*64,wrapper_source='/overlay/wrapper.py',loader=loader)
+            with self.assertRaises(b.Refusal):b.run_root('/repo','/run/private',{},'0'*64,wrapper_source='/overlay/wrapper.py',harness_source='/overlay/native',loader=loader)
 
     def test_prepare_converts_exact_metadata_and_preserves_archive_path(self):
         import acquisition
@@ -101,3 +101,75 @@ class Tests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class RootWiringTests(unittest.TestCase):
+    def test_checked_successor_harness_source_is_separate_from_fixed_data_origin(self):
+        import stat
+        events=[]
+        lease=SimpleNamespace(recheck=lambda:events.append('source-recheck'))
+        def copy(source,destination,**kwargs):
+            events.append((source,destination,kwargs));return lease
+        wrapper=SimpleNamespace(check_acquisition_record=lambda *_:None,copy_external_sources=copy,
+            load_external_modules=lambda _: {'native_cases':object()},
+            run_cases=lambda *a,**kw:{'readerCaseSetPassed':False})
+        with patch.object(b.sys,'platform','linux'),patch.object(b.os,'getuid',return_value=0),patch.object(b.os,'geteuid',return_value=0),patch.object(b,'checked_bytes',return_value=b'inert'),patch.object(b.os,'open',side_effect=[80,81]),patch.object(b.os,'fstat',return_value=SimpleNamespace(st_uid=0,st_mode=stat.S_IFDIR|0o700)),patch.object(b.os,'write',side_effect=lambda fd,raw:len(raw)),patch.object(b.os,'fsync'),patch.object(b.os,'fchmod'),patch.object(b.os,'close'),patch.object(b,'observed_effects',return_value=(object(),[],'a'*64)):
+            result=b.run_root('/base','/run/inert',{'acquisition':{},'packet':'/packet','inventory':'/inventory'},'0'*64,
+                wrapper_source='/successor/wrapper.py',harness_source='/successor/native',loader=lambda *_ ,**kw:wrapper)
+        self.assertEqual(events[0],('/successor/native',Path('/run/inert/sources'),
+            {'compile_pin_path':Path('/base/scripts/guest-reader-intake/compile-38502659264.pin.json')}))
+        self.assertFalse(result['readerCaseSetPassed'])
+
+    def test_before_lease_source_failure_reports_bootstrap_stage(self):
+        with patch.object(b.sys,'platform','linux'),patch.object(b.os,'getuid',return_value=0),patch.object(b.os,'geteuid',return_value=0),patch.object(b,'checked_bytes',side_effect=b.Refusal('bootstrap source hash/identity')):
+            with self.assertRaises(b.Refusal) as caught:
+                b.run_root('/base','/run/inert',{},'0'*64,wrapper_source='/successor/wrapper.py',harness_source='/successor/native')
+        self.assertEqual(b.failure_record(caught.exception)['stage'],'bootstrap:copy')
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_closed_literal_catalog_matches_reviewed_source_calls(self):
+        import ast
+        expected=set()
+        folder=Path(b.__file__).parent
+        for name in ('parent.py','producer.py','control.py','fixture.py','native_cases.py','wrapper.py','bootstrap.py'):
+            for node in ast.walk(ast.parse((folder/name).read_text())):
+                if not isinstance(node,ast.Call):continue
+                index=None
+                if isinstance(node.func,ast.Name):index=1 if node.func.id=='require' else 0 if node.func.id in ('Refusal','ValueError') else None
+                elif isinstance(node.func,ast.Attribute) and node.func.attr=='__init__' and isinstance(node.func.value,ast.Call) and isinstance(node.func.value.func,ast.Name) and node.func.value.func.id=='super':index=0
+                if index is not None and len(node.args)>index and isinstance(node.args[index],ast.Constant) and type(node.args[index].value) is str:
+                    expected.add(node.args[index].value)
+        inline={'output_parent','output_parent_replaced','data_record_path','protected_bootstrap_pin',
+                'bootstrap_source','bootstrap_source_pin','bootstrap_final_pin','data_record',
+                'bootstrap_copy','result_write','result_identity'}
+        self.assertEqual(set(b.ERROR_REASONS),expected|inline)
+        self.assertEqual(len(b.ERROR_REASONS),len(set(b.ERROR_REASONS)))
+
+    def test_failure_stage_errno_and_cause_are_closed_and_not_cleanup_proof(self):
+        import errno
+        class Uncertain(ValueError):pass
+        cause=OSError(errno.EBADF,'private /secret must not appear')
+        error=Uncertain('reader_wrapper_uncertain');error.cause=cause
+        error.lease=SimpleNamespace(stage='case:parent-exit:run')
+        record=b.failure_record(error)
+        self.assertEqual(record['stage'],'case:parent-exit:run')
+        self.assertEqual(record['causeErrnoSymbol'],'EBADF')
+        self.assertEqual(record['causeReason'],'unclassified')
+        self.assertFalse(record['nativeCleanupConfirmed'])
+        self.assertNotIn('/secret',str(record))
+        error.lease.stage='private /secret';error.args=('private /secret',)
+        record=b.failure_record(error,stage='private /secret')
+        self.assertEqual(record['stage'],'unknown')
+        self.assertNotIn('/secret',str(record))
+
+    def test_nested_retained_lease_and_static_reason_without_str_calls(self):
+        class Uncertain(ValueError):
+            def __str__(self):raise AssertionError('no exception rendering')
+        inner=Uncertain('reader_wrapper_uncertain')
+        inner.lease=SimpleNamespace(stage='source:load:native_cases')
+        inner.cause=b.Refusal('outer namespace changed while live')
+        outer=Uncertain('reader_wrapper_uncertain');outer.cause=inner
+        result=b.failure_record(outer)
+        self.assertEqual(result['stage'],'source:load:native_cases')
+        self.assertEqual(result['causeReason'],'outer namespace changed while live')
+        self.assertEqual(result['reason'],'reader_wrapper_uncertain')

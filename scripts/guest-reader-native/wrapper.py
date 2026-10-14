@@ -17,7 +17,7 @@ SOURCE_PINS = {
     'producer.py': 'a3c8dee9d422a6dd9bf39235c549843c70e40892c6294f41f5e8c34da972feab',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
-    'native_cases.py': '4d2824ab9ee4abbf92e0930f77926368d4a102b2c864bd4c38dffad2c4fb588f',
+    'native_cases.py': '7921c1c12ca2388390ad05f0320d4308ce45baa7f73b6301e90923ab88df6a24',
 }
 MODULE_ORDER = (('control', 'control.py'), ('producer', 'producer.py'),
                 ('reader_parent', 'parent.py'), ('reader_fixture', 'fixture.py'),
@@ -127,6 +127,7 @@ class SourceLease:
                           or data_pin_digest != COMPILE_PIN_SHA256)
         self.fds, self.edges, self.files, self.modules = [], [], {}, {}
         self.closed, self.unresolved = False, False
+        self.stage = 'source:capture'
         self.runtime = self.snapshot = self.fixture = self.case_failure = None
 
     def recheck(self):
@@ -213,6 +214,7 @@ def copy_external_sources(source, destination, *, ops=None, pins=None,
         check_edges(pin_edges)
         captured[COMPILE_PIN] = pin_raw
         upper, held, edges = directory(destination.parent)
+        lease.stage = 'source:copy'
         lease.fds.extend(held); lease.edges.extend(edges)
         lease.ancestor_fds = tuple(held)
         for fd in held:
@@ -273,6 +275,7 @@ def load_external_modules(lease):
             'module alias already occupied')
     try:
         for name, filename in MODULE_ORDER:
+            lease.stage = 'source:load:' + name
             lease.recheck()
             raw = read_fd(lease.files[filename][0], MAX_FILE)
             require(hashlib.sha256(raw).hexdigest() == lease.pins[filename], 'source import pin')
@@ -349,6 +352,7 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
     Exact external-parent/source/artifact/workflow admission remains required.
     On uncertainty this function retains every context; it cannot print a pass.
     """
+    lease.stage = 'preflight'
     check_acquisition_record(acquisition_record, datetime.now(timezone.utc) if now is None else now)
     native_guard(lease)
     require(Path(launch_destination) == lease.path.parent/'runtime'
@@ -366,11 +370,17 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
     parent, producer = modules['reader_parent'], modules['producer']
     data, cases = modules['reader_fixture'], modules['native_cases']
     try:
+        lease.stage = 'preflight'
         producer.descriptor_preflight()
+        lease.stage = 'load_pin'
         pin = parent.load_pin(lease.path/COMPILE_PIN)
+        lease.stage = 'capture'
         lease.snapshot = parent.capture_packet(packet_directory, inventory_file, pin=pin)
+        lease.stage = 'launch_root'
         lease.runtime = parent.create_launch_root(lease.snapshot, launch_destination)
+        lease.stage = 'guard'
         parent.guard_root_owner(lease.runtime)
+        lease.stage = 'fixture'
         lease.fixture = data.create_fixture(fixture_destination)
         def factory(debt, pair_factory):
             lease.recheck(); lease.fixture.recheck()
@@ -380,13 +390,16 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
                 control_pair_factory=pair_factory)
         outcomes = []
         for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
+            lease.stage = 'case:' + kind + ':run'
             request = data.request_bytes() if kind == 'same-owner' else b''
             if effects_factory is None:
                 observed = cases.run_case(kind, factory, request)
             else:
                 observed = cases.run_case(kind, factory, request, effects=effects_factory(kind))
             if kind == 'same-owner':
+                lease.stage = 'case:' + kind + ':verify'
                 data.verify_response(observed.observation.stdout, observed.observation.stderr)
+            lease.stage = 'case:' + kind + ':recheck'
             lease.fixture.recheck(); parent.recheck_runtime(lease.runtime); lease.recheck()
             outcomes.append({'kind': kind, 'descriptorsClosed': observed.descriptors_closed,
                              'elapsedSeconds': observed.elapsed_seconds,
@@ -396,6 +409,7 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
                              'nativeReapReceiptObserved': observed.observation.native_wait_status is not None,
                              'controlAndStdinHeldForParentExit': observed.keepalive_before_parent_exit})
         # Close only confirmed case resources. No directory/stage removal claim.
+        lease.stage = 'close'
         lease.fixture.close(); lease.runtime.close(); lease.snapshot.close()
         lease.recheck()
         return {'kind': 'winter-reader-only-case-set', 'cases': outcomes,

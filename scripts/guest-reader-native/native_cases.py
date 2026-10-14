@@ -8,7 +8,7 @@ The intermediate producer uses the unchanged sealed-root bootstrap and ENV.
 import array
 import ctypes
 import os
-import select
+import selectors
 import socket
 import struct
 import time
@@ -171,9 +171,21 @@ def recv_rights(sock, maximum):
         raise
 
 
+def poll_ready(readers=(), writers=(), timeout=0):
+    """Readiness without select()'s FD_SETSIZE ceiling. No ownership is inferred."""
+    with selectors.DefaultSelector() as poll:
+        for fd in readers:
+            poll.register(fd, selectors.EVENT_READ)
+        for fd in writers:
+            poll.register(fd, selectors.EVENT_WRITE)
+        events = poll.select(timeout)
+        return ([key.fd for key, mask in events if mask & selectors.EVENT_READ],
+                [key.fd for key, mask in events if mask & selectors.EVENT_WRITE])
+
+
 def ready(fd, deadline):
     left = deadline - time.monotonic()
-    require(left > 0 and select.select([fd], [], [], left)[0], 'case absolute deadline')
+    require(left > 0 and poll_ready([fd], timeout=left)[0], 'case absolute deadline')
 
 
 class LinuxEffects:
@@ -287,7 +299,7 @@ class LinuxEffects:
         require(data == b'I' and len(rights) == 1, 'actual initial I required')
         h.init_pidfd = rights[0]
         h.init_pid = validate_init_pidfd(h.init_pidfd, h.launcher_pid)
-        require(not select.select([h.init_pidfd, h.launcher_pidfd], [], [], 0)[0],
+        require(not poll_ready([h.init_pidfd, h.launcher_pidfd])[0],
                 'live init and launcher before case trigger')
 
     def verify_keepalive(self, h):
@@ -299,7 +311,7 @@ class LinuxEffects:
                 'duplicated control and stdin write endpoints alive')
 
     def exit_parent(self, h, deadline):
-        require(not select.select([h.init_pidfd, h.launcher_pidfd], [], [], 0)[0],
+        require(not poll_ready([h.init_pidfd, h.launcher_pidfd])[0],
                 'both native processes live at parent-exit trigger')
         require(h.transport.send(b'X') == 1, 'parent exit command')
         ready(h.producer_pidfd, deadline)
@@ -309,7 +321,7 @@ class LinuxEffects:
         at = 0
         while at < len(request):
             left = deadline - self.now()
-            require(left > 0 and select.select([], [h.stdin], [], left)[1], 'request deadline')
+            require(left > 0 and poll_ready(writers=[h.stdin], timeout=left)[1], 'request deadline')
             try: count = os.write(h.stdin, request[at:])
             except BlockingIOError: continue
             require(count > 0, 'request progress'); at += count
@@ -326,7 +338,7 @@ class LinuxEffects:
         while pending:
             left = deadline - self.now()
             require(left > 0, 'negative teardown before C deadline')
-            for fd in select.select(list(pending), [], [], left)[0]:
+            for fd in poll_ready(list(pending), timeout=left)[0]:
                 if fd in (h.launcher_pidfd, h.init_pidfd):
                     exited.add(fd); pending.remove(fd)
                 elif fd in captures:

@@ -81,3 +81,23 @@ Atomic per-root attribution of racing source imports, tool-readable canonical
 generation replay, cold/child continuity and the full guided guest turn remain
 unimplemented. No personal memory, credentials, provider, production activation,
 release or consumer pin is enabled.
+
+The first hosted attempt (38559323552 at da51ed68) failed after successful
+acquisition and complete DATA intake. Its retained result reports Uncertain /
+ValueError with no finer cause or cleanup proof; it is not reader execution
+success. The old admitted branch is frozen. The successor uses scalable readiness
+for the many held capture descriptors. A high-FD DATA reproduction establishes the
+old select() defect, without proving that it caused the hosted failure.
+
+Successor failure observations contain only a closed stage, error class, literal
+reason and allowlisted errno symbol. The reason tuple is mechanically generated
+from literal require/Refusal/ValueError and exception-super constructor arguments
+in the seven externally reviewed modules (plus fixed inline workflow literals);
+computed messages remain unclassified. Tests compare the static tuple to that AST
+inventory. A retained source lease tracks capture/copy/load and the case
+run/verify/recheck/close phase, without changing uncertainty or cleanup outcomes.
+The five harness modules come explicitly from the reviewed successor source
+checkout; the compile DATA pin, acquisition and intake remain pinned to merged
+4d5dfcec. Artifact, C, runtime roles, libraries and downloader are unchanged.
+Fresh source/whole-chain review and a new one-run admission are required; the
+failed attempt grants no retry, profile activation, guided turn or VM proof.
