@@ -112,11 +112,17 @@ describe("the release workflow", () => {
       if (step.run) expect(step.run).not.toMatch(/sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher)?(?:\s|$)/);
     }
     const checkouts = job?.steps?.filter((step) => step.uses?.startsWith("actions/checkout")) ?? [];
-    expect(checkouts.slice(1).map((step) => step.with?.ref)).toEqual([
+    expect(checkouts.map((step) => step.with?.ref)).toEqual([
+      "eb163aa8aadb4083d7ab6bfa063ff821e2853234",
       "0394b36f674765c942f8db07f009b7ad20787dba",
       "8603da22d9fe7f1695166891cd29ccd254b1d21e",
       "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
     ]);
+    const text = readWorkflow("cowork-reader-compile-fixture.yml");
+    expect(text).toContain("--builder-head eb163aa8aadb4083d7ab6bfa063ff821e2853234");
+    expect(text).toContain("if name=='artifacts/native.d':continue");
+    expect(text).toContain("tar.addfile(record,io.BytesIO(data))");
+    expect(text).not.toContain("tar.addfile(record,incoming)");
   });
 
   test("the npm leg is token-gated and carries provenance; the GitHub Packages leg carries `packages: write`", () => {
