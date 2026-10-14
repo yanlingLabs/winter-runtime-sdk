@@ -189,3 +189,18 @@ before/after mountinfo snapshots report endpoint equality only, not absence of
 transient changes. All C/artifact/deadline/case predicates remain unchanged.
 Steps 11 `loader_bind` and 12 `reopen_inputs` append to stable existing indices.
 Source/injected success is not hosted execution, cleanup, boot or activation proof.
+
+The post-init diagnostic SOURCE successor adds only scalar observations on a
+same-owner failure after both existing Observation and Reaps were captured. It
+performs no new IO, waits, closure or cleanup. Raw validated terminal16-bit native,
+launcher and producer wait statuses preserve normal exits versus signals/core bit;
+null native status means missing actual R and is never replaced by zero. Existing
+bounded captures supply full SHA256/byte counts and closed stdout LF framing.
+The unchanged stderr classifier handles at most4096 bytes; valid captures above
+that through the unchanged16384-byte limit report over_classifier_bound. No raw
+content, path, PID, FD or object is attached or printed. Diagnostic/classifier/
+projection failure reports available:false while preserving cause/debt/proof flags.
+These hashes and lengths are ONLY for disposable fixed fixture data: never reuse
+this diagnostic for real guidance, private instructions or personal memory.
+The original success predicates, deadlines, C/artifact and close ordering remain
+unchanged. Source review and new execution admission remain separate.

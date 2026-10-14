@@ -7,6 +7,7 @@ The intermediate producer uses the unchanged sealed-root bootstrap and ENV.
 """
 import array
 import ctypes
+import hashlib
 import os
 import selectors
 import socket
@@ -42,6 +43,7 @@ class Handles:
     launcher_identity_validated: bool = False
     initial_control: object = None
     preinit_diagnostics: object = None
+    postinit_diagnostics: object = None
     received_handles: object = None
     preinit_launcher_wait_status: int | None = None
     preinit_producer_wait_status: int | None = None
@@ -104,6 +106,8 @@ def run_case(kind, operation_factory, request=b'', *, effects=None):
     started = fx.now()
     deadline = started + (6.0 if kind == 'same-owner' else NEGATIVE_SECONDS)
     handles = fx.launch(kind, operation_factory, deadline)
+    observed = None
+    reaps = None
     try:
         fx.receive_handles(handles, deadline)
         input_bytes = 0
@@ -156,6 +160,9 @@ def run_case(kind, operation_factory, request=b'', *, effects=None):
     except BaseException as error:
         # Do not close deliberate keepalives, synthesize terminal receipts, or
         # lose pidfds on uncertain cleanup. External owner must inspect handles.
+        if kind == 'same-owner' and observed is not None and reaps is not None:
+            try: handles.postinit_diagnostics = postinit_diagnostics(observed, reaps)
+            except BaseException: handles.postinit_diagnostics = {'available': False}
         if kind != 'unexpected-parent' and handles.init_pid is None \
                 and hasattr(fx, 'diagnose_preinit'):
             try: fx.diagnose_preinit(handles, deadline)
@@ -238,6 +245,29 @@ def classify_stderr(raw):
         # mapping. The remainder is never returned or rendered.
         return {**result, 'classification': 'audited_label', 'label': label}
     return result
+
+
+
+def postinit_diagnostics(observed, reaps):
+    """Fixture-only closed DATA from captured bytes/reaps. No effects or cleanup."""
+    from control import wait_exit_code
+    native=observed.native_wait_status
+    if native is not None:wait_exit_code(native)
+    wait_exit_code(reaps.launcher_status);wait_exit_code(reaps.producer_status)
+    stdout,stderr=observed.stdout,observed.stderr
+    require(type(stdout) is bytes and len(stdout)<=IO_MAX and type(stderr) is bytes
+            and len(stderr)<=16384,'post-init bounded captures')
+    framing=('empty' if not stdout else 'unterminated' if not stdout.endswith(b'\n')
+             else 'one_lf' if stdout.count(b'\n')==1 else 'multiple_lf')
+    classified=(classify_stderr(stderr) if len(stderr)<=4096 else
+                {'classification':'over_classifier_bound','label':'unknown','errno':0})
+    return {'available':True,'nativeWaitStatus':native,
+            'launcherWaitStatus':reaps.launcher_status,'producerWaitStatus':reaps.producer_status,
+            'stdoutBytes':len(stdout),'stdoutSha256':hashlib.sha256(stdout).hexdigest(),
+            'stdoutFraming':framing,'stderrBytes':len(stderr),
+            'stderrSha256':hashlib.sha256(stderr).hexdigest(),
+            'stderrClassification':classified['classification'],
+            'stderrLabel':classified['label'],'stderrErrno':classified['errno']}
 
 
 def poll_ready(readers=(), writers=(), timeout=0):

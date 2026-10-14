@@ -269,6 +269,7 @@ ERROR_REASONS = (
     'physical alias spelling',
     'pidfd observation bound',
     'plain downloader metadata required',
+    'post-init bounded captures',
     'pre-bootstrap reap uncertain',
     'pre-exec failure is not successful lifetime',
     'pre-init unexpected-parent refusal',
@@ -474,6 +475,50 @@ def preinit_record(chain):
     return result
 
 
+
+POSTINIT_KEYS = ('available','nativeWaitStatus','launcherWaitStatus','producerWaitStatus',
+                'stdoutBytes','stdoutSha256','stdoutFraming','stderrBytes','stderrSha256',
+                'stderrClassification','stderrLabel','stderrErrno')
+
+
+def terminal_status(value):
+    if type(value) is not int or not 0<=value<=65535:return False
+    low=value&255
+    return low==0 or (value>>8==0 and 1 <= (low&127) <= 64)
+
+
+def postinit_record(chain):
+    """Fixture-only scalar observation. No raw guidance or authority is projected."""
+    raw=None
+    for item in chain:
+        observed=getattr(getattr(item,'handles',None),'postinit_diagnostics',None)
+        if observed is not None:raw=observed;break
+    if type(raw) is not dict or set(raw)!=set(POSTINIT_KEYS) or raw['available'] is not True:return {'available':False}
+    if raw['nativeWaitStatus'] is not None and not terminal_status(raw['nativeWaitStatus']):return {'available':False}
+    if not all(terminal_status(raw[name]) for name in ('launcherWaitStatus','producerWaitStatus')):return {'available':False}
+    for name,limit in (('stdoutBytes',320*1024),('stderrBytes',16384)):
+        if type(raw[name]) is not int or not 0<=raw[name]<=limit:return {'available':False}
+    for name in ('stdoutSha256','stderrSha256'):
+        value=raw[name]
+        if type(value) is not str or len(value)!=64 or any(c not in '0123456789abcdef' for c in value):return {'available':False}
+    if type(raw['stdoutFraming']) is not str or raw['stdoutFraming'] not in ('empty','unterminated','one_lf','multiple_lf'):return {'available':False}
+    if (raw['stdoutBytes']==0)!=(raw['stdoutFraming']=='empty'):return {'available':False}
+    if type(raw['stderrClassification']) is not str or raw['stderrClassification'] not in ('empty','audited_perror','audited_label','unrecognized','over_classifier_bound'):return {'available':False}
+    if type(raw['stderrLabel']) is not str or raw['stderrLabel'] not in NATIVE_STDERR_LABELS+('unknown',):return {'available':False}
+    if type(raw['stderrErrno']) is not int or raw['stderrErrno'] not in DIAGNOSTIC_ERRNOS:return {'available':False}
+    if (raw['stderrBytes']==0)!=(raw['stderrClassification']=='empty'):return {'available':False}
+    if (raw['stderrBytes']>4096)!=(raw['stderrClassification']=='over_classifier_bound'):return {'available':False}
+    kind=raw['stderrClassification']
+    if kind in ('empty','unrecognized','over_classifier_bound') and (raw['stderrLabel']!='unknown' or raw['stderrErrno']!=0):return {'available':False}
+    if kind in ('audited_perror','audited_label') and raw['stderrLabel']=='unknown':return {'available':False}
+    if kind=='audited_label' and raw['stderrErrno']!=0:return {'available':False}
+    if raw['stdoutFraming']=='multiple_lf' and raw['stdoutBytes']<2:return {'available':False}
+    empty_sha=hashlib.sha256(b'').hexdigest()
+    for size,digest in (('stdoutBytes','stdoutSha256'),('stderrBytes','stderrSha256')):
+        if raw[size]==0 and raw[digest]!=empty_sha:return {'available':False}
+    return {name:raw[name] for name in POSTINIT_KEYS}
+
+
 def failure_record(error, *, stage='preflight'):
     """Closed observations only. Never serialize exception text or native output."""
     chain=[error]
@@ -496,12 +541,15 @@ def failure_record(error, *, stage='preflight'):
         return (name if name in ERROR_CLASSES else 'Other',
                 reason if type(reason) is str and reason in ERROR_REASONS else 'unclassified',
                 symbol if symbol in ERRNO_SYMBOLS else 'unknown')
+    try:postinit=postinit_record(chain)
+    except BaseException:postinit={'available':False}
     name,reason,symbol=closed(error)
     cause_name,cause_reason,cause_errno=closed(chain[-1])
     return {'readerCaseSetPassed':False, 'stage':stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown',
             'reason':reason, 'exceptionClass':name, 'errnoSymbol':symbol,
             'causeClass':cause_name, 'causeReason':cause_reason, 'causeErrnoSymbol':cause_errno,
             'preInitDiagnostics':preinit_record(chain),
+            'postInitDiagnostics':postinit,
             'nativeCleanupConfirmed':False, 'configEffectProven':False,
             'vmExecutionVerified':False, 'productionActivation':False}
 

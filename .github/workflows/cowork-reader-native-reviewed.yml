@@ -1,7 +1,7 @@
 name: reader-native-reviewed
 on:
   push:
-    branches: [cowork/reader-hosted-reopened-mounts]
+    branches: [cowork/reader-hosted-postinit-diagnostics]
     paths:
       - .github/workflows/cowork-reader-native-reviewed.yml
       - scripts/guest-reader-native/bootstrap.py
@@ -12,7 +12,7 @@ permissions:
   actions: read
 jobs:
   reader-only:
-    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-reopened-mounts' && github.run_attempt == '1'
+    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-postinit-diagnostics' && github.run_attempt == '1'
     concurrency:
       group: reader-native-reviewed
       cancel-in-progress: false
@@ -64,7 +64,7 @@ jobs:
               if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
               raw=os.read(fd,65537)
           finally:os.close(fd)
-          if hashlib.sha256(raw).hexdigest()!='20bceb7cf5e7134bffb079aed85a694472f327e1df009a0511e9e316df15937c':raise ValueError('bootstrap_source_pin')
+          if hashlib.sha256(raw).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('bootstrap_source_pin')
           module=types.ModuleType('_reader_data_bootstrap');module.__file__=str(source);sys.modules[module.__name__]=module
           exec(compile(raw,str(source),'exec'),module.__dict__)
           fd=os.open(record,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -102,7 +102,7 @@ jobs:
                   if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
                   raw=os.read(fd,65537)
               finally:os.close(fd)
-              if hashlib.sha256(raw).hexdigest()!='20bceb7cf5e7134bffb079aed85a694472f327e1df009a0511e9e316df15937c':raise ValueError('bootstrap_source_pin')
+              if hashlib.sha256(raw).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('bootstrap_source_pin')
               protected=root/'bootstrap.py'
               fd=os.open(protected,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
               try:
@@ -116,7 +116,7 @@ jobs:
               fd=os.open(protected,os.O_RDONLY|os.O_NOFOLLOW)
               try:checked=os.read(fd,65537)
               finally:os.close(fd)
-              if hashlib.sha256(checked).hexdigest()!='20bceb7cf5e7134bffb079aed85a694472f327e1df009a0511e9e316df15937c':raise ValueError('protected_bootstrap_pin')
+              if hashlib.sha256(checked).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('protected_bootstrap_pin')
               checked_module=types.ModuleType('_reader_root_bootstrap');checked_module.__file__=str(protected);sys.modules[checked_module.__name__]=checked_module
               exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module
               if data_file.parent!=result_file.parent or data_file.name!='data.json':raise ValueError('data_record_path')
@@ -126,8 +126,8 @@ jobs:
                   if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>1048576:raise ValueError('data_record')
                   data=json.loads(os.read(fd,1048577))
               finally:os.close(fd)
-              result=module.run_root(base,root,data,'0fa07f2781a3300a0f21ff7408fa71d1ec7bbd77fdb6120a21581aa4ebca6a6a',wrapper_source=wrapper,harness_source=harness_source)
-              if hashlib.sha256(protected.read_bytes()).hexdigest()!='20bceb7cf5e7134bffb079aed85a694472f327e1df009a0511e9e316df15937c':raise ValueError('bootstrap_final_pin')
+              result=module.run_root(base,root,data,'142766ad9196cc03787582444b3f1462259f6d6d0d5f2ac9337100a680829b9c',wrapper_source=wrapper,harness_source=harness_source)
+              if hashlib.sha256(protected.read_bytes()).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('bootstrap_final_pin')
           except BaseException as error:
               if module is not None:
                   result=module.failure_record(error)
