@@ -123,6 +123,16 @@ class PacketTests(unittest.TestCase):
         del data['inputs'][str(self.output/alias)]
         data['inputs'][str(self.output/sdk)]['imports']=[{'kind':'import-statement','path':str(self.output/'source/sdk'/p.HEADER)}]
         with self.assertRaisesRegex(p.Refusal,'non-bundled'):b.normalized_metafile(data,self.output,manifest)
+    def test_embedded_private_paths_and_json_escapes_refuse_without_wire_outputs(self):
+        manifest=self.prepare();entry='source/runtime/'+p.READER_ENTRY;sdk='source/sdk/packages/sdk/src/index.ts'
+        for embedded in ('file://'+str(self.output)+'/source/secret','prefix '+str(self.output)+' suffix'):
+            data={'inputs':{str(self.output/name):{'bytes':manifest['stagedInputs'][name]['bytes']} for name in (entry,sdk)},'diagnostic':embedded}
+            with self.assertRaisesRegex(p.Refusal,'private packet path'):b.normalized_metafile(data,self.output,manifest)
+            for name in ('receipt.json','metafile.json'):
+                with self.assertRaisesRegex(p.Refusal,'private packet path'):b.write_wire(self.output/name,{'nested':[embedded]},self.output)
+                self.assertFalse((self.output/name).exists())
+            escaped=json.dumps({'diagnostic':embedded}).replace('/','\\u002f')
+            with self.assertRaisesRegex(p.Refusal,'private packet path'):b.refuse_private_wire(json.loads(escaped),self.output)
     def test_actual_builder_injected_compiler_refusal_retains_measured_stage(self):
         tools={}
         for name in ('compiler','base','cc'):

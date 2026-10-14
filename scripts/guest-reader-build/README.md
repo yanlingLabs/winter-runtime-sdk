@@ -105,3 +105,10 @@ checks govern. Import targets use only the captured bundled manifest graph, with
 one fixed importer-directory base for explicit ./../ edges, absolute paths as-is,
 and exact raw-key matches for other supported spellings. Unsupported extensionless
 paths refuse; there is no importer/build-cwd fallback or filesystem search.
+
+After canonicalization, decoded metadata/receipt keys and values are checked for
+the private packet path anywhere, including composite strings and file URLs. A
+match refuses before writing a normalized metafile or receipt; it is not silently
+redacted. Raw failed compiler evidence may remain locally for inspection and is
+not a valid emitted packet. The separate branch-scoped source workflow runs only
+these portable Python/Git-data/mock checks; it performs no artifact compilation.

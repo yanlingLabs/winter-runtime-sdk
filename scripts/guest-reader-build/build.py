@@ -214,6 +214,20 @@ def check_inputs(packet,manifest):
     if actual!=expected:p.refuse('staged bytes/resolver changed')
     for alias,binding in manifest['resolverBindings'].items():
         if actual.get(alias)!={'kind':'symlink','target':binding['target']}:p.refuse('candidate resolver changed')
+def refuse_private_wire(value,packet):
+    # JSON has already been decoded. Inspect keys and values, including embedded/URL strings.
+    private=str(packet)
+    def inspect(item):
+        if isinstance(item,str):
+            if private in item:p.refuse('private packet path in wire')
+        elif isinstance(item,dict):
+            for key,child in item.items():inspect(key);inspect(child)
+        elif isinstance(item,list):
+            for child in item:inspect(child)
+    inspect(value)
+def write_wire(path,value,packet):
+    refuse_private_wire(value,packet)
+    wire=(p.canonical(value)+'\n').encode();p.write_new(path,wire);return wire
 def manifest_target(text,packet,measured,base='stage'):
     if type(text)!=str or not text or len(text.encode())>4096:p.refuse('metafile path scalar')
     if text.startswith('/'):
@@ -273,6 +287,7 @@ def normalized_metafile(data,packet,manifest):
         if mapped[raw] in normalized_inputs:p.refuse('duplicate canonical metafile input')
         normalized_inputs[mapped[raw]]=record
     normalized['inputs']=normalized_inputs
+    refuse_private_wire(normalized,packet)
     return normalized,{name:measured[name] for name in sorted(bundled)}
 def unknown_flag_probe(runner,compiler_fd,packet,recipe):
     negative=packet/'stage/negative';negative.mkdir(mode=0o700);bogus='--winter-reader-build-option-must-refuse'
@@ -432,7 +447,7 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
         graph=graph_evidence(normalized,packet,manifest)
         # Replace raw paths with normalized owned evidence; never preserve private CLI paths.
         (packet/'artifacts/instructionReader.metafile.json').unlink()
-        meta_wire=(p.canonical(normalized)+'\n').encode();p.write_new(packet/'artifacts/instructionReader.metafile.json',meta_wire)
+        meta_wire=write_wire(packet/'artifacts/instructionReader.metafile.json',normalized,packet)
         artifacts={name:packet/'artifacts'/name for name in ('instructionReader','instructionReaderLauncher')}
         bodies,closure=dependency_closure(artifacts,Path(sysroot),packet/'environment')
         if p.digest(read_file(packet/'stage/linux-bun-base',p.MAX_ELF))!=base_meta['sha256']:p.refuse('staged base changed')
@@ -443,7 +458,7 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
           'recipe':{'target':p.BASE['target'],'autoloadFlags':list(p.AUTOLOAD_FLAGS),'environment':p.ENV,'cwd':'stage','outputsExecuted':False},
           'commands':{'bun':['<held-compiler>',*[arg.replace(str(packet),'<packet>') for arg in compile_args]],'nativeCC':['<held-native-cc>',*[arg.replace(str(packet),'<packet>') for arg in native_args]]},'nativeFlags':list(NATIVE_FLAGS),'systemHeaders':headers,'bundledInputs':bundled,'metafileSha256':p.digest(meta_wire),'artifacts':bodies,'runtimeDependencies':closure,
           'dynamicRuntimeImportsVerified':False,'globalBunConfigurationExecutionVerified':False,'staticMetafileOnly':True,'trustedToolchainVerified':False,'dependencyPackageAttestationVerified':False,'autoloadExecutionVerified':False,'nativeOwnerVerified':False,'linuxExecutionVerified':False,'vmExecutionVerified':False,'activationEnabled':False}
-        p.write_new(packet/'receipt.json',(p.canonical(receipt)+'\n').encode());return receipt
+        write_wire(packet/'receipt.json',receipt,packet);return receipt
     finally:
         for fd in tools:os.close(fd)
 def main():
