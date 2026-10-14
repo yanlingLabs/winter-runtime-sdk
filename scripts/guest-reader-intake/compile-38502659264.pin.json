@@ -1,0 +1,160 @@
+{
+  "archiveBytes": 81359155,
+  "archiveSha256": "e3863c0ebe91a7cbe4efc0c63cf5adb232dbb5bddd1c897cd447045b8c96482b",
+  "artifacts": {
+    "instructionReader": {
+      "bytes": 99264656,
+      "sha256": "057ad648a7184f86a35d0a94a29f180b9000c6f2cfd3a46f9f740c17c6b7ee71"
+    },
+    "instructionReaderLauncher": {
+      "bytes": 72840,
+      "sha256": "1ca222173dca1a5aa390bf395c454b705b35516d244353ae3bf035c6b94276df"
+    }
+  },
+  "base": {
+    "archiveAcquisitionVerified": false,
+    "archiveSha256": "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b",
+    "executableSha256": "37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086",
+    "target": "bun-linux-arm64",
+    "version": "1.3.14"
+  },
+  "builderHead": "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
+  "fileBytes": 243601045,
+  "fileCount": 1472,
+  "formatVersion": 1,
+  "inventoryBytes": 243499,
+  "inventorySha256": "21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f",
+  "origins": [
+    {
+      "checkoutHead": "0394b36f674765c942f8db07f009b7ad20787dba",
+      "head": "0394b36f674765c942f8db07f009b7ad20787dba",
+      "inventorySha256": "37b17e110e21ccbed4e4489230c74087af9b32ddf3e7796cc691cde2baa9e4e6",
+      "role": "runtime",
+      "tree": "c1fc3cc45d775a12b616700d52cc292d1e4e594b"
+    },
+    {
+      "checkoutHead": "8603da22d9fe7f1695166891cd29ccd254b1d21e",
+      "head": "8603da22d9fe7f1695166891cd29ccd254b1d21e",
+      "inventorySha256": "4ce680e6e33e46cb6b5fdcc009c2d07cbb278d1a1c9d0d15fe16b9ecf8807106",
+      "role": "sdk",
+      "tree": "6b92c88c21b5acaa05c4eafa6308621bbab371b3"
+    },
+    {
+      "checkoutHead": "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
+      "head": "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
+      "inventorySha256": "8d2bdc5cecf0aaa2950d3596e370375b7886a7a21cc9ef0a3c36052a5dd7fef4",
+      "role": "overlay",
+      "tree": "c7fd9b3329a8185ce1f51705fc59ba40423bbcd1"
+    },
+    {
+      "checkoutHead": "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
+      "head": "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
+      "inventorySha256": "afb2be2f56649f5084028a7512286296e01b19c75afbca98098a3384257528c7",
+      "role": "builder",
+      "tree": "aadc74163a43dcaa63b246df2442f3e3ae79bc7b"
+    }
+  ],
+  "receiptSha256": "0842d1d5de60085564cf2185d048d2b7f8dccef222decac42a1169df03b2e346",
+  "resolverBindings": {
+    "source/runtime/node_modules/@yanlinglabs/winter-agent-runtime": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-agent-runtime",
+      "target": "../../../sdk/packages/runtime",
+      "version": "0.0.53"
+    },
+    "source/runtime/node_modules/@yanlinglabs/winter-agent-sdk": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-agent-sdk",
+      "target": "../../../sdk/packages/sdk",
+      "version": "0.0.53"
+    },
+    "source/runtime/node_modules/@yanlinglabs/winter-conformance": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-conformance",
+      "target": "../../../sdk/packages/conformance",
+      "version": "0.0.53"
+    },
+    "source/runtime/node_modules/@yanlinglabs/winter-provider-catalog": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-provider-catalog",
+      "target": "../../../sdk/packages/provider-catalog",
+      "version": "0.0.53"
+    },
+    "source/runtime/node_modules/@yanlinglabs/winter-provider-conformance": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-provider-conformance",
+      "target": "../../../sdk/packages/provider-conformance",
+      "version": "0.0.53"
+    },
+    "source/runtime/node_modules/@yanlinglabs/winter-provider-runtime": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-provider-runtime",
+      "target": "../../../sdk/packages/provider-runtime",
+      "version": "0.0.53"
+    },
+    "source/sdk/node_modules/@yanlinglabs/winter-agent-runtime": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-agent-runtime",
+      "target": "../../packages/runtime",
+      "version": "0.0.53"
+    },
+    "source/sdk/node_modules/@yanlinglabs/winter-agent-sdk": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-agent-sdk",
+      "target": "../../packages/sdk",
+      "version": "0.0.53"
+    },
+    "source/sdk/node_modules/@yanlinglabs/winter-conformance": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-conformance",
+      "target": "../../packages/conformance",
+      "version": "0.0.53"
+    },
+    "source/sdk/node_modules/@yanlinglabs/winter-provider-catalog": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-provider-catalog",
+      "target": "../../packages/provider-catalog",
+      "version": "0.0.53"
+    },
+    "source/sdk/node_modules/@yanlinglabs/winter-provider-conformance": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-provider-conformance",
+      "target": "../../packages/provider-conformance",
+      "version": "0.0.53"
+    },
+    "source/sdk/node_modules/@yanlinglabs/winter-provider-runtime": {
+      "origin": "sdk",
+      "package": "@yanlinglabs/winter-provider-runtime",
+      "target": "../../packages/provider-runtime",
+      "version": "0.0.53"
+    }
+  },
+  "run": 38502659264,
+  "runtimeDependencies": {
+    "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1": {
+      "bytes": 203968,
+      "sha256": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505"
+    },
+    "/lib/aarch64-linux-gnu/libc.so.6": {
+      "bytes": 1722920,
+      "sha256": "0f1905dc27dbc6715875c70527bc8da846a10084c9c483e9d8ff76dce8d69d0e"
+    },
+    "/lib/aarch64-linux-gnu/libdl.so.2": {
+      "bytes": 67440,
+      "sha256": "1c16b2692a155191c97d7fdc5ce937d37c242435f05745046a794a9832b16af4"
+    },
+    "/lib/aarch64-linux-gnu/libm.so.6": {
+      "bytes": 591800,
+      "sha256": "5e0391562de36de323fb9cb0f2c1b6bd6d034c840b1dac018499f5fe4ded1b4a"
+    },
+    "/lib/aarch64-linux-gnu/libpthread.so.0": {
+      "bytes": 67440,
+      "sha256": "6f1ab9e7d7de142dc5e2feaf6d19faceff0a0f40d5e225c922899f5362b8c353"
+    },
+    "/lib/ld-linux-aarch64.so.1": {
+      "bytes": 203968,
+      "sha256": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505"
+    }
+  },
+  "workflowHead": "29fe5cff1ea0b93d7970cfee566030f3532fdd74"
+}

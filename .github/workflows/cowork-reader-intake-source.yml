@@ -1,0 +1,26 @@
+name: reader-intake-source
+on:
+  push:
+    branches: [cowork/reader-packet-intake]
+    paths:
+      - scripts/guest-reader-intake/**
+      - .github/workflows/cowork-reader-intake-source.yml
+      - test/gates/release-gates.test.ts
+  pull_request:
+    paths:
+      - scripts/guest-reader-intake/**
+      - .github/workflows/cowork-reader-intake-source.yml
+      - test/gates/release-gates.test.ts
+permissions:
+  contents: read
+jobs:
+  portable-data:
+    if: github.event_name == 'push' || github.head_ref == 'cowork/reader-packet-intake'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Synthetic packet data checks
+        run: python3 -I -S -B -m unittest discover -s scripts/guest-reader-intake -p 'test_intake.py'

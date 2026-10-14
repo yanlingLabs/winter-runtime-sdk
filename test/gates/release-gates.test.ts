@@ -71,7 +71,7 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "release.yml"]);
+    expect(workflows).toEqual(["ci.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "release.yml"]);
     for (const name of workflows.filter((name) => name !== "release.yml")) {
       const source = readWorkflow(name);
       // Non-release workflows may explain this rule in comments, but cannot run publication.
@@ -110,6 +110,23 @@ describe("the release workflow", () => {
       steps: [
         { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
         { name: "Synthetic ELF data checks", run: "python3 -I -S -B -m unittest discover -s scripts/guest-reader-abi -p 'test_*.py'" },
+      ],
+    });
+  });
+
+  test("the reader intake workflow uses only unprivileged synthetic data", () => {
+    const source = parseWorkflow("cowork-reader-intake-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
+    const paths = ["scripts/guest-reader-intake/**", ".github/workflows/cowork-reader-intake-source.yml", "test/gates/release-gates.test.ts"];
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-packet-intake"], paths }, pull_request: { paths } });
+    expect(source.permissions).toEqual({ contents: "read" });
+    expect(Object.keys(source.jobs ?? {})).toEqual(["portable-data"]);
+    expect(source.jobs?.["portable-data"]).toEqual({
+      if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-packet-intake'",
+      "runs-on": "ubuntu-24.04-arm",
+      "timeout-minutes": 5,
+      steps: [
+        { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
+        { name: "Synthetic packet data checks", run: "python3 -I -S -B -m unittest discover -s scripts/guest-reader-intake -p 'test_intake.py'" },
       ],
     });
   });
