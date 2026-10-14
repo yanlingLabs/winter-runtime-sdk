@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import wrapper as w
+import producer as actual_producer
 OBSERVED_TIME=datetime(2026,10,14,tzinfo=timezone.utc)
 RECORD={'metadata':dict(w.ACQUISITION_METADATA),'checked_at':OBSERVED_TIME.isoformat(),
     'directory':'/unprivileged/data','directory_identity':{},'outer_zip_sha256':w.OUTER_ZIP_SHA256,
@@ -167,7 +168,7 @@ class Tests(unittest.TestCase):
         parent=SimpleNamespace(load_pin=pin_load,capture_packet=capture,
             create_launch_root=lambda *_:runtime,guard_root_owner=lambda _:events.append('guard-root'),
             recheck_runtime=lambda _:events.append('runtime-check'))
-        producer=SimpleNamespace(descriptor_preflight=lambda:events.append('preflight'),
+        producer=SimpleNamespace(selected_host_exec_environment=actual_producer.selected_host_exec_environment,descriptor_preflight=lambda:events.append('preflight'),
             NativeOperation=lambda *args,**kw:SimpleNamespace(debt=args[0]))
         data=SimpleNamespace(create_fixture=lambda _:fixture,request_bytes=lambda:b'compact-input',
             verify_response=lambda out,err:events.append('frame-check'))

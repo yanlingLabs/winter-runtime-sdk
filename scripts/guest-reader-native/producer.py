@@ -367,12 +367,30 @@ def install_reopened_inputs(records,root_fd,verify=None):
             error=Refusal('new reopen descriptors retained');error.retained_fds=failed;raise error
 
 
-def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None, reopen_inputs=None):
+
+FIXED_HOST_EXEC_ENV = (('LANG','C'),('LC_ALL','C'),('TZ','UTC'),('HOME',HOME),
+                       ('TMPDIR','/tmp'),('PATH','/usr/bin:/bin'))
+
+
+def selected_host_exec_environment():
+    """Actual selected exec argument, not observed post-exec/C reader environment."""
+    require(type(ENV) is dict and ENV==dict(FIXED_HOST_EXEC_ENV), 'fixed selected exec environment')
+    return types.MappingProxyType(dict(FIXED_HOST_EXEC_ENV))
+
+
+def checked_host_exec_environment(value):
+    require(type(value) is types.MappingProxyType and dict(value)==dict(FIXED_HOST_EXEC_ENV),
+            'immutable selected exec environment')
+    return value
+
+
+def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None, reopen_inputs=None, exec_environment=None):
     """Actual privileged effects. Not called by source/portable tests.
 
     Python/libc are trusted parent tooling, not measured packet runtime objects.
     No PID namespace precedes C's SO_PEERCRED/original-parent check.
     """
+    exec_environment=checked_host_exec_environment(selected_host_exec_environment() if exec_environment is None else exec_environment)
     def mark(index):
         ctypes.set_errno(0)
         if stage is not None:stage(index)
@@ -423,7 +441,7 @@ def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=N
         begin = fd + 1
     os.closerange(begin, 1 << 20)
     mark(9)
-    os.execve(argv[0], argv, ENV)
+    os.execve(argv[0], argv, exec_environment)
     raise Refusal('exec returned')
 
 
@@ -504,7 +522,8 @@ class NativeOperation:
     Root-owned fixture source/shared FDs carry scope; request bytes carry no paths.
     """
     def __init__(self, debt, root, source_fd, shared_fd, guard, recheck,
-                 pidfd_validator=validate_init_pidfd, control_pair_factory=None, source_path=None, shared_path=None):
+                 pidfd_validator=validate_init_pidfd, control_pair_factory=None, source_path=None, shared_path=None, exec_environment=None):
+        self.exec_environment=checked_host_exec_environment(selected_host_exec_environment() if exec_environment is None else exec_environment)
         self.debt, self.root = debt, root
         self.source_fd, self.shared_fd = source_fd, shared_fd
         self.source_path,self.shared_path=source_path,shared_path
@@ -639,7 +658,7 @@ class NativeOperation:
                 os.close(gate[0])
                 child_bootstrap(root_fd, argv, pass_fds,
                                 (stdin[0], stdout[1], stderr[1]),
-                                error_fd=bootstrap_error[1], stage=stage, reopen_inputs=reopen_inputs)
+                                error_fd=bootstrap_error[1], stage=stage, reopen_inputs=reopen_inputs, exec_environment=self.exec_environment)
             except BaseException as error:
                 try: emit_bootstrap_failure(bootstrap_error[1], step[0], error)
                 except BaseException: pass  # Unknown observation; never claim exec/cleanup.

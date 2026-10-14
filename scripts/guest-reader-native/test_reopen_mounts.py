@@ -83,12 +83,15 @@ class Tests(unittest.TestCase):
             def __call__(self,*args):events.append((self.name,args));return 0
         libc=SimpleNamespace(unshare=Function('unshare'),mount=Function('mount'))
         class Ended(BaseException):pass
-        def exec_role(*args):events.append(('exec',args));raise Ended
+        selected=p.selected_host_exec_environment()
+        def exec_role(*args):
+            self.assertIs(args[2],selected)
+            events.append(('exec',args));raise Ended
         def effect(name):return lambda *args:events.append((name,args))
         with ExitStack() as stack:
             for target,name,value in ((p,'root_linux',lambda:None),(p,'validate_stdio',lambda *_:None),(p.ctypes,'CDLL',lambda *_ ,**kw:libc),(p,'reopen_protected_path',lambda _:200),(p,'install_reopened_inputs',effect('reopen')),(p.os,'fstat',lambda _:info),(p.os,'close',effect('close')),(p.os,'dup2',effect('dup2')),(p.os,'fchdir',effect('fchdir')),(p.os,'chroot',effect('chroot')),(p.os,'chdir',effect('chdir')),(p.os,'closerange',effect('close_range')),(p.os,'set_inheritable',effect('inheritable')),(p.os,'execve',exec_role)):
                 stack.enter_context(patch.object(target,name,value))
-            with self.assertRaises(Ended):p.child_bootstrap(10,('/launcher',),(100,101),(40,41,42),error_fd=90,reopen_inputs=records,stage=lambda value:events.append(('step',value)))
+            with self.assertRaises(Ended):p.child_bootstrap(10,('/launcher',),(100,101),(40,41,42),error_fd=90,reopen_inputs=records,stage=lambda value:events.append(('step',value)),exec_environment=selected)
         ordering=[name for name,_ in events]
         self.assertLess(ordering.index('unshare'),ordering.index('mount'))
         mounts=[args for name,args in events if name=='mount']

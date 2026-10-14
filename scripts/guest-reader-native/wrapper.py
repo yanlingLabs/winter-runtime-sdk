@@ -5,6 +5,8 @@ with python3 -I -S -B. Tokens are never inputs to this module. Captured packet
 Python is DATA and is never imported. Host Python/libc remain trusted tooling.
 """
 import hashlib
+import base64
+import re
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -14,10 +16,10 @@ import types
 
 SOURCE_PINS = {
     'parent.py': '856dc389f06ae973b1c1a65149671d984288cf558d7a461e32c89758036c63af',
-    'producer.py': '1ec5338598c528c417dc355a14d5dcf2fb5b67a3c33f98ffe78c48cd53611440',
+    'producer.py': 'e7da78e4ae7c02303101059f4b43bf261d26fc56153a50f2aed8daed651a9a57',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
-    'native_cases.py': 'affda5ad260a483a3b7e6083435be231d3d5138945fa58db129c4ece78ab5d8d',
+    'native_cases.py': '851e3d0bbc3edb23fac26b98edde5f35f4782b9fa1c48ada0d0ecbd0a7f75c95',
 }
 MODULE_ORDER = (('control', 'control.py'), ('producer', 'producer.py'),
                 ('reader_parent', 'parent.py'), ('reader_fixture', 'fixture.py'),
@@ -345,6 +347,48 @@ def check_acquisition_record(record, now):
                 'acquisition member pin mismatch')
 
 
+
+FIXTURE_REQUEST_SHA256='22989cd840ad060f0d509c61c83c0fd5aadf760c08d02767f96144117e9f0714'
+FIXTURE_CONTENT_HASHES={'source':'a8d64a39a0fbb765db51afd62c057d8023a144a964e7ae82180cb328e7c74511',
+                        'shared':'9422204aaa965fce450bb6fa702b0bc04b44bbd28a3d16b616ae23e757344568'}
+
+
+def _sample_unavailable(reason):
+    return {'available':False,'reason':reason}
+
+
+def _fixture_stderr_exporter(lease,pin,modules,selected_environment):
+    """Hosted fixture-only lexical binding; this is never native/read authority."""
+    data=modules['reader_fixture'];producer=modules['producer']
+    eligible=(type(lease) is SourceLease and not lease.synthetic and not lease.closed
+        and not lease.unresolved and getattr(pin,'sha256',None)==COMPILE_PIN_SHA256
+        and type(modules) is dict and set(modules)=={name for name,_ in MODULE_ORDER}
+        and all(lease.modules.get(name) is modules[name] for name,_ in MODULE_ORDER)
+        and getattr(lease,'snapshot',None) is not None and getattr(lease,'runtime',None) is not None
+        and getattr(lease,'fixture',None) is not None
+        and lease.fixture.path==lease.path.parent/'fixture'
+        and data.SOURCE=='/workspace/folders/source' and data.SHARED=='/run/winter/shared-instructions'
+        and type(data.CONTENTS) is dict and set(data.CONTENTS)==set(FIXTURE_CONTENT_HASHES)
+        and all(type(raw) is bytes and hashlib.sha256(raw).hexdigest()==FIXTURE_CONTENT_HASHES[key]
+                for key,raw in data.CONTENTS.items())
+        and hashlib.sha256(data.request_bytes()).hexdigest()==FIXTURE_REQUEST_SHA256
+        and dict(producer.checked_host_exec_environment(selected_environment))==dict(producer.FIXED_HOST_EXEC_ENV))
+    # Binding is minted only after the existing native_guard and full packet/
+    # fixture preparation in run_cases. No incoming DTO or Boolean can mint it.
+    def export(error,kind):
+        if kind!='same-owner':return _sample_unavailable('not_same_owner_failure')
+        if not eligible:return _sample_unavailable('provenance_unverified')
+        raw=getattr(getattr(error,'handles',None),'fixture_stderr_capture',None)
+        if type(raw) is not bytes or len(raw)>16384:return _sample_unavailable('capture_absent')
+        # Reject the COMPLETE capture before taking a prefix; never redact text.
+        if re.search(rb'gh[pousr]_|github_pat_|Authorization|Bearer |AKIA|-----BEGIN|[A-Za-z0-9+/=_-]{40,}',raw,re.IGNORECASE):
+            return _sample_unavailable('scrub_rejected')
+        sample=raw[:4096]
+        return {'available':True,'bytesBase64':base64.b64encode(sample).decode('ascii'),
+                'truncated':len(raw)>4096,'sampleSha256':hashlib.sha256(sample).hexdigest()}
+    return export
+
+
 def run_cases(lease, packet_directory, inventory_file, launch_destination, fixture_destination,
               *, acquisition_record, now=None, effects_factory=None, loaded_modules=None):
     """Unexecuted privileged orchestration, not granted by input shape.
@@ -369,8 +413,11 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
         modules = loaded_modules
     parent, producer = modules['reader_parent'], modules['producer']
     data, cases = modules['reader_fixture'], modules['native_cases']
+    sample_exporter=None
+    kind=None
     try:
         lease.stage = 'preflight'
+        selected_environment=producer.selected_host_exec_environment()
         producer.descriptor_preflight()
         lease.stage = 'load_pin'
         pin = parent.load_pin(lease.path/COMPILE_PIN)
@@ -382,13 +429,17 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
         parent.guard_root_owner(lease.runtime)
         lease.stage = 'fixture'
         lease.fixture = data.create_fixture(fixture_destination)
+        try:
+            sample_exporter=_fixture_stderr_exporter(lease,pin,modules,selected_environment)
+        except BaseException:
+            sample_exporter=lambda error,kind:_sample_unavailable('provenance_unverified')
         def factory(debt, pair_factory):
             lease.recheck(); lease.fixture.recheck()
             return producer.NativeOperation(debt, lease.runtime,
                 lease.fixture.fds['source'], lease.fixture.fds['shared'],
                 parent.guard_root_owner, parent.recheck_runtime,
                 control_pair_factory=pair_factory,source_path=lease.fixture.path/'source',
-                shared_path=lease.fixture.path/'shared')
+                shared_path=lease.fixture.path/'shared',exec_environment=selected_environment)
         outcomes = []
         for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
             lease.stage = 'case:' + kind + ':run'
@@ -418,5 +469,8 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
                 'guidedGuestTurnVerified': False, 'productionActivation': False,
                 'vmExecutionVerified': False, 'fixtureRemovalConfirmed': False}
     except BaseException as error:
+        try:
+            lease.fixture_stderr_sample=sample_exporter(error,kind) if sample_exporter is not None else _sample_unavailable('provenance_unverified')
+        except BaseException:lease.fixture_stderr_sample=_sample_unavailable('projection_error')
         lease.unresolved = True; lease.case_failure = error
         raise Uncertain(lease, error) from error

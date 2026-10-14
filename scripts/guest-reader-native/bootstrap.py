@@ -4,6 +4,8 @@ The new externally reviewed workflow must admit these bytes before execution.
 Tests inject tables; no privileged/native case executes during source validation.
 """
 import hashlib
+import base64
+import binascii
 import errno
 import json
 import os
@@ -178,6 +180,7 @@ ERROR_REASONS = (
     'fixed descriptor capacity unavailable',
     'fixed protected Root parent venue',
     'fixed protected fixture siblings required',
+    'fixed selected exec environment',
     'fixture directory replaced',
     'fixture directory seal changed',
     'fixture file bytes changed',
@@ -192,6 +195,7 @@ ERROR_REASONS = (
     'held immutable reopen input',
     'hidden canary leaked',
     'hosted Linux ARM venue required',
+    'immutable selected exec environment',
     'independent bootstrap error writer',
     'independent fixture file required',
     'independent init pidfd teardown',
@@ -519,8 +523,52 @@ def postinit_record(chain):
     return {name:raw[name] for name in POSTINIT_KEYS}
 
 
+SAMPLE_REASONS=('not_same_owner_failure','scrub_rejected','provenance_unverified',
+                'capture_absent','projection_error')
+
+
+def stderr_sample_record(chain):
+    """Fixture-only PUBLIC bytes; strict additive projection, never general guidance."""
+    raw=None
+    for item in chain:
+        observed=getattr(getattr(item,'lease',None),'fixture_stderr_sample',None)
+        if observed is not None:raw=observed;break
+    unavailable={'available':False,'reason':'projection_error'}
+    if raw is None:return {'available':False,'reason':'capture_absent'}
+    if type(raw) is not dict or type(raw.get('available')) is not bool:return unavailable
+    if raw['available'] is False:
+        if set(raw)=={'available','reason'} and type(raw['reason']) is str and raw['reason'] in SAMPLE_REASONS:
+            return dict(raw)
+        return unavailable
+    if set(raw)!={'available','bytesBase64','truncated','sampleSha256'}:return unavailable
+    encoded=raw['bytesBase64'];digest=raw['sampleSha256']
+    if type(encoded) is not str or len(encoded)>5464 or type(raw['truncated']) is not bool:return unavailable
+    if type(digest) is not str or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):return unavailable
+    try:sample=base64.b64decode(encoded,validate=True)
+    except (ValueError,binascii.Error):return unavailable
+    if len(sample)>4096 or base64.b64encode(sample).decode('ascii')!=encoded:return unavailable
+    if raw['truncated'] and len(sample)!=4096:return unavailable
+    if hashlib.sha256(sample).hexdigest()!=digest:return unavailable
+    return dict(raw)
+
+
+def log_result_projection(result):
+    """No raw/Base64 sample in CI output; the exact artifact alone holds bytes."""
+    projected=dict(result)
+    if 'postInitStderrSample' in projected:
+        sample=projected['postInitStderrSample']
+        if type(sample) is dict and sample.get('available') is True:
+            projected['postInitStderrSample']={key:sample[key] for key in
+                ('available','truncated','sampleSha256')}
+        else:
+            projected['postInitStderrSample']={'available':False}
+            if type(sample) is dict and sample.get('reason') in SAMPLE_REASONS:
+                projected['postInitStderrSample']['reason']=sample['reason']
+    return projected
+
+
 def failure_record(error, *, stage='preflight'):
-    """Closed observations only. Never serialize exception text or native output."""
+    """Closed observations plus explicitly gated PUBLIC fixture sample only."""
     chain=[error]
     for _ in range(2):
         nested=getattr(chain[-1], 'cause', None)
@@ -543,6 +591,14 @@ def failure_record(error, *, stage='preflight'):
                 symbol if symbol in ERRNO_SYMBOLS else 'unknown')
     try:postinit=postinit_record(chain)
     except BaseException:postinit={'available':False}
+    try:sample=stderr_sample_record(chain)
+    except BaseException:sample={'available':False,'reason':'projection_error'}
+    if sample['available']:
+        size=postinit.get('stderrBytes') if postinit.get('available') is True else None
+        if (type(size) is not int or sample['truncated']!=(size>4096)
+                or len(base64.b64decode(sample['bytesBase64']))!=min(size,4096)
+                or (not sample['truncated'] and sample['sampleSha256']!=postinit['stderrSha256'])):
+            sample={'available':False,'reason':'projection_error'}
     name,reason,symbol=closed(error)
     cause_name,cause_reason,cause_errno=closed(chain[-1])
     return {'readerCaseSetPassed':False, 'stage':stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown',
@@ -550,6 +606,7 @@ def failure_record(error, *, stage='preflight'):
             'causeClass':cause_name, 'causeReason':cause_reason, 'causeErrnoSymbol':cause_errno,
             'preInitDiagnostics':preinit_record(chain),
             'postInitDiagnostics':postinit,
+            'postInitStderrSample':sample,
             'nativeCleanupConfirmed':False, 'configEffectProven':False,
             'vmExecutionVerified':False, 'productionActivation':False}
 

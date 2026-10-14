@@ -1,7 +1,7 @@
 name: reader-native-reviewed
 on:
   push:
-    branches: [cowork/reader-hosted-postinit-diagnostics]
+    branches: [cowork/reader-hosted-fixture-stderr]
     paths:
       - .github/workflows/cowork-reader-native-reviewed.yml
       - scripts/guest-reader-native/bootstrap.py
@@ -12,7 +12,7 @@ permissions:
   actions: read
 jobs:
   reader-only:
-    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-postinit-diagnostics' && github.run_attempt == '1'
+    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-fixture-stderr' && github.run_attempt == '1'
     concurrency:
       group: reader-native-reviewed
       cancel-in-progress: false
@@ -64,7 +64,7 @@ jobs:
               if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
               raw=os.read(fd,65537)
           finally:os.close(fd)
-          if hashlib.sha256(raw).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('bootstrap_source_pin')
+          if hashlib.sha256(raw).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('bootstrap_source_pin')
           module=types.ModuleType('_reader_data_bootstrap');module.__file__=str(source);sys.modules[module.__name__]=module
           exec(compile(raw,str(source),'exec'),module.__dict__)
           fd=os.open(record,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -102,7 +102,7 @@ jobs:
                   if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
                   raw=os.read(fd,65537)
               finally:os.close(fd)
-              if hashlib.sha256(raw).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('bootstrap_source_pin')
+              if hashlib.sha256(raw).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('bootstrap_source_pin')
               protected=root/'bootstrap.py'
               fd=os.open(protected,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
               try:
@@ -116,7 +116,7 @@ jobs:
               fd=os.open(protected,os.O_RDONLY|os.O_NOFOLLOW)
               try:checked=os.read(fd,65537)
               finally:os.close(fd)
-              if hashlib.sha256(checked).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('protected_bootstrap_pin')
+              if hashlib.sha256(checked).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('protected_bootstrap_pin')
               checked_module=types.ModuleType('_reader_root_bootstrap');checked_module.__file__=str(protected);sys.modules[checked_module.__name__]=checked_module
               exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module
               if data_file.parent!=result_file.parent or data_file.name!='data.json':raise ValueError('data_record_path')
@@ -126,8 +126,8 @@ jobs:
                   if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>1048576:raise ValueError('data_record')
                   data=json.loads(os.read(fd,1048577))
               finally:os.close(fd)
-              result=module.run_root(base,root,data,'142766ad9196cc03787582444b3f1462259f6d6d0d5f2ac9337100a680829b9c',wrapper_source=wrapper,harness_source=harness_source)
-              if hashlib.sha256(protected.read_bytes()).hexdigest()!='d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc':raise ValueError('bootstrap_final_pin')
+              result=module.run_root(base,root,data,'8d33597828b183d4fa171dbb4496cf63b1964e742a59358abee9c886f21ec4b6',wrapper_source=wrapper,harness_source=harness_source)
+              if hashlib.sha256(protected.read_bytes()).hexdigest()!='d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a':raise ValueError('bootstrap_final_pin')
           except BaseException as error:
               if module is not None:
                   result=module.failure_record(error)
@@ -148,7 +148,7 @@ jobs:
                   if copied.st_nlink!=1 or copied.st_uid!=owner.st_uid or stat.S_IMODE(copied.st_mode)!=0o600:raise ValueError('result_identity')
               finally:os.close(fd)
               os.close(output_dir)
-              print(json.dumps(result,sort_keys=True));raise SystemExit(78) from None
+              print(json.dumps(module.log_result_projection(result) if module is not None else result,sort_keys=True));raise SystemExit(78) from None
           fd=os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)
           try:
               payload=json.dumps(result,sort_keys=True).encode()+b'\n'
@@ -162,7 +162,7 @@ jobs:
               if copied.st_nlink!=1 or copied.st_uid!=owner.st_uid or stat.S_IMODE(copied.st_mode)!=0o600:raise ValueError('result_identity')
           finally:os.close(fd)
           os.close(output_dir)
-          print(json.dumps(result,sort_keys=True))
+          print(json.dumps(module.log_result_projection(result),sort_keys=True))
           PY
       - name: Retain only closed experiment result
         if: always() && steps.download.outputs.private != ''

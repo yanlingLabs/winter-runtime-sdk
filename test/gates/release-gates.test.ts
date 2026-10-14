@@ -134,11 +134,11 @@ describe("the release workflow", () => {
   test("the native reader source workflow runs only injected and temporary DATA tests", () => {
     const source = parseWorkflow("cowork-reader-native-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-native/**", "test/guest/reader-harness-consumer.test.ts", ".github/workflows/cowork-reader-native-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-postinit-diagnostics"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-fixture-stderr"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(source.jobs).toEqual({
       "portable-data": {
-        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-postinit-diagnostics'",
+        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-fixture-stderr'",
         "runs-on": "ubuntu-24.04-arm", "timeout-minutes": 5,
         steps: [
           { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
@@ -154,7 +154,7 @@ describe("the release workflow", () => {
     expect(source.permissions).toEqual({ contents: "read", actions: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["reader-only"]);
     const job = source.jobs?.["reader-only"], steps = job?.steps ?? [];
-    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-postinit-diagnostics' && github.run_attempt == '1'");
+    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-fixture-stderr' && github.run_attempt == '1'");
     expect(steps.length).toBe(6);
     for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
     expect(steps[0]?.with).toEqual({ ref: "4d5dfcec9454d33e8423713491ced08b58669f58", path: "origins/base", "persist-credentials": false });
@@ -167,8 +167,8 @@ describe("the release workflow", () => {
     expect(text).not.toContain("_SHA_PENDING");
     expect(text).toContain("fs.chmodSync(privateDir,0o700)");
     expect(text).toContain("65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99");
-    expect(text).toContain("d187f3ed4ad784c489b1354b930f7bf52af6285c1be0d62d3ebfe094315dafcc");
-    expect(text).toContain("142766ad9196cc03787582444b3f1462259f6d6d0d5f2ac9337100a680829b9c");
+    expect(text).toContain("d8b976256166e55ccfd9b497dcd13fdc5b64ec8da36ff451aef58d934eaaff4a");
+    expect(text).toContain("8d33597828b183d4fa171dbb4496cf63b1964e742a59358abee9c886f21ec4b6");
     expect(text).toContain("sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B");
     expect(text).toContain("checked._compile(raw.toString('utf8'),source)");
     expect(text).toContain("exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module");
@@ -180,6 +180,8 @@ describe("the release workflow", () => {
     expect(text).toContain("os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)");
     expect(text).toContain("causeReason");
     expect(text).toContain("module.failure_record(error)");
+    expect(text.match(/module.log_result_projection\(result\)/g)?.length).toBe(2);
+    expect(text).not.toContain("print(json.dumps(result,sort_keys=True))");
     expect(text).toContain("wrapper_source=wrapper,harness_source=harness_source");
     const bootstrap = readFileSync(resolve(import.meta.dir, "../../scripts/guest-reader-native/bootstrap.py"), "utf8");
     for (const reason of ["outer namespace changed before launch", "outer namespace changed while live", "outer namespace changed after teardown", "actual child handle envelope", "actual initial I required", "negative teardown before C deadline"])

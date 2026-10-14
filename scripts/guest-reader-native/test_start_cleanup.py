@@ -387,6 +387,8 @@ class MountScopeTests(unittest.TestCase):
         with table.patches(),patch.object(p.os,'fork',return_value=0),patch.object(p.os,'read',return_value=b'G'),patch.object(p,'child_bootstrap',side_effect=bootstrap),patch.object(p,'emit_bootstrap_failure',return_value=True),patch.object(p.os,'_exit',side_effect=ChildEnded):
             with self.assertRaises(ChildEnded):table.operation._start()
         root,argv,pass_fds,kwargs=seen[0]
+        self.assertIs(kwargs['exec_environment'],table.operation.exec_environment)
+        self.assertEqual(dict(kwargs['exec_environment']),p.ENV)
         expected=(10,108,100,20,21,101,102,103,104,105,106)
         self.assertEqual(tuple(fd for fd,_,_ in kwargs['reopen_inputs']),expected)
         self.assertNotIn(31,expected)  # Receipt socket has internal sockfs mount, C-authenticated.

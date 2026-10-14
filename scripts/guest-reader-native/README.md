@@ -204,3 +204,48 @@ These hashes and lengths are ONLY for disposable fixed fixture data: never reuse
 this diagnostic for real guidance, private instructions or personal memory.
 The original success predicates, deadlines, C/artifact and close ordering remain
 unchanged. Source review and new execution admission remain separate.
+
+
+Fixture-only PUBLIC stderr successor (source, no run admission)
+
+The failed D78 attempt 38637458454 remains frozen, failed and consumed. This
+successor does not diagnose its signal 5/core-bit observation or confirm cleanup.
+Only the existing same-owner failure path after captured Observation and Reaps
+retains its bounded stderr bytes in the exception-owned handles. No new IO,
+wait, process, cancellation, discharge, oracle, limit or deadline is introduced.
+
+The hosted wrapper selects an immutable exact six-value host exec environment
+before case effects, rejects missing/extra/changed values, and forwards that same
+record through NativeOperation and child_bootstrap to os.execve. This is the
+actual host argument, not an observation of the eventual C child environment.
+The unchanged C literal environment remains source evidence only.
+
+A lexical exporter is prepared only after the existing hosted Root source guard,
+full fixed compile DATA validation, fixed fake fixture creation and exact packet,
+request, shared/source view and fake file hash checks. It cannot mint native
+admission. Production, Core, owner and VM code import no exporter. A capture is
+exportable only for a same-owner failure with complete scalar post-init evidence.
+The entire already-captured stderr (at most 16384 bytes) is checked before taking
+a prefix. Credential patterns gh[pousr]_, github_pat_, Authorization, Bearer,
+AKIA, PEM BEGIN, and Base64-like runs of 40+ characters reject export rather than
+redact. False refusal is accepted. This mechanical scrub is not a secret detector
+for general/private content: all sample bytes are PUBLIC, cacheable fixture DATA,
+and real guidance, credentials, user directories or provider content must never
+reuse it.
+
+The exact result.json alone holds postInitStderrSample. Available samples have
+exact keys available, bytesBase64, truncated, sampleSha256; the prefix is at most
+4096 bytes, canonical Base64 at most 5464 characters, and its SHA is checked.
+Truncation is tied to the original complete stderr length; when untruncated its
+SHA equals the original full hash. The original twelve-key postInitDiagnostics
+is unchanged. Unavailable results carry only available:false plus a closed
+reason. Malformed projections fail unavailable and retain the original cause,
+stage, debt and false proof flags. CI stdout/summary uses log_result_projection,
+which omits bytesBase64 and retains only availability/reason/truncation/hash.
+Evidence collection must compare that scalar projection to the actual CI JSON,
+not deep-equal the full artifact when a sample is present; retain/hash the exact
+artifact before offline canonical decoding. No raw or Base64 sample is printed.
+
+New branch cowork/reader-hosted-fixture-stderr requires fresh exact Root/45/Astra
+source review and separate one-run admission; no push, native execution, retry or
+availability follows from portable tests or this source.

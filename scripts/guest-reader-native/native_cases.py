@@ -44,6 +44,7 @@ class Handles:
     initial_control: object = None
     preinit_diagnostics: object = None
     postinit_diagnostics: object = None
+    fixture_stderr_capture: object = None
     received_handles: object = None
     preinit_launcher_wait_status: int | None = None
     preinit_producer_wait_status: int | None = None
@@ -161,7 +162,10 @@ def run_case(kind, operation_factory, request=b'', *, effects=None):
         # Do not close deliberate keepalives, synthesize terminal receipts, or
         # lose pidfds on uncertain cleanup. External owner must inspect handles.
         if kind == 'same-owner' and observed is not None and reaps is not None:
-            try: handles.postinit_diagnostics = postinit_diagnostics(observed, reaps)
+            try:
+                if type(observed.stderr) is bytes and len(observed.stderr)<=16384:
+                    handles.fixture_stderr_capture=observed.stderr
+                handles.postinit_diagnostics = postinit_diagnostics(observed, reaps)
             except BaseException: handles.postinit_diagnostics = {'available': False}
         if kind != 'unexpected-parent' and handles.init_pid is None \
                 and hasattr(fx, 'diagnose_preinit'):
