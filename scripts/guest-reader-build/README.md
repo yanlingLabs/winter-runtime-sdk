@@ -144,3 +144,15 @@ match refuses before writing a normalized metafile or receipt; it is not silentl
 redacted. Raw failed compiler evidence may remain locally for inspection and is
 not a valid emitted packet. The separate branch-scoped source workflow runs only
 these portable Python/Git-data/mock checks; it performs no artifact compilation.
+
+The separately reviewed diagnostic run38500676309 retained a bounded raw reader
+metafile after the unchanged unsupported-spelling refusal; it is diagnostic-only,
+not a normalized/admitted packet. Its three rejected imports were nonexternal
+literal SDK-family package spellings (SDK root twice, catalog/families once).
+This successor resolves only those family aliases through the captured package's
+exact export key and source `bun` condition. Alias identity, package name/version,
+manifest bytes and an already measured **bundled** target must agree. Pattern,
+nested/unknown condition, dist, outside, missing/unbundled and foreign package
+fallbacks refuse. The raw bare spelling and manifest hash remain separate derived
+resolution evidence; missing compiler `original` remains counted as ambiguity.
+No new compiler run, packet or runtime/native execution follows from this source.

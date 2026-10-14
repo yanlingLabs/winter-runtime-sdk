@@ -237,6 +237,39 @@ def manifest_target(text,packet,measured,base='stage'):
     else:relative=base+'/'+text
     # Pure manifest graph; never look up an unmeasured filesystem fallback.
     return p.resolved_link('metafile-anchor',relative,measured)
+def captured_bare_export(target,importer,packet,manifest,bundled):
+    """Only explicit captured SDK aliases and literal source bun exports; no resolver search."""
+    if type(target)!=str or len(target.encode())>4096:p.refuse('bare SDK specifier')
+    parts=target.split('/');package='/'.join(parts[:2])
+    names={'@yanlinglabs/'+name:folder for name,folder in p.SDK_PACKAGES.items()}
+    if package not in names:p.refuse('unsupported metafile import spelling')
+    subpath='/'.join(parts[2:])
+    if subpath:
+        p.relative(subpath)
+        if not re.fullmatch(r'[A-Za-z0-9_./-]+',subpath):p.refuse('bare SDK literal subpath')
+    if len(parts)>2 and not subpath:p.refuse('bare SDK subpath')
+    if not importer.startswith(('source/runtime/','source/sdk/')):p.refuse('bare SDK importer origin')
+    origin=importer.split('/')[1];alias='source/'+origin+'/node_modules/'+package
+    measured=manifest['stagedInputs'];binding=manifest['resolverBindings'].get(alias)
+    if type(binding)!=dict or binding.get('package')!=package or binding.get('origin')!='sdk' or binding.get('version')!='0.0.53':p.refuse('bare SDK alias identity')
+    if measured.get(alias)!={'kind':'symlink','target':binding.get('target')}:p.refuse('bare SDK alias differs')
+    directory='source/sdk/packages/'+names[package]
+    if p.resolved_link(alias,binding['target'],measured)!=directory:p.refuse('bare SDK alias collision')
+    package_json=directory+'/package.json';expected=measured.get(package_json)
+    if not expected or expected.get('kind')!='file':p.refuse('bare SDK manifest absent')
+    raw=read_file(packet/package_json,p.MAX_JSON)
+    if p.digest(raw)!=expected['sha256'] or len(raw)!=expected['bytes']:p.refuse('bare SDK manifest changed')
+    value=json_data(raw)
+    if type(value)!=dict or value.get('name')!=package or value.get('version')!='0.0.53':p.refuse('bare SDK package identity')
+    exports=value.get('exports')
+    if type(exports)!=dict or not exports or any(type(key)!=str or '*' in key or (key!='.' and not key.startswith('./')) for key in exports):p.refuse('bare SDK exact exports required')
+    key='.' if not subpath else './'+subpath;selected=exports.get(key)
+    if type(selected)!=dict or not selected or set(selected)-{'types','bun','default'} or any(type(item)!=str for item in selected.values()):p.refuse('bare SDK export conditions')
+    declared=selected.get('bun')
+    if type(declared)!=str or not declared.startswith('./src/') or not re.fullmatch(r'\./src/[A-Za-z0-9_./-]+',declared):p.refuse('bare SDK source bun export')
+    relative=p.relative(declared[2:]);resolved=p.resolved_link('bare-export-anchor',directory+'/'+relative,measured)
+    if not resolved.startswith(directory+'/src/') or measured.get(resolved,{}).get('kind')!='file' or resolved not in bundled:p.refuse('bare SDK export outside/unbundled')
+    return resolved,{'rawPath':target,'alias':alias,'packageJson':package_json,'packageJsonSha256':expected['sha256'],'package':package,'version':'0.0.53','exportKey':key,'condition':'bun','declaredTarget':declared,'resolvedTarget':resolved}
 def normalized_metafile(data,packet,manifest):
     if type(data)!=dict or type(data.get('inputs'))!=dict or not 1<=len(data['inputs'])<=p.MAX_ENTRIES:p.refuse('metafile shape')
     measured=manifest['stagedInputs'];mapped={};bundled=set()
@@ -279,7 +312,10 @@ def normalized_metafile(data,packet,manifest):
                 elif target.startswith(('./','../')):
                     resolved=manifest_target(target,packet,measured,str(Path(mapped[raw]).parent))
                 elif target in mapped:resolved=mapped[target]
-                else:p.refuse('unsupported metafile import spelling')
+                else:
+                    if 'capturedBareExport' in item:p.refuse('bare SDK evidence collision')
+                    resolved,evidence=captured_bare_export(target,mapped[raw],packet,manifest,bundled)
+                    copy['capturedBareExport']=evidence
                 if resolved not in bundled:p.refuse('outside/non-bundled import target')
                 copy['path']=resolved
             normalized_imports.append(copy)
@@ -290,7 +326,7 @@ def normalized_metafile(data,packet,manifest):
     refuse_private_wire(normalized,packet)
     return normalized,{name:measured[name] for name in sorted(bundled)}
 def graph_evidence(metafile,packet,manifest):
-    measured=manifest['stagedInputs'];references=[];edges=[];used=set();missing_original=0
+    measured=manifest['stagedInputs'];references=[];edges=[];used=set();missing_original=0;bare_exports=[]
     bound=0
     for source,info in metafile['inputs'].items():
         imports=info.get('imports',[])
@@ -309,6 +345,7 @@ def graph_evidence(metafile,packet,manifest):
                 if original is not None and not (original=='bun' or original.startswith('node:') or original.split('/')[0] in NODE_BUILTINS):p.refuse('external bare mismatch')
             elif target not in measured or measured[target]['kind']!='file':p.refuse('unmeasured metafile import target')
             edges.append({'source':source,'kind':item['kind'],'target':target,'external':external})
+            if 'capturedBareExport' in item:bare_exports.append({'source':source,'sourceSha256':measured[source]['sha256'],**item['capturedBareExport']})
             if original is not None and not original.startswith(('.', '/')):
                 references.append({'source':source,'sourceSha256':measured[source]['sha256'],'specifier':original,'target':target,'kind':item['kind'],'external':external})
     # The exact top-level third-party aliases must actually contribute reachable inputs.
@@ -318,7 +355,7 @@ def graph_evidence(metafile,packet,manifest):
         if any(name.startswith(target+'/') for name in metafile['inputs']):used.add(binding['package'])
     required={binding['package'] for binding in manifest['resolverBindings'].values() if binding['origin']=='dependencies'}
     if used!=required:p.refuse('unused third-party resolver binding')
-    return {'edges':edges,'bareReferences':references,'missingOriginalCount':missing_original,'staticMetafileOnly':True,'dynamicRuntimeImportsVerified':False}
+    return {'edges':edges,'bareReferences':references,'capturedBareExports':bare_exports,'missingOriginalCount':missing_original,'staticMetafileOnly':True,'dynamicRuntimeImportsVerified':False}
 BUN_SOURCE_COMMIT='0d9b296af33f2b851fcbf4df3e9ec89751734ba4'
 POSITIVE_AUTOLOAD=tuple(flag.replace('--no-compile-','--compile-',1) for flag in p.AUTOLOAD_FLAGS)
 OPAQUE_SOURCE=b'await import(globalThis.__winter_reader_missing_specifier);\n'

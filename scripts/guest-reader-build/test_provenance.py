@@ -133,6 +133,57 @@ class PacketTests(unittest.TestCase):
         data['inputs'][str(self.output/entry)]['imports'][0]={'kind':'dynamic-import','path':'unknown-package','external':True}
         normalized,_=b.normalized_metafile(data,self.output,manifest)
         with self.assertRaisesRegex(p.Refusal,'non-builtin external'):b.graph_evidence(normalized,self.output,manifest)
+    def bare_fixture(self):
+        types='src/run-home/types.ts';put(self.runtime,types,b'export const types = true;')
+        catalog=self.sdk/'packages/provider-catalog/package.json';value=json.loads(catalog.read_bytes());value['exports']['./families']={'types':'./dist/families.d.ts','bun':'./src/families.ts','default':'./dist/families.js'};catalog.write_text(json.dumps(value))
+        put(self.sdk,'packages/provider-catalog/src/families.ts',b'export const families = [];')
+        self.heads['runtime']=git_commit(self.runtime);self.heads['sdk']=git_commit(self.sdk);manifest=self.prepare()
+        names=['source/runtime/'+p.READER_ENTRY,'source/runtime/'+types,'source/sdk/packages/sdk/src/index.ts','source/sdk/packages/provider-catalog/src/families.ts']
+        data={'inputs':{str(self.output/name):{'bytes':manifest['stagedInputs'][name]['bytes'],'imports':[]} for name in names}}
+        for name in names[:2]:data['inputs'][str(self.output/name)]['imports']=[{'kind':'import-statement','path':'@yanlinglabs/winter-agent-sdk'}]
+        data['inputs'][str(self.output/names[2])]['imports']=[{'kind':'import-statement','path':'@yanlinglabs/winter-provider-catalog/families'}]
+        return manifest,names,data
+    def test_exact_observed_bare_sdk_root_and_families_records(self):
+        manifest,names,data=self.bare_fixture();normalized,_=b.normalized_metafile(data,self.output,manifest);graph=b.graph_evidence(normalized,self.output,manifest)
+        self.assertEqual(graph['missingOriginalCount'],3);self.assertEqual(len(graph['capturedBareExports']),3)
+        for name in names[:2]:
+            item=normalized['inputs'][name]['imports'][0];self.assertEqual(item['path'],names[2]);self.assertNotIn('original',item)
+            self.assertEqual(item['capturedBareExport']['rawPath'],'@yanlinglabs/winter-agent-sdk')
+        item=normalized['inputs'][names[2]]['imports'][0]
+        self.assertEqual(item['path'],names[3]);self.assertEqual(item['capturedBareExport']['exportKey'],'./families')
+        self.assertEqual(item['capturedBareExport']['packageJsonSha256'],manifest['stagedInputs']['source/sdk/packages/provider-catalog/package.json']['sha256'])
+        self.assertFalse(graph['dynamicRuntimeImportsVerified'])
+    def test_bare_sdk_unknown_foreign_unbundled_and_evidence_collision_refuse(self):
+        manifest,names,data=self.bare_fixture();item=data['inputs'][str(self.output/names[0])]['imports'][0]
+        for target in ('@yanlinglabs/winter-agent-sdk/unknown','@yanlinglabs/winter-agent-sdk/','@yanlinglabs/winter-agent-sdk/../index','@yanlinglabs/winter-agent-sdk/wild*','@yanlinglabs/winter-other','unmeasured-third-party'):
+            item['path']=target
+            with self.assertRaises(p.Refusal):b.normalized_metafile(data,self.output,manifest)
+        item['path']='@yanlinglabs/winter-agent-sdk';item['capturedBareExport']={}
+        with self.assertRaisesRegex(p.Refusal,'evidence collision'):b.normalized_metafile(data,self.output,manifest)
+        del item['capturedBareExport'];del data['inputs'][str(self.output/names[3])]
+        with self.assertRaisesRegex(p.Refusal,'unbundled'):b.normalized_metafile(data,self.output,manifest)
+    def test_bare_sdk_manifest_conditions_and_byte_binding_refuse(self):
+        manifest,names,data=self.bare_fixture();name='source/sdk/packages/sdk/package.json';path=self.output/name;original=path.read_bytes();value=json.loads(original);path.chmod(0o600)
+        path.write_bytes(original+b' ')
+        with self.assertRaisesRegex(p.Refusal,'manifest changed'):b.normalized_metafile(data,self.output,manifest)
+        variants=[{**value,'version':'0.0.28'},{**value,'name':'@yanlinglabs/winter-other'}]
+        for selected in ('./src/index.ts',{'default':'./dist/index.js'},{'bun':'./dist/index.js'},{'bun':'./src/../index.ts'},{'bun':'./src/missing.ts'},{'bun':'/tmp/outside.ts'},{'bun':'./src/index.ts','import':{'default':'./src/index.ts'}},{'bun':['./src/index.ts']}):
+            variants.append({**value,'exports':{'.':selected}})
+        variants.append({**value,'exports':{'.':value['exports']['.'],'./*':{'bun':'./src/index.ts'}}})
+        for wrong in variants:
+            raw=json.dumps(wrong).encode();path.write_bytes(raw);manifest['stagedInputs'][name]={'kind':'file','sha256':p.digest(raw),'bytes':len(raw)}
+            with self.assertRaises(p.Refusal):b.normalized_metafile(data,self.output,manifest)
+        raw=b'{"name":"@yanlinglabs/winter-agent-sdk","version":"0.0.53","exports":{".":{"bun":"./src/index.ts"},".":{"bun":"./src/index.ts"}}}'
+        path.write_bytes(raw);manifest['stagedInputs'][name]={'kind':'file','sha256':p.digest(raw),'bytes':len(raw)}
+        with self.assertRaisesRegex(p.Refusal,'duplicate JSON key'):b.normalized_metafile(data,self.output,manifest)
+    def test_bare_sdk_alias_identity_and_target_collision_refuse(self):
+        manifest,names,data=self.bare_fixture();alias='source/runtime/node_modules/@yanlinglabs/winter-agent-sdk';binding=manifest['resolverBindings'][alias]
+        for change in ({'version':'0.0.28'},{'origin':'dependencies'},{'package':'@yanlinglabs/winter-other'}):
+            original=dict(binding);binding.update(change)
+            with self.assertRaisesRegex(p.Refusal,'alias identity'):b.normalized_metafile(data,self.output,manifest)
+            binding.clear();binding.update(original)
+        binding['target']='../../../sdk/packages/provider-catalog';manifest['stagedInputs'][alias]={'kind':'symlink','target':binding['target']}
+        with self.assertRaisesRegex(p.Refusal,'alias collision'):b.normalized_metafile(data,self.output,manifest)
     def test_falsey_resolver_maps_are_not_defaulted(self):
         for value in (False,[],0,''):
             with self.assertRaisesRegex(p.Refusal,'plain third-party resolver map'):
