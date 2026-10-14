@@ -71,7 +71,7 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "cowork-reader-build-source.yml", "release.yml"]);
+    expect(workflows).toEqual(["ci.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "release.yml"]);
     for (const name of workflows.filter((name) => name !== "release.yml")) {
       const source = readWorkflow(name);
       // Non-release workflows may explain this rule in comments, but cannot run publication.
@@ -94,6 +94,29 @@ describe("the release workflow", () => {
         { name: "Portable source and data checks", run: "python3 -I -S -B scripts/guest-reader-build/test_provenance.py" },
       ],
     });
+  });
+
+  test("the reader compile fixture has exact feature triggers and no output execution", () => {
+    const source = parseWorkflow("cowork-reader-compile-fixture.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ uses?: string; run?: string; with?: Record<string, unknown> }> }> };
+    expect(source.on).toEqual({
+      push: { branches: ["cowork/instruction-reader-compile-fixture"], paths: [".github/workflows/cowork-reader-compile-fixture.yml", "scripts/guest-reader-build/**", "test/gates/release-gates.test.ts"] },
+      workflow_dispatch: {},
+    });
+    expect(source.permissions).toEqual({ contents: "read" });
+    expect(Object.keys(source.jobs ?? {})).toEqual(["compile-only"]);
+    const job = source.jobs?.["compile-only"];
+    expect(job?.if).toBe("github.ref == 'refs/heads/cowork/instruction-reader-compile-fixture'");
+    expect(job?.steps?.length).toBe(8);
+    for (const step of job?.steps ?? []) {
+      if (step.uses?.startsWith("actions/checkout")) expect(step.with?.["persist-credentials"]).toBe(false);
+      if (step.run) expect(step.run).not.toMatch(/sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher)?(?:\s|$)/);
+    }
+    const checkouts = job?.steps?.filter((step) => step.uses?.startsWith("actions/checkout")) ?? [];
+    expect(checkouts.slice(1).map((step) => step.with?.ref)).toEqual([
+      "0394b36f674765c942f8db07f009b7ad20787dba",
+      "8603da22d9fe7f1695166891cd29ccd254b1d21e",
+      "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
+    ]);
   });
 
   test("the npm leg is token-gated and carries provenance; the GitHub Packages leg carries `packages: write`", () => {
