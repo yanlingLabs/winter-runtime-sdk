@@ -156,3 +156,13 @@ nested/unknown condition, dist, outside, missing/unbundled and foreign package
 fallbacks refuse. The raw bare spelling and manifest hash remain separate derived
 resolution evidence; missing compiler `original` remains counted as ambiguity.
 No new compiler run, packet or runtime/native execution follows from this source.
+
+Bare-cache evidence follows pinned
+[bundle_v2](https://github.com/oven-sh/bun/blob/0d9b296af33f2b851fcbf4df3e9ec89751734ba4/src/bundler/bundle_v2.zig#L3323-L3344):
+the source-index cache-hit branch retains bare path text after prior resolution;
+the new-file branch discloses its absolute target. Every derived export therefore
+requires a disclosed absolute inbound edge to that same canonical input. Disclosed
+same-specifier edges from the same origin must agree. Export condition order is
+pinned to `types`, `bun`, `default`, placing the source bun condition before the
+unconditional default. Staged tsconfig.json/jsconfig.json in importer ancestry
+and nearer family aliases refuse; this helper never models their path overrides.

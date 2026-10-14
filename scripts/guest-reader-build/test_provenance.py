@@ -135,13 +135,17 @@ class PacketTests(unittest.TestCase):
         with self.assertRaisesRegex(p.Refusal,'non-builtin external'):b.graph_evidence(normalized,self.output,manifest)
     def bare_fixture(self):
         types='src/run-home/types.ts';put(self.runtime,types,b'export const types = true;')
+        transport='src/guest/instruction-reader-transport.ts';put(self.runtime,transport,b'export const transport = true;')
+        sdk=self.sdk/'packages/sdk/package.json';value=json.loads(sdk.read_bytes());value['exports']['.']={'types':'./dist/index.d.ts','bun':'./src/index.ts','default':'./dist/index.js'};sdk.write_text(json.dumps(value))
         catalog=self.sdk/'packages/provider-catalog/package.json';value=json.loads(catalog.read_bytes());value['exports']['./families']={'types':'./dist/families.d.ts','bun':'./src/families.ts','default':'./dist/families.js'};catalog.write_text(json.dumps(value))
         put(self.sdk,'packages/provider-catalog/src/families.ts',b'export const families = [];')
         self.heads['runtime']=git_commit(self.runtime);self.heads['sdk']=git_commit(self.sdk);manifest=self.prepare()
-        names=['source/runtime/'+p.READER_ENTRY,'source/runtime/'+types,'source/sdk/packages/sdk/src/index.ts','source/sdk/packages/provider-catalog/src/families.ts']
+        names=['source/runtime/'+p.READER_ENTRY,'source/runtime/'+types,'source/sdk/packages/sdk/src/index.ts','source/sdk/packages/provider-catalog/src/families.ts','source/runtime/'+transport,'source/sdk/packages/provider-catalog/src/index.ts']
         data={'inputs':{str(self.output/name):{'bytes':manifest['stagedInputs'][name]['bytes'],'imports':[]} for name in names}}
         for name in names[:2]:data['inputs'][str(self.output/name)]['imports']=[{'kind':'import-statement','path':'@yanlinglabs/winter-agent-sdk'}]
         data['inputs'][str(self.output/names[2])]['imports']=[{'kind':'import-statement','path':'@yanlinglabs/winter-provider-catalog/families'}]
+        data['inputs'][str(self.output/names[4])]['imports']=[{'kind':'import-statement','path':str(self.output/names[2]),'original':'@yanlinglabs/winter-agent-sdk'}]
+        data['inputs'][str(self.output/names[5])]['imports']=[{'kind':'import-statement','path':str(self.output/names[3]),'original':'./families.ts'}]
         return manifest,names,data
     def test_exact_observed_bare_sdk_root_and_families_records(self):
         manifest,names,data=self.bare_fixture();normalized,_=b.normalized_metafile(data,self.output,manifest);graph=b.graph_evidence(normalized,self.output,manifest)
@@ -167,6 +171,24 @@ class PacketTests(unittest.TestCase):
         for item in ({'path':str(self.output/names[2])},{'path':'../../node_modules/@yanlinglabs/winter-agent-sdk/src/index.ts'},{'path':'fs','external':True}):
             imports[0]={'kind':'import-statement','capturedBareExport':{'rawPath':'forged'},**item}
             with self.assertRaisesRegex(p.Refusal,'evidence collision'):b.normalized_metafile(data,self.output,manifest)
+    def test_bare_sdk_disclosed_corroboration_and_disagreement_refuse(self):
+        manifest,names,data=self.bare_fixture();disclosed=data['inputs'][str(self.output/names[4])]['imports'];saved=list(disclosed)
+        disclosed.clear()
+        with self.assertRaisesRegex(p.Refusal,'target undisclosed'):b.normalized_metafile(data,self.output,manifest)
+        disclosed.extend(saved);disclosed[0]['path']=str(self.output/names[3])
+        # Keep another real inbound edge so disagreement, not absence, must refuse.
+        data['inputs'][str(self.output/names[5])]['imports'].append({'kind':'import-statement','path':str(self.output/names[2]),'original':'./different.ts'})
+        with self.assertRaisesRegex(p.Refusal,'disclosed disagreement'):b.normalized_metafile(data,self.output,manifest)
+    def test_bare_sdk_importer_config_and_nearer_alias_refuse(self):
+        manifest,names,data=self.bare_fixture();measured=manifest['stagedInputs']
+        for name in ('source/runtime/src/guest/tsconfig.json','source/runtime/jsconfig.json','source/sdk/packages/sdk/tsconfig.json'):
+            measured[name]={'kind':'file','sha256':p.digest(b'{}'),'bytes':2}
+            with self.assertRaisesRegex(p.Refusal,'importer config'):b.normalized_metafile(data,self.output,manifest)
+            del measured[name]
+        for name in ('source/runtime/src/guest/node_modules/@yanlinglabs/winter-agent-sdk','source/runtime/src/node_modules/@yanlinglabs/winter-agent-sdk/package.json'):
+            measured[name]={'kind':'file','sha256':p.digest(b'{}'),'bytes':2}
+            with self.assertRaisesRegex(p.Refusal,'nearer alias'):b.normalized_metafile(data,self.output,manifest)
+            del measured[name]
     def test_bare_sdk_manifest_conditions_and_byte_binding_refuse(self):
         manifest,names,data=self.bare_fixture();name='source/sdk/packages/sdk/package.json';path=self.output/name;original=path.read_bytes();value=json.loads(original);path.chmod(0o600)
         path.write_bytes(original+b' ')
@@ -175,6 +197,7 @@ class PacketTests(unittest.TestCase):
         for selected in ('./src/index.ts',{'default':'./dist/index.js'},{'bun':'./dist/index.js'},{'bun':'./src/../index.ts'},{'bun':'./src/missing.ts'},{'bun':'/tmp/outside.ts'},{'bun':'./src/index.ts','import':{'default':'./src/index.ts'}},{'bun':['./src/index.ts']}):
             variants.append({**value,'exports':{'.':selected}})
         variants.append({**value,'exports':{'.':value['exports']['.'],'./*':{'bun':'./src/index.ts'}}})
+        variants.append({**value,'exports':{'.':{'default':'./dist/index.js','bun':'./src/index.ts','types':'./dist/index.d.ts'}}})
         for wrong in variants:
             raw=json.dumps(wrong).encode();path.write_bytes(raw);manifest['stagedInputs'][name]={'kind':'file','sha256':p.digest(raw),'bytes':len(raw)}
             with self.assertRaises(p.Refusal):b.normalized_metafile(data,self.output,manifest)

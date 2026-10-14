@@ -238,7 +238,7 @@ def manifest_target(text,packet,measured,base='stage'):
     # Pure manifest graph; never look up an unmeasured filesystem fallback.
     return p.resolved_link('metafile-anchor',relative,measured)
 def captured_bare_export(target,importer,packet,manifest,bundled):
-    """Only explicit captured SDK aliases and literal source bun exports; no resolver search."""
+    """Pinned Bun0d9 bundle_v2:3323-3344 cache hits need disclosed absolute edges."""
     if type(target)!=str or len(target.encode())>4096:p.refuse('bare SDK specifier')
     parts=target.split('/');package='/'.join(parts[:2])
     names={'@yanlinglabs/'+name:folder for name,folder in p.SDK_PACKAGES.items()}
@@ -250,7 +250,15 @@ def captured_bare_export(target,importer,packet,manifest,bundled):
     if len(parts)>2 and not subpath:p.refuse('bare SDK subpath')
     if not importer.startswith(('source/runtime/','source/sdk/')):p.refuse('bare SDK importer origin')
     origin=importer.split('/')[1];alias='source/'+origin+'/node_modules/'+package
-    measured=manifest['stagedInputs'];binding=manifest['resolverBindings'].get(alias)
+    measured=manifest['stagedInputs'];origin_root=Path('source/'+origin);directory=Path(importer).parent
+    while True:
+        if any((directory/name).as_posix() in measured for name in ('tsconfig.json','jsconfig.json')):p.refuse('bare SDK importer config')
+        nearer=(directory/'node_modules'/package).as_posix()
+        if directory!=origin_root and (nearer in measured or any(name.startswith(nearer+'/') for name in measured)):p.refuse('bare SDK nearer alias')
+        if directory==origin_root:break
+        if directory==directory.parent:p.refuse('bare SDK importer ancestry')
+        directory=directory.parent
+    binding=manifest['resolverBindings'].get(alias)
     if type(binding)!=dict or binding.get('package')!=package or binding.get('origin')!='sdk' or binding.get('version')!='0.0.53':p.refuse('bare SDK alias identity')
     if measured.get(alias)!={'kind':'symlink','target':binding.get('target')}:p.refuse('bare SDK alias differs')
     directory='source/sdk/packages/'+names[package]
@@ -264,7 +272,7 @@ def captured_bare_export(target,importer,packet,manifest,bundled):
     exports=value.get('exports')
     if type(exports)!=dict or not exports or any(type(key)!=str or '*' in key or (key!='.' and not key.startswith('./')) for key in exports):p.refuse('bare SDK exact exports required')
     key='.' if not subpath else './'+subpath;selected=exports.get(key)
-    if type(selected)!=dict or not selected or set(selected)-{'types','bun','default'} or any(type(item)!=str for item in selected.values()):p.refuse('bare SDK export conditions')
+    if type(selected)!=dict or list(selected)!=['types','bun','default'] or any(type(item)!=str for item in selected.values()):p.refuse('bare SDK export conditions')
     declared=selected.get('bun')
     if type(declared)!=str or not declared.startswith('./src/') or not re.fullmatch(r'\./src/[A-Za-z0-9_./-]+',declared):p.refuse('bare SDK source bun export')
     relative=p.relative(declared[2:]);resolved=p.resolved_link('bare-export-anchor',directory+'/'+relative,measured)
@@ -294,7 +302,7 @@ def normalized_metafile(data,packet,manifest):
         if isinstance(value,list):return [remap(item) for item in value]
         if isinstance(value,dict):return {remap(key):remap(item) for key,item in value.items()}
         return value
-    normalized=remap(data);normalized_inputs={};edge_count=0
+    normalized=remap(data);normalized_inputs={};edge_count=0;disclosed=[];derived=[]
     for raw,info in data['inputs'].items():
         record=remap(info);imports=info.get('imports',[])
         if type(imports)!=list:p.refuse('metafile import list')
@@ -317,11 +325,18 @@ def normalized_metafile(data,packet,manifest):
                     resolved,evidence=captured_bare_export(target,mapped[raw],packet,manifest,bundled)
                     copy['capturedBareExport']=evidence
                 if resolved not in bundled:p.refuse('outside/non-bundled import target')
+                if target.startswith('/'):disclosed.append({'source':mapped[raw],'original':item.get('original'),'target':resolved})
+                if 'capturedBareExport' in copy:derived.append({'source':mapped[raw],**copy['capturedBareExport']})
                 copy['path']=resolved
             normalized_imports.append(copy)
         record['imports']=normalized_imports
         if mapped[raw] in normalized_inputs:p.refuse('duplicate canonical metafile input')
         normalized_inputs[mapped[raw]]=record
+    # Pinned bundle_v2 cache hits retain the bare spelling after a prior real resolution.
+    for item in derived:
+        if not any(edge['target']==item['resolvedTarget'] for edge in disclosed):p.refuse('bare SDK target undisclosed')
+        for edge in disclosed:
+            if edge['original']==item['rawPath'] and edge['source'].split('/')[1]==item['source'].split('/')[1] and edge['target']!=item['resolvedTarget']:p.refuse('bare SDK disclosed disagreement')
     normalized['inputs']=normalized_inputs
     refuse_private_wire(normalized,packet)
     return normalized,{name:measured[name] for name in sorted(bundled)}
