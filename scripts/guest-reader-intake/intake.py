@@ -439,6 +439,9 @@ def rehydrate_packet(validated: ValidatedPacket, destination: Path, *, layout='p
     leaves = validated._inventory['files']
     mapped = {name: output_name(name, layout) for name in leaves}
     require(len(set(mapped.values())) == len(mapped), 'layout collision')
+    dirs = sorted({str(p) for name in mapped.values() for p in PurePosixPath(name).parents
+                   if str(p) != '.'}, key=lambda n: (n.count('/'), n))
+    require(not (set(mapped.values()) & set(dirs)), 'layout leaf/directory collision')
     # Aliases are mapped from their resolved, validated captured target identity,
     # never guessed from an archive spelling or an uncaptured filesystem path.
     links = {}
@@ -446,8 +449,6 @@ def rehydrate_packet(validated: ValidatedPacket, destination: Path, *, layout='p
         new_name = mapped[name]
         target = output_name(resolved, layout)
         links[new_name] = posixpath.relpath(target, posixpath.dirname(new_name))
-    dirs = sorted({str(p) for name in mapped.values() for p in PurePosixPath(name).parents
-                   if str(p) != '.'}, key=lambda n: (n.count('/'), n))
     with directory_fd(destination.parent) as parent:
         require(os.fstat(parent).st_uid == os.geteuid(), 'output parent ownership')
         os.mkdir(destination.name, 0o700, dir_fd=parent)
@@ -492,9 +493,13 @@ def rehydrate_packet(validated: ValidatedPacket, destination: Path, *, layout='p
                 finally:
                     os.close(fd)
             os.fchmod(root_fd, 0o500)
-        except BaseException:
+        except BaseException as original:
             # Only fresh children made above are cleaned. Never follow aliases.
-            os.fchmod(root_fd, 0o700)
+            cleanup_uncertain = False
+            try:
+                os.fchmod(root_fd, 0o700)
+            except OSError:
+                cleanup_uncertain = True
             for name in dirs:
                 try:
                     with relative_parent(root_fd, name) as (parent_fd, leaf):
@@ -503,9 +508,14 @@ def rehydrate_packet(validated: ValidatedPacket, destination: Path, *, layout='p
                             os.fchmod(fd, 0o700)
                         finally:
                             os.close(fd)
-                except FileNotFoundError:
-                    pass
-            shutil.rmtree(destination.name, dir_fd=parent)
+                except (OSError, Refusal):
+                    cleanup_uncertain = True
+            try:
+                shutil.rmtree(destination.name, dir_fd=parent)
+            except BaseException:
+                cleanup_uncertain = True
+            if cleanup_uncertain:
+                original.add_note('Output cleanup could not be fully confirmed; no receipt was issued.')
             raise
         finally:
             os.close(root_fd)

@@ -376,6 +376,39 @@ class IntakeTests(unittest.TestCase):
             spool = Path(validated._temporary.name)
         self.assertFalse(spool.exists())
 
+    def test_cleanup_directory_error_still_attempts_removal_and_preserves_original(self):
+        self.fixture.write()
+        destination = self.root / 'output'
+        real_parent = intake.relative_parent
+        state = {'cleanup': False}
+        def copy_failure(*args, **kwargs):
+            state['cleanup'] = True
+            raise intake.Refusal('original copy failure')
+        def parent_failure(*args, **kwargs):
+            if state['cleanup']:
+                raise NotADirectoryError('injected cleanup traversal failure')
+            return real_parent(*args, **kwargs)
+        with self.fixture.validate() as validated:
+            with mock.patch.object(intake, 'input_file', side_effect=copy_failure), \
+                 mock.patch.object(intake, 'relative_parent', side_effect=parent_failure), \
+                 mock.patch.object(intake.shutil, 'rmtree', wraps=shutil.rmtree) as remove:
+                with self.assertRaisesRegex(intake.Refusal, '^original copy failure$'):
+                    intake.rehydrate_packet(validated, destination)
+                remove.assert_called_once()
+            self.assertFalse(destination.exists())
+
+    def test_mapped_leaf_directory_collision_refuses_before_output(self):
+        self.fixture.write()
+        destination = self.root / 'output'
+        real_name = intake.output_name
+        def colliding_name(name, layout):
+            return 'sdk' if name == 'inputs.json' else real_name(name, layout)
+        with self.fixture.validate() as validated:
+            with mock.patch.object(intake, 'output_name', side_effect=colliding_name):
+                with self.assertRaisesRegex(intake.Refusal, 'layout leaf/directory collision'):
+                    intake.rehydrate_packet(validated, destination, layout='siblings')
+            self.assertFalse(destination.exists())
+
     def test_validation_cleanup_on_late_refusal(self):
         self.fixture.write(missing='receipt.json')
         real_create = tempfile.TemporaryDirectory

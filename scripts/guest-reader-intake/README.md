@@ -34,7 +34,9 @@ with validate_packet(archive, inventory) as validated:
 - `rehydrate_packet(validated: ValidatedPacket, destination: Path, *,
   layout="packet") -> dict` copies only that validated spool into a fresh
   destination. It rechecks each held file's hash while copying. Existing output
-  is refused; a copy failure removes the freshly created destination.
+  is refused. A copy failure attempts removal of the freshly created destination,
+  preserving the original failure even if cleanup encounters another error; an
+  exception note reports uncertain cleanup and no receipt is issued.
 - `load_pin(path=None) -> dict` reads a bounded pin JSON file without following
   filesystem symlinks or accepting a hardlinked file. The pin file and this tool
   are trusted caller-owned source and must be hash-bound by any future external
