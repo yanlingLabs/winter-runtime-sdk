@@ -164,11 +164,44 @@ jobs:
             ${{ env.READER_FIXTURE }}/packet-inventory.json
           if-no-files-found: error
           retention-days: 7
-      - name: Retain bounded compiler refusal diagnostics
+      - name: Bound raw reader metadata for this public-source diagnostic
+        id: reader_metafile_check
         if: failure() && env.READER_FIXTURE != ''
+        shell: bash
+        run: |
+          python3 -I -S -B - "$READER_FIXTURE" <<'PY'
+          import os, stat, sys
+          limit=16*1024*1024;held=[]
+          identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+          try:
+              fd=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);held.append(fd)
+              try:
+                  for name in ('packet','artifacts'):
+                      fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd);held.append(fd)
+                  fd=os.open('instructionReader.metafile.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=fd);held.append(fd)
+              except FileNotFoundError:
+                  print('Raw reader metadata absent; bounded diagnostic records only.')
+              else:
+                  before=os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit:raise ValueError('raw reader metadata bound')
+                  total=0
+                  while True:
+                      chunk=os.read(fd,min(65536,limit-total+1))
+                      if not chunk:break
+                      total+=len(chunk)
+                      if total>limit:raise ValueError('raw reader metadata grew')
+                  if total!=before.st_size or identity(before)!=identity(os.fstat(fd)):raise ValueError('raw reader metadata changed')
+                  print('Raw reader metadata observed bounded; diagnostic-only, unadmitted, public-source fixture.')
+          finally:
+              for fd in reversed(held):os.close(fd)
+          PY
+      - name: Retain bounded compiler refusal diagnostics
+        if: failure() && env.READER_FIXTURE != '' && steps.reader_metafile_check.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: reader-compile-diagnostics-${{ github.run_id }}
-          path: ${{ env.READER_FIXTURE }}/packet/diagnostics/*.json
+          path: |
+            ${{ env.READER_FIXTURE }}/packet/diagnostics/*.json
+            ${{ env.READER_FIXTURE }}/packet/artifacts/instructionReader.metafile.json
           if-no-files-found: ignore
           retention-days: 7

@@ -106,7 +106,7 @@ describe("the release workflow", () => {
     expect(Object.keys(source.jobs ?? {})).toEqual(["compile-only"]);
     const job = source.jobs?.["compile-only"];
     expect(job?.if).toBe("github.ref == 'refs/heads/cowork/instruction-reader-compile-fixture'");
-    expect(job?.steps?.length).toBe(9);
+    expect(job?.steps?.length).toBe(10);
     for (const step of job?.steps ?? []) {
       if (step.uses?.startsWith("actions/checkout")) expect(step.with?.["persist-credentials"]).toBe(false);
       if (step.run) expect(step.run).not.toMatch(/sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher)?(?:\s|$)/);
@@ -122,15 +122,21 @@ describe("the release workflow", () => {
     expect(uploads.length).toBe(2);
     expect(uploads[1]).toEqual({
       name: "Retain bounded compiler refusal diagnostics",
-      if: "failure() && env.READER_FIXTURE != ''",
+      if: "failure() && env.READER_FIXTURE != '' && steps.reader_metafile_check.outcome == 'success'",
       uses: "actions/upload-artifact@v4",
       with: {
         name: "reader-compile-diagnostics-${{ github.run_id }}",
-        path: "${{ env.READER_FIXTURE }}/packet/diagnostics/*.json",
+        path: "${{ env.READER_FIXTURE }}/packet/diagnostics/*.json\n${{ env.READER_FIXTURE }}/packet/artifacts/instructionReader.metafile.json\n",
         "if-no-files-found": "ignore",
         "retention-days": 7,
       },
     });
+    const rawCheck = job?.steps?.find((step) => step.name === "Bound raw reader metadata for this public-source diagnostic");
+    expect(rawCheck?.if).toBe("failure() && env.READER_FIXTURE != ''");
+    expect(rawCheck?.run).toContain("limit=16*1024*1024");
+    expect(rawCheck?.run).toContain("stat.S_ISREG(before.st_mode)");
+    expect(rawCheck?.run).toContain("os.O_NOFOLLOW|os.O_NONBLOCK");
+    expect(rawCheck?.run).toContain("diagnostic-only, unadmitted, public-source fixture");
     const text = readWorkflow("cowork-reader-compile-fixture.yml");
     expect(text).toContain("--builder-head 73de25a7ac606c32a9df22bf5591f5db66c159ee");
     expect(text).toContain("if name=='artifacts/native.d':continue");
