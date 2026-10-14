@@ -12,7 +12,10 @@ permissions:
   actions: read
 jobs:
   reader-only:
-    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-bootstrap'
+    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-bootstrap' && github.run_attempt == '1'
+    concurrency:
+      group: reader-native-reviewed
+      cancel-in-progress: false
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
@@ -39,12 +42,12 @@ jobs:
             const privateDir=fs.realpathSync(fs.mkdtempSync(path.join(process.env.RUNNER_TEMP,'reader-native-')));fs.chmodSync(privateDir,0o700);
             const source=path.join(process.env.GITHUB_WORKSPACE,'origins/bootstrap/scripts/guest-reader-native/download.cjs');
             const fd=fs.openSync(source,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
-            let raw;try {const s=fs.fstatSync(fd);if(!s.isFile()||s.nlink!==1||s.size>65536)throw new Error('download_source_refused');raw=fs.readFileSync(fd);}finally{fs.closeSync(fd);}
+            let raw;try {const s=fs.fstatSync(fd);if(!s.isFile()||s.nlink!==1||s.size>65536)throw new Error('download_source_refused');const buffer=Buffer.alloc(65537);let at=0,n;while((n=fs.readSync(fd,buffer,at,buffer.length-at,null))>0){at+=n;if(at>65536)throw new Error('download_source_bound');}const end=fs.fstatSync(fd);if(at!==s.size||s.dev!==end.dev||s.ino!==end.ino||s.size!==end.size||s.mtimeMs!==end.mtimeMs||s.ctimeMs!==end.ctimeMs)throw new Error('download_source_changed');raw=buffer.subarray(0,at);}finally{fs.closeSync(fd);}
             if(crypto.createHash('sha256').update(raw).digest('hex')!=='65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99') throw new Error('download_source_pin');
             const checked=new Module(source);checked.filename=source;checked.paths=[];checked._compile(raw.toString('utf8'),source);
             const result=await checked.exports.download({github,context,destination:path.join(privateDir,'download')});
             const record=path.join(privateDir,'download.json');fs.writeFileSync(record,JSON.stringify(result),{flag:'wx',mode:0o600});
-            core.setOutput('private',privateDir);core.setOutput('record',record);
+            const identity=fs.statSync(privateDir);core.setOutput('identity',JSON.stringify({dev:identity.dev,ino:identity.ino,uid:identity.uid,gid:identity.gid,mode:identity.mode}));core.setOutput('private',privateDir);core.setOutput('record',record);
       - name: Token-free complete packet DATA intake
         id: data
         env:
@@ -78,12 +81,19 @@ jobs:
       - name: One separately admitted reader-only case set
         env:
           READER_DATA_RECORD: ${{ steps.data.outputs.record }}
+          READER_PRIVATE_IDENTITY: ${{ steps.download.outputs.identity }}
           READER_PRIVATE: ${{ steps.download.outputs.private }}
         run: |
-          sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B - "$GITHUB_WORKSPACE/origins/base" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native/bootstrap.py" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native/wrapper.py" "$READER_DATA_RECORD" "$READER_PRIVATE/result.json" <<'PY'
+          sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B - "$GITHUB_WORKSPACE/origins/base" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native/bootstrap.py" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native/wrapper.py" "$READER_DATA_RECORD" "$READER_PRIVATE/result.json" "$READER_PRIVATE_IDENTITY" <<'PY'
           import hashlib,json,os,stat,sys,tempfile,types
           from pathlib import Path
-          base,source,wrapper,data_file,result_file=map(Path,sys.argv[1:])
+          base,source,wrapper,data_file,result_file=map(Path,sys.argv[1:6])
+          expected=json.loads(sys.argv[6])
+          output_dir=os.open(result_file.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+          owner=os.fstat(output_dir)
+          if not stat.S_ISDIR(owner.st_mode) or stat.S_IMODE(owner.st_mode)!=0o700 or {'dev':owner.st_dev,'ino':owner.st_ino,'uid':owner.st_uid,'gid':owner.st_gid,'mode':owner.st_mode}!=expected:raise ValueError('output_parent')
+          named=os.stat(result_file.parent,follow_symlinks=False)
+          if (named.st_dev,named.st_ino)!=(owner.st_dev,owner.st_ino):raise ValueError('output_parent_replaced')
           root=Path(tempfile.mkdtemp(prefix='winter-reader-native-',dir='/run'));os.chmod(root,0o700)
           try:
               fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -109,7 +119,8 @@ jobs:
               if hashlib.sha256(checked).hexdigest()!='6375274c90772356b1ab307d836146586ce8e1561eeceb9bf642a30ffabb5e81':raise ValueError('protected_bootstrap_pin')
               module=types.ModuleType('_reader_root_bootstrap');module.__file__=str(protected);sys.modules[module.__name__]=module
               exec(compile(checked,str(protected),'exec'),module.__dict__)
-              fd=os.open(data_file,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+              if data_file.parent!=result_file.parent or data_file.name!='data.json':raise ValueError('data_record_path')
+              fd=os.open('data.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=output_dir)
               try:
                   info=os.fstat(fd)
                   if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>1048576:raise ValueError('data_record')
@@ -118,8 +129,18 @@ jobs:
               result=module.run_root(base,root,data,'399928685ca16702699f021cd410c397324e4264b1bb8ec99090d6279c7b9fa4',wrapper_source=wrapper)
               if hashlib.sha256(protected.read_bytes()).hexdigest()!='6375274c90772356b1ab307d836146586ce8e1561eeceb9bf642a30ffabb5e81':raise ValueError('bootstrap_final_pin')
           except BaseException as error:
-              result={'readerCaseSetPassed':False,'reason':'reader_native_refused','exceptionClass':type(error).__name__ if type(error).__name__ in ('Refusal','Uncertain','ValueError','OSError') else 'Other','nativeCleanupConfirmed':False,'configEffectProven':False,'vmExecutionVerified':False,'productionActivation':False}
-              fd=os.open(result_file,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+              allowed={'case absolute deadline','owned private PID namespace init','live init and launcher before case trigger','same-owner native control outcome','unexpected-parent exact native refusal','producer death killed launcher and adopted init','independent launcher and pipe teardown','independent init pidfd teardown','reader fixture/correlation mismatch','unexpected reader stderr','reader_wrapper_uncertain','native case uncertain; ownership retained','artifact expired or clock unavailable','bootstrap_source_pin','bootstrap_final_pin','data_record'}
+              cause=getattr(error,'cause',None)
+              for _ in range(2):
+                  if type(cause).__name__ not in ('Uncertain','CaseUncertain'):break
+                  nested=getattr(cause,'cause',None)
+                  if nested is None:break
+                  cause=nested
+              reason=str(error) if type(error).__name__ in ('Refusal','Uncertain','ValueError') and str(error) in allowed else 'reader_native_refused'
+              cause_class=type(cause).__name__ if type(cause).__name__ in ('Refusal','Uncertain','ValueError','OSError') else 'Other'
+              cause_reason=str(cause) if type(cause).__name__ in ('Refusal','Uncertain','ValueError') and str(cause) in allowed else 'unclassified'
+              result={'readerCaseSetPassed':False,'reason':reason,'causeClass':cause_class,'causeReason':cause_reason,'exceptionClass':type(error).__name__ if type(error).__name__ in ('Refusal','Uncertain','ValueError','OSError') else 'Other','nativeCleanupConfirmed':False,'configEffectProven':False,'vmExecutionVerified':False,'productionActivation':False}
+              fd=os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)
               try:
                   payload=json.dumps(result,sort_keys=True).encode()+b'\n'
                   at=0
@@ -127,10 +148,13 @@ jobs:
                       n=os.write(fd,payload[at:])
                       if n<=0:raise ValueError('result_write')
                       at+=n
-                  os.fsync(fd);os.fchmod(fd,0o444)
+                  os.fsync(fd);os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)
+                  copied=os.fstat(fd)
+                  if copied.st_nlink!=1 or copied.st_uid!=owner.st_uid or stat.S_IMODE(copied.st_mode)!=0o600:raise ValueError('result_identity')
               finally:os.close(fd)
+              os.close(output_dir)
               print(json.dumps(result,sort_keys=True));raise SystemExit(78) from None
-          fd=os.open(result_file,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+          fd=os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)
           try:
               payload=json.dumps(result,sort_keys=True).encode()+b'\n'
               at=0
@@ -138,8 +162,11 @@ jobs:
                   n=os.write(fd,payload[at:])
                   if n<=0:raise ValueError('result_write')
                   at+=n
-              os.fsync(fd);os.fchmod(fd,0o444)
+              os.fsync(fd);os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)
+              copied=os.fstat(fd)
+              if copied.st_nlink!=1 or copied.st_uid!=owner.st_uid or stat.S_IMODE(copied.st_mode)!=0o600:raise ValueError('result_identity')
           finally:os.close(fd)
+          os.close(output_dir)
           print(json.dumps(result,sort_keys=True))
           PY
       - name: Retain only closed experiment result

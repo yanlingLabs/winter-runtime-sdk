@@ -154,7 +154,7 @@ describe("the release workflow", () => {
     expect(source.permissions).toEqual({ contents: "read", actions: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["reader-only"]);
     const job = source.jobs?.["reader-only"], steps = job?.steps ?? [];
-    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-bootstrap'");
+    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-bootstrap' && github.run_attempt == '1'");
     expect(steps.length).toBe(6);
     for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
     expect(steps[0].with).toEqual({ ref: "4d5dfcec9454d33e8423713491ced08b58669f58", path: "origins/base", "persist-credentials": false });
@@ -172,6 +172,13 @@ describe("the release workflow", () => {
     expect(text).toContain("sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B");
     expect(text).toContain("checked._compile(raw.toString('utf8'),source)");
     expect(text).toContain("exec(compile(checked,str(protected),'exec'),module.__dict__)");
+    expect(text).toContain("group: reader-native-reviewed");
+    expect(text).toContain("cancel-in-progress: false");
+    expect(text).toContain("Buffer.alloc(65537)");
+    expect(text).not.toContain("fs.readFileSync(fd)");
+    expect(text).toContain("os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)");
+    expect(text).toContain("os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)");
+    expect(text).toContain("causeReason");
     expect(steps[5].with?.path).toBe("${{ steps.download.outputs.private }}/result.json");
   });
 
