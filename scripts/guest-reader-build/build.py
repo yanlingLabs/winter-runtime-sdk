@@ -289,23 +289,6 @@ def normalized_metafile(data,packet,manifest):
     normalized['inputs']=normalized_inputs
     refuse_private_wire(normalized,packet)
     return normalized,{name:measured[name] for name in sorted(bundled)}
-def unknown_flag_probe(runner,compiler_fd,packet,recipe):
-    negative=packet/'stage/negative';negative.mkdir(mode=0o700);bogus='--winter-reader-build-option-must-refuse'
-    args=[arg.replace(str(packet/'artifacts'),str(negative)) for arg in recipe]+[bogus]
-    try:runner(['/proc/self/fd/'+str(compiler_fd),*args],packet/'stage',120,(compiler_fd,))
-    except CommandFailure as failure:
-        # An argv echo or unrelated compiler error cannot satisfy this attribution.
-        pattern=re.compile(r"(?:error: )?(?:unknown|unrecognized|unsupported|invalid|unexpected) (?:command.line )?(?:flag|option|argument)(?:[: =]+|\s+)[\"'`]?"+re.escape(bogus)+r"[\"'`]?\.?",re.IGNORECASE)
-        lines=failure.stderr.decode('utf8').splitlines()
-        matches=[line for line in lines if len(line.encode())<=512 and pattern.fullmatch(line.strip())]
-        if failure.code!=1 or len(matches)!=1:p.refuse('unknown flag refusal mismatch')
-        negative_fd=p.root_fd(negative)
-        try:
-            with os.scandir(negative_fd) as entries:
-                if next(entries,None) is not None:p.refuse('unknown flag created output')
-        finally:os.close(negative_fd)
-        return {'exitCode':failure.code,'diagnosticClass':'unique_unknown_flag','stdoutSha256':p.digest(failure.stdout),'stdoutBytes':len(failure.stdout),'stderrSha256':p.digest(failure.stderr),'stderrBytes':len(failure.stderr),'outputCreated':False,'receiptCreated':False}
-    p.refuse('unknown flag was accepted')
 def graph_evidence(metafile,packet,manifest):
     measured=manifest['stagedInputs'];references=[];edges=[];used=set();missing_original=0
     bound=0
@@ -336,6 +319,88 @@ def graph_evidence(metafile,packet,manifest):
     required={binding['package'] for binding in manifest['resolverBindings'].values() if binding['origin']=='dependencies'}
     if used!=required:p.refuse('unused third-party resolver binding')
     return {'edges':edges,'bareReferences':references,'missingOriginalCount':missing_original,'staticMetafileOnly':True,'dynamicRuntimeImportsVerified':False}
+BUN_SOURCE_COMMIT='0d9b296af33f2b851fcbf4df3e9ec89751734ba4'
+POSITIVE_AUTOLOAD=tuple(flag.replace('--no-compile-','--compile-',1) for flag in p.AUTOLOAD_FLAGS)
+OPAQUE_SOURCE=b'await import(globalThis.__winter_reader_missing_specifier);\n'
+def measurement_inventory(directory):
+    result={};fd=p.root_fd(directory);total=0
+    try:
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                if len(result)>=16:p.refuse('measurement output count')
+                name=p.relative(entry.name);info=entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):p.refuse('measurement output regular file')
+                held=p.leaf(fd,name)
+                try:data=p.read_fd(held,p.MAX_ELF)
+                finally:os.close(held)
+                total+=len(data)
+                if total>2*p.MAX_ELF:p.refuse('measurement output aggregate')
+                result[name]={'sha256':p.digest(data),'bytes':len(data)}
+    finally:os.close(fd)
+    return dict(sorted(result.items()))
+def measurement_recipe(recipe,packet,directory,entry=None):
+    args=[arg.replace(str(packet/'artifacts'),str(directory)) for arg in recipe]
+    if entry is not None:
+        args=[str(entry) if arg==str(packet/'source/runtime'/p.READER_ENTRY) else arg for arg in args]
+    return args
+def run_measurement(runner,compiler_fd,packet,scratch,case,args):
+    directory=scratch/case;directory.mkdir(mode=0o700);stdout=stderr=b'';exit_code=None;runner_error=False
+    try:
+        stdout,stderr=runner(['/proc/self/fd/'+str(compiler_fd),*measurement_recipe(args,packet,directory)],packet/'stage',120,(compiler_fd,));exit_code=0
+    except CommandFailure as failure:stdout=failure.stdout;stderr=failure.stderr;exit_code=failure.code
+    except Exception:runner_error=True
+    capture_refused=type(stdout)!=bytes or type(stderr)!=bytes or len(stdout)+len(stderr)>MAX_OUTPUT
+    if capture_refused:
+        stdout=stdout[:MAX_OUTPUT] if type(stdout)==bytes else b'';stderr=stderr[:max(0,MAX_OUTPUT-len(stdout))] if type(stderr)==bytes else b''
+    record={'formatVersion':1,'kind':'winter-reader-compiler-observation','case':case,'exitCode':exit_code,'runnerError':runner_error,'captureRefused':capture_refused,'captureHashesComplete':not capture_refused and not runner_error,'stdoutSha256':p.digest(stdout),'stdoutBytes':len(stdout),'stderrSha256':p.digest(stderr),'stderrBytes':len(stderr),'outputsExecuted':False,'nativeAdmission':False}
+    try:record['outputs']=measurement_inventory(directory)
+    except Exception:
+        record['outputs']=None;record['inventoryRefused']=True
+    # A durable bounded sanitized observation precedes every semantic refusal.
+    record_path=packet/'diagnostics'/f'{case}.json';write_wire(record_path,record,packet)
+    if runner_error or capture_refused or record.get('inventoryRefused'):p.refuse('measurement observation refused')
+    return record,stderr,directory
+def exact_negative(record,stderr,line):
+    if type(record['exitCode'])!=int or record['exitCode']!=1 or record.get('stdoutBytes')!=0 or record['outputs']!= {}:p.refuse('semantic negative outcome')
+    if stderr!=(line+'\n').encode():p.refuse('semantic negative diagnostic')
+def opaque_diagnostic(opaque):
+    source=OPAQUE_SOURCE.decode().rstrip('\n')
+    error='This import() expression will not be bundled because the argument is not a string literal'
+    note='To allow opaque dynamic specifiers, use Bun.build({ allowUnresolved: [""] }) or pass --allow-unresolved with an empty-string pattern'
+    return ('1 | '+source+'\n'+' '*17+'^\n'+'error: '+error+'\n'+' '*4+'at '+str(opaque)+':1:14\n\n'+'1 | '+source+'\n'+' '*17+'^\n'+'note: '+note+'\n'+' '*3+'at '+str(opaque)+':1:14\n').encode()
+def exact_opaque_negative(record,stderr,opaque):
+    if record['exitCode']!=1 or type(record['exitCode'])!=int or record.get('stdoutBytes')!=0 or record['outputs']!={}:p.refuse('opaque negative outcome')
+    if stderr!=opaque_diagnostic(opaque):p.refuse('opaque diagnostic envelope')
+def parsed_output(record,directory,base_fd,expected_nibble):
+    if record['exitCode']!=0 or 'instructionReader' not in record['outputs']:p.refuse('measurement compile outcome')
+    fd,_=file_input(directory/'instructionReader',p.MAX_ELF)
+    try:
+        base_hash=p.digest(p.read_fd(base_fd,p.MAX_ELF))
+        decoded=p.standalone_flags(fd,base_fd)
+    finally:os.close(fd)
+    if decoded['baseSha256']!=base_hash or decoded['outputSha256']!=record['outputs']['instructionReader']['sha256']:p.refuse('measurement decoded hash mismatch')
+    if decoded['flagsNibble']!=expected_nibble or decoded['payload']['compileExecArgvBytes']!=0:p.refuse('measurement embedded flags')
+    return decoded
+def compiler_semantic_evidence(runner,compiler_fd,base_fd,packet,recipe):
+    scratch=packet.parent/'reader-compiler-measurements';scratch.mkdir(mode=0o700);evidence={};records=[]
+    for index,(negative,positive) in enumerate(zip(p.AUTOLOAD_FLAGS,POSITIVE_AUTOLOAD)):
+        case=f'autoload-pair-{index}'
+        record,stderr,_=run_measurement(runner,compiler_fd,packet,scratch,case,[*recipe,positive]);records.append(record)
+        exact_negative(record,stderr,'error: Cannot use both '+positive+' and '+negative)
+    record,stderr,_=run_measurement(runner,compiler_fd,packet,scratch,'unresolved-pair',[*recipe,'--allow-unresolved=*']);records.append(record)
+    exact_negative(record,stderr,'error: --reject-unresolved and --allow-unresolved cannot be used together')
+    for case,arguments,nibble in (
+        ('autoload-default',[arg for arg in recipe if arg not in p.AUTOLOAD_FLAGS],12),
+        ('autoload-enabled',[POSITIVE_AUTOLOAD[p.AUTOLOAD_FLAGS.index(arg)] if arg in p.AUTOLOAD_FLAGS else arg for arg in recipe],0)):
+        record,_,directory=run_measurement(runner,compiler_fd,packet,scratch,case,arguments);records.append(record)
+        evidence[case]={'observation':record,'embedded':parsed_output(record,directory,base_fd,nibble)}
+    opaque=scratch/'opaque-import.ts';p.write_new(opaque,OPAQUE_SOURCE)
+    opaque_recipe=measurement_recipe(recipe,packet,packet/'artifacts',opaque)
+    record,stderr,_=run_measurement(runner,compiler_fd,packet,scratch,'opaque-rejected',opaque_recipe);records.append(record)
+    exact_opaque_negative(record,stderr,opaque)
+    record,_,directory=run_measurement(runner,compiler_fd,packet,scratch,'opaque-allowed',[arg for arg in opaque_recipe if arg!='--reject-unresolved']);records.append(record)
+    evidence['opaque-control']={'observation':record,'embedded':parsed_output(record,directory,base_fd,15),'sourceSha256':p.digest(OPAQUE_SOURCE),'sourceBytes':len(OPAQUE_SOURCE)}
+    return {'sourceCommit':BUN_SOURCE_COMMIT,'parserCases':records,'differentials':evidence,'unknownLongOptions':{'property':'skipped','observedRun':38494750351,'observedExitCode':0,'usedAsGate':False},'opaqueDynamicRejectionVerified':True,'optionalLiteralImportsVerified':False,'dynamicRuntimeImportsVerified':False,'measurementScratchArchived':False,'outputsExecuted':False}
 def compiler_recipe(packet):
     return ['build','--no-env-file','--config='+str(packet/'stage/empty-bunfig.toml'),'--compile','--reject-unresolved',*p.AUTOLOAD_FLAGS,
       '--target='+p.BASE['target'],'--compile-executable-path='+str(packet/'stage/linux-bun-base'),'--metafile='+str(packet/'artifacts/instructionReader.metafile.json'),
@@ -422,11 +487,15 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
         first=cc_version.decode('utf8').splitlines()[0]
         if len(first.encode())>512 or '/' in first:p.refuse('native compiler version bound')
         compile_args=compiler_recipe(packet)
-        flag_refusal=unknown_flag_probe(runner,compiler_fd,packet,compile_args)
+        semantic_evidence=compiler_semantic_evidence(runner,compiler_fd,base_fd,packet,compile_args)
         runner(['/proc/self/fd/'+str(compiler_fd),*compile_args],packet/'stage',120,(compiler_fd,))
         native_args=[*NATIVE_FLAGS,'-I'+str(packet/'source/overlay/packages/runtime/src/guest'),'-MD','-MF',str(packet/'artifacts/native.d'),
           str(packet/'source/overlay'/p.C_SOURCE),'-o',str(packet/'artifacts/instructionReaderLauncher')]
         runner(['/proc/self/fd/'+str(cc_fd),*native_args],packet/'stage',120,(cc_fd,))
+        reader_fd,_=file_input(packet/'artifacts/instructionReader',p.MAX_ELF)
+        try:reader_flags=p.standalone_flags(reader_fd,base_fd)
+        finally:os.close(reader_fd)
+        if reader_flags['flagsNibble']!=15 or reader_flags['payload']['compileExecArgvBytes']!=0:p.refuse('reader embedded autoload flags')
         # Full system header provenance is an observation, not trusted toolchain proof.
         depfile=read_file(packet/'artifacts/native.d',p.MAX_JSON)
         words=shlex.split(depfile.decode().replace('\\\n',' '),posix=True)
@@ -451,10 +520,11 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
         artifacts={name:packet/'artifacts'/name for name in ('instructionReader','instructionReaderLauncher')}
         bodies,closure=dependency_closure(artifacts,Path(sysroot),packet/'environment')
         if p.digest(read_file(packet/'stage/linux-bun-base',p.MAX_ELF))!=base_meta['sha256']:p.refuse('staged base changed')
+        if reader_flags['outputSha256']!=bodies['instructionReader']['sha256'] or reader_flags['baseSha256']!=base_meta['sha256']:p.refuse('reader decoded hash mismatch')
         for fd,expected in ((compiler_fd,compiler_meta),(base_fd,base_meta),(cc_fd,cc_meta)):
             if p.digest(p.read_fd(fd,p.MAX_ELF))!=expected['sha256']:p.refuse('held tool/base changed')
         receipt={'formatVersion':1,'kind':'winter-reader-compile','inputsSha256':p.digest(read_file(packet/'inputs.json',p.MAX_JSON)),'origins':manifest['origins'],
-          'resolverBindings':manifest['resolverBindings'],'pythonSourceObservations':PYTHON_SOURCE_OBSERVATIONS,'executedPythonSourceAuthenticated':False,'reachableGraph':graph,'unknownFlagRefusal':flag_refusal,'compiler':{'version':pin['version'],**compiler_meta},'base':{**pin,'archiveAcquisitionVerified':False},'nativeCompiler':{'version':first,**cc_meta},
+          'resolverBindings':manifest['resolverBindings'],'pythonSourceObservations':PYTHON_SOURCE_OBSERVATIONS,'executedPythonSourceAuthenticated':False,'reachableGraph':graph,'compilerSemanticEvidence':semantic_evidence,'readerEmbeddedFlags':reader_flags,'compiler':{'version':pin['version'],**compiler_meta},'base':{**pin,'archiveAcquisitionVerified':False},'nativeCompiler':{'version':first,**cc_meta},
           'recipe':{'target':p.BASE['target'],'autoloadFlags':list(p.AUTOLOAD_FLAGS),'environment':p.ENV,'cwd':'stage','outputsExecuted':False},
           'commands':{'bun':['<held-compiler>',*[arg.replace(str(packet),'<packet>') for arg in compile_args]],'nativeCC':['<held-native-cc>',*[arg.replace(str(packet),'<packet>') for arg in native_args]]},'nativeFlags':list(NATIVE_FLAGS),'systemHeaders':headers,'bundledInputs':bundled,'metafileSha256':p.digest(meta_wire),'artifacts':bodies,'runtimeDependencies':closure,
           'dynamicRuntimeImportsVerified':False,'globalBunConfigurationExecutionVerified':False,'staticMetafileOnly':True,'trustedToolchainVerified':False,'dependencyPackageAttestationVerified':False,'autoloadExecutionVerified':False,'nativeOwnerVerified':False,'linuxExecutionVerified':False,'vmExecutionVerified':False,'activationEnabled':False}

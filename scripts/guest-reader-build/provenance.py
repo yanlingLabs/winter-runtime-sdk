@@ -251,6 +251,79 @@ def copy_inventory(root,manifest,destination):
         if inventory(check)!=manifest:refuse('copied inventory differs')
     finally:os.close(check)
 
+def standalone_flags(output_fd,base_fd):
+    """Pinned Bun 1.3.14 standalone layout inspection; never execute or load ELF data."""
+    source_commit='0d9b296af33f2b851fcbf4df3e9ec89751734ba4'
+    def layout(data):
+        if len(data)<64 or data[:7]!=b'\x7fELF\x02\x01\x01':refuse('standalone ELF64 little endian')
+        kind,machine,version=struct.unpack_from('<HHI',data,16)
+        if kind not in (2,3) or machine!=183 or version!=1:refuse('standalone ARM64 ELF')
+        phoff,shoff=struct.unpack_from('<QQ',data,32)
+        ehsize,phsize,phcount,shsize,shcount,strings_index=struct.unpack_from('<HHHHHH',data,52)
+        if ehsize!=64 or phsize!=56 or not 1<=phcount<=256 or phoff<64 or phoff+56*phcount>len(data):refuse('standalone program table')
+        if shsize!=64 or not 1<=shcount<=512 or shoff<64 or shoff+64*shcount>len(data) or not 0<strings_index<shcount:refuse('standalone section table')
+        sections=[struct.unpack_from('<IIQQQQIIQQ',data,shoff+64*i) for i in range(shcount)]
+        strings_section=sections[strings_index];strings_at,strings_size=strings_section[4:6]
+        if strings_section[1]!=3 or not 1<=strings_size<=1024*1024 or strings_at+strings_size>len(data):refuse('standalone section strings')
+        strings=data[strings_at:strings_at+strings_size];bun_sections=[]
+        for section in sections:
+            name_at=section[0]
+            if name_at>=len(strings):refuse('standalone section name')
+            end=strings.find(b'\0',name_at,min(len(strings),name_at+4097))
+            if end<0:refuse('standalone section name bound')
+            if strings[name_at:end]==b'.bun':bun_sections.append(section)
+        if len(bun_sections)!=1:refuse('standalone unique .bun section')
+        section=bun_sections[0];address,at,size=section[3:6]
+        if section[1]!=1 or size<8 or at+size>len(data) or address+size>2**64:refuse('standalone .bun PROGBITS bounds')
+        loads=[]
+        for i in range(phcount):
+            ptype,_flags,offset,va,_pa,filesize,memsize,_align=struct.unpack_from('<IIQQQQQQ',data,phoff+56*i)
+            if ptype!=1:continue
+            if filesize>memsize or offset+filesize>len(data) or va+memsize>2**64:refuse('standalone load bounds')
+            for old_offset,old_va,old_file,old_mem in loads:
+                if (filesize and old_file and offset<old_offset+old_file and old_offset<offset+filesize) or (memsize and old_mem and va<old_va+old_mem and old_va<va+memsize):refuse('standalone overlapping load map')
+            loads.append((offset,va,filesize,memsize))
+        return {'fileOffset':at,'virtualAddress':address,'bytes':size},loads
+    def mapped(loads,at,size,expected):
+        file_maps=[load for load in loads if load[0]<=at and at+size<=load[0]+load[2]]
+        if len(file_maps)!=1:refuse('standalone unique file map')
+        load=file_maps[0];va=load[1]+at-load[0]
+        virtual_maps=[item for item in loads if item[1]<=va and va+size<=item[1]+item[3]]
+        if va!=expected or len(virtual_maps)!=1 or virtual_maps[0]!=load:refuse('standalone virtual map')
+    base=read_fd(base_fd,MAX_ELF);output=read_fd(output_fd,MAX_ELF)
+    base_section,base_loads=layout(base);section,loads=layout(output)
+    original_at=base_section['fileOffset'];original_va=base_section['virtualAddress']
+    mapped(base_loads,original_at,8,original_va)
+    if struct.unpack_from('<Q',base,original_at)[0]!=0:refuse('standalone base slot not zero')
+    if original_at+8>len(output):refuse('standalone original slot bounds')
+    mapped(loads,original_at,8,original_va)
+    at,size,address=section['fileOffset'],section['bytes'],section['virtualAddress']
+    if struct.unpack_from('<Q',output,original_at)[0]!=address or address==0:refuse('standalone original slot pointer')
+    if at<original_at+8 and original_at<at+size:refuse('standalone original slot overlaps payload')
+    mapped(loads,at,size,address)
+    payload_size=struct.unpack_from('<Q',output,at)[0];trailer=b'\n---- Bun! ----\n'
+    if size!=8+payload_size or payload_size<32+len(trailer):refuse('standalone payload size')
+    payload=output[at+8:at+size]
+    if not payload.endswith(trailer):refuse('standalone payload trailer')
+    offsets_at=len(payload)-len(trailer)-32
+    byte_count,modules_at,modules_size,entry,argv_at,argv_size,flags=struct.unpack_from('<QIIIIII',payload,offsets_at)
+    if byte_count!=offsets_at:refuse('standalone offsets byte count')
+    if flags&0xfffffff0:refuse('standalone reserved flags')
+    def pointer(at,size):
+        if at>byte_count or size>byte_count-at:refuse('standalone pointer range')
+    pointer(modules_at,modules_size);pointer(argv_at,argv_size)
+    if argv_size!=0 or argv_at>=byte_count or payload[argv_at]!=0:refuse('standalone empty exec argv terminator')
+    module_count=modules_size//52
+    if modules_size%52 or not 1<=module_count<=MAX_ENTRIES or entry>=module_count:refuse('standalone modules or entry')
+    for module_at in range(modules_at,modules_at+modules_size,52):
+        for slot in range(6):pointer(*struct.unpack_from('<II',payload,module_at+slot*8))
+    return {'version':'1.3.14','sourceCommit':source_commit,'layout':'bun-1.3.14-elf64le-arm64-standalone',
+        'baseSha256':digest(base),'outputSha256':digest(output),'flagsWord':flags,'flagsNibble':flags&15,'disableDefaultEnvFiles':bool(flags&1),
+        'disableAutoloadBunfig':bool(flags&2),'disableAutoloadTsconfig':bool(flags&4),'disableAutoloadPackageJson':bool(flags&8),
+        'payload':{'sha256':digest(payload),'bytes':len(payload),'byteCount':byte_count,'modulesOffset':modules_at,'modulesBytes':modules_size,
+            'moduleCount':module_count,'entryPointId':entry,'compileExecArgvOffset':argv_at,'compileExecArgvBytes':argv_size},
+        'originalSlot':{'fileOffset':original_at,'virtualAddress':original_va},'section':section}
+
 def elf_metadata(fd):
     """Bounded ELF64 little-endian data inspection only, never readelf/ldd execution."""
     data=read_fd(fd,MAX_ELF)

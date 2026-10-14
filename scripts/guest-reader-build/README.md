@@ -43,8 +43,8 @@ pin; archive acquisition itself is not performed or attested by this builder.
 Native system headers are bounded post-compile observations; they are not a sealed
 compiler/toolchain snapshot or proof that the compiler opened those exact bytes.
 
-The pinned compiler recipe rejects unresolved dynamic imports rather than adding a
-resolver fallback. The normalized metafile proves only its recorded static inputs;
+The pinned compiler recipe rejects opaque nonliteral dynamic specifiers rather than
+adding a resolver fallback; optional literal imports remain outside that proof. The normalized metafile proves only its recorded static inputs;
 receipts explicitly leave dynamicRuntimeImportsVerified false. Captured sources
 are immutable copies by default modes, with complete byte/resolver rechecks; the
 unprivileged owner can still change them, so this packet is not a Root admission.
@@ -66,12 +66,44 @@ the NEW compiler's bounded import records (including original when present);
 missing-original ambiguity is recorded, and no comment-scanning parser invents a
 source graph. This remains static compilation evidence, not runtime graph proof.
 
-The first ordinary build must run the same recipe/parser/held compiler with one
-unique bogus flag and a separate fresh negative output directory. Only exit1 and
-a closed diagnostic line naming that exact unknown flag satisfy the negative;
-unrelated failures or outputs refuse. The normal positive compilation follows. No
-probe/compiler/output is executed by the portable tests. The copied Linux base is
-rehashed after compilation as well as its original held file.
+The first compile-only job (38494750351) acquired the pinned compiler but refused
+before positive reader/C compilation or packet upload: Bun 1.3.14 returned zero
+for the bogus-long-option probe. Its pinned parser skips unknown long options;
+repositioning that option cannot establish semantic recognition. No artifact or
+complete reader receipt was produced. This source successor has not been compiled.
+
+The replacement gates are complementary compiler/data measurements:
+
+- Four same-recipe negatives append each autoload-positive counterpart, plus a
+  reject/allow-unresolved conflict. Each requires exit 1, empty stdout and output
+  directory, and the exact pinned one-line conflict diagnostic.
+- Compiler-only default/all-enabled controls must decode low flag nibbles 0xC/0;
+  the actual reader must decode 0xF. The bounded pinned ELF64/AArch64 decoder binds
+  the original base .bun pointer slot to the relocated output payload through
+  unique file/virtual PT_LOAD mappings. It checks exact section size, the 32-byte
+  Offsets record, the **16-byte** trailer, reserved zero bits and empty NUL-ended
+  compile argv. Decoded base/output hashes must match their measured bytes.
+- A fixed live nonliteral import expression must refuse with reject-unresolved
+  and the full source-derived error/note codeframe envelope; without the flag it
+  compiles only as data. Optional literal imports and runtime import completeness
+  remain unverified. Missing-original metafile records remain explicit ambiguity;
+  literal dynamic records still require measured bundled targets. The metafile
+  cannot independently establish absence of opaque runtime imports.
+
+Each bounded observation (exit, stdout/stderr hashes, output inventory, malformed
+capture/inventory refusal) is written before semantic refusal. Measurement sources
+and ELF controls live outside the packet and are never admitted or archived as
+executable roles; exactly the reader and its launcher remain admitted compile
+outputs. No output is executed. The first reviewed new job must confirm the exact
+source-derived diagnostic envelopes or fail honestly; portable fixtures do not
+establish real compiler behavior. The copied Linux base is rehashed after compiling.
+
+These checks are specific to Bun source
+[0d9b296](https://github.com/oven-sh/bun/tree/0d9b296af33f2b851fcbf4df3e9ec89751734ba4):
+Arguments.zig conflict handlers, Context.zig defaults, StandaloneModuleGraph.zig
+Offsets/read path, exe_format/elf.zig slot writes, and P.zig opaque-import handling.
+Compiler flags, embedded bits and parser effect do not prove autoload execution or
+global configuration behavior. All execution/authority flags remain false.
 
 Directory intake streams before count limits. Capture timeout/overflow/setup errors
 signal the still-unreaped owned process group before a bounded one-second wait;
