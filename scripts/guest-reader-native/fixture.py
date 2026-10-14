@@ -100,7 +100,9 @@ def request():
 
 
 def request_bytes():
-    return json.dumps(request(), separators=(',', ':')).encode('ascii') + b'\n'
+    # Pinned RuntimeSDK0394 parseRequest requires JSON.stringify(parsed) ===
+    # original text: compact literal UTF8, no LF; EOF terminates the request.
+    return json.dumps(request(), separators=(',', ':'), ensure_ascii=False).encode('utf-8')
 
 
 def expected_snapshot():

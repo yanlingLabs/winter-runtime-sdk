@@ -32,6 +32,17 @@ class Tests(unittest.TestCase):
         self.assertFalse(f.verify_response(raw, b'')['configEffectProven'])
         self.assertLess(len(f.request_bytes()), 16 * 1024)
 
+    def test_actual_transport_required_compact_json_without_lf_grammar(self):
+        raw=f.request_bytes()
+        self.assertFalse(raw.endswith(b'\n'))
+        self.assertEqual(raw,json.dumps(json.loads(raw.decode('utf-8')),
+            separators=(',',':'),ensure_ascii=False).encode('utf-8'))
+        self.assertEqual(json.loads(raw),f.request())
+        # Same exact roundtrip grammar as RuntimeSDK0394 parseRequest. Adding
+        # LF is valid generic JSON but must fail this transport's wire contract.
+        self.assertNotEqual(raw+b'\n',json.dumps(json.loads(raw+b'\n'),
+            separators=(',',':'),ensure_ascii=False).encode('utf-8'))
+
     def test_foreign_extra_bool_missing_wrong_digest_and_stderr_refuse(self):
         good = dict(f.request(), snapshot=f.expected_snapshot())
         cases = []

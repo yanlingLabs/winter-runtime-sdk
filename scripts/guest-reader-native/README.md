@@ -49,7 +49,9 @@ The injected pidfd validator, owner checks, socket factory and effect tables
 are test seams, not native authority factories.
 
 `fixture.py` prepares fixed readable readonly shared/source files and hidden
-home/store canaries. Its oracle checks the exact echoed correlation and two
+home/store canaries. Request framing is compact literal UTF8 JSON with no LF,
+terminated by EOF, as required by the pinned RuntimeSDK transport. Responses
+remain exactly one JSON line. Its oracle checks the exact echoed correlation and two
 guidance blocks, hashes and provenance. Synthetic frames only test this oracle.
 `native_cases.py` supplies callable, currently unexecuted, same-owner control,
 unexpected-parent and parent-exit orchestration. Parent-exit keeps duplicated
