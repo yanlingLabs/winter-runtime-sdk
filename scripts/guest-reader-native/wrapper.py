@@ -14,7 +14,7 @@ import types
 
 SOURCE_PINS = {
     'parent.py': '856dc389f06ae973b1c1a65149671d984288cf558d7a461e32c89758036c63af',
-    'producer.py': '9d98ac8aa2bc6a3e7f72109a429d85092d2b3f1cd0d668fb975686339657044e',
+    'producer.py': '1ec5338598c528c417dc355a14d5dcf2fb5b67a3c33f98ffe78c48cd53611440',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
     'native_cases.py': '567743f70a7b5a7b1142d052db4ea6766b6f74a7907f80c2b96018acc6dd0230',
@@ -387,7 +387,8 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
             return producer.NativeOperation(debt, lease.runtime,
                 lease.fixture.fds['source'], lease.fixture.fds['shared'],
                 parent.guard_root_owner, parent.recheck_runtime,
-                control_pair_factory=pair_factory)
+                control_pair_factory=pair_factory,source_path=lease.fixture.path/'source',
+                shared_path=lease.fixture.path/'shared')
         outcomes = []
         for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
             lease.stage = 'case:' + kind + ':run'

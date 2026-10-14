@@ -18,7 +18,7 @@ class Tests(unittest.TestCase):
         for index,name in enumerate(p.BOOTSTRAP_STEPS,1):
             self.assertEqual(p.decode_bootstrap_record(p.bootstrap_record(index,errno.EBADF)),
                              {'recordObserved':True,'step':name,'errno':errno.EBADF})
-        for raw in (b'x',b'x'*7,b'x'*9,struct.pack('<II',0,0),struct.pack('<II',11,0),struct.pack('<II',1,4095)):
+        for raw in (b'x',b'x'*7,b'x'*9,struct.pack('<II',0,0),struct.pack('<II',13,0),struct.pack('<II',1,4095)):
             with self.subTest(raw=raw),self.assertRaises(p.Refusal):p.decode_bootstrap_record(raw)
         for step,code in ((True,0),(1,True),(1,-1),(1,1.0)):
             with self.assertRaises(p.Refusal):p.bootstrap_record(step,code)
@@ -75,25 +75,25 @@ class Tests(unittest.TestCase):
             if failed=='exec':raise OSError(errno.ENOENT,'private source path')
             raise ExecReached
         with ExitStack() as stack:
-            for target,name,value in ((p,'root_linux',lambda:None),(p,'validate_stdio',lambda *_:None),(p.ctypes,'CDLL',lambda *_ ,**kw:libc),(p,'verify_mount_namespace',effect('mount_identity')),(p.os,'dup2',effect('dup2')),(p.os,'fchdir',effect('fchdir')),(p.os,'chroot',effect('chroot')),(p.os,'chdir',effect('chdir')),(p.os,'closerange',effect('close_range')),(p.os,'set_inheritable',effect('inheritable')),(p.os,'execve',execute)):
+            for target,name,value in ((p,'root_linux',lambda:None),(p,'validate_stdio',lambda *_:None),(p.ctypes,'CDLL',lambda *_ ,**kw:libc),(p,'install_reopened_inputs',effect('reopen_inputs')),(p,'reopen_protected_path',lambda _:80),(p.os,'close',effect('close')),(p.os,'fstat',lambda _:SimpleNamespace(st_dev=1,st_ino=10,st_mode=0o40555,st_uid=0,st_gid=0,st_nlink=2,st_size=0,st_mtime_ns=1,st_ctime_ns=2)),(p.os,'dup2',effect('dup2')),(p.os,'fchdir',effect('fchdir')),(p.os,'chroot',effect('chroot')),(p.os,'chdir',effect('chdir')),(p.os,'closerange',effect('close_range')),(p.os,'set_inheritable',effect('inheritable')),(p.os,'execve',execute)):
                 stack.enter_context(patch.object(target,name,value))
-            try:p.child_bootstrap(10,('/launcher','unchanged'),(100,101),(40,41,42),error_fd=90,stage=lambda value:events.append(('step',value)),mount_fds=(10,100,101))
+            try:p.child_bootstrap(10,('/launcher','unchanged'),(100,101),(40,41,42),error_fd=90,stage=lambda value:events.append(('step',value)),reopen_inputs=((10,'/run/inert/root',(1,10,0o40555,0,0,2,0,1,2)),))
             except (ExecReached,p.Refusal,OSError) as error:return events,error,libc
         self.fail('inert exec must not return')
 
     def test_error_writer_stays_cloexec_and_never_enters_public_argv(self):
         events,error,libc=self.bootstrap()
-        self.assertEqual([event[1] for event in events if isinstance(event,tuple) and event[0]=='step'],[3,4,10,7,8,9])
+        self.assertEqual([event[1] for event in events if isinstance(event,tuple) and event[0]=='step'],[3,4,5,6,11,12,7,8,9])
         self.assertIn(('inheritable',(90,False)),events)
         self.assertIn(('inheritable',(100,True)),events)
         self.assertIn(('exec',('/launcher',('/launcher','unchanged'),p.ENV)),events)
         for event in events:
             if isinstance(event,tuple) and event[0]=='close_range':
                 begin,end=event[1];self.assertFalse(begin<=90<end)
-        self.assertNotIn('unshare',events);self.assertNotIn('mount',events)
+        self.assertIn('unshare',events);self.assertIn('mount',events)
 
     def test_failure_stage_is_set_before_each_effect_without_native_execution(self):
-        for effect,step in (('dup2',4),('mount_identity',10),('fchdir',7),('close_range',8),('exec',9)):
+        for effect,step in (('dup2',4),('unshare',5),('mount',6),('reopen_inputs',12),('fchdir',7),('close_range',8),('exec',9)):
             with self.subTest(effect=effect):
                 events,error,_=self.bootstrap(effect)
                 self.assertEqual([event[1] for event in events if isinstance(event,tuple) and event[0]=='step'][-1],step)

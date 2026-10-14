@@ -184,7 +184,7 @@ def validate_stdio(pipe_fds, pass_fds, *, get_stat=os.fstat, get_flags=None):
 
 
 BOOTSTRAP_STEPS = ('child_setup', 'gate', 'root_guard', 'stdio', 'unshare',
-                   'propagation', 'chroot', 'descriptor_envelope', 'exec', 'mount_identity')
+                   'propagation', 'chroot', 'descriptor_envelope', 'exec', 'mount_identity', 'loader_bind', 'reopen_inputs')
 BOOTSTRAP_ERRNOS = (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
                     18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 36, 38, 40,
                     75, 80, 87, 95, 110)
@@ -208,7 +208,7 @@ def emit_bootstrap_failure(fd, step, error):
     # One atomic nonblocking PIPE_BUF-sized write. Refusal/death cannot invent EOF exec proof.
     code=getattr(error,'errno',None)
     if type(code) is not int:
-        code=ctypes.get_errno() if step in (5,6,10) else 0
+        code=ctypes.get_errno() if step in (5,6,10,11,12) else 0
     if code not in BOOTSTRAP_ERRNOS:code=0
     return os.write(fd,bootstrap_record(step,code)) == 8
 
@@ -255,7 +255,7 @@ def require_mount_membership(fds, raw, observe):
                 'bootstrap FD outside current mount namespace')
 
 
-def verify_mount_namespace(fds):
+def verify_mount_namespace(fds,*,mount_root_fd=None):
     """Unexecuted Linux observation. No unshare/mount or path reopen fallback."""
     require(sys.byteorder=='little','bootstrap statx endian')
     libc=ctypes.CDLL(None,use_errno=True)
@@ -267,6 +267,10 @@ def verify_mount_namespace(fds):
         raw=ctypes.create_string_buffer(256)
         ctypes.set_errno(0)
         require(call(fd,b'',0x1000,STATX_MNT_ID,ctypes.byref(raw))==0,'bootstrap statx syscall')
+        if fd==mount_root_fd:
+            attributes=struct.unpack_from('<Q',raw.raw,8)[0]
+            supported=struct.unpack_from('<Q',raw.raw,56)[0]
+            require(supported & 0x2000 and attributes & 0x2000,'supported loader mount root required')
         return statx_mount_id(raw.raw)
     def read_current():
         held=os.open('/proc/self/mountinfo',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -280,10 +284,90 @@ def verify_mount_namespace(fds):
         finally:os.close(held)
     before=read_current()
     require_mount_membership(fds,before,observe)
-    require(read_current()==before,'bootstrap mount namespace changed during check')
+    require(read_current()==before,'bootstrap mount snapshots differ')
 
 
-def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None, mount_fds=None):
+
+def immutable_identity(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink,
+            info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+
+def prepare_reopen_inputs(paths):
+    require(type(paths) is tuple and 1<=len(paths)<=16,'closed reopen inventory')
+    require(all(type(fd) is int and 3<=fd<=65535 for fd,_ in paths)
+            and len({fd for fd,_ in paths})==len(paths),'distinct original reopen FDs')
+    result=[]
+    for fd,value in paths:
+        path=Path(value)
+        require(path.is_absolute() and str(path).startswith('/run/') and len(path.parts)<=64
+                and len(str(path).encode())<=4096 and '..' not in path.parts,
+                'canonical protected reopen path')
+        info=os.fstat(fd)
+        require(info.st_uid==0 and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                and not stat.S_IMODE(info.st_mode)&0o222
+                and fcntl.fcntl(fd,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY,
+                'held immutable reopen input')
+        result.append((fd,str(path),immutable_identity(info)))
+    return tuple(result)
+
+
+def reopen_protected_path(value):
+    path=Path(value);owned=[];failed=[]
+    def close_new(fd):
+        owned.remove(fd)  # Each close is attempted once; errors retain explicit debt.
+        try:os.close(fd)
+        except OSError:failed.append(fd);raise
+    try:
+        upper=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);owned.append(upper)
+        for part in path.parts[1:-1]:
+            info=os.fstat(upper)
+            require(info.st_uid==0 and not stat.S_IMODE(info.st_mode)&0o022,'protected reopen ancestry')
+            upper=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=upper);owned.append(upper)
+        info=os.fstat(upper)
+        require(info.st_uid==0 and not stat.S_IMODE(info.st_mode)&0o022,'protected reopen ancestry')
+        leaf=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=upper);owned.append(leaf)
+        for fd in tuple(owned[:-1]):close_new(fd)
+        owned.remove(leaf)
+        return leaf
+    except BaseException as error:
+        for fd in tuple(owned):
+            try:close_new(fd)
+            except OSError:pass
+        if failed:
+            refusal=Refusal('new reopen ancestry descriptors retained');refusal.retained_fds=failed
+            raise refusal from error
+        raise
+
+
+def install_reopened_inputs(records,root_fd,verify=None):
+    verify=verify_mount_namespace if verify is None else verify
+    targets={fd for fd,_,_ in records};opened=[]
+    try:
+        for target,path,expected in records:
+            require(immutable_identity(os.fstat(target))==expected,'parent held reopen identity changed')
+            new=reopen_protected_path(path)
+            require(new not in targets and new not in opened,'new reopen descriptors distinct')
+            opened.append(new)
+            info=os.fstat(new)
+            require(immutable_identity(info)==expected
+                    and fcntl.fcntl(new,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY,
+                    'reopened immutable identity mismatch')
+        verify(tuple(opened),mount_root_fd=opened[[fd for fd,_,_ in records].index(root_fd)])
+        for (target,_,expected),new in zip(records,opened):
+            require(immutable_identity(os.fstat(target))==expected
+                    and immutable_identity(os.fstat(new))==expected,'reopen identity changed before install')
+            os.dup2(new,target)
+    finally:
+        failed=[]
+        for fd in opened:
+            try:os.close(fd)
+            except OSError:failed.append(fd)
+        if failed:
+            error=Refusal('new reopen descriptors retained');error.retained_fds=failed;raise error
+
+
+def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None, reopen_inputs=None):
     """Actual privileged effects. Not called by source/portable tests.
 
     Python/libc are trusted parent tooling, not measured packet runtime objects.
@@ -302,12 +386,27 @@ def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=N
     validate_stdio(pipe_fds, pass_fds)
     for target, inherited in enumerate(pipe_fds):
         os.dup2(inherited, target)
-    # Keep plan filesystem FDs in the original namespace through C's clone phase.
-    # The receipt socket is sockfs/internal; C separately authenticates its peer.
-    mark(10)
-    require(type(mount_fds) is tuple and root_fd in mount_fds,
-            'explicit bootstrap mount scope')
-    verify_mount_namespace(mount_fds)
+    require(type(reopen_inputs) is tuple and root_fd in {fd for fd,_,_ in reopen_inputs},
+            'explicit bootstrap reopen scope')
+    root_path=next(path for fd,path,_ in reopen_inputs if fd==root_fd)
+    libc=ctypes.CDLL(None,use_errno=True)
+    libc.unshare.argtypes=[ctypes.c_int];libc.unshare.restype=ctypes.c_int
+    libc.mount.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_ulong,ctypes.c_void_p]
+    libc.mount.restype=ctypes.c_int
+    mark(5)
+    require(libc.unshare(0x00020000)==0,'private bootstrap mount namespace')
+    mark(6)
+    require(libc.mount(None,b'/',None,0x4000|0x40000,None)==0,'private real root propagation')
+    mark(11)
+    checked=reopen_protected_path(root_path)
+    try:
+        require(immutable_identity(os.fstat(checked))==next(identity for fd,_,identity in reopen_inputs if fd==root_fd),
+                'loader bind target identity')
+    finally:os.close(checked)
+    encoded=os.fsencode(root_path)
+    require(libc.mount(encoded,encoded,None,0x1000,None)==0,'nonrecursive loader root bind')
+    mark(12)
+    install_reopened_inputs(reopen_inputs,root_fd)
     mark(7)
     os.fchdir(root_fd)
     os.chroot('.')
@@ -405,9 +504,10 @@ class NativeOperation:
     Root-owned fixture source/shared FDs carry scope; request bytes carry no paths.
     """
     def __init__(self, debt, root, source_fd, shared_fd, guard, recheck,
-                 pidfd_validator=validate_init_pidfd, control_pair_factory=None):
+                 pidfd_validator=validate_init_pidfd, control_pair_factory=None, source_path=None, shared_path=None):
         self.debt, self.root = debt, root
         self.source_fd, self.shared_fd = source_fd, shared_fd
+        self.source_path,self.shared_path=source_path,shared_path
         self.guard, self.recheck = guard, recheck
         self.pidfd_validator = pidfd_validator
         # Trusted external harness seam for the intentional ancestor-peer negative,
@@ -518,8 +618,13 @@ class NativeOperation:
         pass_fds = (reader_fd, b.fileno(), self.source_fd, self.shared_fd,
                     *(fd for fd, _ in libraries))
         root_fd = self.root.directories[''][0]
-        mount_fds=(root_fd,self.root.files['artifacts/instructionReaderLauncher'][0],
-                   reader_fd,self.source_fd,self.shared_fd,*(fd for fd,_ in libraries))
+        require(self.source_path is not None and self.shared_path is not None,'explicit fixture reopen paths')
+        paths=((root_fd,self.root.path),
+               (self.root.files['artifacts/instructionReaderLauncher'][0],self.root.path/'artifacts/instructionReaderLauncher'),
+               (reader_fd,self.root.path/'artifacts/instructionReader'),
+               (self.source_fd,self.source_path),(self.shared_fd,self.shared_path),
+               *((fd,self.root.path/path.lstrip('/')) for fd,path in libraries))
+        reopen_inputs=prepare_reopen_inputs(paths)
         self.recheck(self.root)  # Immediately before owned fork/bootstrap/exec.
         pid = os.fork()
         if pid == 0:
@@ -534,7 +639,7 @@ class NativeOperation:
                 os.close(gate[0])
                 child_bootstrap(root_fd, argv, pass_fds,
                                 (stdin[0], stdout[1], stderr[1]),
-                                error_fd=bootstrap_error[1], stage=stage, mount_fds=mount_fds)
+                                error_fd=bootstrap_error[1], stage=stage, reopen_inputs=reopen_inputs)
             except BaseException as error:
                 try: emit_bootstrap_failure(bootstrap_error[1], step[0], error)
                 except BaseException: pass  # Unknown observation; never claim exec/cleanup.

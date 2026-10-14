@@ -68,7 +68,7 @@ class InjectedEffects:
         self.wait_results = [(123, 0)]
         self.wait_error = None
         self.wait_calls = []
-        self.root = SimpleNamespace(
+        self.root = SimpleNamespace(path=p.Path('/run/inert/runtime'),
             files={'artifacts/instructionReader': (100,), 'artifacts/instructionReaderLauncher': (108,)} |
                   {path.lstrip('/'): (101 + index,) for index, path in enumerate(p.LIBRARIES)},
             directories={'': (10,)})
@@ -88,9 +88,9 @@ class InjectedEffects:
 
     def fstat(self, fd):
         self.effect('fixture-stat', fd)
-        self.case.assertIn(fd, (20, 21), 'unexpected real filesystem observation')
-        return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0,
-                               st_dev=1, st_ino=fd)
+        self.case.assertIn(fd, (10,20,21,100,101,102,103,104,105,106,108), 'unexpected filesystem observation')
+        return SimpleNamespace(st_mode=(stat.S_IFDIR if fd in (10,20,21) else stat.S_IFREG)|0o555,
+            st_uid=0,st_gid=0,st_nlink=2 if fd in (10,20,21) else 1,st_size=0,st_mtime_ns=1,st_ctime_ns=2,st_dev=1,st_ino=fd)
 
     def scandir(self, path):
         self.effect('proc-inventory', path)
@@ -200,7 +200,7 @@ class InjectedEffects:
                 (p.platform, 'machine', lambda: 'aarch64'),
                 (p.threading, 'active_count', lambda: 1),
                 (p.os, 'getuid', lambda: 0), (p.os, 'geteuid', lambda: 0),
-                (p.os, 'fstat', self.fstat), (p.os, 'scandir', self.scandir),
+                (p.fcntl,'fcntl',lambda *_:os.O_RDONLY),(p.os, 'fstat', self.fstat), (p.os, 'scandir', self.scandir),
                 (p.socket, 'socketpair', self.socketpair), (p.os, 'pipe2', self.pipe2),
                 (p.os, 'set_blocking', self.set_blocking), (p.os, 'fork', self.fork), (p.os, 'pidfd_open', self.pidfd_open),
                 (p.os, 'write', self.write), (p.os, 'close', self.close),
@@ -216,7 +216,7 @@ class InjectedEffects:
     def start(self):
         def factory(debt):
             self.case.assertIs(debt, self.registry.debts[0])
-            self.operation = p.NativeOperation(debt, self.root, 20, 21, self.guard, self.recheck)
+            self.operation = p.NativeOperation(debt, self.root, 20, 21, self.guard,self.recheck,source_path='/run/inert/fixture/source',shared_path='/run/inert/fixture/shared')
             return self.operation
         with self.patches():
             return p.start_registered(self.registry, factory)
@@ -374,13 +374,11 @@ class SetupCleanupTests(unittest.TestCase):
         self.assertFalse(debt.descriptor_drained)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 class MountScopeTests(unittest.TestCase):
     def test_actual_start_supplies_all_filesystem_roles_and_excludes_socket(self):
         table=InjectedEffects(self);debt=table.registry.register()
-        table.operation=p.NativeOperation(debt,table.root,20,21,table.guard,table.recheck)
+        table.operation=p.NativeOperation(debt,table.root,20,21,table.guard,table.recheck,source_path='/run/inert/fixture/source',shared_path='/run/inert/fixture/shared')
         class ChildEnded(BaseException):pass
         seen=[]
         def bootstrap(root,argv,pass_fds,pipe_fds,**kwargs):
@@ -390,7 +388,10 @@ class MountScopeTests(unittest.TestCase):
             with self.assertRaises(ChildEnded):table.operation._start()
         root,argv,pass_fds,kwargs=seen[0]
         expected=(10,108,100,20,21,101,102,103,104,105,106)
-        self.assertEqual(kwargs['mount_fds'],expected)
+        self.assertEqual(tuple(fd for fd,_,_ in kwargs['reopen_inputs']),expected)
         self.assertNotIn(31,expected)  # Receipt socket has internal sockfs mount, C-authenticated.
         self.assertEqual(set(pass_fds)-{31},set(expected)-{10,108})
         self.assertEqual(kwargs['error_fd'],49)
+
+if __name__ == '__main__':
+    unittest.main()

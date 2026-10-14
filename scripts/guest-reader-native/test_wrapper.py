@@ -155,7 +155,7 @@ class Tests(unittest.TestCase):
             def close(self):events.append('close-'+self.name);self.closed=True
             def recheck(self):events.append('check-'+self.name)
         snapshot,runtime,fixture=(Resource(name) for name in ('snapshot','runtime','fixture'))
-        fixture.fds={'source':30,'shared':31}
+        fixture.fds={'source':30,'shared':31};fixture.path=Path('/run/reader-wrapper/fixture')
         lease=SimpleNamespace(path=Path('/run/reader-wrapper/sources'),unresolved=False,
             recheck=lambda:events.append('source-check'),case_failure=None)
         pin=object()

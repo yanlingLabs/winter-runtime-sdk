@@ -100,7 +100,6 @@ class Tests(unittest.TestCase):
             with self.assertRaises(b.Refusal):b.prepare_data('/repo','/private/raw.zip',wrong,'/private/scratch',loader=loader)
 
 
-if __name__=='__main__':unittest.main()
 
 class RootWiringTests(unittest.TestCase):
     def test_checked_successor_harness_source_is_separate_from_fixed_data_origin(self):
@@ -239,3 +238,6 @@ class PreinitProjectionTests(unittest.TestCase):
         import producer
         self.assertEqual(b.BOOTSTRAP_STEP_NAMES,producer.BOOTSTRAP_STEPS)
         self.assertEqual(b.DIAGNOSTIC_ERRNOS,producer.BOOTSTRAP_ERRNOS)
+
+if __name__ == '__main__':
+    unittest.main()

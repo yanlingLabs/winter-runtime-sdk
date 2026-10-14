@@ -13,8 +13,9 @@ def info(ids=(21,22)):
     return b''.join(str(value).encode()+b' 1 0:1 / /fixture rw - tmpfs tmpfs rw\n' for value in ids)
 
 
-def result(value=21,mask=p.STATX_MNT_ID):
+def result(value=21,mask=p.STATX_MNT_ID,attributes=0,supported=0):
     raw=bytearray(256);struct.pack_into('<I',raw,0,mask);struct.pack_into('<Q',raw,0x90,value)
+    struct.pack_into('<Q',raw,8,attributes);struct.pack_into('<Q',raw,56,supported)
     return bytes(raw)
 
 
@@ -43,18 +44,18 @@ class Tests(unittest.TestCase):
         for value in (True,None,'21',21.0,23):
             with self.assertRaises(p.Refusal):p.require_mount_membership((100,),info(),lambda _:value)
 
-    def observe(self,*,mask=p.STATX_MNT_ID,code=0,reads=None):
+    def observe(self,*,mask=p.STATX_MNT_ID,code=0,reads=None,attributes=0,supported=0,root_fd=None):
         calls=[];closed=[]
         class Statx:
             def __call__(self,fd,path,flags,wanted,pointer):
                 calls.append((fd,path,flags,wanted))
-                ctypes.memmove(pointer,result(mask=mask),256)
+                ctypes.memmove(pointer,result(mask=mask,attributes=attributes,supported=supported),256)
                 return code
         call=Statx();libc=SimpleNamespace(statx=call)
         chunks=iter([info(),b'',info(),b''] if reads is None else reads)
         with patch.object(p.ctypes,'CDLL',return_value=libc),patch.object(p.os,'open',return_value=90),patch.object(p.os,'read',side_effect=lambda *_:next(chunks)),patch.object(p.os,'close',side_effect=closed.append):
             error=None
-            try:p.verify_mount_namespace((100,101))
+            try:p.verify_mount_namespace((100,101),mount_root_fd=root_fd)
             except BaseException as caught:error=caught
         return calls,closed,call,error
 
@@ -77,21 +78,13 @@ class Tests(unittest.TestCase):
             with self.assertRaises(OSError):p.verify_mount_namespace((100,))
             close.assert_called_once_with(90)
 
-    def test_child_does_not_unshare_or_mount_and_checks_before_chroot_exec(self):
-        events=[]
-        class Reached(BaseException):pass
-        def observe(fds):events.append(('mounts',fds))
-        def record(name):return lambda *args:events.append((name,args))
-        def execute(*args):events.append(('exec',args));raise Reached
-        # All privileged operations replaced BEFORE calling the actual source function.
-        with ExitStack() as stack:
-            for target,name,value in ((p,'root_linux',lambda:None),(p,'validate_stdio',lambda *_:None),(p,'verify_mount_namespace',observe),(p.ctypes,'CDLL',lambda *_ ,**kw:self.fail('child must not load unshare/mount table')),(p.os,'dup2',record('dup2')),(p.os,'fchdir',record('fchdir')),(p.os,'chroot',record('chroot')),(p.os,'chdir',record('chdir')),(p.os,'closerange',record('close_range')),(p.os,'set_inheritable',record('inheritable')),(p.os,'execve',execute)):
-                stack.enter_context(patch.object(target,name,value))
-            with self.assertRaises(Reached):
-                p.child_bootstrap(10,('/launcher','unchanged'),(100,101),(40,41,42),error_fd=90,mount_fds=(10,100,101),stage=lambda value:events.append(('step',value)))
-        self.assertLess(events.index(('mounts',(10,100,101))),events.index(('chroot',('.',))))
-        self.assertIn(('step',10),events);self.assertIn(('inheritable',(90,False)),events)
-        self.assertEqual(events[-1],('exec',('/launcher',('/launcher','unchanged'),p.ENV)))
+    def test_root_mount_attribute_must_be_supported_and_set(self):
+        for attrs,supported in ((0,0),(0x2000,0),(0,0x2000)):
+            with self.subTest(attrs=attrs,supported=supported):
+                _,closed,_,error=self.observe(attributes=attrs,supported=supported,root_fd=100)
+                self.assertIsInstance(error,p.Refusal);self.assertEqual(closed,[90])
+        _,closed,_,error=self.observe(attributes=0x2000,supported=0x2000,root_fd=100)
+        self.assertIsNone(error);self.assertEqual(closed,[90,90])
 
 
 if __name__=='__main__':unittest.main()

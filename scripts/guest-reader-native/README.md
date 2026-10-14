@@ -134,14 +134,15 @@ For bootstrap observations, `recordObserved:false` with errno 0 means no record;
 Neither means that exec or cleanup succeeded. The correction changes no deadline,
 case oracle, C bytes or compiled artifact.
 
-The mount-identity SOURCE successor removes Python's pre-exec NEWNS/unshare and
+The unpublished 19d mount-identity proposal below is superseded and was never run.
+That SOURCE proposal removes Python's pre-exec NEWNS/unshare and
 propagation mount only. The sealed eight-file loader chroot, C peer checks,
 C detached clones then NEWNS/private propagation, UID/filter/limits and all case
 oracles remain unchanged. Before chroot, every tree-clone filesystem descriptor
 (reader/source/shared/six libraries) plus sealed root/launcher must return ordinary
 STATX_MNT_ID in a bounded current mountinfo snapshot. The socket is internal sockfs,
 not a filesystem clone input; its existing C peer/shape guards remain independent.
-A second snapshot refuses concurrent namespace change. There is no unsupported
+Two snapshots must match; equality does not rule out transient changes between reads. There is no unsupported
 statx, missing-mask, unique-ID or pathname fallback. Failure emits the appended
 closed bootstrap step `mount_identity` (index 10); existing step numbers are stable.
 
@@ -163,3 +164,28 @@ all supplied filesystem roles, and inject bounded statx/mountinfo results/failur
 They execute no mount, namespace, chroot, helper or compiled packet. Runtime
 compatibility and the namespace hypothesis require a freshly reviewed hosted run.
 All old experiment branches remain frozen; no retrospective cleanup claim follows.
+
+
+The reopened-mount SOURCE successor instead creates Python NEWNS while still on
+real `/`, makes real `/` recursively private, and nonrecursively binds the sealed
+loader directory onto itself. It reopens the 11 filesystem inputs from canonical
+protected paths derived solely from the sealed root and fixture. Every ancestor
+is opened nofollow and checked Root-owned/nonwritable to other identities. Each
+new descriptor must be distinct from original targets and match the already
+hash-validated held input's dev/inode/type/uid/gid/mode/nlink/size/mtime/ctime and
+readonly access; no additional 99 MiB rehash or host-library fallback occurs.
+Ordinary mount IDs must belong to current mountinfo, and the loader root's
+STATX_ATTR_MOUNT_ROOT must be explicitly supported and set. Only then are new
+FDs installed onto original numbers, followed by sealed chroot and unchanged C
+exec. Internal sockets/pidfds are never reopened; neither `/proc/self/fd` nor
+pathname aliases can replace these comparisons. Newly acquired FDs get one close
+attempt on failure; close uncertainty is retained, with no unmount/repair claim.
+
+[Linux propagation checks](https://github.com/torvalds/linux/blob/v6.12/fs/namespace.c#L2544)
+require a mountpoint. Chrooting into an ordinary directory alone does not supply
+one; the self-bind plus explicit attribute check addresses that separate source
+precondition. Earlier descriptor-mismatch causality remains unmeasured. Matching
+before/after mountinfo snapshots report endpoint equality only, not absence of
+transient changes. All C/artifact/deadline/case predicates remain unchanged.
+Steps 11 `loader_bind` and 12 `reopen_inputs` append to stable existing indices.
+Source/injected success is not hosted execution, cleanup, boot or activation proof.
