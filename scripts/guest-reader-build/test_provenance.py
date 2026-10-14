@@ -120,6 +120,19 @@ class PacketTests(unittest.TestCase):
         for target in ('/tmp/unmeasured.ts','./missing.ts'):
             data['inputs'][str(self.output/names[1])]['imports'][0]['path']=target
             with self.assertRaises(p.Refusal):b.normalized_metafile(data,self.output,manifest)
+    def test_literal_dynamic_missing_original_preserves_measured_graph(self):
+        put(self.runtime,'src/instruction-reader.ts',b'export const read = true;');self.heads['runtime']=git_commit(self.runtime)
+        manifest=self.prepare();entry='source/runtime/'+p.READER_ENTRY;target='source/runtime/src/instruction-reader.ts'
+        data={'inputs':{str(self.output/name):{'bytes':manifest['stagedInputs'][name]['bytes'],'imports':[]} for name in (entry,target,'source/sdk/packages/sdk/src/index.ts')}}
+        data['inputs'][str(self.output/entry)]['imports']=[{'kind':'dynamic-import','path':str(self.output/target)}]
+        normalized,_=b.normalized_metafile(data,self.output,manifest);graph=b.graph_evidence(normalized,self.output,manifest)
+        self.assertEqual(graph['missingOriginalCount'],1);self.assertFalse(graph['dynamicRuntimeImportsVerified'])
+        self.assertEqual(graph['edges'][0]['target'],target)
+        data['inputs'][str(self.output/entry)]['imports'][0]['path']='/tmp/unmeasured-dynamic.ts'
+        with self.assertRaises(p.Refusal):b.normalized_metafile(data,self.output,manifest)
+        data['inputs'][str(self.output/entry)]['imports'][0]={'kind':'dynamic-import','path':'unknown-package','external':True}
+        normalized,_=b.normalized_metafile(data,self.output,manifest)
+        with self.assertRaisesRegex(p.Refusal,'non-builtin external'):b.graph_evidence(normalized,self.output,manifest)
     def test_falsey_resolver_maps_are_not_defaulted(self):
         for value in (False,[],0,''):
             with self.assertRaisesRegex(p.Refusal,'plain third-party resolver map'):
@@ -295,6 +308,12 @@ class PacketTests(unittest.TestCase):
             with self.assertRaisesRegex(p.Refusal,'observation refused'):b.run_measurement(runner,123,self.output,scratch,'overflow',b.compiler_recipe(self.output))
         record=json.loads((self.output/'diagnostics/overflow.json').read_bytes());self.assertTrue(record['captureRefused']);self.assertFalse(record['captureHashesComplete'])
         self.assertFalse((self.output/'receipt.json').exists())
+    def test_runner_capture_error_is_not_complete_hash_evidence(self):
+        self.output.mkdir();(self.output/'stage').mkdir();scratch=self.root/'scratch';scratch.mkdir()
+        def runner(*args):raise RuntimeError('inert injected capture failure')
+        with self.assertRaisesRegex(p.Refusal,'observation refused'):b.run_measurement(runner,123,self.output,scratch,'runner-error',b.compiler_recipe(self.output))
+        record=json.loads((self.output/'diagnostics/runner-error.json').read_bytes())
+        self.assertTrue(record['runnerError']);self.assertFalse(record['captureHashesComplete'])
     def test_candidate_export_must_resolve_source(self):
         manifest=self.sdk/'packages/sdk/package.json'
         value=json.loads(manifest.read_bytes());value['exports']['.']['bun']='./dist/index.js';manifest.write_text(json.dumps(value))

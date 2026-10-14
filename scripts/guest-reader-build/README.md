@@ -86,7 +86,9 @@ The replacement gates are complementary compiler/data measurements:
 - A fixed live nonliteral import expression must refuse with reject-unresolved
   and the full source-derived error/note codeframe envelope; without the flag it
   compiles only as data. Optional literal imports and runtime import completeness
-  remain unverified. Opaque records in the actual reader metafile refuse.
+  remain unverified. Missing-original metafile records remain explicit ambiguity;
+  literal dynamic records still require measured bundled targets. The metafile
+  cannot independently establish absence of opaque runtime imports.
 
 Each bounded observation (exit, stdout/stderr hashes, output inventory, malformed
 capture/inventory refusal) is written before semantic refusal. Measurement sources

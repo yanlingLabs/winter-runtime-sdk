@@ -300,7 +300,6 @@ def graph_evidence(metafile,packet,manifest):
             if bound>p.MAX_ENTRIES:p.refuse('metafile import count')
             if type(item)!=dict or type(item.get('kind'))!=str or type(item.get('path'))!=str or type(item.get('external',False))!=bool:p.refuse('metafile import record')
             if len(item['kind'].encode())>128 or len(item['path'].encode())>4096:p.refuse('metafile import scalar bound')
-            if item['kind'] in ('dynamic-import','import-dynamic') and item.get('original') is None:p.refuse('reader opaque dynamic import record')
             target=item['path'];external=item.get('external',False);original=item.get('original')
             if original is not None and (type(original)!=str or not original or len(original.encode())>4096):p.refuse('metafile original specifier')
             if original is None:missing_original+=1
@@ -353,7 +352,7 @@ def run_measurement(runner,compiler_fd,packet,scratch,case,args):
     capture_refused=type(stdout)!=bytes or type(stderr)!=bytes or len(stdout)+len(stderr)>MAX_OUTPUT
     if capture_refused:
         stdout=stdout[:MAX_OUTPUT] if type(stdout)==bytes else b'';stderr=stderr[:max(0,MAX_OUTPUT-len(stdout))] if type(stderr)==bytes else b''
-    record={'formatVersion':1,'kind':'winter-reader-compiler-observation','case':case,'exitCode':exit_code,'runnerError':runner_error,'captureRefused':capture_refused,'captureHashesComplete':not capture_refused,'stdoutSha256':p.digest(stdout),'stdoutBytes':len(stdout),'stderrSha256':p.digest(stderr),'stderrBytes':len(stderr),'outputsExecuted':False,'nativeAdmission':False}
+    record={'formatVersion':1,'kind':'winter-reader-compiler-observation','case':case,'exitCode':exit_code,'runnerError':runner_error,'captureRefused':capture_refused,'captureHashesComplete':not capture_refused and not runner_error,'stdoutSha256':p.digest(stdout),'stdoutBytes':len(stdout),'stderrSha256':p.digest(stderr),'stderrBytes':len(stderr),'outputsExecuted':False,'nativeAdmission':False}
     try:record['outputs']=measurement_inventory(directory)
     except Exception:
         record['outputs']=None;record['inventoryRefused']=True
