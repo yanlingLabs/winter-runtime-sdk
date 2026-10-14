@@ -1,10 +1,33 @@
 #!/usr/bin/env python3
 """New reader-only, multi-origin compilation packet. Never executes outputs."""
-import argparse,hashlib,importlib.util,json,os,platform,re,selectors,shlex,signal,subprocess,time
+import argparse,hashlib,importlib.util,json,os,platform,re,selectors,shlex,signal,stat,subprocess,time
 from pathlib import Path
 if os.geteuid()==0:raise SystemExit('unprivileged reader build required before project imports')
+def observe_python_sources():
+    # Bounded observations only. Python may already have loaded build.py or cached code.
+    observations={}
+    for name in ('build.py','provenance.py'):
+        path=Path(__file__).resolve().with_name(name)
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+        try:
+            before=os.fstat(fd);chunks=[];size=0;limit=16*1024*1024
+            if not stat.S_ISREG(before.st_mode) or before.st_size>limit:raise ValueError('bounded Python source observation')
+            while True:
+                data=os.read(fd,min(65536,limit-size+1))
+                if not data:break
+                size+=len(data)
+                if size>limit:raise ValueError('Python source observation grew')
+                chunks.append(data)
+            after=os.fstat(fd)
+            key=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+            if key(before)!=key(after) or size!=before.st_size:raise ValueError('Python source observation changed')
+            observations['scripts/guest-reader-build/'+name]={'sha256':hashlib.sha256(b''.join(chunks)).hexdigest(),'bytes':size}
+        finally:os.close(fd)
+    return observations
+PYTHON_SOURCE_OBSERVATIONS=observe_python_sources()
 _spec=importlib.util.spec_from_file_location('reader_provenance',Path(__file__).with_name('provenance.py'))
 p=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(p)
+if observe_python_sources()!=PYTHON_SOURCE_OBSERVATIONS:raise ValueError('Python source observation changed during helper import')
 
 MAX_OUTPUT=16*1024*1024
 NATIVE_FLAGS=('-O2','-std=gnu11','-Wall','-Wextra','-Werror','-D_FORTIFY_SOURCE=2','-fstack-protector-strong','-fPIE','-pie','-Wl,-z,relro,-z,now,-z,noexecstack')
@@ -66,6 +89,10 @@ def json_data(data):
             result[key]=value
         return result
     return json.loads(data,object_pairs_hook=object_pairs)
+def resolver_map_file(path):
+    value=json_data(read_file(path,p.MAX_JSON))
+    if type(value)!=dict:p.refuse('plain third-party resolver map required')
+    return value
 def read_file(path,limit):
     fd,_=file_input(Path(path),limit)
     try:return p.read_fd(fd,limit)
@@ -139,6 +166,8 @@ def snapshot(packet,inputs_only=False):
 def prepare_packet(runtime,sdk,overlay,dependencies,output,heads=None,builder_root=None,builder_head=None,resolver_map=None):
     heads=heads or {'runtime':p.RUNTIME_HEAD,'sdk':p.SDK_HEAD,'overlay':p.OVERLAY_HEAD}
     builder_root=Path(builder_root) if builder_root is not None else Path(__file__).resolve().parents[2]
+    if resolver_map is None:resolver_map={}
+    if type(resolver_map)!=dict:p.refuse('plain third-party resolver map required')
     builder_head=builder_head or heads.get('builder')
     if builder_head is None:p.refuse('externally pinned builder head required')
     output=Path(output)
@@ -148,6 +177,8 @@ def prepare_packet(runtime,sdk,overlay,dependencies,output,heads=None,builder_ro
     try:
         for role,path,names in [('runtime',runtime,None),('sdk',sdk,None),('overlay',overlay,[p.C_SOURCE,p.HEADER]),('builder',builder_root,BUILDER_FILES)]:
             record,fd,entries,eligible=eligible_capture(role,Path(path).resolve(),builder_head if role=='builder' else heads[role],names);records.append(record);held.append((fd,entries,eligible))
+        for name,observation in PYTHON_SOURCE_OBSERVATIONS.items():
+            if records[3]['eligibleFiles'].get(name)!={'kind':'file',**observation}:p.refuse('captured builder differs from Python source observation')
         sdk_header=records[1]['eligibleFiles'].get(p.HEADER);overlay_header=records[2]['eligibleFiles'][p.HEADER]
         if sdk_header!=overlay_header:p.refuse('SDK overlay header differs from main')
         if p.READER_ENTRY not in records[0]['eligibleFiles']:p.refuse('actual private reader entry missing')
@@ -161,13 +192,13 @@ def prepare_packet(runtime,sdk,overlay,dependencies,output,heads=None,builder_ro
             if p.git_entries(path,record['head'])!=(record['tree'],entries):p.refuse('origin Git tree changed')
             if p.source_inventory(fd,entries,eligible)!=record['eligibleFiles']:p.refuse('origin changed during copy')
         if p.inventory(depfd)!=depmanifest:p.refuse('dependencies changed during copy')
-        bindings=alias_bindings(output,records,resolver_map or {})
+        bindings=alias_bindings(output,records,resolver_map)
         # Resolve the full staged graph, including origin-crossing aliases, before compilation.
         staged=snapshot(output)
         for path,binding in bindings.items():
             if staged.get(path)!={'kind':'symlink','target':binding['target']}:p.refuse('resolver binding changed')
         manifest={'formatVersion':1,'kind':'winter-reader-inputs','origins':records,'dependencies':depmanifest,'resolverBindings':bindings,'stagedInputs':staged,
-          'bareReferencesPendingMetafile':True,'thirdPartyResolverMapSha256':p.digest(p.canonical(resolver_map or {}).encode()),'stagedInventorySha256':p.digest(p.canonical(staged).encode()),'dependencyInstallationPerformed':False,'nativeOwnerVerified':False,'linuxExecutionVerified':False,'vmExecutionVerified':False,'activationEnabled':False}
+          'pythonSourceObservations':PYTHON_SOURCE_OBSERVATIONS,'executedPythonSourceAuthenticated':False,'bareReferencesPendingMetafile':True,'thirdPartyResolverMapSha256':p.digest(p.canonical(resolver_map).encode()),'stagedInventorySha256':p.digest(p.canonical(staged).encode()),'dependencyInstallationPerformed':False,'nativeOwnerVerified':False,'linuxExecutionVerified':False,'vmExecutionVerified':False,'activationEnabled':False}
         p.write_new(output/'inputs.json',(p.canonical(manifest)+'\n').encode())
         return manifest
     finally:
@@ -183,30 +214,66 @@ def check_inputs(packet,manifest):
     if actual!=expected:p.refuse('staged bytes/resolver changed')
     for alias,binding in manifest['resolverBindings'].items():
         if actual.get(alias)!={'kind':'symlink','target':binding['target']}:p.refuse('candidate resolver changed')
+def manifest_target(text,packet,measured,base='stage'):
+    if type(text)!=str or not text or len(text.encode())>4096:p.refuse('metafile path scalar')
+    if text.startswith('/'):
+        path=Path(text)
+        if not path.is_relative_to(packet):p.refuse('metafile path outside packet')
+        relative=path.relative_to(packet).as_posix()
+    else:relative=base+'/'+text
+    # Pure manifest graph; never look up an unmeasured filesystem fallback.
+    return p.resolved_link('metafile-anchor',relative,measured)
 def normalized_metafile(data,packet,manifest):
     if type(data)!=dict or type(data.get('inputs'))!=dict or not 1<=len(data['inputs'])<=p.MAX_ENTRIES:p.refuse('metafile shape')
-    measured=manifest['stagedInputs'];mapped={}
+    measured=manifest['stagedInputs'];mapped={};bundled=set()
     for raw,info in data['inputs'].items():
         if type(raw)!=str or type(info)!=dict or type(info.get('bytes'))!=int:p.refuse('metafile input record')
-        physical=(packet/'stage'/raw).resolve();relative=physical.relative_to(packet).as_posix() if physical.is_relative_to(packet) else None
-        if relative is None or measured.get(relative,{}).get('kind')!='file' or measured[relative]['bytes']!=info['bytes']:p.refuse('metafile input outside capture')
+        relative=manifest_target(raw,packet,measured)
+        if measured.get(relative,{}).get('kind')!='file' or measured[relative]['bytes']!=info['bytes']:p.refuse('metafile input outside capture')
         if ('0.0.28' in relative) or ('/dist/' in relative and relative.startswith('source/sdk/packages/')):p.refuse('old/unmeasured SDK emit')
         if relative.startswith('dependencies/') and '@yanlinglabs' in relative:p.refuse('published peer resolver')
-        mapped[raw]=relative
+        mapped[raw]=relative;bundled.add(relative)
     entry='source/runtime/'+p.READER_ENTRY
-    if entry not in mapped.values():p.refuse('reader entry missing from graph')
-    if not any(name.startswith('source/sdk/packages/sdk/') for name in mapped.values()):p.refuse('actual candidate SDK peer absent')
+    if entry not in bundled:p.refuse('reader entry missing from graph')
+    if not any(name.startswith('source/sdk/packages/sdk/') for name in bundled):p.refuse('actual candidate SDK peer absent')
     def remap(value):
         if isinstance(value,str):
             if value in mapped:return mapped[value]
-            if str(packet) in value:return value.replace(str(packet),'<packet>')
-            if value.startswith('/'):p.refuse('private absolute metafile path')
+            if value.startswith('/'):
+                path=Path(value)
+                if not path.is_relative_to(packet):p.refuse('private absolute metafile path')
+                return '<packet>/'+path.relative_to(packet).as_posix()
             return value
         if isinstance(value,list):return [remap(item) for item in value]
         if isinstance(value,dict):return {remap(key):remap(item) for key,item in value.items()}
         return value
-    normalized=remap(data)
-    return normalized,{name:measured[name] for name in sorted(set(mapped.values()))}
+    normalized=remap(data);normalized_inputs={};edge_count=0
+    for raw,info in data['inputs'].items():
+        record=remap(info);imports=info.get('imports',[])
+        if type(imports)!=list:p.refuse('metafile import list')
+        normalized_imports=[]
+        for item in imports:
+            edge_count+=1
+            if edge_count>p.MAX_ENTRIES or type(item)!=dict or type(item.get('path'))!=str or type(item.get('external',False))!=bool:p.refuse('metafile import record')
+            copy=remap(item)
+            # Original spelling is evidence; it must not be treated as a filesystem path.
+            if 'original' in item:copy['original']=item['original']
+            if not item.get('external',False):
+                target=item['path']
+                if target.startswith('/'):
+                    resolved=manifest_target(target,packet,measured)
+                elif target.startswith(('./','../')):
+                    resolved=manifest_target(target,packet,measured,str(Path(mapped[raw]).parent))
+                elif target in mapped:resolved=mapped[target]
+                else:p.refuse('unsupported metafile import spelling')
+                if resolved not in bundled:p.refuse('outside/non-bundled import target')
+                copy['path']=resolved
+            normalized_imports.append(copy)
+        record['imports']=normalized_imports
+        if mapped[raw] in normalized_inputs:p.refuse('duplicate canonical metafile input')
+        normalized_inputs[mapped[raw]]=record
+    normalized['inputs']=normalized_inputs
+    return normalized,{name:measured[name] for name in sorted(bundled)}
 def unknown_flag_probe(runner,compiler_fd,packet,recipe):
     negative=packet/'stage/negative';negative.mkdir(mode=0o700);bogus='--winter-reader-build-option-must-refuse'
     args=[arg.replace(str(packet/'artifacts'),str(negative)) for arg in recipe]+[bogus]
@@ -372,7 +439,7 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
         for fd,expected in ((compiler_fd,compiler_meta),(base_fd,base_meta),(cc_fd,cc_meta)):
             if p.digest(p.read_fd(fd,p.MAX_ELF))!=expected['sha256']:p.refuse('held tool/base changed')
         receipt={'formatVersion':1,'kind':'winter-reader-compile','inputsSha256':p.digest(read_file(packet/'inputs.json',p.MAX_JSON)),'origins':manifest['origins'],
-          'resolverBindings':manifest['resolverBindings'],'reachableGraph':graph,'unknownFlagRefusal':flag_refusal,'compiler':{'version':pin['version'],**compiler_meta},'base':{**pin,'archiveAcquisitionVerified':False},'nativeCompiler':{'version':first,**cc_meta},
+          'resolverBindings':manifest['resolverBindings'],'pythonSourceObservations':PYTHON_SOURCE_OBSERVATIONS,'executedPythonSourceAuthenticated':False,'reachableGraph':graph,'unknownFlagRefusal':flag_refusal,'compiler':{'version':pin['version'],**compiler_meta},'base':{**pin,'archiveAcquisitionVerified':False},'nativeCompiler':{'version':first,**cc_meta},
           'recipe':{'target':p.BASE['target'],'autoloadFlags':list(p.AUTOLOAD_FLAGS),'environment':p.ENV,'cwd':'stage','outputsExecuted':False},
           'commands':{'bun':['<held-compiler>',*[arg.replace(str(packet),'<packet>') for arg in compile_args]],'nativeCC':['<held-native-cc>',*[arg.replace(str(packet),'<packet>') for arg in native_args]]},'nativeFlags':list(NATIVE_FLAGS),'systemHeaders':headers,'bundledInputs':bundled,'metafileSha256':p.digest(meta_wire),'artifacts':bodies,'runtimeDependencies':closure,
           'dynamicRuntimeImportsVerified':False,'globalBunConfigurationExecutionVerified':False,'staticMetafileOnly':True,'trustedToolchainVerified':False,'dependencyPackageAttestationVerified':False,'autoloadExecutionVerified':False,'nativeOwnerVerified':False,'linuxExecutionVerified':False,'vmExecutionVerified':False,'activationEnabled':False}
@@ -386,6 +453,7 @@ def main():
     parser.add_argument('--resolver-map',required=True,type=Path)
     args=parser.parse_args()
     if platform.system()!='Linux' or platform.machine() not in ('aarch64','arm64'):p.refuse('ordinary Linux ARM64 build required')
-    receipt=build(args.runtime,args.sdk,args.overlay,args.dependencies,args.compiler,args.base,args.cc,args.sysroot,args.out,builder_head=args.builder_head,resolver_map=json_data(read_file(args.resolver_map,p.MAX_JSON)))
+    resolver_map=resolver_map_file(args.resolver_map)
+    receipt=build(args.runtime,args.sdk,args.overlay,args.dependencies,args.compiler,args.base,args.cc,args.sysroot,args.out,builder_head=args.builder_head,resolver_map=resolver_map)
     print(json.dumps({'compiled':True,'receiptSha256':p.digest(p.canonical(receipt).encode()+b'\n'),'linuxExecutionVerified':False,'vmExecutionVerified':False,'activationEnabled':False}))
 if __name__=='__main__':main()

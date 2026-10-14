@@ -37,7 +37,9 @@ class PacketTests(unittest.TestCase):
             put(self.sdk,'packages/'+folder+'/package.json',json.dumps({'name':'@yanlinglabs/'+name,'version':'0.0.53','exports':{'.':{'bun':'./src/index.ts'}}}).encode())
             put(self.sdk,'packages/'+folder+'/src/index.ts',b'export const WINTER_BRAND = {};\n')
         put(self.overlay,p.HEADER,b'/* same header */\n');put(self.overlay,p.C_SOURCE,b'#include "linux-compartment.h"\n')
-        for name in b.BUILDER_FILES:put(self.builder,name,b'inert builder source data\n')
+        for name in b.BUILDER_FILES:
+            data=(Path(__file__).resolve().parents[2]/name).read_bytes() if name in b.PYTHON_SOURCE_OBSERVATIONS else b'inert builder source data\n'
+            put(self.builder,name,data)
         put(self.deps,'typescript/lib/index.js',b'/* inert dependency */\n')
         self.heads={name:git_commit(path) for name,path in [('runtime',self.runtime),('sdk',self.sdk),('overlay',self.overlay),('builder',self.builder)]}
         self.output=self.root/'packet'
@@ -86,6 +88,41 @@ class PacketTests(unittest.TestCase):
             with self.assertRaises(p.Refusal):b.normalized_metafile(bad,self.output,manifest)
         bad={'inputs':{entries[0]:{'bytes':1}}}
         with self.assertRaises(p.Refusal):b.normalized_metafile(bad,self.output,manifest)
+    def test_import_targets_normalize_actual_bun_relative_absolute_and_alias_shapes(self):
+        put(self.sdk,'packages/provider-catalog/src/families.ts',b'export const families = [];')
+        put(self.sdk,'packages/sdk/src/validate.ts',b'export const validate = true;')
+        self.heads['sdk']=git_commit(self.sdk);manifest=self.prepare()
+        names=['source/runtime/'+p.READER_ENTRY,'source/sdk/packages/sdk/src/index.ts','source/sdk/packages/sdk/src/validate.ts','source/sdk/packages/provider-catalog/src/index.ts','source/sdk/packages/provider-catalog/src/families.ts']
+        data={'inputs':{str(self.output/name):{'bytes':manifest['stagedInputs'][name]['bytes'],'imports':[]} for name in names}}
+        data['inputs'][str(self.output/names[1])]['imports']=[{'kind':'import-statement','original':'./validate.ts','path':str(self.output/names[2])}]
+        data['inputs'][str(self.output/names[3])]['imports']=[{'kind':'import-statement','path':'./families.ts'}]
+        data['inputs'][str(self.output/names[0])]['imports']=[{'kind':'import-statement','original':'@yanlinglabs/winter-agent-sdk','path':str(self.output/'source/runtime/node_modules/@yanlinglabs/winter-agent-sdk/src/index.ts')},{'kind':'import-statement','original':'node:fs','path':'fs','external':True}]
+        normalized,_=b.normalized_metafile(data,self.output,manifest);graph=b.graph_evidence(normalized,self.output,manifest)
+        self.assertEqual(normalized['inputs'][names[3]]['imports'][0]['path'],names[4]);self.assertEqual(graph['missingOriginalCount'],1)
+        self.assertEqual(graph['bareReferences'][0]['specifier'],'@yanlinglabs/winter-agent-sdk')
+        data['inputs'][str(self.output/names[0])]['imports'][0]['path']='../../node_modules/@yanlinglabs/winter-agent-sdk/src/index.ts'
+        normalized,_=b.normalized_metafile(data,self.output,manifest);self.assertEqual(normalized['inputs'][names[0]]['imports'][0]['path'],names[1])
+        for target in ('/tmp/unmeasured.ts','./missing.ts'):
+            data['inputs'][str(self.output/names[1])]['imports'][0]['path']=target
+            with self.assertRaises(p.Refusal):b.normalized_metafile(data,self.output,manifest)
+    def test_falsey_resolver_maps_are_not_defaulted(self):
+        for value in (False,[],0,''):
+            with self.assertRaisesRegex(p.Refusal,'plain third-party resolver map'):
+                b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,resolver_map=value)
+        path=self.root/'resolver-map.json'
+        for value in (None,False,[],0,''):
+            path.write_text(json.dumps(value))
+            with self.assertRaisesRegex(p.Refusal,'plain third-party resolver map'):b.resolver_map_file(path)
+        self.assertFalse(self.output.exists())
+    def test_duplicate_physical_inputs_and_nonbundled_import_refuse(self):
+        manifest=self.prepare();entry='source/runtime/'+p.READER_ENTRY;sdk='source/sdk/packages/sdk/src/index.ts'
+        alias='source/runtime/node_modules/@yanlinglabs/winter-agent-sdk/src/index.ts'
+        names=[entry,sdk,alias]
+        data={'inputs':{str(self.output/name):{'bytes':manifest['stagedInputs'][sdk if name==alias else name]['bytes']} for name in names}}
+        with self.assertRaisesRegex(p.Refusal,'duplicate canonical'):b.normalized_metafile(data,self.output,manifest)
+        del data['inputs'][str(self.output/alias)]
+        data['inputs'][str(self.output/sdk)]['imports']=[{'kind':'import-statement','path':str(self.output/'source/sdk'/p.HEADER)}]
+        with self.assertRaisesRegex(p.Refusal,'non-bundled'):b.normalized_metafile(data,self.output,manifest)
     def test_actual_builder_injected_compiler_refusal_retains_measured_stage(self):
         tools={}
         for name in ('compiler','base','cc'):

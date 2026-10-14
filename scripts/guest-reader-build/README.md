@@ -91,3 +91,17 @@ disabled: pinned Bun documentation describes global/local merging. Enforceable
 recipe facts are the empty cwd, explicit empty config, no-env-file and four
 compiled-autoload-off flags. Global configuration execution remains unverified;
 first real pinned-runner probes remain owed.
+
+The two executing Python source files are hashed before helper exec_module and
+reobserved afterward, then compared with the four-file builder capture. These are
+bounded observations, not executed-source authentication: Python may have loaded
+different/cached code, and capture is not a sealed interpreter/code-loader proof.
+
+Compiler/Git descendants that closed inherited pipes before normal leader reaping
+are accepted only for this ephemeral ordinary CI fixture. Their termination is
+not proven. Future artifact workflow must place --out outside the checkout and
+outside a RUNNER_TEMP ancestor carrying resolver config; the explicit ancestor
+checks govern. Import targets use only the captured bundled manifest graph, with
+one fixed importer-directory base for explicit ./../ edges, absolute paths as-is,
+and exact raw-key matches for other supported spellings. Unsupported extensionless
+paths refuse; there is no importer/build-cwd fallback or filesystem search.
