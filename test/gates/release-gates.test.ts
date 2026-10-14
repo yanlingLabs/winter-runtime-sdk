@@ -97,7 +97,7 @@ describe("the release workflow", () => {
   });
 
   test("the reader compile fixture has exact feature triggers and no output execution", () => {
-    const source = parseWorkflow("cowork-reader-compile-fixture.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ uses?: string; run?: string; with?: Record<string, unknown> }> }> };
+    const source = parseWorkflow("cowork-reader-compile-fixture.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ name?: string; if?: string; uses?: string; run?: string; with?: Record<string, unknown> }> }> };
     expect(source.on).toEqual({
       push: { branches: ["cowork/instruction-reader-compile-fixture"], paths: [".github/workflows/cowork-reader-compile-fixture.yml", "scripts/guest-reader-build/**", "test/gates/release-gates.test.ts"] },
       workflow_dispatch: {},
@@ -106,20 +106,33 @@ describe("the release workflow", () => {
     expect(Object.keys(source.jobs ?? {})).toEqual(["compile-only"]);
     const job = source.jobs?.["compile-only"];
     expect(job?.if).toBe("github.ref == 'refs/heads/cowork/instruction-reader-compile-fixture'");
-    expect(job?.steps?.length).toBe(8);
+    expect(job?.steps?.length).toBe(9);
     for (const step of job?.steps ?? []) {
       if (step.uses?.startsWith("actions/checkout")) expect(step.with?.["persist-credentials"]).toBe(false);
       if (step.run) expect(step.run).not.toMatch(/sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher)?(?:\s|$)/);
     }
     const checkouts = job?.steps?.filter((step) => step.uses?.startsWith("actions/checkout")) ?? [];
     expect(checkouts.map((step) => step.with?.ref)).toEqual([
-      "eb163aa8aadb4083d7ab6bfa063ff821e2853234",
+      "73de25a7ac606c32a9df22bf5591f5db66c159ee",
       "0394b36f674765c942f8db07f009b7ad20787dba",
       "8603da22d9fe7f1695166891cd29ccd254b1d21e",
       "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
     ]);
+    const uploads = job?.steps?.filter((step) => step.uses === "actions/upload-artifact@v4") ?? [];
+    expect(uploads.length).toBe(2);
+    expect(uploads[1]).toEqual({
+      name: "Retain bounded compiler refusal diagnostics",
+      if: "failure() && env.READER_FIXTURE != ''",
+      uses: "actions/upload-artifact@v4",
+      with: {
+        name: "reader-compile-diagnostics-${{ github.run_id }}",
+        path: "${{ env.READER_FIXTURE }}/packet/diagnostics/*.json",
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+      },
+    });
     const text = readWorkflow("cowork-reader-compile-fixture.yml");
-    expect(text).toContain("--builder-head eb163aa8aadb4083d7ab6bfa063ff821e2853234");
+    expect(text).toContain("--builder-head 73de25a7ac606c32a9df22bf5591f5db66c159ee");
     expect(text).toContain("if name=='artifacts/native.d':continue");
     expect(text).toContain("tar.addfile(record,io.BytesIO(data))");
     expect(text).not.toContain("tar.addfile(record,incoming)");
