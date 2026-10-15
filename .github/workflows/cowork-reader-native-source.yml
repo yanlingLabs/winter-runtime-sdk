@@ -1,7 +1,7 @@
 name: reader-native-source
 on:
   push:
-    branches: [cowork/reader-linux-native-harness, cowork/reader-native-wrapper, cowork/reader-hosted-fixture-stderr]
+    branches: [cowork/reader-linux-native-harness, cowork/reader-native-wrapper, cowork/reader-hosted-fixture-stderr, cowork/reader-probe-integration]
     paths:
       - scripts/guest-reader-native/**
       - test/guest/reader-harness-consumer.test.ts

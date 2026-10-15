@@ -83,7 +83,7 @@ describe("the release workflow", () => {
 
   test("the reader source workflow is credential-free portable data checking only", () => {
     const source = parseWorkflow("cowork-reader-build-source.yml") as { on?: { push?: { branches?: unknown } }; permissions?: unknown; jobs?: Record<string, unknown> };
-    expect(source.on?.push?.branches).toEqual(["cowork/instruction-reader-build", "cowork/reader-compile-semantics"]);
+    expect(source.on?.push?.branches).toEqual(["cowork/instruction-reader-build", "cowork/reader-compile-semantics", "cowork/reader-probe-integration"]);
     expect(source.permissions).toEqual({ contents: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["portable-data"]);
     expect(source.jobs?.["portable-data"]).toEqual({
@@ -117,7 +117,7 @@ describe("the release workflow", () => {
   test("the reader intake workflow uses only unprivileged synthetic data", () => {
     const source = parseWorkflow("cowork-reader-intake-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-intake/**", ".github/workflows/cowork-reader-intake-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-packet-intake"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-packet-intake", "cowork/reader-probe-integration"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["portable-data"]);
     expect(source.jobs?.["portable-data"]).toEqual({
@@ -134,7 +134,7 @@ describe("the release workflow", () => {
   test("the native reader source workflow runs only injected and temporary DATA tests", () => {
     const source = parseWorkflow("cowork-reader-native-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-native/**", "test/guest/reader-harness-consumer.test.ts", ".github/workflows/cowork-reader-native-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-fixture-stderr"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-fixture-stderr", "cowork/reader-probe-integration"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(source.jobs).toEqual({
       "portable-data": {
