@@ -946,6 +946,25 @@ class Pins(unittest.TestCase):
         self.assertEqual(gate.count('"' + bootstrap + '"'), 1); self.assertEqual(gate.count('"' + wrapper + '"'), 1)
         self.assertEqual(set(re.findall(r"hexdigest\(\)!='([0-9a-f]{64})'", workflow)) - {'65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99'}, {bootstrap})
         self.assertEqual(set(re.findall(r"data,'([0-9a-f]{64})'", workflow)), {wrapper})
+        download = self.digest('download.cjs')   # The reviewed downloader is pinned by hash in the workflow's github-script step.
+        self.assertEqual(workflow.count(download), 1); self.assertEqual(gate.count('"' + download + '"'), 1)
+
+    def test_origins_base_is_a_commit_that_carries_exactly_the_files_the_bootstrap_pins(self):
+        workflow = (ROOT / '.github/workflows/cowork-reader-native-reviewed.yml').read_text()
+        gate = (ROOT / 'test/gates/release-gates.test.ts').read_text()
+        ref = re.search(r"ref: ([0-9a-f]{40})\n\s+path: origins/base", workflow).group(1)
+        self.assertEqual(gate.count('{ ref: "' + ref + '", path: "origins/base"'), 1)
+        import subprocess
+        def show(path):
+            return subprocess.run(['git', '-C', str(ROOT), 'show', ref + ':' + path], capture_output=True)
+        if subprocess.run(['git', '-C', str(ROOT), 'cat-file', '-e', ref + '^{commit}'], capture_output=True).returncode != 0:
+            self.skipTest('the origins/base commit is not in this (shallow or partial) clone')
+        for path, pin in (('scripts/guest-reader-native/acquisition.py', b.ACQUISITION_SHA),
+                          ('scripts/guest-reader-intake/intake.py', b.INTAKE_SHA),
+                          ('scripts/guest-reader-intake/' + w.COMPILE_PIN, b.PIN_SHA)):
+            blob = show(path)
+            self.assertEqual(blob.returncode, 0, path)
+            self.assertEqual(hashlib.sha256(blob.stdout).hexdigest(), pin, path)
 
 
 if __name__ == '__main__': unittest.main()

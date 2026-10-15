@@ -157,7 +157,7 @@ describe("the release workflow", () => {
     expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-fixture-stderr' && github.run_attempt == '1'");
     expect(steps.length).toBe(6);
     for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
-    expect(steps[0]?.with).toEqual({ ref: "4d5dfcec9454d33e8423713491ced08b58669f58", path: "origins/base", "persist-credentials": false });
+    expect(steps[0]?.with).toEqual({ ref: "a94c4c89d489103e09bcc5c799312c9a44cbf86e", path: "origins/base", "persist-credentials": false });
     expect(steps[1]?.with).toEqual({ ref: "${{ github.sha }}", path: "origins/bootstrap", "persist-credentials": false });
     expect(steps[2]?.uses).toBe("actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b");
     expect(steps[2]?.with?.["github-token"]).toBe("${{ github.token }}");
@@ -166,9 +166,9 @@ describe("the release workflow", () => {
     expect(text).not.toContain("GITHUB_ENV");
     expect(text).not.toContain("_SHA_PENDING");
     expect(text).toContain("fs.chmodSync(privateDir,0o700)");
-    expect(text).toContain("65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99");
-    expect(text).toContain("4a2341427edfb8d6d2e2449348cef36ec693795a3e7e050877aaeba367eefe75");
-    expect(text).toContain("0748061a3fad523adcf8f28d02cc2317e34a714d34157306ec398937226f50c1");
+    expect(text).toContain("6745b668d5d6418cb6b8021e05d73eaeaf35d4ada3e3e3b2f76aaae71d1c2757");
+    expect(text).toContain("456cffc6d76d39262f76b9bf856020bbbd8df57ed6ea2814f307370051d90190");
+    expect(text).toContain("1f4a4222c91cecd8057eb45f367af24452027737781264d0aeae6a85be37ba7a");
     expect(text).toContain("sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B");
     expect(text).toContain("checked._compile(raw.toString('utf8'),source)");
     expect(text).toContain("exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module");
