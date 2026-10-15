@@ -306,9 +306,14 @@ class PacketTests(unittest.TestCase):
                 with self.assertRaisesRegex(p.Refusal,'differs from its pin'):
                     b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,overlay_pins={**self.pins,name:'0'*64})
                 self.assertFalse(self.output.exists())
-    def test_default_overlay_pins_are_the_placeholder_constants_and_refuse_fixture_bytes(self):
+    def test_default_overlay_pins_are_the_agent_sdk_687b9557_hashes_and_refuse_fixture_bytes(self):
         self.assertEqual(set(p.OVERLAY_SOURCE_SHA256),{p.C_SOURCE,p.PROBE_SOURCE,p.HEADER})
         self.assertTrue(all(len(value)==64 and set(value)<=set('0123456789abcdef') for value in p.OVERLAY_SOURCE_SHA256.values()))
+        # sha256 of the three files at agent-sdk 687b9557 (git show 687b9557:<path> | shasum -a 256).
+        self.assertEqual(p.OVERLAY_SOURCE_SHA256,{
+            'packages/runtime/src/guest/linux-instruction-reader-compartment.c':'28aa279d6ecb560424fe24bf8ccc0893ffc61cfbb9ba6ba72d38c66b7b655893',
+            'packages/runtime/src/guest/linux-instruction-reader-dependency-probe.c':'39ad16cdd2ceee031817cf57787b8d9251b314da1fe18b707b20bc785ba59b3e',
+            'packages/runtime/src/guest/linux-compartment.h':'92fef7c0708a23b1e930c5b2560dae6bef27294dfd682346e69d35c0484b967d'})
         # No injected pins: the constants apply, so the fixture bytes must not be accepted.
         with self.assertRaisesRegex(p.Refusal,'differs from its pin'):b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder)
         self.assertFalse(self.output.exists())

@@ -17,11 +17,11 @@ OVERLAY_HEAD='f6d88d9a2f8ae15bb50afb98868183ae769e3b11'  # still the pre-probe o
 C_SOURCE='packages/runtime/src/guest/linux-instruction-reader-compartment.c'
 PROBE_SOURCE='packages/runtime/src/guest/linux-instruction-reader-dependency-probe.c'
 HEADER='packages/runtime/src/guest/linux-compartment.h'
-# PLACEHOLDER (lane B scaffolding): these are the agent-sdk 94dd2f48 overlay hashes. The integrator replaces
-# them with the hashes of the frozen agent-sdk sha before any compile run; never treat them as a reviewed pin.
+# The overlay sources' hashes at agent-sdk 687b9557 (the compartment C, the reader-v2 dependency probe C and the shared
+# header). OVERLAY_HEAD above moves separately, to the final agent-sdk head, once that head is frozen.
 OVERLAY_SOURCE_SHA256={
-    C_SOURCE:'14622f98f4b809867326b26386599eae36fc34fee407ff4415418b65d28d5d46',
-    PROBE_SOURCE:'c0da913079104150fcc8c218718589a30f36fc157bcfb682f4f82de21642fd18',
+    C_SOURCE:'28aa279d6ecb560424fe24bf8ccc0893ffc61cfbb9ba6ba72d38c66b7b655893',
+    PROBE_SOURCE:'39ad16cdd2ceee031817cf57787b8d9251b314da1fe18b707b20bc785ba59b3e',
     HEADER:'92fef7c0708a23b1e930c5b2560dae6bef27294dfd682346e69d35c0484b967d'}
 READER_ENTRY='src/guest/instruction-reader-entry.ts'
 SDK_PACKAGES={'winter-agent-sdk':'sdk','winter-agent-runtime':'runtime','winter-provider-catalog':'provider-catalog','winter-provider-runtime':'provider-runtime','winter-conformance':'conformance','winter-provider-conformance':'provider-conformance'}
