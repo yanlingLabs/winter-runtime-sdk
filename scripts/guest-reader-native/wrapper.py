@@ -16,10 +16,10 @@ import types
 
 SOURCE_PINS = {
     'parent.py': '856dc389f06ae973b1c1a65149671d984288cf558d7a461e32c89758036c63af',
-    'producer.py': 'e7da78e4ae7c02303101059f4b43bf261d26fc56153a50f2aed8daed651a9a57',
+    'producer.py': 'e9513391bf0159bffff1dcc900e636302cd684631aacb430fbca9f6b8b31252c',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
-    'native_cases.py': '6daab94ac05da5bb245604cb9e06cf7c8a6d41a630bb4b2128b2aaaaef3d56ee',
+    'native_cases.py': '82bd3366f49c1a38f1431a4bf510a67d1f60246d0059ab5efddee643eab874b1',
 }
 MODULE_ORDER = (('control', 'control.py'), ('producer', 'producer.py'),
                 ('reader_parent', 'parent.py'), ('reader_fixture', 'fixture.py'),
@@ -440,7 +440,31 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
                 parent.guard_root_owner, parent.recheck_runtime,
                 control_pair_factory=pair_factory,source_path=lease.fixture.path/'source',
                 shared_path=lease.fixture.path/'shared',exec_environment=selected_environment)
+        def probe_factory(debt, pair_factory):
+            # The dependency probe uses the reader's exact launch envelope; only the executable role differs.
+            lease.recheck(); lease.fixture.recheck()
+            return producer.NativeOperation(debt, lease.runtime,
+                lease.fixture.fds['source'], lease.fixture.fds['shared'],
+                parent.guard_root_owner, parent.recheck_runtime,
+                control_pair_factory=pair_factory,source_path=lease.fixture.path/'source',
+                shared_path=lease.fixture.path/'shared',exec_environment=selected_environment,
+                executable_role='instructionReaderDependencyProbe')
         outcomes = []
+        # The probe runs FIRST so it yields data even when the reader later fails. Its content never feeds
+        # readerCaseSetPassed; only a teardown failure (CaseUncertain) stops the set, as for any case.
+        kind = 'dependency-probe'
+        lease.stage = 'case:dependency-probe:run'
+        if effects_factory is None:
+            probed = cases.run_probe_case(probe_factory)
+        else:
+            probed = cases.run_probe_case(probe_factory, effects=effects_factory(kind))
+        lease.dependency_probe = probed.record
+        lease.stage = 'case:dependency-probe:verify'
+        require(type(probed.record) is dict and probed.record.get('ran') is True
+                and probed.record.get('readerSuccessImplied') is False
+                and probed.record.get('bunCompatibilityProven') is False, 'probe record proof flags')
+        lease.stage = 'case:dependency-probe:recheck'
+        lease.fixture.recheck(); parent.recheck_runtime(lease.runtime); lease.recheck()
         for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
             lease.stage = 'case:' + kind + ':run'
             request = data.request_bytes() if kind == 'same-owner' else b''
@@ -467,7 +491,8 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
         return {'kind': 'winter-reader-only-case-set', 'cases': outcomes,
                 'readerCaseSetPassed': True, 'configEffectProven': False,
                 'guidedGuestTurnVerified': False, 'productionActivation': False,
-                'vmExecutionVerified': False, 'fixtureRemovalConfirmed': False}
+                'vmExecutionVerified': False, 'fixtureRemovalConfirmed': False,
+                'dependencyProbe': lease.dependency_probe}
     except BaseException as error:
         try:
             lease.fixture_stderr_sample=sample_exporter(error,kind) if sample_exporter is not None else _sample_unavailable('provenance_unverified')

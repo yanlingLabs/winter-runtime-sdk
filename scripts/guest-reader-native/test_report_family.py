@@ -582,8 +582,9 @@ class Projection(unittest.TestCase):
         other = b.failure_record(w.Uncertain(lease, error))
         self.assertEqual({k: v for k, v in other.items() if k != 'postInitReportFamily'}, old)
         self.assertEqual(set(record), {'readerCaseSetPassed', 'stage', 'reason', 'exceptionClass', 'errnoSymbol', 'causeClass', 'causeReason', 'causeErrnoSymbol',
-                                       'preInitDiagnostics', 'postInitDiagnostics', 'postInitStderrSample', 'postInitReportFamily', 'nativeCleanupConfirmed',
+                                       'preInitDiagnostics', 'postInitDiagnostics', 'postInitStderrSample', 'postInitReportFamily', 'dependencyProbe', 'nativeCleanupConfirmed',
                                        'configEffectProven', 'vmExecutionVerified', 'productionActivation'})
+        self.assertEqual(record['dependencyProbe'], {'ran': False})  # No probe record: the closed default.
         self.assertEqual(set(record['postInitDiagnostics']), set(b.POSTINIT_KEYS))
         for flag in ('readerCaseSetPassed', 'nativeCleanupConfirmed', 'configEffectProven', 'vmExecutionVerified', 'productionActivation'): self.assertIs(record[flag], False)
         self.assertEqual(record['stage'], 'case:same-owner:run'); self.assertEqual(record['causeReason'], 'same-owner native control outcome')
@@ -794,7 +795,7 @@ class StageAlignment(unittest.TestCase):
         modules = {'control': object(), 'producer': SimpleNamespace(selected_host_exec_environment=at('preflight'), descriptor_preflight=fine),
                    'reader_parent': SimpleNamespace(load_pin=at('load_pin'), capture_packet=at('capture'), create_launch_root=at('launch_root'),
                                                     guard_root_owner=at('guard'), recheck_runtime=fine),
-                   'reader_fixture': SimpleNamespace(create_fixture=at('fixture')), 'native_cases': SimpleNamespace(run_case=boom)}
+                   'reader_fixture': SimpleNamespace(create_fixture=at('fixture')), 'native_cases': SimpleNamespace(run_case=boom, run_probe_case=boom)}
         lease = object.__new__(w.SourceLease)
         lease.path = Path('/run/fixed/sources'); lease.synthetic = False; lease.closed = False; lease.unresolved = False
         lease.modules = dict(modules); lease.recheck = lambda: None; lease.snapshot = lease.runtime = lease.fixture = None
@@ -829,7 +830,7 @@ class StageAlignment(unittest.TestCase):
             if not (stage.startswith('case:') or stage == 'close'): continue
             kind = stage.split(':')[1] if stage.startswith('case:') else 'parent-exit'  # run_cases leaves `kind` at its last value after the loop.
             self.assertEqual(self.family(error, stage), self.sample_reason(error, kind), stage)
-        self.assertEqual(set(b.NOT_SAME_OWNER_STAGES), {stage for stage in b.FAILURE_STAGES if stage == 'close' or stage.startswith(('case:unexpected-parent:', 'case:parent-exit:'))})
+        self.assertEqual(set(b.NOT_SAME_OWNER_STAGES), {stage for stage in b.FAILURE_STAGES if stage == 'close' or stage.startswith(('case:dependency-probe:', 'case:unexpected-parent:', 'case:parent-exit:'))})
 
     def test_failures_outside_run_cases_say_capture_absent_as_the_sample_does(self):
         def agree(error, stage):

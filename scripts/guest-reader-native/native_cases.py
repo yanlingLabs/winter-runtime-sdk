@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from producer import (Registry, Refusal, IO_MAX, parse_receipt, require,
                       root_linux, start_registered, validate_init_pidfd,
-                      BOOTSTRAP_ERRNOS, decode_bootstrap_record)
+                      BOOTSTRAP_ERRNOS, decode_bootstrap_record, view_contract_sha256)
 
 KINDS = ('same-owner', 'unexpected-parent', 'parent-exit')
 NEGATIVE_SECONDS = 3.0  # From BEFORE fork, strictly before C's 4000ms deadline.
@@ -50,6 +50,7 @@ class Handles:
     received_handles: object = None
     preinit_launcher_wait_status: int | None = None
     preinit_producer_wait_status: int | None = None
+    dependency_probe: object = None  # Closed record of run_probe_case, success or failure.
 
 
 @dataclass(frozen=True)
@@ -280,6 +281,106 @@ def postinit_diagnostics(observed, reaps):
             'stderrSha256':hashlib.sha256(stderr).hexdigest(),
             'stderrClassification':classified['classification'],
             'stderrLabel':classified['label'],'stderrErrno':classified['errno']}
+
+
+# ---------------------------------------------------------------------------
+# Reader dependency probe line, grammar `reader-v2`. DATA in, closed scalars out.
+#
+#   probe=reader-v2 stack_rc=N stack_bounds=B stack_contains=B urandom_open=N urandom_read=B
+#   getrandom=N proc_list=N proc_numeric=N proc_root=B canary_open=N\n
+#
+# N is 0|[1-9][0-9]{0,9}, at most 4294967295; B is [01]. Fixed key order, single spaces, exactly
+# one trailing LF, ASCII only, at most 256 bytes, matched with fullmatch over the whole buffer.
+# Cross-field rules (anything else is `unknown`): stack_rc!=0 implies bounds=0 and contains=0;
+# contains=1 implies bounds=1; urandom_open!=0 implies urandom_read=0; proc_list!=0 implies
+# proc_numeric=0; proc_numeric is 0..65535. The line states are `valid` (the whole grammar),
+# `absent` (an empty buffer) and `unknown` (everything else, including any exception).
+#
+# The raw line is never stored. The errno-valued fields (stack_rc, urandom_open, getrandom,
+# proc_list, canary_open) become symbols: 0 is `OK`, a Linux number in the closed table below is
+# its symbol, any other number is `unknown`. The table is the LINUX guest numbering (the probe
+# runs on Linux), never the host `errno` module, so a macOS test host reports the same symbols
+# as the hosted runner. Its symbol set equals bootstrap.ERRNO_SYMBOLS except EOPNOTSUPP, which
+# shares number 95 with ENOTSUP, reported as ENOTSUP as everywhere else in the harness.
+#
+# A probe line is untrusted runtime text. It is NOT a cause, NOT a reader success and NOT
+# evidence that Bun runs: the probe exercises only the pinned libc.
+# ---------------------------------------------------------------------------
+PROBE_MAX_LINE = 256
+PROBE_FIELDS = (('stack_rc', 'stackRc', 'n'), ('stack_bounds', 'stackBounds', 'b'),
+                ('stack_contains', 'stackContains', 'b'), ('urandom_open', 'urandomOpen', 'n'),
+                ('urandom_read', 'urandomRead', 'b'), ('getrandom', 'getrandom', 'n'),
+                ('proc_list', 'procList', 'n'), ('proc_numeric', 'procNumeric', 'n'),
+                ('proc_root', 'procRoot', 'b'), ('canary_open', 'canaryOpen', 'n'))
+PROBE_ERRNO_FIELDS = ('stackRc', 'urandomOpen', 'getrandom', 'procList', 'canaryOpen')
+PROBE_LINE_STATES = ('valid', 'absent', 'unknown')
+PROBE_CANARY_STATES = ('not_visible', 'visible', 'unknown', 'not_checked')
+PROBE_ERRNO_OK = 'OK'
+PROBE_ERRNO_UNKNOWN = 'unknown'
+PROBE_LINUX_ERRNO_SYMBOLS = {
+    1: 'EPERM', 2: 'ENOENT', 3: 'ESRCH', 4: 'EINTR', 5: 'EIO', 6: 'ENXIO', 7: 'E2BIG', 8: 'ENOEXEC',
+    9: 'EBADF', 10: 'ECHILD', 11: 'EAGAIN', 12: 'ENOMEM', 13: 'EACCES', 14: 'EFAULT', 16: 'EBUSY',
+    17: 'EEXIST', 18: 'EXDEV', 19: 'ENODEV', 20: 'ENOTDIR', 21: 'EISDIR', 22: 'EINVAL', 23: 'ENFILE',
+    24: 'EMFILE', 26: 'ETXTBSY', 28: 'ENOSPC', 30: 'EROFS', 32: 'EPIPE', 36: 'ENAMETOOLONG',
+    38: 'ENOSYS', 40: 'ELOOP', 75: 'EOVERFLOW', 80: 'ELIBBAD', 87: 'EUSERS', 95: 'ENOTSUP',
+    104: 'ECONNRESET', 110: 'ETIMEDOUT'}
+_PROBE_NUMBER = rb'(0|[1-9][0-9]{0,9})'
+_PROBE_BIT = rb'([01])'
+_PROBE_LINE = re.compile(b'probe=reader-v2 ' + b' '.join(
+    key.encode('ascii') + b'=' + (_PROBE_NUMBER if kind == 'n' else _PROBE_BIT)
+    for key, _, kind in PROBE_FIELDS) + b'\n')
+
+
+def probe_errno_symbol(number):
+    """OK for 0, the closed Linux symbol for a known number, otherwise `unknown`."""
+    return PROBE_ERRNO_OK if number == 0 else PROBE_LINUX_ERRNO_SYMBOLS.get(number, PROBE_ERRNO_UNKNOWN)
+
+
+def probe_outside_canary(line, fields, init_bound):
+    """The two B3 halves. The raw numbers are already symbols; no content is added.
+
+    process: `visible` when more than one numeric /proc entry was listed; `not_visible` only for
+    a valid line whose /proc listing succeeded and held exactly the namespace's own pid 1 AND the
+    case held the validated init binding; `unknown` otherwise. file: the canary open reported
+    ENOENT (`not_visible`), succeeded (`visible`, an escape) or anything else (`unknown`)."""
+    if line != 'valid' or type(fields) is not dict:
+        return {'process': 'unknown', 'file': 'unknown'}
+    if fields['procNumeric'] > 1: process = 'visible'
+    elif (init_bound is True and fields['procList'] == PROBE_ERRNO_OK
+            and fields['procNumeric'] == 1 and fields['procRoot'] is True): process = 'not_visible'
+    else: process = 'unknown'
+    canary = fields['canaryOpen']
+    return {'process': process,
+            'file': 'not_visible' if canary == 'ENOENT' else 'visible' if canary == PROBE_ERRNO_OK else 'unknown'}
+
+
+def parse_probe_line(raw, *, init_bound=False):
+    """Closed scalars for one complete stdout capture. Never raises, never returns content."""
+    try:
+        if type(raw) is bytes and raw == b'':
+            return {'line': 'absent', 'fields': None,
+                    'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
+        if type(raw) is not bytes or len(raw) > PROBE_MAX_LINE: raise ValueError
+        matched = _PROBE_LINE.fullmatch(raw)
+        if matched is None: raise ValueError
+        numbers = [int(group) for group in matched.groups()]
+        if any(number > 0xFFFFFFFF for number in numbers): raise ValueError
+        (stack_rc, bounds, contains, urandom_open, urandom_read,
+         _getrandom, proc_list, proc_numeric, _proc_root, _canary) = numbers
+        if stack_rc != 0 and (bounds or contains): raise ValueError
+        if contains and not bounds: raise ValueError
+        if urandom_open != 0 and urandom_read: raise ValueError
+        if proc_list != 0 and proc_numeric != 0: raise ValueError
+        if proc_numeric > 65535: raise ValueError
+        fields = {}
+        for (_, name, kind), number in zip(PROBE_FIELDS, numbers):
+            fields[name] = (number == 1) if kind == 'b' else (
+                probe_errno_symbol(number) if name in PROBE_ERRNO_FIELDS else number)
+        return {'line': 'valid', 'fields': fields,
+                'outsideCanary': probe_outside_canary('valid', fields, init_bound)}
+    except Exception:
+        return {'line': 'unknown', 'fields': None,
+                'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
 
 
 # ---------------------------------------------------------------------------
@@ -875,3 +976,93 @@ class LinuxEffects:
         h.subreaper_changed = False
         require(not failures, 'case descriptor close failures retained')
         h.retained = False
+
+
+# ---------------------------------------------------------------------------
+# The dependency-probe case. A SEPARATE function: run_case and LinuxEffects are unchanged and
+# unaware of it (the unchanged effects table is reused through the `effects` seam). Sequence:
+# receive_handles -> receive_init -> NO request is sent -> observe -> reap -> close_confirmed.
+#
+# Teardown predicates raise CaseUncertain exactly as the reader cases do. Content predicates
+# (the native wait status, an empty stderr, the stdout grammar) are only RECORDED and never
+# raise: a probe that crashed, wrote the wrong line or wrote to stderr still hands a closed
+# record to the wrapper. The record never feeds readerCaseSetPassed.
+# ---------------------------------------------------------------------------
+PROBE_KIND = 'dependency-probe'
+PROBE_SECONDS = 6.0  # Same envelope as the same-owner reader case.
+
+
+@dataclass(frozen=True)
+class ProbeEvidence:
+    record: dict
+    elapsed_seconds: float
+    observation: Observation
+    reaps: Reaps
+    descriptors_closed: bool
+    config_effect_proven: bool = False
+
+
+def build_probe_record(observed, reaps, *, init_bound, view_contract):
+    """The closed dependencyProbe record. Pure DATA, no effect, never raises, no raw content.
+
+    `observed`/`reaps` may be None (a failure before them): then nothing was checked."""
+    parsed = {'line': 'unknown', 'fields': None, 'outsideCanary': {'process': 'not_checked', 'file': 'not_checked'}}
+    observation, family = {'available': False}, 'capture_absent'
+    if observed is not None:
+        try: parsed = parse_probe_line(observed.stdout, init_bound=init_bound)
+        except Exception:
+            parsed = {'line': 'unknown', 'fields': None, 'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
+        try: family = classify_report_family(observed.stderr)
+        except Exception: family = 'classification_error'
+        if reaps is not None:
+            try: observation = postinit_diagnostics(observed, reaps)
+            except Exception: observation = {'available': False}
+    return {'ran': True, 'line': parsed['line'], 'fields': parsed['fields'], 'observation': observation,
+            'stderrFamily': family, 'outsideCanary': parsed['outsideCanary'],
+            'viewContractSha256': view_contract,
+            'readerSuccessImplied': False, 'bunCompatibilityProven': False}
+
+
+def run_probe_case(operation_factory, *, effects=None):
+    """Run the dependency probe through the reader's launch envelope. Returns ProbeEvidence."""
+    view_contract = view_contract_sha256()
+    fx = effects if effects is not None else LinuxEffects()
+    started = fx.now()
+    deadline = started + PROBE_SECONDS
+    handles = fx.launch(PROBE_KIND, operation_factory, deadline)
+    observed = None
+    reaps = None
+    init_bound = False
+    try:
+        fx.receive_handles(handles, deadline)
+        fx.receive_init(handles, deadline)
+        require(type(handles.init_pid) is int and handles.init_pid > 1
+                and handles.init_pidfd is not None, 'validated init required')
+        init_bound = True
+        # No request: the probe never reads stdin, and nothing is written or closed early.
+        observed = fx.observe(handles, deadline)
+        require(observed.launcher_ready and observed.stdout_eof and observed.stderr_eof
+                and observed.control_eof, 'independent launcher and pipe teardown')
+        if handles.bootstrap_error is not None:
+            require(observed.bootstrap_eof and not observed.bootstrap_record_observed,
+                    'bootstrap pipe drained without failure record')
+        require(observed.init_ready, 'independent init pidfd teardown')
+        reaps = fx.reap(handles, PROBE_KIND, observed, deadline)
+        require(reaps.producer_status == 0, 'producer actually reaped exit zero')
+        elapsed = fx.now() - started
+        require(0 <= elapsed < deadline - started, 'bounded case before native deadline')
+        fx.close_confirmed(handles)
+        require(not handles.retained, 'confirmed descriptor discharge')
+        elapsed = fx.now() - started
+        require(0 <= elapsed < deadline - started, 'descriptor discharge before case deadline')
+        record = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract)
+        handles.dependency_probe = record
+        return ProbeEvidence(record, elapsed, observed, reaps, True)
+    except BaseException as error:
+        # Keep whatever was observed; never close keepalives or lose pidfds on uncertainty.
+        try: handles.dependency_probe = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract)
+        except BaseException: pass  # Original refusal/debt is never replaced.
+        if handles.init_pid is None and hasattr(fx, 'diagnose_preinit'):
+            try: fx.diagnose_preinit(handles, deadline)
+            except BaseException: pass  # Original refusal/debt is never replaced.
+        raise CaseUncertain(handles, error) from error

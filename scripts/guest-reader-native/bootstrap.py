@@ -113,8 +113,10 @@ ERROR_REASONS = (
     'closed bootstrap source path',
     'closed bootstrap step',
     'closed drain observations',
+    'closed executable role',
     'closed external source pins',
     'closed handles',
+    'closed launcher argv',
     'closed native case kind',
     'closed packet library inventory',
     'closed pidfd observation',
@@ -282,6 +284,7 @@ ERROR_REASONS = (
     'private bootstrap mount namespace',
     'private real root propagation',
     'private source parent required',
+    'probe record proof flags',
     'proc observation bound',
     'proc observation identity changed',
     'proc observation regular file',
@@ -373,11 +376,11 @@ ERRNO_SYMBOLS = ('EACCES', 'EPERM', 'ENOENT', 'EBADF', 'EINVAL', 'EMFILE', 'ENFI
                  'ENOMEM', 'ENOSPC', 'EROFS', 'EIO', 'EPIPE', 'ECONNRESET', 'ETIMEDOUT',
                  'EINTR', 'EAGAIN', 'ENOTDIR', 'ELOOP', 'ESRCH', 'ECHILD', 'EEXIST', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP',
                  'E2BIG', 'ENOEXEC', 'EFAULT', 'EBUSY', 'EXDEV', 'ENODEV', 'EISDIR',
-                 'ETXTBSY', 'ENAMETOOLONG', 'EOVERFLOW', 'ELIBBAD', 'EUSERS')
+                 'ETXTBSY', 'ENAMETOOLONG', 'EOVERFLOW', 'ELIBBAD', 'EUSERS', 'ENXIO')
 FAILURE_STAGES = ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'fixture',
                   'close', 'source:capture', 'source:copy', 'bootstrap:copy', 'bootstrap:load') + tuple(
     'source:load:' + name for name in ('control', 'producer', 'reader_parent', 'reader_fixture', 'native_cases')) + tuple(
-    'case:' + kind + ':' + phase for kind in ('same-owner', 'unexpected-parent', 'parent-exit')
+    'case:' + kind + ':' + phase for kind in ('dependency-probe', 'same-owner', 'unexpected-parent', 'parent-exit')
     for phase in ('run', 'verify', 'recheck'))
 
 
@@ -523,6 +526,87 @@ def postinit_record(chain):
     return {name:raw[name] for name in POSTINIT_KEYS}
 
 
+# Reader dependency probe record (native_cases.build_probe_record, grammar reader-v2). Strict closed
+# projection: any shape, type, value or cross-field inconsistency yields {'ran': False}. The raw probe
+# line never reaches a record; errno-valued fields are the symbols below (ERRNO_SYMBOLS, the success
+# token OK, and unknown). Nothing here is reader success, a Bun result or cleanup proof.
+PROBE_KEYS = ('ran','line','fields','observation','stderrFamily','outsideCanary','viewContractSha256',
+              'readerSuccessImplied','bunCompatibilityProven')
+PROBE_FIELD_KEYS = ('stackRc','stackBounds','stackContains','urandomOpen','urandomRead','getrandom',
+                    'procList','procNumeric','procRoot','canaryOpen')
+PROBE_ERRNO_FIELDS = ('stackRc','urandomOpen','getrandom','procList','canaryOpen')
+PROBE_BIT_FIELDS = ('stackBounds','stackContains','urandomRead','procRoot')
+PROBE_LINES = ('valid','absent','unknown')
+PROBE_CANARY_STATES = ('not_visible','visible','unknown','not_checked')
+PROBE_ERRNO_VALUES = ERRNO_SYMBOLS+('OK','unknown')
+PROBE_MAX_LINE = 256
+
+
+def probe_projection(raw):
+    """A validated copy of one dependencyProbe record, or {'ran': False}. Never raises on hostile DATA."""
+    off={'ran':False}
+    if type(raw) is not dict:return off
+    if set(raw)=={'ran'}:return dict(off) if raw['ran'] is False else off
+    if set(raw)!=set(PROBE_KEYS) or raw['ran'] is not True:return off
+    line=raw['line']
+    if type(line) is not str or line not in PROBE_LINES:return off
+    fields=raw['fields']
+    if line=='valid':
+        if type(fields) is not dict or set(fields)!=set(PROBE_FIELD_KEYS):return off
+        for name in PROBE_ERRNO_FIELDS:
+            if type(fields[name]) is not str or fields[name] not in PROBE_ERRNO_VALUES:return off
+        for name in PROBE_BIT_FIELDS:
+            if type(fields[name]) is not bool:return off
+        if type(fields['procNumeric']) is not int or not 0<=fields['procNumeric']<=65535:return off
+        if fields['stackRc']!='OK' and (fields['stackBounds'] or fields['stackContains']):return off
+        if fields['stackContains'] and not fields['stackBounds']:return off
+        if fields['urandomOpen']!='OK' and fields['urandomRead']:return off
+        if fields['procList']!='OK' and fields['procNumeric']!=0:return off
+        fields={name:fields[name] for name in PROBE_FIELD_KEYS}
+    elif fields is not None:return off
+    canary=raw['outsideCanary']
+    if type(canary) is not dict or set(canary)!={'process','file'}:return off
+    for name in ('process','file'):
+        if type(canary[name]) is not str or canary[name] not in PROBE_CANARY_STATES:return off
+    if line=='valid':
+        if canary['file']!=('not_visible' if fields['canaryOpen']=='ENOENT' else 'visible' if fields['canaryOpen']=='OK' else 'unknown'):return off
+        if fields['procNumeric']>1:
+            if canary['process']!='visible':return off
+        elif fields['procList']=='OK' and fields['procNumeric']==1 and fields['procRoot']:
+            if canary['process'] not in ('not_visible','unknown'):return off
+        elif canary['process']!='unknown':return off
+    elif (canary['process'],canary['file']) not in (('unknown','unknown'),('not_checked','not_checked')):return off
+    family=raw['stderrFamily']
+    if type(family) is not str or family not in REPORT_FAMILIES+('capture_absent',):return off
+    observation=raw['observation']
+    try:checked=postinit_record([types.SimpleNamespace(handles=types.SimpleNamespace(postinit_diagnostics=observation))])
+    except BaseException:return off
+    if checked!=observation:return off
+    if checked['available'] is True:
+        if line=='valid' and (checked['stdoutFraming']!='one_lf' or checked['stdoutBytes']>PROBE_MAX_LINE):return off
+        if (line=='absent')!=(checked['stdoutBytes']==0):return off
+        if family in REPORT_FAMILIES[:3]+('incomplete',) and checked['stderrBytes']==0:return off
+    if (canary['process'],canary['file'])==('not_checked','not_checked') and (
+            line!='unknown' or checked['available'] is not False or family!='capture_absent'):return off
+    digest=raw['viewContractSha256']
+    if type(digest) is not str or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):return off
+    if raw['readerSuccessImplied'] is not False or raw['bunCompatibilityProven'] is not False:return off
+    return {'ran':True,'line':line,'fields':fields,'observation':checked,'stderrFamily':family,
+            'outsideCanary':{'process':canary['process'],'file':canary['file']},'viewContractSha256':digest,
+            'readerSuccessImplied':False,'bunCompatibilityProven':False}
+
+
+def probe_record(chain):
+    """The probe record for a failure: the first holder in chain order (per item: handles, then lease)."""
+    raw=None
+    for item in chain:
+        for holder in (getattr(item,'handles',None),getattr(item,'lease',None)):
+            observed=getattr(holder,'dependency_probe',None)
+            if observed is not None:raw=observed;break
+        if raw is not None:break
+    return {'ran':False} if raw is None else probe_projection(raw)
+
+
 SAMPLE_REASONS=('not_same_owner_failure','scrub_rejected','provenance_unverified',
                 'capture_absent','projection_error')
 
@@ -595,6 +679,9 @@ def log_result_projection(result):
         family=projected['postInitReportFamily']
         if type(family) is not str or family not in REPORT_FAMILIES+REPORT_FAMILY_ABSENT:
             projected['postInitReportFamily']='classification_error'
+    if 'dependencyProbe' in projected:
+        try:projected['dependencyProbe']=probe_projection(projected['dependencyProbe'])
+        except BaseException:projected['dependencyProbe']={'ran':False}
     return projected
 
 
@@ -632,6 +719,8 @@ def failure_record(error, *, stage='preflight'):
             sample={'available':False,'reason':'projection_error'}
     try:family=report_family_record(chain,stage)
     except BaseException:family='classification_error'
+    try:probe=probe_record(chain)
+    except BaseException:probe={'ran':False}
     if family in REPORT_FAMILIES[:3]+('incomplete',) and postinit.get('available') is True and postinit.get('stderrBytes')==0:
         family='classification_error'  # A report cannot come from an empty capture.
     name,reason,symbol=closed(error)
@@ -643,6 +732,7 @@ def failure_record(error, *, stage='preflight'):
             'postInitDiagnostics':postinit,
             'postInitStderrSample':sample,
             'postInitReportFamily':family,
+            'dependencyProbe':probe,
             'nativeCleanupConfirmed':False, 'configEffectProven':False,
             'vmExecutionVerified':False, 'productionActivation':False}
 
