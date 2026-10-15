@@ -134,7 +134,7 @@ describe("the release workflow", () => {
   test("the native reader source workflow runs only injected and temporary DATA tests", () => {
     const source = parseWorkflow("cowork-reader-native-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-native/**", "test/guest/reader-harness-consumer.test.ts", ".github/workflows/cowork-reader-native-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-fixture-stderr", "cowork/reader-probe-integration"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-fixture-stderr", "cowork/reader-probe-integration", "cowork/reader-hosted-dependency-probe"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(source.jobs).toEqual({
       "portable-data": {
@@ -152,13 +152,13 @@ describe("the release workflow", () => {
     const source = parseWorkflow("cowork-reader-native-reviewed.yml") as { on?: Record<string, unknown>; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ name?: string; uses?: string; with?: Record<string, unknown>; run?: string }> }> };
     expect(Object.keys(source.on ?? {})).toEqual(["push"]);
     expect(source.on?.push).toEqual({
-      branches: ["cowork/reader-hosted-fixture-stderr"],
+      branches: ["cowork/reader-hosted-dependency-probe"],
       paths: [".github/workflows/cowork-reader-native-reviewed.yml", "scripts/guest-reader-native/bootstrap.py", "scripts/guest-reader-native/download.cjs", "scripts/guest-reader-native/wrapper.py"],
     });
     expect(source.permissions).toEqual({ contents: "read", actions: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["reader-only"]);
     const job = source.jobs?.["reader-only"], steps = job?.steps ?? [];
-    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-fixture-stderr' && github.run_attempt == '1'");
+    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-dependency-probe' && github.run_attempt == '1'");
     expect(steps.length).toBe(6);
     for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
     expect(steps[0]?.with).toEqual({ ref: "a94c4c89d489103e09bcc5c799312c9a44cbf86e", path: "origins/base", "persist-credentials": false });

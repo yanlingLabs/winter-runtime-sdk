@@ -519,3 +519,10 @@ the release-gate pins are recomputed together in one final integration commit. T
 acquisition pin and, on this integration branch, the reviewed workflow's branch list (`cowork/reader-hosted-fixture-stderr`)
 are untouched; the integration branch is named only by the three source-only workflows. No
 native execution, compile run, hosted run, retry or activation follows from this source.
+
+Admission. The one admission commit on branch `cowork/reader-hosted-dependency-probe` changes only
+the reviewed workflow's branch list and job condition from `cowork/reader-hosted-fixture-stderr`
+(frozen, consumed) to that branch, adds it to the native source workflow, and mirrors both in the
+release-gate test. It admits exactly one first-creation push, hosted attempt 1, against compile
+run 38715669708's packet before that artifact expires; any outcome consumes it, with no rerun,
+repush or second attempt. A healthy probe does not clear Bun, make the reader pass or diagnose C59.

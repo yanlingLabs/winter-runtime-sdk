@@ -1,7 +1,7 @@
 name: reader-native-reviewed
 on:
   push:
-    branches: [cowork/reader-hosted-fixture-stderr]
+    branches: [cowork/reader-hosted-dependency-probe]
     paths:
       - .github/workflows/cowork-reader-native-reviewed.yml
       - scripts/guest-reader-native/bootstrap.py
@@ -12,7 +12,7 @@ permissions:
   actions: read
 jobs:
   reader-only:
-    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-fixture-stderr' && github.run_attempt == '1'
+    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-dependency-probe' && github.run_attempt == '1'
     concurrency:
       group: reader-native-reviewed
       cancel-in-progress: false
