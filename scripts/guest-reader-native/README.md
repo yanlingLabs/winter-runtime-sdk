@@ -516,6 +516,6 @@ those stay `audited_label` with the errno dropped.
 Pins and admission. This slice changes `producer.py`, `native_cases.py`, `parent.py`, `wrapper.py`
 and `bootstrap.py`, so `SOURCE_PINS`, the reviewed workflow's bootstrap and wrapper hash lines and
 the release-gate pins are recomputed together in one final integration commit. The compile pin, the
-acquisition pin and the reviewed workflow's branch list (`cowork/reader-hosted-fixture-stderr`)
+acquisition pin and, on this integration branch, the reviewed workflow's branch list (`cowork/reader-hosted-fixture-stderr`)
 are untouched; the integration branch is named only by the three source-only workflows. No
 native execution, compile run, hosted run, retry or activation follows from this source.

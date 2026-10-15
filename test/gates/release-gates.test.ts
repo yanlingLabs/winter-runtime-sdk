@@ -151,6 +151,10 @@ describe("the release workflow", () => {
   test("the reviewed reader workflow pins origins, actions and the isolated bootstrap chain", () => {
     const source = parseWorkflow("cowork-reader-native-reviewed.yml") as { on?: Record<string, unknown>; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ name?: string; uses?: string; with?: Record<string, unknown>; run?: string }> }> };
     expect(Object.keys(source.on ?? {})).toEqual(["push"]);
+    expect(source.on?.push).toEqual({
+      branches: ["cowork/reader-hosted-fixture-stderr"],
+      paths: [".github/workflows/cowork-reader-native-reviewed.yml", "scripts/guest-reader-native/bootstrap.py", "scripts/guest-reader-native/download.cjs", "scripts/guest-reader-native/wrapper.py"],
+    });
     expect(source.permissions).toEqual({ contents: "read", actions: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["reader-only"]);
     const job = source.jobs?.["reader-only"], steps = job?.steps ?? [];
