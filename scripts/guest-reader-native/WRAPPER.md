@@ -9,7 +9,8 @@ and output caps precede SHA checks. Both inner streams are hashed
 before creating output. Copying repeats the hash checks and retains an incomplete
 private directory on failure, without calling it valid. Expiry at
 2026-10-21T02:45:33Z refuses; no reupload/retention workaround. This validates the
-container and two member bodies, not the inner 1472-leaf tree. The merged intake
+container and two member bodies, not the inner tree (1472 leaves for the reviewed two-artifact
+packet; the three-artifact packet's count is a measured value pinned at repin). The merged intake
 and parent perform that later complete validation.
 
 Future acquisition permissions are `contents:read` and `actions:read`. The token
@@ -41,8 +42,8 @@ predicate is not hosted-runner provenance or a production native capability.
 The future external chain must independently bind the download, complete packet,
 source bootstrap and approved venue before choosing to invoke this function.
 
-The wrapper retains the source lease, complete snapshot, eight-object launch
-root and fixed fixture on any uncertain outcome, including `CaseUncertain`'s
+The wrapper retains the source lease, complete snapshot, launch root (nine copied
+objects plus the Root-created canary leaf) and fixed fixture on any uncertain outcome, including `CaseUncertain`'s
 actual descriptors. It invokes only the existing same-owner, unexpected-parent
 and parent-exit cases. Actual source/context rechecks happen after every case;
 the positive frame uses the exact existing consumer oracle. Runtime and fixture
