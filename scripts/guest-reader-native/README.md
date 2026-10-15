@@ -72,6 +72,8 @@ control and stdin writer endpoints alive in the observer until actual init and
 monitor pidfd readiness and adopted reaps, within three seconds from before fork
 (before C's four-second deadline). Negative observations never invent `R` or
 complete producer debt. Uncertain case handles remain available to their owner.
+The dependency-probe case (below) is a separate function beside them: it runs first and is
+never one of the reader cases.
 
 Portable validation is ordinary temporary DATA and injected operation tables:
 
@@ -388,3 +390,110 @@ reviewed workflow's `bootstrap.py` and `wrapper.py` pins and the release-gate te
 recomputed together. Branch `cowork/reader-report-classifier` is not named by the reviewed
 workflow, which still admits only `cowork/reader-hosted-fixture-stderr`; no push, native
 execution, retry, workflow change or run admission follows from this source.
+
+
+Reader dependency probe (source, no run admission)
+
+The consumed fixture-stderr attempt left C59 undiagnosed: the reader crashed inside the view
+with a Bun banner, and the only evidence is a family label. This slice adds a measurement that
+does not depend on Bun running. It diagnoses nothing by itself, is not reader success, does not
+clear Bun and does not explain C59. It records what the pinned libc and the view let a tiny
+program see, so a later reading of the reader's failure has data beside it.
+
+What runs. A third compiled packet artifact, `artifacts/instructionReaderDependencyProbe`, built
+from the agent-sdk overlay `linux-instruction-reader-dependency-probe.c` with the same native
+flags as the reader and launcher, dynamic only: its one dependency under test is the packet's
+pinned libc, and there is no static probe. It reads nothing from stdin, prints one stdout line (a
+failure to write exits 70) and writes nothing to stderr, so it adds no perror label to the
+classifier. `producer.NativeOperation` takes a closed `executable_role`, `instructionReader`
+(default) or `instructionReaderDependencyProbe`. The role selects only the executable-FD slot
+(launcher argv[2]) and that leaf's reopen path. The launcher, argv, UID 20002, GROUP 10000, view,
+six libraries, host exec environment and pipe envelope are identical for both roles, and
+`viewContractSha256` (a SHA-256 over the descriptor-masked launcher argv, the exec environment and
+the view constants) is the same value for both, so a record names the view contract it ran under,
+never a descriptor or a role. A reference positive control (the probe as an ordinary Root process
+outside the view) is left out of this attempt.
+
+When it runs. `native_cases.run_probe_case` is a separate function; `run_case` and `LinuxEffects`
+are unchanged and the same effects table is reused through the `effects` seam. The sequence is
+receive_handles, receive_init, no request, observe, reap, close_confirmed, under the same six
+second envelope as the same-owner case. `run_cases` runs it first, before same-owner, with the
+stages `case:dependency-probe:run|verify|recheck`, so it yields data even when a reader case
+fails afterwards. Teardown predicates (validated init, independent launcher, pipe and init
+teardown, the bootstrap pipe drained without a record, producer reaped with exit zero, the
+deadlines, confirmed descriptor discharge) raise `CaseUncertain` exactly as for any case and stop
+the set with the handles retained. Content predicates (the native wait status, stderr, the stdout
+grammar) are only recorded, never raised: a probe that crashed, wrote a bad line or wrote to
+stderr still hands a closed record on. The record never feeds `readerCaseSetPassed`, which
+is still decided by the three reader cases alone; `readerSuccessImplied` and
+`bunCompatibilityProven` are constant `false` and a record carrying anything else is dropped.
+
+The line, grammar `reader-v2`, identical in the C and `native_cases.parse_probe_line`:
+
+    probe=reader-v2 stack_rc=N stack_bounds=B stack_contains=B urandom_open=N urandom_read=B getrandom=N proc_list=N proc_numeric=N proc_root=B canary_open=N\n
+
+N is `0|[1-9][0-9]{0,9}` and at most 4294967295, B is `[01]`; fixed key order, single spaces,
+exactly one trailing LF, ASCII only, at most 256 bytes, matched with `fullmatch` over the whole
+stdout capture. Cross-field rules, or the line is `unknown`: `stack_rc!=0` implies both stack bits 0;
+`stack_contains=1` implies `stack_bounds=1`; `urandom_open!=0` implies `urandom_read=0`;
+`proc_list!=0` implies `proc_numeric=0`; `proc_numeric` is 0..65535. The line state is `valid`,
+`absent` (empty stdout) or `unknown` (everything else, including any exception). The healthy line
+preregistered for a hosted run is `stack_rc=0 stack_bounds=1 stack_contains=1 urandom_open=0
+urandom_read=1 getrandom=0 proc_list=0 proc_numeric=1 proc_root=1 canary_open=2`, where 2 is
+ENOENT. The raw line is never stored. The errno-valued fields (`stack_rc`, `urandom_open`,
+`getrandom`, `proc_list`, `canary_open`) become symbols: `OK` for 0, a symbol of a closed table of
+Linux numbers (the guest numbering, never the host `errno` module; it includes ENXIO), or `unknown`.
+
+The closed `dependencyProbe` record has the keys `ran`, `line` (`valid|absent|unknown`), `fields`
+(null unless valid), `observation` (the scalar post-init diagnostics of the case, or
+`available:false`), `stderrFamily` (the closed report-family classifier over the probe's stderr
+capture, which is where a loader failure shows up), `outsideCanary`, `viewContractSha256`,
+`readerSuccessImplied` and `bunCompatibilityProven`. It appears under `dependencyProbe` in the
+success result and, through the same strict projection, in every failure record and in
+`log_result_projection`; a record that fails the projection's shape, type, value or cross-field
+checks is replaced by `{"ran": false}`. A probe that never produced a line (a failure before
+`observe`) reports `line: unknown` with `outsideCanary` `not_checked` on both halves.
+
+The outside canary (the B3 isolation check) has two halves, both read from the line. Neither
+carries any content, only a closed state.
+
+- `file`: the harness itself creates a Root-owned `0444` regular file `winter-outside-canary`,
+  exclusively and never copied, at the top of the sealed launch root; that is `/` after the
+  producer's chroot and is NOT inside the reader's view. `0444` is deliberate: were the view to
+  leak, the reader uid could open it, whereas `0400` would turn a leak into a masking EACCES. The
+  probe opens `/winter-outside-canary` with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, closes the
+  descriptor at once on success and never reads it. Only ENOENT (`canary_open=2`) means
+  `not_visible`. A successful open (`0`) means `visible`, an escape. Anything else (EACCES, ELOOP,
+  ENXIO, EINTR, a number outside the closed table, and so on) is `unknown`: an error other than
+  ENOENT does not show that the name was absent, so it is never read as not visible.
+- `process`: `visible` when the probe listed more than one numeric `/proc` entry; `not_visible`
+  only for a `valid` line whose `/proc` listing succeeded (`proc_list=0`) and held exactly one
+  numeric entry (`proc_numeric=1`), where `/proc/1/root` has the same device and inode as `/`
+  (`proc_root=1`), while the case held the validated init binding (a received init pid greater than
+  1 and its pidfd); `unknown` otherwise. Even then it is a statement about the view's `/proc`, not
+  a claim about which process the one entry is beyond that binding.
+
+A passing line says the pinned libc started, read its own stack bounds, opened and read
+`/dev/urandom`, called `getrandom`, listed `/proc` and could not see the canary file; it says nothing
+about Bun or a JavaScript runtime. A `visible` file or process half is an isolation failure
+of the view, not a probe failure, and the set still proceeds to the reader cases.
+
+Packet and labels. The probe artifact makes the packet three artifacts plus six libraries, nine
+copies, with the canary as the tenth sealed leaf; the leaf and descriptor counts are measured values
+that the one approved compile run records and the repin (S8) pins, so none is fixed here. The
+compartment's perror labels were re-extracted at agent-sdk 687b9557: 66 in the C file
+(63 literal `require` labels and 3 passed through `reader_expect` and `reader_entropy_identity`)
+plus 4 in the shared header, 70 in all, of which 13 are new (the `/proc` root, mount, descriptor and
+entropy inventories and the private `/dev` and `/proc` setup). `native_cases.STDERR_LABELS`,
+`bootstrap.NATIVE_STDERR_LABELS` and a test literal in `test_bootstrap.py` carry the same 70.
+The C also has exits that print nothing (the `_exit(64)` contract refusals and the bare `_exit(77)`
+liveness failures); those are classified by exit status only. Two of the new labels can carry an
+errno outside the closed table (EFBIG on the mount inventory, EBADMSG while scanning a directory);
+those stay `audited_label` with the errno dropped.
+
+Pins and admission. This slice changes `producer.py`, `native_cases.py`, `parent.py`, `wrapper.py`
+and `bootstrap.py`, so `SOURCE_PINS`, the reviewed workflow's bootstrap and wrapper hash lines and
+the release-gate pins are recomputed together in one final integration commit. The compile pin, the
+acquisition pin and the reviewed workflow's branch list (`cowork/reader-hosted-fixture-stderr`)
+are untouched; the integration branch is named only by the three source-only workflows. No
+native execution, compile run, hosted run, retry or activation follows from this source.

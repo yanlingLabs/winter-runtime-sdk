@@ -44,8 +44,17 @@ source bootstrap and approved venue before choosing to invoke this function.
 
 The wrapper retains the source lease, complete snapshot, launch root (nine copied
 objects plus the Root-created canary leaf) and fixed fixture on any uncertain outcome, including `CaseUncertain`'s
-actual descriptors. It invokes only the existing same-owner, unexpected-parent
-and parent-exit cases. Actual source/context rechecks happen after every case;
+actual descriptors. It invokes the dependency-probe case first, then only the
+existing same-owner, unexpected-parent and parent-exit cases. The probe uses the
+reader's exact launch envelope through a factory closure that differs only in
+`executable_role`, runs under the stages `case:dependency-probe:run|verify|recheck`
+and leaves its closed `dependencyProbe` record on the lease (and on the handles
+when it raises). That record is data beside the case set, never a reader success:
+`readerCaseSetPassed` stays decided by the three reader cases, the record's
+`readerSuccessImplied` and `bunCompatibilityProven` are constant false, and only a
+teardown failure (`CaseUncertain`) stops the set. Its canary halves, where only
+ENOENT counts as not visible, are described in `README.md`. Actual source/context
+rechecks happen after every case;
 the positive frame uses the exact existing consumer oracle. Runtime and fixture
 destinations are fixed fresh siblings under the same protected parent. No
 directory deletion, unmount, repair, retry or sealed-stage cleanup is claimed.
