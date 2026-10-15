@@ -235,7 +235,8 @@ class PreinitProjectionTests(unittest.TestCase):
         for value in ('reader root','reader skeleton','reader private temporary files'):
             self.assertIn(value,b.NATIVE_STDERR_LABELS)
 
-    # The compartment's require()/perror labels, extracted from agent-sdk commit 687b9557
+    # The compartment's require()/perror labels, extracted from agent-sdk commit 687b9557 and re-extracted at the final
+    # overlay head 53082a74, where both files have the same sha256 and the same 70 labels result
     # (packages/runtime/src/guest/linux-instruction-reader-compartment.c, sha256 28aa279d6ecb560424fe24bf8ccc0893ffc61cfbb9ba6ba72d38c66b7b655893,
     # and linux-compartment.h, sha256 92fef7c0708a23b1e930c5b2560dae6bef27294dfd682346e69d35c0484b967d). The C file has 66
     # labels: 63 are the literal last argument of a require() call, and 3 reach perror through a helper that takes the label

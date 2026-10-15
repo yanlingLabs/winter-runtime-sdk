@@ -307,17 +307,17 @@ class PacketTests(unittest.TestCase):
                     b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,overlay_pins={**self.pins,name:'0'*64})
                 self.assertFalse(self.output.exists())
     def test_overlay_head_is_the_frozen_agent_sdk_head(self):
-        # agent-sdk cowork/reader-runtime-compatibility; its tree is 66c46ed213d0bb25d1083c91783599dfabde462c. The three
-        # overlay sources are byte-identical to 687b9557 there (OVERLAY_SOURCE_SHA256 below).
-        self.assertEqual(p.OVERLAY_HEAD,'0bd905b194905b8e82ed3d89ce01dca673815e61')
+        # agent-sdk cowork/reader-runtime-compatibility; its tree is a4a66851f800d6a768eb60a7e698b3ddf5f60ad6. The three
+        # overlay sources hash to OVERLAY_SOURCE_SHA256 there (below).
+        self.assertEqual(p.OVERLAY_HEAD,'53082a74a98120f5deffa75f04dc306976d75de8')
         self.assertEqual((p.RUNTIME_HEAD,p.SDK_HEAD),('0394b36f674765c942f8db07f009b7ad20787dba','8603da22d9fe7f1695166891cd29ccd254b1d21e'))
-    def test_default_overlay_pins_are_the_agent_sdk_687b9557_hashes_and_refuse_fixture_bytes(self):
+    def test_default_overlay_pins_are_the_agent_sdk_53082a74_hashes_and_refuse_fixture_bytes(self):
         self.assertEqual(set(p.OVERLAY_SOURCE_SHA256),{p.C_SOURCE,p.PROBE_SOURCE,p.HEADER})
         self.assertTrue(all(len(value)==64 and set(value)<=set('0123456789abcdef') for value in p.OVERLAY_SOURCE_SHA256.values()))
-        # sha256 of the three files at agent-sdk 687b9557 (git show 687b9557:<path> | shasum -a 256).
+        # sha256 of the three files at agent-sdk 53082a74 (git show 53082a74:<path> | shasum -a 256).
         self.assertEqual(p.OVERLAY_SOURCE_SHA256,{
             'packages/runtime/src/guest/linux-instruction-reader-compartment.c':'28aa279d6ecb560424fe24bf8ccc0893ffc61cfbb9ba6ba72d38c66b7b655893',
-            'packages/runtime/src/guest/linux-instruction-reader-dependency-probe.c':'39ad16cdd2ceee031817cf57787b8d9251b314da1fe18b707b20bc785ba59b3e',
+            'packages/runtime/src/guest/linux-instruction-reader-dependency-probe.c':'77ce6f1cdc02cef122eb2806e9df06514fdc7a2f9191d107a897df62d045b20a',
             'packages/runtime/src/guest/linux-compartment.h':'92fef7c0708a23b1e930c5b2560dae6bef27294dfd682346e69d35c0484b967d'})
         # No injected pins: the constants apply, so the fixture bytes must not be accepted.
         with self.assertRaisesRegex(p.Refusal,'differs from its pin'):b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder)

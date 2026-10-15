@@ -185,10 +185,12 @@ The scratch stays a single path, so the workflow's exclusion and the inventory's
 `excludedScratch` do not change.
 
 `OVERLAY_SOURCE_SHA256` (C, probe C, header) in `provenance.py` holds the hashes of those three
-files at agent-sdk 687b9557. `OVERLAY_HEAD` is the frozen agent-sdk head 0bd905b1 (tree 66c46ed2);
-its three sources are byte-identical to 687b9557, which the per-file pin check enforces before any
-output exists. The compile-fixture workflow still checks out the earlier overlay ref and moves to
-`OVERLAY_HEAD` in its own separately approved step; until then a compile run would refuse at the
-overlay head check. Tests inject their own pins the same way they inject heads. Like every
+files at the frozen agent-sdk head, which is also `OVERLAY_HEAD`: 53082a74 (tree a4a66851). The
+per-file pin check enforces them before any output exists. The compartment C and the header are
+byte-identical to agent-sdk 687b9557; the probe C differs from it only in comments (it now says
+the probe is dynamic against the packet libc). The compile-fixture workflow still checks out the
+earlier overlay ref and moves to `OVERLAY_HEAD` in its own separately approved step; until then a
+compile run would refuse at the overlay head check. Tests inject their own pins the same way they
+inject heads. Like every
 source test, none of them compiles anything, and no test executes the probe or any other output:
 the injected runner only writes inert bytes.

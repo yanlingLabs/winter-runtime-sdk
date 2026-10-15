@@ -481,7 +481,8 @@ of the view, not a probe failure, and the set still proceeds to the reader cases
 Packet and labels. The probe artifact makes the packet three artifacts plus six libraries, nine
 copies, with the canary as the tenth sealed leaf; the leaf and descriptor counts are measured values
 that the one approved compile run records and the repin (S8) pins, so none is fixed here. The
-compartment's perror labels were re-extracted at agent-sdk 687b9557: 66 in the C file
+compartment's perror labels were extracted at agent-sdk 687b9557 and re-extracted at the final overlay head 53082a74
+(the C and header are byte-identical there): 66 in the C file
 (63 literal `require` labels and 3 passed through `reader_expect` and `reader_entropy_identity`)
 plus 4 in the shared header, 70 in all, of which 13 are new (the `/proc` root, mount, descriptor and
 entropy inventories and the private `/dev` and `/proc` setup). `native_cases.STDERR_LABELS`,
