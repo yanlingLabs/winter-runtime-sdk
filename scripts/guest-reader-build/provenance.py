@@ -13,9 +13,16 @@ MAX_DEPENDENCY_BYTES=128*1024*1024
 AUTOLOAD_FLAGS=('--no-compile-autoload-bunfig','--no-compile-autoload-dotenv','--no-compile-autoload-tsconfig','--no-compile-autoload-package-json')
 SDK_HEAD='8603da22d9fe7f1695166891cd29ccd254b1d21e'
 RUNTIME_HEAD='0394b36f674765c942f8db07f009b7ad20787dba'
-OVERLAY_HEAD='f6d88d9a2f8ae15bb50afb98868183ae769e3b11'
+OVERLAY_HEAD='f6d88d9a2f8ae15bb50afb98868183ae769e3b11'  # still the pre-probe overlay; the integrator moves it with OVERLAY_SOURCE_SHA256 to the frozen agent-sdk sha
 C_SOURCE='packages/runtime/src/guest/linux-instruction-reader-compartment.c'
+PROBE_SOURCE='packages/runtime/src/guest/linux-instruction-reader-dependency-probe.c'
 HEADER='packages/runtime/src/guest/linux-compartment.h'
+# PLACEHOLDER (lane B scaffolding): these are the agent-sdk 94dd2f48 overlay hashes. The integrator replaces
+# them with the hashes of the frozen agent-sdk sha before any compile run; never treat them as a reviewed pin.
+OVERLAY_SOURCE_SHA256={
+    C_SOURCE:'14622f98f4b809867326b26386599eae36fc34fee407ff4415418b65d28d5d46',
+    PROBE_SOURCE:'c0da913079104150fcc8c218718589a30f36fc157bcfb682f4f82de21642fd18',
+    HEADER:'92fef7c0708a23b1e930c5b2560dae6bef27294dfd682346e69d35c0484b967d'}
 READER_ENTRY='src/guest/instruction-reader-entry.ts'
 SDK_PACKAGES={'winter-agent-sdk':'sdk','winter-agent-runtime':'runtime','winter-provider-catalog':'provider-catalog','winter-provider-runtime':'provider-runtime','winter-conformance':'conformance','winter-provider-conformance':'provider-conformance'}
 BASE={'version':'1.3.14','target':'bun-linux-arm64','archiveSha256':'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b','executableSha256':'37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086'}
