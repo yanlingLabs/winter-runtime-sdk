@@ -795,7 +795,7 @@ class StageAlignment(unittest.TestCase):
         modules = {'control': object(), 'producer': SimpleNamespace(selected_host_exec_environment=at('preflight'), descriptor_preflight=fine),
                    'reader_parent': SimpleNamespace(load_pin=at('load_pin'), capture_packet=at('capture'), create_launch_root=at('launch_root'),
                                                     guard_root_owner=at('guard'), recheck_runtime=fine),
-                   'reader_fixture': SimpleNamespace(create_fixture=at('fixture')), 'native_cases': SimpleNamespace(run_case=boom)}
+                   'reader_fixture': SimpleNamespace(create_fixture=at('fixture')), 'native_cases': SimpleNamespace(run_case=boom, run_probe_case=boom)}
         lease = object.__new__(w.SourceLease)
         lease.path = Path('/run/fixed/sources'); lease.synthetic = False; lease.closed = False; lease.unresolved = False
         lease.modules = dict(modules); lease.recheck = lambda: None; lease.snapshot = lease.runtime = lease.fixture = None

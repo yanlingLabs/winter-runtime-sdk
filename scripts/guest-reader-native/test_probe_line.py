@@ -563,9 +563,11 @@ class Closed(unittest.TestCase):
         def fields(**changes): return dict(record['fields'], **changes)
         bad = (fields(stackRc='EINVAL'), fields(stackRc='unknown', stackBounds=True, stackContains=False),
                fields(stackBounds=False, stackContains=True), fields(urandomOpen='ENOENT'), fields(urandomOpen='unknown'),
-               fields(procList='EACCES'), fields(procList='unknown', procNumeric=1))
+               fields(procList='EACCES'), fields(procList='unknown', procNumeric=1), fields(procList='EACCES', procNumeric=2))
+        # The canary half is set consistently with the (violating) fields, so only the cross-field rule can refuse them.
         for item in bad:
-            self.assertEqual(b.probe_projection(dict(record, fields=item)), {'ran': False}, item)
+            canary = {'process': 'visible' if item['procNumeric'] > 1 else 'unknown', 'file': 'not_visible'}
+            self.assertEqual(b.probe_projection(dict(record, fields=item, outsideCanary=canary)), {'ran': False}, item)
         good = (fields(stackRc='EINVAL', stackBounds=False, stackContains=False), fields(stackBounds=True, stackContains=False),
                 fields(urandomOpen='ENOENT', urandomRead=False), fields(procList='EACCES', procNumeric=0))
         for item in good:
