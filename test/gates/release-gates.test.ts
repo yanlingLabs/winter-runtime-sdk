@@ -252,6 +252,7 @@ describe("the release workflow", () => {
     expect(pins.length).toBe(1);
     const pin = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "guest-reader-intake", pins[0]!), "utf8")) as { builderHead: string; origins: Array<{ role: string; head: string }> };
     expect(text).toContain(`--builder-head ${pin.builderHead}`);
+    expect(text).toContain(`'builderHead':'${pin.builderHead}'`);
     expect(checkouts[0]?.with?.ref).toBe(pin.builderHead);
     expect(checkouts[3]?.with?.ref).toBe(pin.origins.find((origin) => origin.role === "overlay")?.head);
     expect(text).toContain("if name=='artifacts/native.d':continue");
