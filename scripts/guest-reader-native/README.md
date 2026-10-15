@@ -25,9 +25,12 @@ Root-owned `0555`, except the canary `0444` and the private view destination `07
 must itself be Root-owned `0700` under protected Root ancestry. There is no
 runner-library discovery or fallback, writable sealed runtime descriptor, or
 import of captured project code. DATA intake modes are not execution authority.
-The full capture of the earlier 1472-leaf packet held 1629 descriptors; the capture of the
-1474-leaf three-artifact packet holds 1632 (measured offline with `capture_packet` on the
-rehydrated real packet; the figure follows from the leaf and directory counts). The actual parent preflights
+The capture of the 1474-leaf three-artifact packet holds 1604 descriptors for the packet itself
+(1462 regular files, 140 directories and 2 controls) plus the ancestor descriptors of the tree, pin
+and inventory paths, which grow with the venue's path depth. An offline `capture_packet` on the
+rehydrated real packet held about 1630 in all (1631 at a 10-component tree path, 1635 at 14), so the
+total is not an invariant. The earlier 1472-leaf packet's 1629 was measured the same way. The real
+guard is the parent's `descriptor_need = leaves + dirs + 2·path_parts + 64`: the actual parent preflights
 only its own soft limit within a fixed allowed bound before capture.
 
 `producer.py` registers one debt before effects and uses that same object for
@@ -495,7 +498,10 @@ of the view, not a probe failure, and the set still proceeds to the reader cases
 
 Packet and labels. The probe artifact makes the packet three artifacts plus six libraries, nine
 copies, with the canary as the tenth sealed leaf; the leaf and descriptor counts are measured values
-(1474 leaves, 1632 held descriptors) taken from compile run 38715669708 and pinned by the repin. The
+(1474 leaves; about 1630 held descriptors, depending on path depth) taken from compile run 38715669708
+and pinned by the repin. The compile DATA pin, acquisition and intake now come from `origins/base` at
+a94c4c89d489103e09bcc5c799312c9a44cbf86e on this branch, which carries exactly the three files the
+bootstrap pins by hash; the earlier attempt's 4d5dfcec could not stay, since it held the two-artifact intake. The
 compartment's perror labels were extracted at agent-sdk 687b9557 and re-extracted at the final overlay head 53082a74
 (the C and header are byte-identical there): 66 in the C file
 (63 literal `require` labels and 3 passed through `reader_expect` and `reader_entropy_identity`)

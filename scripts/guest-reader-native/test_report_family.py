@@ -944,7 +944,7 @@ class Pins(unittest.TestCase):
         bootstrap, wrapper = self.digest('bootstrap.py'), self.digest('wrapper.py')
         self.assertEqual(workflow.count(bootstrap), 4); self.assertEqual(workflow.count(wrapper), 1)
         self.assertEqual(gate.count('"' + bootstrap + '"'), 1); self.assertEqual(gate.count('"' + wrapper + '"'), 1)
-        self.assertEqual(set(re.findall(r"hexdigest\(\)!='([0-9a-f]{64})'", workflow)) - {'65f78b2219a17d0fe7bddc44d58558ab94e8817c371fcc87c2dc25229366ee99'}, {bootstrap})
+        self.assertEqual(set(re.findall(r"hexdigest\(\)!='([0-9a-f]{64})'", workflow)), {bootstrap})
         self.assertEqual(set(re.findall(r"data,'([0-9a-f]{64})'", workflow)), {wrapper})
         download = self.digest('download.cjs')   # The reviewed downloader is pinned by hash in the workflow's github-script step.
         self.assertEqual(workflow.count(download), 1); self.assertEqual(gate.count('"' + download + '"'), 1)
