@@ -217,26 +217,30 @@ def control_observation(data, rights):
             'rightsCount': len(rights), 'eof': data == b''}
 
 
-# Exact static require/perror labels audited from pinned C/header sources.
+# Exact static require/perror labels of the compartment C (63 literal + 3 passed through reader_expect and
+# reader_entropy_identity = 66) and its header (4: bind, bind flags, fixture path, seccomp), extracted at agent-sdk
+# 687b9557 (C sha256 28aa279d...5893, header sha256 92fef7c0...967d). 57 were audited earlier; 13 are new in the
+# probe-era compartment (the /proc, /dev, mount and descriptor inventories). test_bootstrap pins the full list as a literal.
 STDERR_LABELS = ('bind', 'bind flags', 'fixture path', 'reader Root peer', 'reader admitted clone',
-    'reader bounding capabilities', 'reader close-on-exec',
-    'reader directory mountpoint', 'reader empty readonly cwd', 'reader explicit pipe',
-    'reader explicit pipe-only envelope', 'reader file mountpoint',
+    'reader bounding capabilities', 'reader close-on-exec', 'reader created entropy identity',
+    'reader descriptor inventory', 'reader descriptor kind', 'reader directory mountpoint',
+    'reader empty readonly cwd', 'reader entropy node', 'reader explicit pipe',
+    'reader explicit pipe-only envelope', 'reader file mountpoint', 'reader final entropy identity',
     'reader immutable exec', 'reader immutable file', 'reader independent primary gid',
-    'reader independent uid', 'reader inherited descriptor', 'reader monitor control',
-    'reader monitor control copy', 'reader monitor death', 'reader monitor init',
+    'reader independent uid', 'reader inherited descriptor', 'reader init process id',
+    'reader monitor control', 'reader monitor control copy', 'reader monitor death', 'reader monitor init',
     'reader monitor init copy', 'reader monitor originals', 'reader monotonic deadline',
-    'reader mount attach', 'reader namespace init', 'reader namespace kill',
-    'reader namespace pidfd', 'reader namespaces', 'reader no new privileges',
-    'reader parent pidfd', 'reader pipe descriptor', 'reader pipe flags',
-    'reader private propagation', 'reader private temporary files',
-    'reader readonly skeleton', 'reader receipt type',
-    'reader recursive mount flags', 'reader resource ceiling', 'reader root', 'reader seccomp',
-    'reader selected directory', 'reader selected workspace group', 'reader service death',
-    'reader service pidfd', 'reader setup monitor death', 'reader shared identity',
-    'reader skeleton', 'reader skeleton ancestor', 'reader source identity', 'reader surviving pipe',
-    'reader view ancestor', 'reader view cwd', 'reader view ownership', 'reader view root',
-    'reader zero capabilities', 'seccomp')
+    'reader mount attach', 'reader mount inventory', 'reader namespace init', 'reader namespace kill',
+    'reader namespace pidfd', 'reader namespaces', 'reader no new privileges', 'reader parent pidfd',
+    'reader pipe descriptor', 'reader pipe flags', 'reader private device directory', 'reader private proc',
+    'reader private propagation', 'reader private temporary files', 'reader proc cwd identity',
+    'reader proc root identity', 'reader proc root inventory', 'reader readonly device directory',
+    'reader readonly skeleton', 'reader receipt type', 'reader recursive mount flags',
+    'reader resource ceiling', 'reader root', 'reader seccomp', 'reader selected directory',
+    'reader selected workspace group', 'reader service death', 'reader service pidfd',
+    'reader setup monitor death', 'reader shared identity', 'reader skeleton', 'reader skeleton ancestor',
+    'reader source identity', 'reader surviving pipe', 'reader view ancestor', 'reader view cwd',
+    'reader view ownership', 'reader view root', 'reader zero capabilities', 'seccomp')
 
 
 def classify_stderr(raw):

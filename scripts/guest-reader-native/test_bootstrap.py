@@ -1,4 +1,5 @@
 """Source/Data and injected bootstrap checks. No native effects or real proc IO."""
+import errno
 import hashlib
 import os
 from pathlib import Path
@@ -233,6 +234,127 @@ class PreinitProjectionTests(unittest.TestCase):
             self.assertNotIn(value,b.NATIVE_STDERR_LABELS)
         for value in ('reader root','reader skeleton','reader private temporary files'):
             self.assertIn(value,b.NATIVE_STDERR_LABELS)
+
+    # The compartment's require()/perror labels, extracted from agent-sdk commit 687b9557
+    # (packages/runtime/src/guest/linux-instruction-reader-compartment.c, sha256 28aa279d6ecb560424fe24bf8ccc0893ffc61cfbb9ba6ba72d38c66b7b655893,
+    # and linux-compartment.h, sha256 92fef7c0708a23b1e930c5b2560dae6bef27294dfd682346e69d35c0484b967d). The C file has 66
+    # labels: 63 are the literal last argument of a require() call, and 3 reach perror through a helper that takes the label
+    # (reader_expect and reader_entropy_identity); the header adds bind, bind flags, fixture path and seccomp = 70. Re-extract and
+    # update this literal, native_cases.STDERR_LABELS and bootstrap.NATIVE_STDERR_LABELS together when the C or header changes.
+    # The C also has unlabelled exits that print nothing (64 refusals and bare 77 liveness failures); those are classified by
+    # exit status only. The dependency probe C prints no stderr label at all (its only output is one stdout line).
+    COMPARTMENT_LABELS_687B9557 = (
+        'bind',
+        'bind flags',
+        'fixture path',
+        'reader Root peer',
+        'reader admitted clone',
+        'reader bounding capabilities',
+        'reader close-on-exec',
+        'reader created entropy identity',
+        'reader descriptor inventory',
+        'reader descriptor kind',
+        'reader directory mountpoint',
+        'reader empty readonly cwd',
+        'reader entropy node',
+        'reader explicit pipe',
+        'reader explicit pipe-only envelope',
+        'reader file mountpoint',
+        'reader final entropy identity',
+        'reader immutable exec',
+        'reader immutable file',
+        'reader independent primary gid',
+        'reader independent uid',
+        'reader inherited descriptor',
+        'reader init process id',
+        'reader monitor control',
+        'reader monitor control copy',
+        'reader monitor death',
+        'reader monitor init',
+        'reader monitor init copy',
+        'reader monitor originals',
+        'reader monotonic deadline',
+        'reader mount attach',
+        'reader mount inventory',
+        'reader namespace init',
+        'reader namespace kill',
+        'reader namespace pidfd',
+        'reader namespaces',
+        'reader no new privileges',
+        'reader parent pidfd',
+        'reader pipe descriptor',
+        'reader pipe flags',
+        'reader private device directory',
+        'reader private proc',
+        'reader private propagation',
+        'reader private temporary files',
+        'reader proc cwd identity',
+        'reader proc root identity',
+        'reader proc root inventory',
+        'reader readonly device directory',
+        'reader readonly skeleton',
+        'reader receipt type',
+        'reader recursive mount flags',
+        'reader resource ceiling',
+        'reader root',
+        'reader seccomp',
+        'reader selected directory',
+        'reader selected workspace group',
+        'reader service death',
+        'reader service pidfd',
+        'reader setup monitor death',
+        'reader shared identity',
+        'reader skeleton',
+        'reader skeleton ancestor',
+        'reader source identity',
+        'reader surviving pipe',
+        'reader view ancestor',
+        'reader view cwd',
+        'reader view ownership',
+        'reader view root',
+        'reader zero capabilities',
+        'seccomp',
+    )
+    COMPARTMENT_LABELS_NEW_IN_687B9557 = (
+        'reader created entropy identity',
+        'reader descriptor inventory',
+        'reader descriptor kind',
+        'reader entropy node',
+        'reader final entropy identity',
+        'reader init process id',
+        'reader mount inventory',
+        'reader private device directory',
+        'reader private proc',
+        'reader proc cwd identity',
+        'reader proc root identity',
+        'reader proc root inventory',
+        'reader readonly device directory',
+    )
+
+    def test_native_labels_equal_the_pinned_compartment_label_literal_in_both_modules(self):
+        import native_cases
+        literal=self.COMPARTMENT_LABELS_687B9557
+        self.assertEqual(len(literal),70);self.assertEqual(len(set(literal)),70)
+        self.assertEqual(list(literal),sorted(literal))
+        self.assertEqual(set(native_cases.STDERR_LABELS),set(literal))
+        self.assertEqual(len(native_cases.STDERR_LABELS),len(set(native_cases.STDERR_LABELS)))
+        self.assertEqual(b.NATIVE_STDERR_LABELS,literal)
+        new=set(self.COMPARTMENT_LABELS_NEW_IN_687B9557)
+        self.assertEqual(len(new),13);self.assertLessEqual(new,set(literal))
+        self.assertEqual(len(set(literal)-new),57)
+
+    def test_every_new_compartment_label_classifies_as_an_audited_label_never_unrecognized(self):
+        import native_cases
+        for label in self.COMPARTMENT_LABELS_NEW_IN_687B9557:
+            with self.subTest(label=label):
+                mapped=label.encode()+b': '+os.strerror(errno.ENODEV).encode()+b'\n'
+                self.assertEqual(native_cases.classify_stderr(mapped),
+                                 {'byteCount':len(mapped),'classification':'audited_perror',
+                                  'label':label,'errno':errno.ENODEV})
+                # An errno text outside the closed table (EFBIG, which 'reader mount inventory' raises) keeps the
+                # audited step and drops the unmapped errno.
+                odd=native_cases.classify_stderr(label.encode()+b': '+os.strerror(errno.EFBIG).encode()+b'\n')
+                self.assertEqual((odd['classification'],odd['label'],odd['errno']),('audited_label',label,0))
 
     def test_opaque_pipe_contract_matches_the_actual_producer_module(self):
         import producer

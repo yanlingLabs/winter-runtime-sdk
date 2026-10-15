@@ -387,7 +387,8 @@ FAILURE_STAGES = ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'f
 
 
 
-# Literal inventory of require labels in SDK f6d88d9a C/header; not output authority.
+# Literal inventory of require labels in the compartment C/header at agent-sdk 687b9557 (70 labels: see
+# native_cases.STDERR_LABELS); not output authority.
 NATIVE_STDERR_LABELS = (
     'bind',
     'bind flags',
@@ -396,16 +397,22 @@ NATIVE_STDERR_LABELS = (
     'reader admitted clone',
     'reader bounding capabilities',
     'reader close-on-exec',
+    'reader created entropy identity',
+    'reader descriptor inventory',
+    'reader descriptor kind',
     'reader directory mountpoint',
     'reader empty readonly cwd',
+    'reader entropy node',
     'reader explicit pipe',
     'reader explicit pipe-only envelope',
     'reader file mountpoint',
+    'reader final entropy identity',
     'reader immutable exec',
     'reader immutable file',
     'reader independent primary gid',
     'reader independent uid',
     'reader inherited descriptor',
+    'reader init process id',
     'reader monitor control',
     'reader monitor control copy',
     'reader monitor death',
@@ -414,6 +421,7 @@ NATIVE_STDERR_LABELS = (
     'reader monitor originals',
     'reader monotonic deadline',
     'reader mount attach',
+    'reader mount inventory',
     'reader namespace init',
     'reader namespace kill',
     'reader namespace pidfd',
@@ -422,8 +430,14 @@ NATIVE_STDERR_LABELS = (
     'reader parent pidfd',
     'reader pipe descriptor',
     'reader pipe flags',
+    'reader private device directory',
+    'reader private proc',
     'reader private propagation',
     'reader private temporary files',
+    'reader proc cwd identity',
+    'reader proc root identity',
+    'reader proc root inventory',
+    'reader readonly device directory',
     'reader readonly skeleton',
     'reader receipt type',
     'reader recursive mount flags',
