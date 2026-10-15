@@ -8,7 +8,11 @@ import random
 import time
 import unittest
 
+import bootstrap as b
 import native_cases as cases
+import producer as p
+import wrapper as w
+from types import SimpleNamespace
 
 HEALTHY = (b'probe=reader-v2 stack_rc=0 stack_bounds=1 stack_contains=1 urandom_open=0 urandom_read=1 '
            b'getrandom=0 proc_list=0 proc_numeric=1 proc_root=1 canary_open=2\n')
@@ -370,6 +374,290 @@ class Closed(unittest.TestCase):
         for _ in range(2000): cases.parse_probe_line(HEALTHY, init_bound=True)
         for _ in range(200): cases.parse_probe_line(b'probe=reader-v2 ' + b'1' * 250)
         self.assertLess(time.monotonic() - start, 2.0)
+
+
+
+# --------------------------------------------------------------------------------------------------
+# The bootstrap projection of the probe record: strict, closed, and equal to the artifact record.
+# --------------------------------------------------------------------------------------------------
+VIEW = p.view_contract_sha256()
+BUN_REPORT = None
+
+
+def observed_for(stdout=HEALTHY, stderr=b'', native=0):
+    return cases.Observation(True, True, True, True, True, stdout, stderr, native)
+
+
+def record_for(stdout=HEALTHY, stderr=b'', native=0, launcher=0, producer=0, *, reaps=True, observed=True, bound=True):
+    return cases.build_probe_record(observed_for(stdout, stderr, native) if observed else None,
+                                    cases.Reaps(producer, launcher, None) if reaps else None,
+                                    init_bound=bound, view_contract=VIEW)
+
+
+def failure_for(record, *, via='lease', stage='case:same-owner:run'):
+    lease = SimpleNamespace(stage=stage, **({'dependency_probe': record} if via == 'lease' else {}))
+    handles = SimpleNamespace(**({'dependency_probe': record} if via == 'handles' else {}))
+    return b.failure_record(w.Uncertain(lease, SimpleNamespace(handles=handles, cause=None)))
+
+
+class Constants(unittest.TestCase):
+    def test_bootstrap_constants_mirror_the_case_module(self):
+        self.assertEqual(b.PROBE_FIELD_KEYS, tuple(name for _, name, _ in cases.PROBE_FIELDS))
+        self.assertEqual(b.PROBE_ERRNO_FIELDS, cases.PROBE_ERRNO_FIELDS)
+        self.assertEqual(b.PROBE_BIT_FIELDS, tuple(name for _, name, kind in cases.PROBE_FIELDS if kind == 'b'))
+        self.assertEqual(b.PROBE_LINES, cases.PROBE_LINE_STATES)
+        self.assertEqual(b.PROBE_CANARY_STATES, cases.PROBE_CANARY_STATES)
+        self.assertEqual(b.PROBE_MAX_LINE, cases.PROBE_MAX_LINE)
+        self.assertEqual(b.PROBE_ERRNO_VALUES, b.ERRNO_SYMBOLS + (cases.PROBE_ERRNO_OK, cases.PROBE_ERRNO_UNKNOWN))
+        self.assertEqual(set(b.PROBE_KEYS), {'ran', 'line', 'fields', 'observation', 'stderrFamily', 'outsideCanary',
+                                             'viewContractSha256', 'readerSuccessImplied', 'bunCompatibilityProven'})
+        self.assertEqual(set(record_for()), set(b.PROBE_KEYS))
+
+    def test_the_new_stages_are_registered_and_agree_with_the_report_family_gate(self):
+        stages = ('case:dependency-probe:run', 'case:dependency-probe:verify', 'case:dependency-probe:recheck')
+        self.assertEqual(tuple(stage for stage in b.FAILURE_STAGES if 'dependency-probe' in stage), stages)
+        self.assertEqual(len(set(b.FAILURE_STAGES)), len(b.FAILURE_STAGES))
+        for stage in stages:
+            self.assertIn(stage, b.NOT_SAME_OWNER_STAGES)
+            record = b.failure_record(w.Refusal('x'), stage=stage)   # A stage argument is only a default.
+            self.assertEqual(record['stage'], stage)
+            error = w.Uncertain(SimpleNamespace(stage=stage), w.Refusal('injected'))
+            self.assertEqual(b.failure_record(error)['stage'], stage)
+            self.assertEqual(b.failure_record(error)['postInitReportFamily'], 'not_same_owner_failure')
+        self.assertIn('ENXIO', b.ERRNO_SYMBOLS)
+        self.assertEqual(b.failure_record(OSError(6, 'private /secret'))['errnoSymbol'], 'ENXIO')   # Number 6 on Linux and macOS.
+        self.assertNotIn('/secret', str(b.failure_record(OSError(6, 'private /secret'))))
+
+
+class Closed(unittest.TestCase):
+    def test_every_record_the_case_can_build_is_accepted_unchanged(self):
+        from test_report_family import bun
+        loader = b'/instruction-reader: error while loading shared libraries: libc.so.6: cannot open shared object file\n'
+        stdouts = (HEALTHY, MAX_VALID, line(canary_open=0), line(proc_numeric=3), line(stack_rc=22, stack_bounds=0, stack_contains=0, urandom_open=2, urandom_read=0),
+                   b'', b'garbage\n', HEALTHY + HEALTHY, HEALTHY[:-1], b'\xff' * 300, line(proc_list=13, proc_numeric=0, canary_open=13))
+        stderrs = (b'', bun(), loader, b'junk', b'x\n', b'x' * 4097, b'x' * 16384, b'reader root: ' + __import__('os').strerror(2).encode() + b'\n')
+        count = 0
+        for stdout in stdouts:
+            for stderr in stderrs:
+                for native in (None, 0, 9, 77 << 8, 11 | 128, 0xffff):
+                    for launcher, producer in ((0, 0), (64 << 8, 0), (9, 0), (0, 78 << 8)):
+                        for reaps in (True, False):
+                            for observed in (True, False):
+                                for bound in (True, False):
+                                    record = record_for(stdout, stderr, native, launcher, producer, reaps=reaps, observed=observed, bound=bound)
+                                    self.assertEqual(b.probe_projection(record), record, (stdout, stderr, native))
+                                    self.assertEqual(b.log_result_projection({'dependencyProbe': record})['dependencyProbe'], record)
+                                    count += 1
+        self.assertGreater(count, 5000)
+
+    def test_the_failure_record_carries_the_same_closed_record_from_either_holder(self):
+        record = record_for()
+        for via in ('lease', 'handles'):
+            result = failure_for(record, via=via)
+            self.assertEqual(result['dependencyProbe'], record)
+            self.assertEqual(b.log_result_projection(result)['dependencyProbe'], result['dependencyProbe'])
+            self.assertEqual(json.loads(json.dumps(result))['dependencyProbe'], record)
+        self.assertEqual(failure_for(None)['dependencyProbe'], {'ran': False})
+        self.assertEqual(b.failure_record(w.Refusal('x'))['dependencyProbe'], {'ran': False})
+        self.assertEqual(b.probe_record([]), {'ran': False})
+
+    def test_a_healthy_probe_beside_a_failing_reader_keeps_both_facts(self):
+        record = record_for()
+        reader = SimpleNamespace(handles=SimpleNamespace(postinit_diagnostics=None, dependency_probe=None),
+                                 cause=cases.Refusal('same-owner native control outcome'))
+        error = w.Uncertain(SimpleNamespace(stage='case:same-owner:run', dependency_probe=record), reader)
+        result = b.failure_record(error)
+        self.assertIs(result['readerCaseSetPassed'], False)
+        self.assertEqual(result['stage'], 'case:same-owner:run')
+        self.assertEqual(result['causeReason'], 'same-owner native control outcome')
+        self.assertEqual(result['dependencyProbe'], record)
+        self.assertIs(result['dependencyProbe']['readerSuccessImplied'], False)
+        for flag in ('readerCaseSetPassed', 'nativeCleanupConfirmed', 'configEffectProven', 'vmExecutionVerified', 'productionActivation'):
+            self.assertIs(result[flag], False)
+
+    def test_the_cases_own_handles_win_over_the_lease_and_the_first_holder_decides(self):
+        mine, theirs = record_for(), record_for(stdout=b'')
+        error = w.Uncertain(SimpleNamespace(stage='case:dependency-probe:run', dependency_probe=theirs),
+                            SimpleNamespace(handles=SimpleNamespace(dependency_probe=mine), cause=None))
+        self.assertEqual(b.failure_record(error)['dependencyProbe'], theirs)   # chain order: the lease is the first item
+        chain = [SimpleNamespace(handles=SimpleNamespace(dependency_probe=mine), lease=SimpleNamespace(dependency_probe=theirs))]
+        self.assertEqual(b.probe_record(chain), mine)
+        chain = [SimpleNamespace(handles=SimpleNamespace(dependency_probe=None)), SimpleNamespace(lease=SimpleNamespace(dependency_probe=theirs))]
+        self.assertEqual(b.probe_record(chain), theirs)
+        broken = [SimpleNamespace(handles=SimpleNamespace(dependency_probe={'ran': 'maybe'})), SimpleNamespace(lease=SimpleNamespace(dependency_probe=mine))]
+        self.assertEqual(b.probe_record(broken), {'ran': False})   # An invalid record is never replaced by a later one.
+
+    def test_the_default_and_the_explicit_not_run_record(self):
+        self.assertEqual(b.probe_projection({'ran': False}), {'ran': False})
+        for bad in (None, [], 'ran', 0, {}, {'ran': True}, {'ran': 'False'}, {'ran': 0}, {'ran': None}, {'ran': False, 'extra': 1},
+                    {'RAN': False}, b'ran', ('ran', False)):
+            self.assertEqual(b.probe_projection(bad), {'ran': False}, bad)
+
+    def test_the_log_projection_equals_the_artifact_record_and_adds_nothing(self):
+        record = record_for()
+        artifact = failure_for(record)
+        projected = b.log_result_projection(artifact)
+        self.assertEqual(projected['dependencyProbe'], artifact['dependencyProbe'])
+        self.assertEqual({key: value for key, value in projected.items() if key != 'postInitStderrSample'},
+                         {key: value for key, value in artifact.items() if key != 'postInitStderrSample'})
+        self.assertNotIn('dependencyProbe', b.log_result_projection({'kind': 'winter-reader-only-case-set'}))
+        self.assertEqual(b.log_result_projection({'dependencyProbe': {'ran': False}})['dependencyProbe'], {'ran': False})
+        for value in (None, 7, 'probe', ['ran'], {'ran': True}, record | {'line': 'private'}, {**record, 'fields': {'x': 1}}):
+            self.assertEqual(b.log_result_projection({'dependencyProbe': value})['dependencyProbe'], {'ran': False})
+        a = dict(artifact); b.log_result_projection(a); self.assertEqual(a, artifact)   # The input is not mutated.
+
+    def mutated(self, key, value, base=None):
+        record = json.loads(json.dumps(base or record_for()))
+        record[key] = value
+        return record
+
+    def test_every_key_must_be_present_and_nothing_else_is_allowed(self):
+        record = record_for()
+        for key in record:
+            gone = dict(record); del gone[key]
+            self.assertEqual(b.probe_projection(gone), {'ran': False}, key)
+        self.assertEqual(b.probe_projection(dict(record, rawLine=HEALTHY.decode())), {'ran': False})
+        self.assertEqual(b.probe_projection(dict(record, extra=None)), {'ran': False})
+
+    def test_type_confusion_and_foreign_values_never_escape(self):
+        marker = '/private/secret-marker'
+        for key, values in {
+                'ran': (1, 'True', None, 0), 'line': ('VALID', 'valid ', marker, None, b'valid', 1, True),
+                'stderrFamily': ('not_same_owner_failure', 'Unknown', marker, None, 1, b'unknown', 'bun_report_shape '),
+                'viewContractSha256': ('A' * 64, 'a' * 63, 'a' * 65, marker, None, 1, 'g' * 64, b'a' * 64),
+                'readerSuccessImplied': (True, 1, 0, None, 'False'), 'bunCompatibilityProven': (True, 1, 0, None, 'False'),
+                'observation': (None, [], marker, {'available': True}, {'available': 1}, {'raw': marker}),
+                'outsideCanary': (None, [], {'process': 'visible'}, {'process': marker, 'file': 'unknown'},
+                                  {'process': 'unknown', 'file': 'unknown', 'extra': 1}, {'process': True, 'file': 'unknown'},
+                                  {'process': 'VISIBLE', 'file': 'unknown'})}.items():
+            for value in values:
+                result = b.probe_projection(self.mutated(key, value))
+                self.assertEqual(result, {'ran': False}, (key, value))
+                self.assertNotIn(marker, json.dumps(result))
+
+    def test_fields_are_closed_scalars(self):
+        record = record_for()
+        marker = '/private/secret-marker'
+        for name in b.PROBE_ERRNO_FIELDS:
+            for bad in (marker, 'ENOENT ', 'enoent', 0, 2, None, True, b'ENOENT', 'ok', 'Unknown', ''):
+                fields = dict(record['fields'], **{name: bad})
+                self.assertEqual(b.probe_projection(dict(record, fields=fields)), {'ran': False}, (name, bad))
+        for name in b.PROBE_BIT_FIELDS:
+            for bad in (0, 1, 'True', None, 2):
+                fields = dict(record['fields'], **{name: bad})
+                self.assertEqual(b.probe_projection(dict(record, fields=fields)), {'ran': False}, (name, bad))
+        for bad in (True, -1, 65536, 1.0, '1', None, 4294967295):
+            fields = dict(record['fields'], procNumeric=bad)
+            self.assertEqual(b.probe_projection(dict(record, fields=fields)), {'ran': False}, bad)
+        for fields in (None, [], {}, dict(record['fields'], extra=1), {k: v for k, v in record['fields'].items() if k != 'procRoot'}):
+            self.assertEqual(b.probe_projection(dict(record, fields=fields)), {'ran': False})
+        self.assertEqual(b.probe_projection(dict(record, line='absent')), {'ran': False})    # fields must be None unless valid
+        self.assertEqual(b.probe_projection(dict(record, line='unknown')), {'ran': False})
+        for symbol in b.ERRNO_SYMBOLS + ('OK', 'unknown'):
+            fields = dict(record['fields'], canaryOpen=symbol)
+            canary = {'process': 'not_visible', 'file': 'not_visible' if symbol == 'ENOENT' else 'visible' if symbol == 'OK' else 'unknown'}
+            self.assertEqual(b.probe_projection(dict(record, fields=fields, outsideCanary=canary))['fields']['canaryOpen'], symbol)
+
+    def test_every_cross_field_rule_is_re_checked_on_the_symbols(self):
+        record = record_for()
+        def fields(**changes): return dict(record['fields'], **changes)
+        bad = (fields(stackRc='EINVAL'), fields(stackRc='unknown', stackBounds=True, stackContains=False),
+               fields(stackBounds=False, stackContains=True), fields(urandomOpen='ENOENT'), fields(urandomOpen='unknown'),
+               fields(procList='EACCES'), fields(procList='unknown', procNumeric=1))
+        for item in bad:
+            self.assertEqual(b.probe_projection(dict(record, fields=item)), {'ran': False}, item)
+        good = (fields(stackRc='EINVAL', stackBounds=False, stackContains=False), fields(stackBounds=True, stackContains=False),
+                fields(urandomOpen='ENOENT', urandomRead=False), fields(procList='EACCES', procNumeric=0))
+        for item in good:
+            canary = {'process': 'unknown', 'file': 'not_visible'}
+            self.assertEqual(b.probe_projection(dict(record, fields=item, outsideCanary=canary))['ran'], True, item)
+
+    def test_the_derived_canary_halves_must_match_the_fields(self):
+        record = record_for()
+        for process, file in (('visible', 'not_visible'), ('unknown', 'visible'), ('unknown', 'unknown'), ('not_checked', 'not_checked'),
+                              ('visible', 'visible'), ('not_visible', 'unknown')):
+            if (process, file) == ('not_visible', 'not_visible'): continue
+            self.assertEqual(b.probe_projection(dict(record, outsideCanary={'process': process, 'file': file})), {'ran': False}, (process, file))
+        # Without the init binding the process half is only `unknown`; with it, `not_visible`.
+        self.assertEqual(b.probe_projection(record_for(bound=False))['outsideCanary'], {'process': 'unknown', 'file': 'not_visible'})
+        self.assertEqual(b.probe_projection(record_for(bound=True))['outsideCanary'], {'process': 'not_visible', 'file': 'not_visible'})
+        many = record_for(stdout=line(proc_numeric=2))
+        self.assertEqual(many['outsideCanary']['process'], 'visible')
+        self.assertEqual(b.probe_projection(dict(many, outsideCanary={'process': 'unknown', 'file': 'not_visible'})), {'ran': False})
+        self.assertEqual(b.probe_projection(dict(many, outsideCanary={'process': 'not_visible', 'file': 'not_visible'})), {'ran': False})
+
+    def test_not_checked_is_only_for_a_record_that_observed_nothing(self):
+        nothing = record_for(observed=False, reaps=False)
+        self.assertEqual((nothing['line'], nothing['stderrFamily'], nothing['observation']), ('unknown', 'capture_absent', {'available': False}))
+        self.assertEqual(nothing['outsideCanary'], {'process': 'not_checked', 'file': 'not_checked'})
+        self.assertEqual(b.probe_projection(nothing), nothing)
+        for change in ({'line': 'absent'}, {'stderrFamily': 'unknown'}, {'observation': record_for()['observation']}):
+            self.assertEqual(b.probe_projection(dict(nothing, **change)), {'ran': False}, change)
+        seen = record_for(stdout=b'junk\n')
+        self.assertEqual(seen['outsideCanary'], {'process': 'unknown', 'file': 'unknown'})
+        self.assertEqual(b.probe_projection(dict(seen, outsideCanary={'process': 'not_checked', 'file': 'not_checked'})), {'ran': False})
+
+    def test_the_observation_must_be_the_exact_postinit_record_and_agree_with_the_line(self):
+        record = record_for()
+        for key in b.POSTINIT_KEYS[1:]:
+            broken = dict(record['observation']); broken[key] = 'private' if key not in ('stdoutBytes',) else -1
+            self.assertEqual(b.probe_projection(dict(record, observation=broken)), {'ran': False}, key)
+        extra = dict(record['observation'], rawOutput='/private')
+        self.assertEqual(b.probe_projection(dict(record, observation=extra)), {'ran': False})
+        # A valid line needs one LF of at most 256 bytes; an absent line an empty stdout; the converse too.
+        two = record_for(stdout=HEALTHY + HEALTHY)
+        self.assertEqual(two['line'], 'unknown')
+        self.assertEqual(b.probe_projection(dict(two, line='valid', fields=record['fields'], outsideCanary=record['outsideCanary'])), {'ran': False})
+        silent = record_for(stdout=b'')
+        self.assertEqual(silent['line'], 'absent')
+        self.assertEqual(b.probe_projection(dict(silent, line='unknown')), {'ran': False})
+        self.assertEqual(b.probe_projection(dict(record, line='absent', fields=None, outsideCanary={'process': 'unknown', 'file': 'unknown'})), {'ran': False})
+
+    def test_a_recognised_report_needs_a_non_empty_stderr_in_the_observation(self):
+        record = record_for()
+        for family in ('bun_report_shape', 'webkit_assertion_shape', 'loader_error_shape', 'incomplete'):
+            self.assertEqual(b.probe_projection(dict(record, stderrFamily=family)), {'ran': False}, family)
+        for family in ('unknown', 'classification_error', 'capture_absent'):
+            self.assertEqual(b.probe_projection(dict(record, stderrFamily=family))['stderrFamily'], family)
+        from test_report_family import bun
+        crashed = record_for(stdout=b'', stderr=bun(), native=11 | 128)
+        self.assertEqual(crashed['stderrFamily'], 'bun_report_shape')
+        self.assertEqual(b.probe_projection(crashed), crashed)
+
+    def test_projection_returns_a_copy_never_the_input_object(self):
+        record = record_for()
+        result = b.probe_projection(record)
+        self.assertIsNot(result, record)
+        self.assertIsNot(result['fields'], record['fields'])
+        self.assertIsNot(result['outsideCanary'], record['outsideCanary'])
+        self.assertIsNot(result['observation'], record['observation'])
+
+    def test_projection_failure_cannot_replace_the_original_failure_record(self):
+        record = record_for()
+        error = w.Uncertain(SimpleNamespace(stage='case:same-owner:run', dependency_probe=record), w.Refusal('same-owner native control outcome'))
+        baseline = b.failure_record(error)
+        with patch_object(b, 'probe_record', ValueError('private projection failure')):
+            refused = b.failure_record(error)
+        self.assertEqual(refused['dependencyProbe'], {'ran': False})
+        self.assertEqual({k: v for k, v in refused.items() if k != 'dependencyProbe'}, {k: v for k, v in baseline.items() if k != 'dependencyProbe'})
+        with patch_object(b, 'probe_projection', RecursionError('private')):
+            self.assertEqual(b.log_result_projection({'dependencyProbe': record})['dependencyProbe'], {'ran': False})
+
+    def test_hostile_data_is_refused_without_an_exception(self):
+        class Hostile(dict):
+            def __getitem__(self, key): raise RuntimeError('hostile')
+        class Deep(dict): pass
+        record = record_for()
+        for value in (Hostile(record), 'x' * 100000, {'ran': True, 'line': 'valid', 'fields': 'x' * 100000}, [record], (record,), 10 ** 100):
+            try: result = b.probe_projection(value)
+            except BaseException as error: self.fail('projection raised %r' % (error,))
+            self.assertEqual(result, {'ran': False})
+        self.assertEqual(b.failure_record(w.Uncertain(SimpleNamespace(stage='case:same-owner:run', dependency_probe=Hostile(record)), w.Refusal('x')))['dependencyProbe'], {'ran': False})
+
+
+def patch_object(target, name, error):
+    from unittest.mock import patch
+    return patch.object(target, name, side_effect=error)
 
 
 if __name__ == '__main__': unittest.main()

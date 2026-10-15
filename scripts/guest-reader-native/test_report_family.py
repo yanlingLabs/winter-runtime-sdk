@@ -582,8 +582,9 @@ class Projection(unittest.TestCase):
         other = b.failure_record(w.Uncertain(lease, error))
         self.assertEqual({k: v for k, v in other.items() if k != 'postInitReportFamily'}, old)
         self.assertEqual(set(record), {'readerCaseSetPassed', 'stage', 'reason', 'exceptionClass', 'errnoSymbol', 'causeClass', 'causeReason', 'causeErrnoSymbol',
-                                       'preInitDiagnostics', 'postInitDiagnostics', 'postInitStderrSample', 'postInitReportFamily', 'nativeCleanupConfirmed',
+                                       'preInitDiagnostics', 'postInitDiagnostics', 'postInitStderrSample', 'postInitReportFamily', 'dependencyProbe', 'nativeCleanupConfirmed',
                                        'configEffectProven', 'vmExecutionVerified', 'productionActivation'})
+        self.assertEqual(record['dependencyProbe'], {'ran': False})  # No probe record: the closed default.
         self.assertEqual(set(record['postInitDiagnostics']), set(b.POSTINIT_KEYS))
         for flag in ('readerCaseSetPassed', 'nativeCleanupConfirmed', 'configEffectProven', 'vmExecutionVerified', 'productionActivation'): self.assertIs(record[flag], False)
         self.assertEqual(record['stage'], 'case:same-owner:run'); self.assertEqual(record['causeReason'], 'same-owner native control outcome')
