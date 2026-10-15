@@ -402,7 +402,7 @@ program see, so a later reading of the reader's failure has data beside it.
 
 What runs. A third compiled packet artifact, `artifacts/instructionReaderDependencyProbe`, built
 from the agent-sdk overlay `linux-instruction-reader-dependency-probe.c` with the same native
-flags as the reader and launcher, dynamic only: its one dependency under test is the packet's
+flags as the launcher (the reader is a Bun compile, not a native build), dynamic only: its one dependency under test is the packet's
 pinned libc, and there is no static probe. It reads nothing from stdin, prints one stdout line (a
 failure to write exits 70) and writes nothing to stderr, so it adds no perror label to the
 classifier. `producer.NativeOperation` takes a closed `executable_role`, `instructionReader`
@@ -411,7 +411,13 @@ classifier. `producer.NativeOperation` takes a closed `executable_role`, `instru
 six libraries, host exec environment and pipe envelope are identical for both roles, and
 `viewContractSha256` (a SHA-256 over the descriptor-masked launcher argv, the exec environment and
 the view constants) is the same value for both, so a record names the view contract it ran under,
-never a descriptor or a role. A reference positive control (the probe as an ordinary Root process
+never a descriptor or a role. The operation is built by its factory inside the forked producer
+child, so the parent never holds it and cannot ask it for its own digest. The wrapper therefore
+hands `run_probe_case` the exec environment it passes to the operation, and the digest is computed
+from the fixed recipe plus that environment, which `NativeOperation` accepts only if it is the one
+closed environment: it is by construction the digest `NativeOperation.view_contract_sha256` returns
+for any operation that can launch (a test builds one and compares), and any other environment is
+refused before a single effect. A reference positive control (the probe as an ordinary Root process
 outside the view) is left out of this attempt.
 
 When it runs. `native_cases.run_probe_case` is a separate function; `run_case` and `LinuxEffects`
@@ -422,7 +428,12 @@ stages `case:dependency-probe:run|verify|recheck`, so it yields data even when a
 fails afterwards. Teardown predicates (validated init, independent launcher, pipe and init
 teardown, the bootstrap pipe drained without a record, producer reaped with exit zero, the
 deadlines, confirmed descriptor discharge) raise `CaseUncertain` exactly as for any case and stop
-the set with the handles retained. Content predicates (the native wait status, stderr, the stdout
+the set with the handles retained. The record such a failed case leaves on its handles claims
+nothing from its capture: `line` is `unknown` with no `fields`, and both canary halves are
+`unknown`, never `not_visible` (even when the capture looks healthy, and even for a leak), because
+"exactly one line" cannot be shown without stdout EOF and a case that did not finish its teardown
+proves nothing. Only a case that passed every teardown predicate with stdout EOF reports the parsed
+line and the derived halves. Content predicates (the native wait status, stderr, the stdout
 grammar) are only recorded, never raised: a probe that crashed, wrote a bad line or wrote to
 stderr still hands a closed record on. The record never feeds `readerCaseSetPassed`, which
 is still decided by the three reader cases alone; `readerSuccessImplied` and
@@ -451,8 +462,12 @@ capture, which is where a loader failure shows up), `outsideCanary`, `viewContra
 `readerSuccessImplied` and `bunCompatibilityProven`. It appears under `dependencyProbe` in the
 success result and, through the same strict projection, in every failure record and in
 `log_result_projection`; a record that fails the projection's shape, type, value or cross-field
-checks is replaced by `{"ran": false}`. A probe that never produced a line (a failure before
-`observe`) reports `line: unknown` with `outsideCanary` `not_checked` on both halves.
+checks is replaced by `{"ran": false}`. The Root stage (`bootstrap.run_root`) applies that
+projection to the success record before `result.json` is written, because the wrapper cannot import
+the bootstrap that loads it, so a tampered success record collapses there too and the key is always
+present. A probe that never produced a line (a failure before `observe`) reports `line: unknown`
+with `outsideCanary` `not_checked` on both halves; a failure after `observe` reports `unknown` on
+both halves (above), and keeps the post-init scalars once the reaps exist.
 
 The outside canary (the B3 isolation check) has two halves, both read from the line. Neither
 carries any content, only a closed state.

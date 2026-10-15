@@ -52,7 +52,11 @@ and leaves its closed `dependencyProbe` record on the lease (and on the handles
 when it raises). That record is data beside the case set, never a reader success:
 `readerCaseSetPassed` stays decided by the three reader cases, the record's
 `readerSuccessImplied` and `bunCompatibilityProven` are constant false, and only a
-teardown failure (`CaseUncertain`) stops the set. Its canary halves, where only
+teardown failure (`CaseUncertain`) stops the set. The record of such a failed case
+reports an `unknown` line and `unknown` canary halves, never `not_visible`. The
+wrapper hands the probe case the exec environment it gives the operations, which
+the record's `viewContractSha256` is computed from, and the Root stage projects
+the success record through the bootstrap's closed validator before it is written. Its canary halves, where only
 ENOENT counts as not visible, are described in `README.md`. Actual source/context
 rechecks happen after every case;
 the positive frame uses the exact existing consumer oracle. Runtime and fixture
