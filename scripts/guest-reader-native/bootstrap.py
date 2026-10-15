@@ -373,11 +373,11 @@ ERRNO_SYMBOLS = ('EACCES', 'EPERM', 'ENOENT', 'EBADF', 'EINVAL', 'EMFILE', 'ENFI
                  'ENOMEM', 'ENOSPC', 'EROFS', 'EIO', 'EPIPE', 'ECONNRESET', 'ETIMEDOUT',
                  'EINTR', 'EAGAIN', 'ENOTDIR', 'ELOOP', 'ESRCH', 'ECHILD', 'EEXIST', 'ENOSYS', 'EOPNOTSUPP', 'ENOTSUP',
                  'E2BIG', 'ENOEXEC', 'EFAULT', 'EBUSY', 'EXDEV', 'ENODEV', 'EISDIR',
-                 'ETXTBSY', 'ENAMETOOLONG', 'EOVERFLOW', 'ELIBBAD', 'EUSERS')
+                 'ETXTBSY', 'ENAMETOOLONG', 'EOVERFLOW', 'ELIBBAD', 'EUSERS', 'ENXIO')
 FAILURE_STAGES = ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'fixture',
                   'close', 'source:capture', 'source:copy', 'bootstrap:copy', 'bootstrap:load') + tuple(
     'source:load:' + name for name in ('control', 'producer', 'reader_parent', 'reader_fixture', 'native_cases')) + tuple(
-    'case:' + kind + ':' + phase for kind in ('same-owner', 'unexpected-parent', 'parent-exit')
+    'case:' + kind + ':' + phase for kind in ('dependency-probe', 'same-owner', 'unexpected-parent', 'parent-exit')
     for phase in ('run', 'verify', 'recheck'))
 
 

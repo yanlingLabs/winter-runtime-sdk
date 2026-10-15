@@ -829,7 +829,7 @@ class StageAlignment(unittest.TestCase):
             if not (stage.startswith('case:') or stage == 'close'): continue
             kind = stage.split(':')[1] if stage.startswith('case:') else 'parent-exit'  # run_cases leaves `kind` at its last value after the loop.
             self.assertEqual(self.family(error, stage), self.sample_reason(error, kind), stage)
-        self.assertEqual(set(b.NOT_SAME_OWNER_STAGES), {stage for stage in b.FAILURE_STAGES if stage == 'close' or stage.startswith(('case:unexpected-parent:', 'case:parent-exit:'))})
+        self.assertEqual(set(b.NOT_SAME_OWNER_STAGES), {stage for stage in b.FAILURE_STAGES if stage == 'close' or stage.startswith(('case:dependency-probe:', 'case:unexpected-parent:', 'case:parent-exit:'))})
 
     def test_failures_outside_run_cases_say_capture_absent_as_the_sample_does(self):
         def agree(error, stage):
