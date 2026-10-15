@@ -13,8 +13,8 @@ pinned to SHA256 `21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c
 (81,359,155 bytes), and the receipt to
 `0842d1d5de60085564cf2185d048d2b7f8dccef222decac42a1169df03b2e346`.
 The tracked pin additionally binds all four origin head/tree/inventory identities,
-both reader artifacts, six environment paths, the base, and all twelve explicit
-resolver aliases. No check invokes Git or code inside those origins. This exact
+all three compiled artifacts (the reader, its launcher and the reader dependency
+probe), six environment paths, the base, and all twelve explicit resolver aliases. No check invokes Git or code inside those origins. This exact
 pin contract consumes the previously reviewed source/compiler audit as a DATA
 prerequisite; it does not independently reproduce that audit or establish ABI
 compatibility with any prospective guest image.
@@ -50,8 +50,8 @@ identity, mapped through that exact layout. They are never inferred from package
 names or the host filesystem. Both layouts retain all captured sources and allow
 aliases only into captured SDK package roots.
 
-All six regular-file roles (`source`, `metadata`, `environment`, `reader`,
-`readerLauncher`, `base`) receive mode `0400`. Created directories begin `0700`
+All seven regular-file roles (`source`, `metadata`, `environment`, `reader`,
+`readerLauncher`, `readerDependencyProbe`, `base`) receive mode `0400`. Created directories begin `0700`
 and finish `0500`. Every compiled object is non-executable DATA. Symlink mode is
 platform-defined; aliases are created only after all regular copies finish.
 Archive `0400` does not grant execution. Returned receipts explicitly keep all
@@ -96,6 +96,16 @@ no execute/authority option. Tests use synthetic DATA, including synthetic
 compiled-role bodies. The retained real packet check separately validates all
 1,472 leaves and 243,601,045 body bytes, and checks both rehydrated layouts, modes
 and aliases without executing or importing any captured code.
+
+The default pin named above is the earlier TWO-artifact packet (reader and launcher).
+With `ARTIFACTS` now naming three roles, that packet is no longer accepted by the exact
+role-set check and `verify_actual_data.py` against it refuses until the three-artifact
+compile pin exists. The 1,472 leaves and 243,601,045 body bytes are therefore measured
+values of the earlier packet only: the three-artifact packet adds the probe's C source
+leaf and the probe artifact leaf, and its leaf count, body bytes, inventory, archive and
+receipt hashes are replaced by values measured from the one approved compile run (S8).
+Nothing in the tests depends on those numbers: they synthesize their own three-artifact
+packets from the pin's non-artifact fields.
 
 Source/packet review is required before push. ABI, rootfs identity, external
 parent, reader-native harness, guided profile and actual Linux runtime evidence
