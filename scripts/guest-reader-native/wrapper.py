@@ -15,7 +15,7 @@ import sys
 import types
 
 SOURCE_PINS = {
-    'parent.py': '856dc389f06ae973b1c1a65149671d984288cf558d7a461e32c89758036c63af',
+    'parent.py': 'a3f1ce8149f41d52c52b3d091868867f1d9b027a69c5ea29356f443f9d7c3dcc',
     'producer.py': 'e7da78e4ae7c02303101059f4b43bf261d26fc56153a50f2aed8daed651a9a57',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
