@@ -201,7 +201,10 @@ class ParentTests(unittest.TestCase):
                 info = canary.lstat()
                 self.assertTrue(stat.S_ISREG(info.st_mode))
                 self.assertEqual(stat.S_IMODE(info.st_mode), 0o444)
-                self.assertEqual((info.st_uid, info.st_gid, info.st_nlink), (os.geteuid(), os.getegid(), 1))
+                self.assertEqual((info.st_uid, info.st_nlink), (os.geteuid(), 1))
+                # The group is the process's or, where a new file inherits its directory's group (macOS, or a setgid
+                # directory), the directory's. The real Root guard (parent.canary_ok) separately enforces gid 0.
+                self.assertIn(info.st_gid, {os.getegid(), canary.parent.lstat().st_gid})
                 self.assertEqual(canary.read_bytes(), parent.CANARY_CONTENT)
                 self.assertIn(parent.CANARY_LEAF, os.listdir(sealed.path))
                 held_fd, expected, observed = sealed.files[parent.CANARY_LEAF]
