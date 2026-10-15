@@ -597,7 +597,7 @@ def probe_projection(raw):
 
 
 def probe_record(chain):
-    """The probe record for a failure: the case's own handles first, else the retained lease."""
+    """The probe record for a failure: the first holder in chain order (per item: handles, then lease)."""
     raw=None
     for item in chain:
         for holder in (getattr(item,'handles',None),getattr(item,'lease',None)):
