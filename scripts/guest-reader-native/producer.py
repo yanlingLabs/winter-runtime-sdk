@@ -6,6 +6,7 @@ Tests inject operation tables; no compiled role, namespace or privileged call ru
 import ctypes
 import hashlib
 import fcntl
+import json
 import types
 from pathlib import Path
 import os
@@ -62,6 +63,46 @@ def launcher_argv(reader_fd, receipt_fd, source_fd, shared_fd, libraries):
             str(reader_fd), VIEW, str(receipt_fd), str(UID), str(GROUP),
             str(source_fd), SOURCE, SOURCE, str(shared_fd), str(len(libraries)),
             *(value for fd, path in libraries for value in (str(fd), path))]
+
+
+# Closed executable roles. The role selects ONLY which sealed artifact leaf is the launcher's
+# executable-FD slot (and that leaf's reopen path). Everything else in the launch recipe - the
+# launcher, UID, GROUP, view, libraries, environment, pipe envelope - is role-independent.
+DEFAULT_EXECUTABLE_ROLE = 'instructionReader'
+EXECUTABLE_ROLES = types.MappingProxyType({
+    'instructionReader': 'artifacts/instructionReader',
+    'instructionReaderDependencyProbe': 'artifacts/instructionReaderDependencyProbe'})
+LAUNCHER_ARGV_LENGTH = 12 + 2 * len(LIBRARIES)
+# argv slots that carry a process-local descriptor number: executable, receipt, source, shared
+# and each library descriptor. They are masked in the view contract.
+LAUNCHER_FD_SLOTS = (2, 4, 7, 10) + tuple(12 + 2 * index for index in range(len(LIBRARIES)))
+
+
+def masked_launcher_argv(argv):
+    require(type(argv) is list and len(argv) == LAUNCHER_ARGV_LENGTH
+            and all(type(value) is str for value in argv)
+            and all(argv[index].isascii() and argv[index].isdigit() for index in LAUNCHER_FD_SLOTS),
+            'closed launcher argv')
+    return ['<fd>' if index in LAUNCHER_FD_SLOTS else value for index, value in enumerate(argv)]
+
+
+def view_contract_digest(argv, env):
+    """SHA-256 over the masked launcher argv, the exec environment and the view constants.
+
+    Descriptor numbers are masked, so the digest is stable across runs and across executable
+    roles: it names the view contract in force, never a descriptor or a role."""
+    contract = {'argv': masked_launcher_argv(argv), 'env': dict(env),
+                'constants': {'uid': UID, 'group': GROUP, 'view': VIEW, 'source': SOURCE,
+                              'home': HOME, 'libraries': list(LIBRARIES),
+                              'ioMax': IO_MAX, 'deadlineMs': DEADLINE_MS}}
+    raw = json.dumps(contract, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+    return hashlib.sha256(raw.encode('ascii')).hexdigest()
+
+
+def view_contract_sha256():
+    """The contract digest of the fixed launch recipe (placeholder descriptors, masked anyway)."""
+    libraries = tuple((10 + index, path) for index, path in enumerate(LIBRARIES))
+    return view_contract_digest(launcher_argv(3, 4, 5, 6, libraries), selected_host_exec_environment())
 
 
 def parse_receipt(data, descriptors):
@@ -522,7 +563,10 @@ class NativeOperation:
     Root-owned fixture source/shared FDs carry scope; request bytes carry no paths.
     """
     def __init__(self, debt, root, source_fd, shared_fd, guard, recheck,
-                 pidfd_validator=validate_init_pidfd, control_pair_factory=None, source_path=None, shared_path=None, exec_environment=None):
+                 pidfd_validator=validate_init_pidfd, control_pair_factory=None, source_path=None, shared_path=None, exec_environment=None,
+                 executable_role=DEFAULT_EXECUTABLE_ROLE):
+        require(type(executable_role) is str and executable_role in EXECUTABLE_ROLES, 'closed executable role')
+        self.executable_role = executable_role
         self.exec_environment=checked_host_exec_environment(selected_host_exec_environment() if exec_environment is None else exec_environment)
         self.debt, self.root = debt, root
         self.source_fd, self.shared_fd = source_fd, shared_fd
@@ -596,6 +640,29 @@ class NativeOperation:
         # No I/R native proof was produced: even confirmed setup cleanup is not a
         # successful native reader lifetime. Keep complete() false.
 
+    def launch_recipe(self, receipt_fd):
+        """The launch recipe as DATA: argv, inherited descriptors, root descriptor, reopen paths.
+
+        No effect. The executable role changes only the executable-FD slot (argv[2], the first
+        inherited descriptor) and that leaf's reopen path."""
+        leaf = EXECUTABLE_ROLES[self.executable_role]
+        executable_fd = self.root.files[leaf][0]
+        libraries = tuple((self.root.files[path.lstrip('/')][0], path) for path in LIBRARIES)
+        argv = launcher_argv(executable_fd, receipt_fd, self.source_fd, self.shared_fd, libraries)
+        pass_fds = (executable_fd, receipt_fd, self.source_fd, self.shared_fd,
+                    *(fd for fd, _ in libraries))
+        root_fd = self.root.directories[''][0]
+        require(self.source_path is not None and self.shared_path is not None,'explicit fixture reopen paths')
+        paths=((root_fd,self.root.path),
+               (self.root.files['artifacts/instructionReaderLauncher'][0],self.root.path/'artifacts/instructionReaderLauncher'),
+               (executable_fd,self.root.path/leaf),
+               (self.source_fd,self.source_path),(self.shared_fd,self.shared_path),
+               *((fd,self.root.path/path.lstrip('/')) for fd,path in libraries))
+        return argv, pass_fds, root_fd, paths
+
+    def view_contract_sha256(self, receipt_fd):
+        return view_contract_digest(self.launch_recipe(receipt_fd)[0], self.exec_environment)
+
     def _start(self):
         root_linux()
         require(self.debt.phase == 'registered', 'registration before effects')
@@ -631,18 +698,7 @@ class NativeOperation:
         stdin, stdout, stderr, gate, bootstrap_error = pipes
         os.set_blocking(bootstrap_error[1], False)
         self.fds.update(fd for pair in pipes for fd in pair)
-        reader_fd = self.root.files['artifacts/instructionReader'][0]
-        libraries = tuple((self.root.files[path.lstrip('/')][0], path) for path in LIBRARIES)
-        argv = launcher_argv(reader_fd, b.fileno(), self.source_fd, self.shared_fd, libraries)
-        pass_fds = (reader_fd, b.fileno(), self.source_fd, self.shared_fd,
-                    *(fd for fd, _ in libraries))
-        root_fd = self.root.directories[''][0]
-        require(self.source_path is not None and self.shared_path is not None,'explicit fixture reopen paths')
-        paths=((root_fd,self.root.path),
-               (self.root.files['artifacts/instructionReaderLauncher'][0],self.root.path/'artifacts/instructionReaderLauncher'),
-               (reader_fd,self.root.path/'artifacts/instructionReader'),
-               (self.source_fd,self.source_path),(self.shared_fd,self.shared_path),
-               *((fd,self.root.path/path.lstrip('/')) for fd,path in libraries))
+        argv, pass_fds, root_fd, paths = self.launch_recipe(b.fileno())
         reopen_inputs=prepare_reopen_inputs(paths)
         self.recheck(self.root)  # Immediately before owned fork/bootstrap/exec.
         pid = os.fork()
