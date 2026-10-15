@@ -214,6 +214,35 @@ class ParentTests(unittest.TestCase):
                 self.assertTrue(info.st_mode & stat.S_IROTH)
                 parent.recheck_runtime(sealed)
 
+    def test_producer_roles_and_launch_recipe_agree_with_the_real_sealed_root(self):
+        # Integration seam between the harness lane (producer) and the build lane (parent): the producer's
+        # closed executable roles must name leaves the parent really seals, and the canary the probe opens
+        # ("/winter-outside-canary" in the probe C) must be the leaf the parent really creates at the root top.
+        import producer
+        from pathlib import Path as P
+        self.assertEqual(set(producer.EXECUTABLE_ROLES), parent.ARTIFACTS - {'instructionReaderLauncher'})
+        self.assertEqual(producer.DEFAULT_EXECUTABLE_ROLE, 'instructionReader')
+        self.assertEqual('/' + parent.CANARY_LEAF, '/winter-outside-canary')
+        with self.fixture.capture() as snapshot:
+            with parent.create_launch_root(snapshot, self.root / 'sealed', SyntheticOwnerOps()) as sealed:
+                self.assertIn(parent.CANARY_LEAF, sealed.files)
+                seen = set()
+                for role, leaf in producer.EXECUTABLE_ROLES.items():
+                    with self.subTest(role=role):
+                        self.assertEqual(leaf, 'artifacts/' + role)
+                        operation = producer.NativeOperation(
+                            producer.Debt(), sealed, 40, 41, lambda _: None, lambda _: None,
+                            source_path=P('/run/winter-fixture/fixture/source'),
+                            shared_path=P('/run/winter-fixture/fixture/shared'), executable_role=role)
+                        argv, pass_fds, root_fd, paths = operation.launch_recipe(42)
+                        executable_fd = sealed.files[leaf][0]
+                        seen.add(executable_fd)
+                        self.assertEqual(argv[2], str(executable_fd))
+                        self.assertIn(executable_fd, pass_fds)
+                        self.assertIn((executable_fd, sealed.path / leaf), paths)
+                        self.assertEqual(root_fd, sealed.directories[''][0])
+                self.assertEqual(len(seen), len(producer.EXECUTABLE_ROLES))
+
     def test_canary_mode_expectations_guard_the_canary_apart_from_the_runtime_objects(self):
         self.assertEqual(parent.runtime_file_mode(parent.CANARY_LEAF), 0o444)
         self.assertEqual(parent.runtime_file_mode('artifacts/instructionReaderDependencyProbe'), 0o555)
