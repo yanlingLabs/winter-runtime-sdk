@@ -223,14 +223,15 @@ class TeardownRaises(unittest.TestCase):
         self.assertNotIn('close', fx.events) if last_event != 'close' else None
         return error, fx
 
-    def test_each_missing_independent_observation_retains_handles_and_keeps_the_content(self):
+    def test_each_missing_independent_observation_retains_handles_and_claims_nothing_from_the_capture(self):
         for field in ('launcher_ready', 'init_ready', 'stdout_eof', 'stderr_eof', 'control_eof'):
             with self.subTest(field=field):
                 fx = ProbeEffects(); fx.observation = replace(fx.observation, **{field: False})
                 error, fx = self.assert_uncertain(fx, absent=(('reap', 'dependency-probe'),))
                 record = fx.h.dependency_probe
-                self.assertEqual(record['line'], 'valid')   # The content survives a teardown failure.
-                self.assertEqual(record['outsideCanary'], {'process': 'not_visible', 'file': 'not_visible'})
+                # A healthy-looking line from a case that did not finish its teardown proves nothing.
+                self.assertEqual((record['line'], record['fields']), ('unknown', None))
+                self.assertEqual(record['outsideCanary'], {'process': 'unknown', 'file': 'unknown'})
                 self.assertEqual(record['observation'], {'available': False})   # No reap yet.
 
     def test_bootstrap_pipe_must_drain_without_a_failure_record(self):
@@ -249,8 +250,9 @@ class TeardownRaises(unittest.TestCase):
             error, fx = self.assert_uncertain(fx)
             self.assertEqual(str(error.cause), 'producer actually reaped exit zero')
             self.assertNotIn('close', fx.events)
-            self.assertEqual(fx.h.dependency_probe['line'], 'valid')
-            self.assertEqual(fx.h.dependency_probe['observation']['producerWaitStatus'], status)
+            self.assertEqual(fx.h.dependency_probe['line'], 'unknown')
+            self.assertEqual(fx.h.dependency_probe['outsideCanary'], {'process': 'unknown', 'file': 'unknown'})
+            self.assertEqual(fx.h.dependency_probe['observation']['producerWaitStatus'], status)   # The scalars are still kept.
 
     def test_launch_handle_and_init_failures_retain_handles_and_record_nothing_checked(self):
         for name in ('receive_handles', 'receive_init'):
@@ -285,7 +287,7 @@ class TeardownRaises(unittest.TestCase):
         fx.reap = reap_fails
         error, fx = self.assert_uncertain(fx)
         record = fx.h.dependency_probe
-        self.assertEqual((record['line'], record['outsideCanary']['process']), ('valid', 'visible'))
+        self.assertEqual((record['line'], record['outsideCanary']), ('unknown', {'process': 'unknown', 'file': 'unknown'}))   # Even a leak seen in a failed case.
         self.assertEqual(record['observation'], {'available': False})
 
     def test_deadlines_bound_the_case_and_the_discharge(self):
@@ -298,7 +300,7 @@ class TeardownRaises(unittest.TestCase):
         error, fx = failure(fx, None)   # The discharge itself happened; only its deadline was missed.
         self.assertEqual(str(error.cause), 'descriptor discharge before case deadline')
         self.assertEqual(fx.events[-1], 'close')
-        self.assertEqual(fx.h.dependency_probe['line'], 'valid')
+        self.assertEqual(fx.h.dependency_probe['line'], 'unknown')   # The case failed, so its capture is not trusted.
         self.assertIs(error.handles, fx.h)
 
     def test_close_that_does_not_discharge_is_uncertain(self):
@@ -335,6 +337,106 @@ class TeardownRaises(unittest.TestCase):
         self.assertEqual(str(caught.exception.cause), 'original injected failure')
         self.assertIsNone(fx.h.dependency_probe)
         self.assertTrue(fx.h.retained)
+
+
+class FailedCaseNeverClaimsNotVisible(unittest.TestCase):
+    """A record from a case that did not complete its teardown predicates reports line `unknown` and both canary
+    halves `unknown`, whatever its capture looks like. Only the completed success path may say `not_visible`."""
+    UNKNOWN = {'process': 'unknown', 'file': 'unknown'}
+
+    def assert_nothing_claimed(self, fx, *, line='unknown'):
+        with self.assertRaises(cases.CaseUncertain): run(fx)
+        record = fx.h.dependency_probe
+        self.assertEqual((record['ran'], record['line'], record['fields']), (True, line, None))
+        self.assertEqual(record['outsideCanary'], self.UNKNOWN)
+        for half in record['outsideCanary'].values(): self.assertNotEqual(half, 'not_visible')
+        self.assertIs(record['readerSuccessImplied'], False)
+        return record
+
+    def test_no_stdout_eof_with_a_healthy_looking_line(self):
+        fx = ProbeEffects(); fx.observation = replace(fx.observation, stdout_eof=False)
+        self.assertEqual(fx.observation.stdout, HEALTHY)
+        self.assert_nothing_claimed(fx)
+
+    def test_no_stdout_eof_and_an_empty_capture_is_unknown_not_absent(self):
+        fx = ProbeEffects(stdout=b''); fx.observation = replace(fx.observation, stdout_eof=False)
+        self.assert_nothing_claimed(fx)
+
+    def test_reap_that_raises(self):
+        fx = ProbeEffects(); fx.reap = lambda *_: (_ for _ in ()).throw(cases.Refusal('actual producer reap'))
+        record = self.assert_nothing_claimed(fx)
+        self.assertEqual(record['observation'], {'available': False})
+
+    def test_nonzero_producer_status(self):
+        for status in (1 << 8, 9):
+            record = self.assert_nothing_claimed(ProbeEffects(producer=status))
+            self.assertEqual(record['observation']['producerWaitStatus'], status)
+
+    def test_every_other_teardown_failure_after_a_healthy_looking_observation(self):
+        def refuses(name):
+            fx = ProbeEffects(); setattr(fx, name, lambda *_: (_ for _ in ()).throw(cases.Refusal('inert failure'))); return fx
+        def keeps():
+            fx = ProbeEffects(); fx.close_confirmed = lambda h: fx.events.append('close'); return fx
+        def slow():
+            fx = ProbeEffects(); iterator = iter((0.0, 6.0)); fx.now = lambda: next(iterator); return fx
+        def bootstrap():
+            fx = ProbeEffects(); fx.h.bootstrap_error = 27
+            fx.observation = replace(fx.observation, bootstrap_eof=False); return fx
+        for name, fx in (('close fails', refuses('close_confirmed')), ('close does not discharge', keeps()),
+                         ('case deadline', slow()), ('bootstrap pipe', bootstrap())):
+            with self.subTest(name):
+                self.assert_nothing_claimed(fx)
+        for field in ('launcher_ready', 'init_ready', 'stderr_eof', 'control_eof'):
+            with self.subTest(field):
+                fx = ProbeEffects(); fx.observation = replace(fx.observation, **{field: False})
+                self.assert_nothing_claimed(fx)
+
+    def test_a_leak_seen_in_a_failed_case_is_unknown_too(self):
+        fx = ProbeEffects(stdout=line(proc_numeric=2, canary_open=0)); fx.observation = replace(fx.observation, stdout_eof=False)
+        self.assert_nothing_claimed(fx)
+
+    def test_the_builder_needs_both_a_completed_case_and_stdout_eof(self):
+        observed = cases.Observation(True, True, True, True, True, HEALTHY, b'', 0)
+        reaps = cases.Reaps(0, 0, None)
+        def build(observed=observed, complete=True):
+            return cases.build_probe_record(observed, reaps, init_bound=True, view_contract=p.view_contract_sha256(), complete=complete)
+        self.assertEqual((build()['line'], build()['outsideCanary']), ('valid', {'process': 'not_visible', 'file': 'not_visible'}))
+        for complete in (False, None, 1, 'True'):
+            self.assertEqual((build(complete=complete)['line'], build(complete=complete)['outsideCanary']), ('unknown', self.UNKNOWN), complete)
+        for eof in (False, None, 1, 'yes'):
+            record = build(replace(observed, stdout_eof=eof))
+            self.assertEqual((record['line'], record['fields'], record['outsideCanary']), ('unknown', None, self.UNKNOWN), eof)
+        with self.assertRaises(TypeError): cases.build_probe_record(observed, reaps, init_bound=True, view_contract='0' * 64)
+
+    def test_the_projection_keeps_such_a_record_and_the_success_golden_is_unchanged(self):
+        import bootstrap as b
+        fx = ProbeEffects(stdout=b''); fx.observation = replace(fx.observation, stdout_eof=False)
+        record = self.assert_nothing_claimed(fx)
+        self.assertEqual(b.probe_projection(record), record)
+        self.assertEqual(run()[0].record, healthy_record())
+
+
+class ViewContract(unittest.TestCase):
+    def test_the_record_digest_follows_the_environment_handed_to_the_operation_and_equals_the_operations_own(self):
+        from test_executable_role import operation, RECEIPT_FD
+        environment = p.selected_host_exec_environment()
+        fx = ProbeEffects()
+        evidence = cases.run_probe_case(lambda *_: None, effects=fx, exec_environment=environment)
+        self.assertEqual(evidence.record['viewContractSha256'], p.view_contract_sha256(environment))
+        self.assertEqual(evidence.record['viewContractSha256'], p.view_contract_sha256())
+        # The digest an operation built with that environment computes for itself (descriptor numbers are masked).
+        self.assertEqual(evidence.record['viewContractSha256'],
+                         operation('instructionReaderDependencyProbe', exec_environment=environment).view_contract_sha256(RECEIPT_FD))
+
+    def test_any_other_environment_is_refused_before_a_single_effect(self):
+        import types
+        for bad in (types.MappingProxyType({}), types.MappingProxyType(dict(p.selected_host_exec_environment(), TZ='Europe/Paris')),
+                    dict(p.selected_host_exec_environment())):
+            fx = ProbeEffects()
+            with self.assertRaises(cases.Refusal):
+                cases.run_probe_case(lambda *_: None, effects=fx, exec_environment=bad)
+            self.assertEqual(fx.events, [])
+            self.assertEqual(fx.now_calls, 0)
 
 
 class Structure(unittest.TestCase):

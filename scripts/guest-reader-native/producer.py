@@ -99,10 +99,15 @@ def view_contract_digest(argv, env):
     return hashlib.sha256(raw.encode('ascii')).hexdigest()
 
 
-def view_contract_sha256():
-    """The contract digest of the fixed launch recipe (placeholder descriptors, masked anyway)."""
+def view_contract_sha256(exec_environment=None):
+    """The contract digest of the fixed launch recipe (placeholder descriptors, masked anyway).
+
+    With `exec_environment` it is the digest for exactly that environment, which must be the one closed
+    environment a NativeOperation accepts; it then equals NativeOperation.view_contract_sha256 for any
+    operation built with it."""
     libraries = tuple((10 + index, path) for index, path in enumerate(LIBRARIES))
-    return view_contract_digest(launcher_argv(3, 4, 5, 6, libraries), selected_host_exec_environment())
+    environment = selected_host_exec_environment() if exec_environment is None else checked_host_exec_environment(exec_environment)
+    return view_contract_digest(launcher_argv(3, 4, 5, 6, libraries), environment)
 
 
 def parse_receipt(data, descriptors):

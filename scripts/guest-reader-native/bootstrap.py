@@ -387,7 +387,7 @@ FAILURE_STAGES = ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'f
 
 
 
-# Literal inventory of require labels in the compartment C/header at agent-sdk 687b9557 (70 labels: see
+# Literal inventory of require labels in the compartment C/header at agent-sdk 53082a74 (70 labels: see
 # native_cases.STDERR_LABELS); not output authority.
 NATIVE_STDERR_LABELS = (
     'bind',
@@ -600,7 +600,7 @@ def probe_projection(raw):
     if checked!=observation:return off
     if checked['available'] is True:
         if line=='valid' and (checked['stdoutFraming']!='one_lf' or checked['stdoutBytes']>PROBE_MAX_LINE):return off
-        if (line=='absent')!=(checked['stdoutBytes']==0):return off
+        if line=='absent' and checked['stdoutBytes']!=0:return off   # `unknown` may hold no bytes: a case that did not finish.
         if family in REPORT_FAMILIES[:3]+('incomplete',) and checked['stderrBytes']==0:return off
     if (canary['process'],canary['file'])==('not_checked','not_checked') and (
             line!='unknown' or checked['available'] is not False or family!='capture_absent'):return off
@@ -921,6 +921,9 @@ def run_root(repository,protected_parent,data,wrapper_digest,*,wrapper_source,ha
             protected_parent/'fixture',acquisition_record=data['acquisition'],effects_factory=factory,
             loaded_modules=modules)
         lease.recheck();checked_bytes(target,wrapper_digest,root_copy=True)
+        # The wrapper cannot import this module, so the closed probe projection is applied here, before result.json:
+        # a tampered or malformed success record collapses to {'ran': False}, and the key is always present.
+        result['dependencyProbe']=probe_projection(result.get('dependencyProbe'))
         result['outerMountsSha256']=baseline;result['outerObservations']=observations
         return result
     except BaseException as error:

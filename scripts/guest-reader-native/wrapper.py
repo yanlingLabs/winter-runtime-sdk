@@ -455,9 +455,9 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
         kind = 'dependency-probe'
         lease.stage = 'case:dependency-probe:run'
         if effects_factory is None:
-            probed = cases.run_probe_case(probe_factory)
+            probed = cases.run_probe_case(probe_factory, exec_environment=selected_environment)
         else:
-            probed = cases.run_probe_case(probe_factory, effects=effects_factory(kind))
+            probed = cases.run_probe_case(probe_factory, effects=effects_factory(kind), exec_environment=selected_environment)
         lease.dependency_probe = probed.record
         lease.stage = 'case:dependency-probe:verify'
         require(type(probed.record) is dict and probed.record.get('ran') is True

@@ -22,7 +22,7 @@ RECORD={'metadata':dict(w.ACQUISITION_METADATA),'checked_at':OBSERVED_TIME.isofo
 ACQUISITION={'acquisition_record':RECORD,'now':OBSERVED_TIME}
 HEALTHY_PROBE=cases_probe.build_probe_record(
     cases_probe.Observation(True,True,True,True,True,HEALTHY_LINE,b'',0),cases_probe.Reaps(0,0,None),
-    init_bound=True,view_contract=actual_producer.view_contract_sha256())
+    init_bound=True,view_contract=actual_producer.view_contract_sha256(),complete=True)
 
 
 class SyntheticOwner(w.OwnerOps):
@@ -192,7 +192,8 @@ class Tests(unittest.TestCase):
         probe_record=dict(HEALTHY_PROBE,**(probe_changes or {}))
         def probe(factory,**kwargs):
             events.append('dependency-probe')
-            if kwargs:events.append(('effects',kwargs['effects']))
+            self.assertEqual(kwargs['exec_environment'],producer.selected_host_exec_environment())   # The environment the operations get.
+            if 'effects' in kwargs:events.append(('effects',kwargs['effects']))
             debt=object();operation=factory(debt,None);self.assertIs(operation.debt,debt)
             self.assertEqual(operation.kwargs['executable_role'],'instructionReaderDependencyProbe')
             self.assertEqual(operation.kwargs['control_pair_factory'],None)
@@ -327,7 +328,7 @@ class Tests(unittest.TestCase):
 
     def test_unhealthy_probe_content_never_changes_the_reader_set_outcome(self):
         unhealthy=cases_probe.build_probe_record(cases_probe.Observation(True,True,True,True,True,b'',b'',11|128),
-            cases_probe.Reaps(0,139<<8,None),init_bound=True,view_contract=actual_producer.view_contract_sha256())
+            cases_probe.Reaps(0,139<<8,None),init_bound=True,view_contract=actual_producer.view_contract_sha256(),complete=True)
         self.assertEqual(unhealthy['line'],'absent')
         lease,events,resources,result,error=self.run_orchestrated(probe_changes=unhealthy)
         self.assertIsNone(error);self.assertIs(result['readerCaseSetPassed'],True)
@@ -366,7 +367,7 @@ class Tests(unittest.TestCase):
         import bootstrap as b
         lease,modules,events,_=self.orchestrator()
         record=cases_probe.build_probe_record(cases_probe.Observation(True,True,True,True,True,HEALTHY_LINE,b'',0),None,
-            init_bound=True,view_contract=actual_producer.view_contract_sha256())
+            init_bound=True,view_contract=actual_producer.view_contract_sha256(),complete=False)   # A failed case never completes.
         def probe(factory,**kwargs):
             raise cases_probe.CaseUncertain(SimpleNamespace(dependency_probe=record),cases_probe.Refusal('independent init pidfd teardown'))
         modules['native_cases'].run_probe_case=probe

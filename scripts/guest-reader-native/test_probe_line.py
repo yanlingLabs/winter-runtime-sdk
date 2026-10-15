@@ -388,10 +388,11 @@ def observed_for(stdout=HEALTHY, stderr=b'', native=0):
     return cases.Observation(True, True, True, True, True, stdout, stderr, native)
 
 
-def record_for(stdout=HEALTHY, stderr=b'', native=0, launcher=0, producer=0, *, reaps=True, observed=True, bound=True):
+def record_for(stdout=HEALTHY, stderr=b'', native=0, launcher=0, producer=0, *, reaps=True, observed=True, bound=True,
+               complete=True):
     return cases.build_probe_record(observed_for(stdout, stderr, native) if observed else None,
                                     cases.Reaps(producer, launcher, None) if reaps else None,
-                                    init_bound=bound, view_contract=VIEW)
+                                    init_bound=bound, view_contract=VIEW, complete=complete)
 
 
 def failure_for(record, *, via='lease', stage='case:same-owner:run'):
@@ -612,7 +613,10 @@ class Closed(unittest.TestCase):
         self.assertEqual(b.probe_projection(dict(two, line='valid', fields=record['fields'], outsideCanary=record['outsideCanary'])), {'ran': False})
         silent = record_for(stdout=b'')
         self.assertEqual(silent['line'], 'absent')
-        self.assertEqual(b.probe_projection(dict(silent, line='unknown')), {'ran': False})
+        # `unknown` with an empty capture is what a case that did not finish reports (no EOF proves nothing): accepted.
+        # `absent` beside bytes, or `valid` beside none, is not.
+        self.assertEqual(b.probe_projection(dict(silent, line='unknown'))['line'], 'unknown')
+        self.assertEqual(b.probe_projection(dict(two, line='absent', fields=None, outsideCanary=silent['outsideCanary'])), {'ran': False})
         self.assertEqual(b.probe_projection(dict(record, line='absent', fields=None, outsideCanary={'process': 'unknown', 'file': 'unknown'})), {'ran': False})
 
     def test_a_recognised_report_needs_a_non_empty_stderr_in_the_observation(self):

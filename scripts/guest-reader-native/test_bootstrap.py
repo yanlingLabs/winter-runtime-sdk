@@ -119,6 +119,34 @@ class RootWiringTests(unittest.TestCase):
             {'compile_pin_path':Path('/base/scripts/guest-reader-intake/compile-38502659264.pin.json')}))
         self.assertFalse(result['readerCaseSetPassed'])
 
+    def run_root_returning(self,returned):
+        import stat
+        lease=SimpleNamespace(recheck=lambda:None)
+        wrapper=SimpleNamespace(check_acquisition_record=lambda *_:None,copy_external_sources=lambda *a,**kw:lease,
+            load_external_modules=lambda _: {'native_cases':object()},run_cases=lambda *a,**kw:returned)
+        with patch.object(b.sys,'platform','linux'),patch.object(b.os,'getuid',return_value=0),patch.object(b.os,'geteuid',return_value=0),patch.object(b,'checked_bytes',return_value=b'inert'),patch.object(b.os,'open',side_effect=[80,81]),patch.object(b.os,'fstat',return_value=SimpleNamespace(st_uid=0,st_mode=stat.S_IFDIR|0o700)),patch.object(b.os,'write',side_effect=lambda fd,raw:len(raw)),patch.object(b.os,'fsync'),patch.object(b.os,'fchmod'),patch.object(b.os,'close'),patch.object(b,'observed_effects',return_value=(object(),[],'a'*64)):
+            return b.run_root('/base','/run/inert',{'acquisition':{},'packet':'/packet','inventory':'/inventory'},'0'*64,
+                wrapper_source='/successor/wrapper.py',harness_source='/successor/native',loader=lambda *_ ,**kw:wrapper)
+
+    def test_the_success_result_carries_only_the_projected_probe_record(self):
+        from test_probe_line import record_for
+        good=record_for()
+        result=self.run_root_returning({'readerCaseSetPassed':True,'dependencyProbe':good})
+        self.assertEqual(result['dependencyProbe'],good)           # A genuine record passes through unchanged...
+        self.assertIsNot(result['dependencyProbe'],good)           # ...as a copy, never the wrapper's own object.
+        tampered=(dict(good,readerSuccessImplied=True),dict(good,bunCompatibilityProven=1),dict(good,rawStdout='/private/x'),
+                  dict(good,line='valid',fields=dict(good['fields'],canaryOpen='unknown')),   # Halves that disagree with the fields.
+                  dict(good,outsideCanary={'process':'not_visible','file':'leaked'}),
+                  dict(good,viewContractSha256='nothex'),{k:v for k,v in good.items() if k!='fields'},
+                  {'ran':True},'a string',None,[good],42)
+        for item in tampered:
+            with self.subTest(item=str(item)[:60]):
+                result=self.run_root_returning({'readerCaseSetPassed':True,'dependencyProbe':item})
+                self.assertEqual(result['dependencyProbe'],{'ran':False})
+        result=self.run_root_returning({'readerCaseSetPassed':True})   # The key is always present in what is written.
+        self.assertEqual(result['dependencyProbe'],{'ran':False})
+        self.assertTrue(result['readerCaseSetPassed'])             # The projection never changes the case outcome.
+
     def test_before_lease_source_failure_reports_bootstrap_stage(self):
         with patch.object(b.sys,'platform','linux'),patch.object(b.os,'getuid',return_value=0),patch.object(b.os,'geteuid',return_value=0),patch.object(b,'checked_bytes',side_effect=b.Refusal('bootstrap source hash/identity')):
             with self.assertRaises(b.Refusal) as caught:
@@ -244,7 +272,7 @@ class PreinitProjectionTests(unittest.TestCase):
     # update this literal, native_cases.STDERR_LABELS and bootstrap.NATIVE_STDERR_LABELS together when the C or header changes.
     # The C also has unlabelled exits that print nothing (64 refusals and bare 77 liveness failures); those are classified by
     # exit status only. The dependency probe C prints no stderr label at all (its only output is one stdout line).
-    COMPARTMENT_LABELS_687B9557 = (
+    COMPARTMENT_LABELS_53082A74 = (
         'bind',
         'bind flags',
         'fixture path',
@@ -316,7 +344,8 @@ class PreinitProjectionTests(unittest.TestCase):
         'reader zero capabilities',
         'seccomp',
     )
-    COMPARTMENT_LABELS_NEW_IN_687B9557 = (
+    # The 13 labels the earlier audit (agent-sdk f6d88d9a, the overlay of the compile packet 38502659264) did not have.
+    COMPARTMENT_LABELS_ADDED_AFTER_F6D88D9A = (
         'reader created entropy identity',
         'reader descriptor inventory',
         'reader descriptor kind',
@@ -334,19 +363,19 @@ class PreinitProjectionTests(unittest.TestCase):
 
     def test_native_labels_equal_the_pinned_compartment_label_literal_in_both_modules(self):
         import native_cases
-        literal=self.COMPARTMENT_LABELS_687B9557
+        literal=self.COMPARTMENT_LABELS_53082A74
         self.assertEqual(len(literal),70);self.assertEqual(len(set(literal)),70)
         self.assertEqual(list(literal),sorted(literal))
         self.assertEqual(set(native_cases.STDERR_LABELS),set(literal))
         self.assertEqual(len(native_cases.STDERR_LABELS),len(set(native_cases.STDERR_LABELS)))
         self.assertEqual(b.NATIVE_STDERR_LABELS,literal)
-        new=set(self.COMPARTMENT_LABELS_NEW_IN_687B9557)
+        new=set(self.COMPARTMENT_LABELS_ADDED_AFTER_F6D88D9A)
         self.assertEqual(len(new),13);self.assertLessEqual(new,set(literal))
         self.assertEqual(len(set(literal)-new),57)
 
     def test_every_new_compartment_label_classifies_as_an_audited_label_never_unrecognized(self):
         import native_cases
-        for label in self.COMPARTMENT_LABELS_NEW_IN_687B9557:
+        for label in self.COMPARTMENT_LABELS_ADDED_AFTER_F6D88D9A:
             with self.subTest(label=label):
                 mapped=label.encode()+b': '+os.strerror(errno.ENODEV).encode()+b'\n'
                 self.assertEqual(native_cases.classify_stderr(mapped),

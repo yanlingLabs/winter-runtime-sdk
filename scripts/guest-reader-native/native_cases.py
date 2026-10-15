@@ -219,7 +219,8 @@ def control_observation(data, rights):
 
 # Exact static require/perror labels of the compartment C (63 literal + 3 passed through reader_expect and
 # reader_entropy_identity = 66) and its header (4: bind, bind flags, fixture path, seccomp), extracted at agent-sdk
-# 687b9557 (C sha256 28aa279d...5893, header sha256 92fef7c0...967d). 57 were audited earlier; 13 are new in the
+# 687b9557 and re-extracted at 53082a74 (C sha256 28aa279d...5893 and header sha256 92fef7c0...967d at both).
+# 57 were audited earlier; 13 are new in the
 # probe-era compartment (the /proc, /dev, mount and descriptor inventories). test_bootstrap pins the full list as a literal.
 STDERR_LABELS = ('bind', 'bind flags', 'fixture path', 'reader Root peer', 'reader admitted clone',
     'reader bounding capabilities', 'reader close-on-exec', 'reader created entropy identity',
@@ -358,6 +359,10 @@ def probe_outside_canary(line, fields, init_bound):
             'file': 'not_visible' if canary == 'ENOENT' else 'visible' if canary == PROBE_ERRNO_OK else 'unknown'}
 
 
+def _probe_unknown():
+    return {'line': 'unknown', 'fields': None, 'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
+
+
 def parse_probe_line(raw, *, init_bound=False):
     """Closed scalars for one complete stdout capture. Never raises, never returns content."""
     try:
@@ -383,8 +388,7 @@ def parse_probe_line(raw, *, init_bound=False):
         return {'line': 'valid', 'fields': fields,
                 'outsideCanary': probe_outside_canary('valid', fields, init_bound)}
     except Exception:
-        return {'line': 'unknown', 'fields': None,
-                'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
+        return _probe_unknown()
 
 
 # ---------------------------------------------------------------------------
@@ -1006,16 +1010,18 @@ class ProbeEvidence:
     config_effect_proven: bool = False
 
 
-def build_probe_record(observed, reaps, *, init_bound, view_contract):
+def build_probe_record(observed, reaps, *, init_bound, view_contract, complete):
     """The closed dependencyProbe record. Pure DATA, no effect, never raises, no raw content.
 
-    `observed`/`reaps` may be None (a failure before them): then nothing was checked."""
+    `observed`/`reaps` may be None (a failure before them): then nothing was checked. `complete` is True only
+    when the case passed every teardown predicate. "Exactly one line" needs stdout EOF, and a case that did not
+    finish proves nothing, so without both the line and both canary halves are `unknown`, never `not_visible`."""
     parsed = {'line': 'unknown', 'fields': None, 'outsideCanary': {'process': 'not_checked', 'file': 'not_checked'}}
     observation, family = {'available': False}, 'capture_absent'
     if observed is not None:
         try: parsed = parse_probe_line(observed.stdout, init_bound=init_bound)
-        except Exception:
-            parsed = {'line': 'unknown', 'fields': None, 'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
+        except Exception: parsed = _probe_unknown()
+        if complete is not True or getattr(observed, 'stdout_eof', None) is not True: parsed = _probe_unknown()
         try: family = classify_report_family(observed.stderr)
         except Exception: family = 'classification_error'
         if reaps is not None:
@@ -1027,9 +1033,13 @@ def build_probe_record(observed, reaps, *, init_bound, view_contract):
             'readerSuccessImplied': False, 'bunCompatibilityProven': False}
 
 
-def run_probe_case(operation_factory, *, effects=None):
-    """Run the dependency probe through the reader's launch envelope. Returns ProbeEvidence."""
-    view_contract = view_contract_sha256()
+def run_probe_case(operation_factory, *, effects=None, exec_environment=None):
+    """Run the dependency probe through the reader's launch envelope. Returns ProbeEvidence.
+
+    The operation is built by the factory inside the forked producer child, so this parent never holds it. The
+    record's viewContractSha256 is therefore computed from the fixed recipe plus the exec environment the caller
+    hands the operation (default: the selected one), which NativeOperation accepts only if it is the closed one."""
+    view_contract = view_contract_sha256(exec_environment)
     fx = effects if effects is not None else LinuxEffects()
     started = fx.now()
     deadline = started + PROBE_SECONDS
@@ -1059,12 +1069,12 @@ def run_probe_case(operation_factory, *, effects=None):
         require(not handles.retained, 'confirmed descriptor discharge')
         elapsed = fx.now() - started
         require(0 <= elapsed < deadline - started, 'descriptor discharge before case deadline')
-        record = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract)
+        record = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract, complete=True)
         handles.dependency_probe = record
         return ProbeEvidence(record, elapsed, observed, reaps, True)
     except BaseException as error:
         # Keep whatever was observed; never close keepalives or lose pidfds on uncertainty.
-        try: handles.dependency_probe = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract)
+        try: handles.dependency_probe = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract, complete=False)
         except BaseException: pass  # Original refusal/debt is never replaced.
         if handles.init_pid is None and hasattr(fx, 'diagnose_preinit'):
             try: fx.diagnose_preinit(handles, deadline)
