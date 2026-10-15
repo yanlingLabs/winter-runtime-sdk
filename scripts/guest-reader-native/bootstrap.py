@@ -284,6 +284,7 @@ ERROR_REASONS = (
     'private bootstrap mount namespace',
     'private real root propagation',
     'private source parent required',
+    'probe record proof flags',
     'proc observation bound',
     'proc observation identity changed',
     'proc observation regular file',
