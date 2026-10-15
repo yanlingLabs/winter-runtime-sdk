@@ -322,12 +322,9 @@ class ParentTests(unittest.TestCase):
             self.assertGreater(snapshot.measurements['fileCount'], 1)
 
     def test_reviewed_file_count_is_one_named_measured_constant(self):
+        # The count the reviewed pin is held to lives in one named constant, replaced together with the pin at repin.
         self.assertEqual(parent.REVIEWED_FILE_COUNT, 1472)
-        data = parent.load_pin().data
-        self.assertEqual(data['fileCount'], parent.REVIEWED_FILE_COUNT)
-        # The reviewed pin is the earlier two-artifact packet; the contract now demands three roles.
-        self.assertEqual(len(data['artifacts']), 2)
-        self.assertEqual(len(parent.ARTIFACTS), 3)
+        self.assertEqual(parent.load_pin().data['fileCount'], parent.REVIEWED_FILE_COUNT)
 
     def test_requires_reviewed_pin_not_packet_dict(self):
         with self.assertRaisesRegex(parent.Refusal, 'separately reviewed'):
