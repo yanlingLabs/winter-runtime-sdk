@@ -15,11 +15,12 @@ import stat
 import sys
 import unicodedata
 
-REVIEWED_PIN_SHA256 = 'e319e8a859dcc891a59c8a2d4134aa02ad8dd0da94bca45b339e49fdc92bae2b'
-REVIEWED_INVENTORY_SHA256 = '21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f'
-# A measured value of the reviewed packet, not a design constant: the three-artifact compile pin
-# (S8) replaces the pin hash, the inventory hash and this count together with the measured numbers.
-REVIEWED_FILE_COUNT = 1472
+REVIEWED_PIN_SHA256 = 'd95ebe794e7202ef430e393461e9b3926e7d30318fe1f7ed875b4686967566de'
+REVIEWED_INVENTORY_SHA256 = '0893ae66d58aa577713d8d73a989a0b0e760a9f1c031eb1ce64bfb849302f6c7'
+# A measured value of the reviewed packet, not a design constant: compile run 38715669708's three-artifact
+# packet has 1474 leaves (the earlier two-artifact packet had 1472). The pin hash, the inventory hash and this
+# count are replaced together whenever the pinned packet changes.
+REVIEWED_FILE_COUNT = 1474
 MAX_JSON = 4 * 1024 * 1024
 MAX_LEAF = 128 * 1024 * 1024
 MAX_BYTES = 512 * 1024 * 1024
@@ -246,7 +247,7 @@ class ReviewedPin:
 
 def load_pin(path=None, *, expected_sha256=REVIEWED_PIN_SHA256):
     require(digest_ok(expected_sha256), 'external pin digest required')
-    path = path or Path(__file__).parent.parent / 'guest-reader-intake' / 'compile-38502659264.pin.json'
+    path = path or Path(__file__).parent.parent / 'guest-reader-intake' / 'compile-38715669708.pin.json'
     held = Handles()
     try:
         _, raw = held.file(path, MAX_JSON)

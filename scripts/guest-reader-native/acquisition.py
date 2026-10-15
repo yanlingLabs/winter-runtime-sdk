@@ -52,15 +52,15 @@ class AcquisitionPins:
 
 
 PRODUCTION_PINS = AcquisitionPins(
-    ArtifactMetadata(1358618589, 38502659264,
-                     "29fe5cff1ea0b93d7970cfee566030f3532fdd74", 11866353126,
-                     "reader-compile-packet-38502659264", 81095921, False,
-                     "2026-10-21T02:45:33Z"),
-    (MemberPin(NAMES[0], 81359155,
-               "e3863c0ebe91a7cbe4efc0c63cf5adb232dbb5bddd1c897cd447045b8c96482b"),
-     MemberPin(NAMES[1], 243499,
-               "21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f")),
-    "bd586bafdcffeca4c4fbdfcdd65b4f8b807b2ff2b7ba8adfebbacf067874dfcd")
+    ArtifactMetadata(1358618589, 38715669708,
+                     "75a4fe073f45c50b4ce3d53d01f7749a6829bacf", 11962257334,
+                     "reader-compile-packet-38715669708", 81111513, False,
+                     "2026-10-22T09:49:05Z"),
+    (MemberPin(NAMES[0], 81378280,
+               "e8249728f18bf37e2e22f299df3ad1829e2930e8ab589cabfb804d6ed6386f3c"),
+     MemberPin(NAMES[1], 243843,
+               "0893ae66d58aa577713d8d73a989a0b0e760a9f1c031eb1ce64bfb849302f6c7")),
+    "233fd0f9717034c23cd0c35d4ce539ab1a3e02a0cac114d5262363b3960af8e8")
 
 
 @dataclass(frozen=True)

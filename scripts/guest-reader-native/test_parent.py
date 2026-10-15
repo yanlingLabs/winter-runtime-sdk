@@ -355,7 +355,7 @@ class ParentTests(unittest.TestCase):
 
     def test_reviewed_file_count_is_one_named_measured_constant(self):
         # The count the reviewed pin is held to lives in one named constant, replaced together with the pin at repin.
-        self.assertEqual(parent.REVIEWED_FILE_COUNT, 1472)
+        self.assertEqual(parent.REVIEWED_FILE_COUNT, 1474)   # Compile run 38715669708 (three artifacts); the earlier packet had 1472.
         self.assertEqual(parent.load_pin().data['fileCount'], parent.REVIEWED_FILE_COUNT)
 
     def test_requires_reviewed_pin_not_packet_dict(self):

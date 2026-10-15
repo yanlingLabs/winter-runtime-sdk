@@ -1,14 +1,18 @@
 {
-  "archiveBytes": 81359155,
-  "archiveSha256": "e3863c0ebe91a7cbe4efc0c63cf5adb232dbb5bddd1c897cd447045b8c96482b",
+  "archiveBytes": 81378280,
+  "archiveSha256": "e8249728f18bf37e2e22f299df3ad1829e2930e8ab589cabfb804d6ed6386f3c",
   "artifacts": {
     "instructionReader": {
       "bytes": 99264656,
       "sha256": "057ad648a7184f86a35d0a94a29f180b9000c6f2cfd3a46f9f740c17c6b7ee71"
     },
+    "instructionReaderDependencyProbe": {
+      "bytes": 71208,
+      "sha256": "7a0ac9a396d37480be3a28ca2457740208e96cb943e645735986a7e391856b90"
+    },
     "instructionReaderLauncher": {
-      "bytes": 72840,
-      "sha256": "1ca222173dca1a5aa390bf395c454b705b35516d244353ae3bf035c6b94276df"
+      "bytes": 73624,
+      "sha256": "d8f26cedbd807d1ab091179d6274fa273d3b424a34e1cdb48f7f73fc3f961a61"
     }
   },
   "base": {
@@ -18,12 +22,12 @@
     "target": "bun-linux-arm64",
     "version": "1.3.14"
   },
-  "builderHead": "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
-  "fileBytes": 243601045,
-  "fileCount": 1472,
+  "builderHead": "0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27",
+  "fileBytes": 243716286,
+  "fileCount": 1474,
   "formatVersion": 1,
-  "inventoryBytes": 243499,
-  "inventorySha256": "21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f",
+  "inventoryBytes": 243843,
+  "inventorySha256": "0893ae66d58aa577713d8d73a989a0b0e760a9f1c031eb1ce64bfb849302f6c7",
   "origins": [
     {
       "checkoutHead": "0394b36f674765c942f8db07f009b7ad20787dba",
@@ -40,21 +44,21 @@
       "tree": "6b92c88c21b5acaa05c4eafa6308621bbab371b3"
     },
     {
-      "checkoutHead": "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
-      "head": "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
-      "inventorySha256": "8d2bdc5cecf0aaa2950d3596e370375b7886a7a21cc9ef0a3c36052a5dd7fef4",
+      "checkoutHead": "53082a74a98120f5deffa75f04dc306976d75de8",
+      "head": "53082a74a98120f5deffa75f04dc306976d75de8",
+      "inventorySha256": "f7dae9a4710db1bb710362ab79b6a88a01e889ffc0c060c8c6179c08d1d310f9",
       "role": "overlay",
-      "tree": "c7fd9b3329a8185ce1f51705fc59ba40423bbcd1"
+      "tree": "a4a66851f800d6a768eb60a7e698b3ddf5f60ad6"
     },
     {
-      "checkoutHead": "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
-      "head": "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
-      "inventorySha256": "afb2be2f56649f5084028a7512286296e01b19c75afbca98098a3384257528c7",
+      "checkoutHead": "0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27",
+      "head": "0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27",
+      "inventorySha256": "29d04ce26b1e1e1242b0cc52673e4bad9083ea23509ba3b565cb68c67fd5f31a",
       "role": "builder",
-      "tree": "aadc74163a43dcaa63b246df2442f3e3ae79bc7b"
+      "tree": "9c86a6b919157458c1aa60399ce6f3d8c1423119"
     }
   ],
-  "receiptSha256": "0842d1d5de60085564cf2185d048d2b7f8dccef222decac42a1169df03b2e346",
+  "receiptSha256": "6ae867037f315a8a9fcd50c311617816f66001f2e91883f49f99740bcef1a135",
   "resolverBindings": {
     "source/runtime/node_modules/@yanlinglabs/winter-agent-runtime": {
       "origin": "sdk",
@@ -129,7 +133,7 @@
       "version": "0.0.53"
     }
   },
-  "run": 38502659264,
+  "run": 38715669708,
   "runtimeDependencies": {
     "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1": {
       "bytes": 203968,
@@ -156,5 +160,5 @@
       "sha256": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505"
     }
   },
-  "workflowHead": "29fe5cff1ea0b93d7970cfee566030f3532fdd74"
+  "workflowHead": "75a4fe073f45c50b4ce3d53d01f7749a6829bacf"
 }

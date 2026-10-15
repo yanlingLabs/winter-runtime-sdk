@@ -116,7 +116,7 @@ class RootWiringTests(unittest.TestCase):
             result=b.run_root('/base','/run/inert',{'acquisition':{},'packet':'/packet','inventory':'/inventory'},'0'*64,
                 wrapper_source='/successor/wrapper.py',harness_source='/successor/native',loader=lambda *_ ,**kw:wrapper)
         self.assertEqual(events[0],('/successor/native',Path('/run/inert/sources'),
-            {'compile_pin_path':Path('/base/scripts/guest-reader-intake/compile-38502659264.pin.json')}))
+            {'compile_pin_path':Path('/base/scripts/guest-reader-intake/compile-38715669708.pin.json')}))
         self.assertFalse(result['readerCaseSetPassed'])
 
     def run_root_returning(self,returned):

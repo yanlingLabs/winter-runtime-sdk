@@ -15,9 +15,9 @@ import sys
 import types
 from datetime import datetime, timezone
 
-ACQUISITION_SHA = 'b8d1239464603c040d1d179651e8a7d75dbbd7ccd92235d7b84158e4f57273d9'
-INTAKE_SHA = '38e2546eb85fb10d06175871960e5370bac15f26aa9f5e0916fd3e880b42aaaa'
-PIN_SHA = 'e319e8a859dcc891a59c8a2d4134aa02ad8dd0da94bca45b339e49fdc92bae2b'
+ACQUISITION_SHA = '45237c32c1904a1f53151c62192aae44771dba18ec3fec18cc820b97528fddfe'
+INTAKE_SHA = 'a4ee5a910e6a4acfd5cf7e9905ad6755d6fed0812311ce47d30486daa39d9c40'
+PIN_SHA = 'd95ebe794e7202ef430e393461e9b3926e7d30318fe1f7ed875b4686967566de'
 SOURCE_MAX = 64 * 1024
 MOUNT_MAX = 1024 * 1024
 
@@ -833,7 +833,7 @@ def prepare_data(repository,zip_path,metadata,private_scratch,*,now=None,loader=
     require(set(metadata)==set(vars(expected)) and all(type(metadata[key]) is
             type(value) and metadata[key]==value for key,value in vars(expected).items()),
             'exact downloader metadata conversion')
-    pin=json.loads(checked_bytes(repository/'scripts/guest-reader-intake/compile-38502659264.pin.json',PIN_SHA))
+    pin=json.loads(checked_bytes(repository/'scripts/guest-reader-intake/compile-38715669708.pin.json',PIN_SHA))
     record=acq.acquire_local_zip(zip_path,private_scratch,acq.ArtifactMetadata(**metadata),
         now=datetime.now(timezone.utc) if now is None else now)
     members={member.name:Path(member.path) for member in record.members}
@@ -912,7 +912,7 @@ def run_root(repository,protected_parent,data,wrapper_digest,*,wrapper_source,ha
         wrapper=loader('_reader_root_wrapper',target,wrapper_digest,root_copy=True)
         wrapper.check_acquisition_record(data['acquisition'],datetime.now(timezone.utc))
         lease=wrapper.copy_external_sources(harness_source,protected_parent/'sources',
-            compile_pin_path=repository/'scripts/guest-reader-intake/compile-38502659264.pin.json')
+            compile_pin_path=repository/'scripts/guest-reader-intake/compile-38715669708.pin.json')
         # Default effects receive an optional trusted instrumentation factory only;
         # this seam never supplies scope or native authority.
         modules=wrapper.load_external_modules(lease)

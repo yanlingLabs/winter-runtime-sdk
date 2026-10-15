@@ -903,6 +903,41 @@ class Pins(unittest.TestCase):
     def test_wrapper_pins_name_the_actual_harness_modules(self):
         for name, pin in w.SOURCE_PINS.items(): self.assertEqual(self.digest(name), pin, name)
 
+    def test_the_compile_pin_acquisition_and_intake_pins_agree_across_every_module(self):
+        """Every constant that names the pinned compile packet, its hosted artifact or the base files the bootstrap
+        loads must name the bytes and values actually present (a stale one would be refused only on the hosted run)."""
+        import acquisition as acq
+        import parent as par
+        intake_dir = HERE.parent / 'guest-reader-intake'
+        pin_file = intake_dir / w.COMPILE_PIN
+        pin_raw = pin_file.read_bytes()
+        pin = json.loads(pin_raw)
+        sha = lambda raw: hashlib.sha256(raw).hexdigest()
+        self.assertEqual({sha(pin_raw)}, {w.COMPILE_PIN_SHA256, b.PIN_SHA, par.REVIEWED_PIN_SHA256})
+        self.assertEqual(b.ACQUISITION_SHA, self.digest('acquisition.py'))
+        self.assertEqual(b.INTAKE_SHA, sha((intake_dir / 'intake.py').read_bytes()))
+        self.assertIn("with_name('" + w.COMPILE_PIN + "')", (intake_dir / 'intake.py').read_text())
+        self.assertEqual((pin['inventorySha256'], pin['fileCount']), (par.REVIEWED_INVENTORY_SHA256, par.REVIEWED_FILE_COUNT))
+        self.assertEqual(sorted(path.name for path in intake_dir.glob('compile-*.pin.json')), [w.COMPILE_PIN])
+        source = (HERE / 'bootstrap.py').read_text()
+        self.assertEqual(source.count('guest-reader-intake/' + w.COMPILE_PIN), 2)
+        # The hosted artifact: acquisition.py, wrapper.py and download.cjs describe the same artifact and the same members.
+        pins = acq.PRODUCTION_PINS
+        meta = pins.metadata
+        self.assertEqual(w.ACQUISITION_METADATA, {'repository_id': meta.repository_id, 'run_id': meta.run_id, 'head_sha': meta.head_sha,
+                                                  'artifact_id': meta.artifact_id, 'artifact_name': meta.artifact_name,
+                                                  'size_in_bytes': meta.size_in_bytes, 'expired': meta.expired, 'expires_at': meta.expires_at})
+        self.assertEqual(w.ACQUISITION_MEMBERS, {m.name: (m.size, m.sha256) for m in pins.members})
+        self.assertEqual(w.OUTER_ZIP_SHA256, pins.outer_sha256)
+        self.assertEqual((pin['run'], pin['workflowHead']), (meta.run_id, meta.head_sha))
+        self.assertEqual(meta.artifact_name, 'reader-compile-packet-%d' % pin['run'])
+        self.assertEqual({m.name: m.sha256 for m in pins.members}, {'reader-packet.tar.gz': pin['archiveSha256'], 'packet-inventory.json': pin['inventorySha256']})
+        self.assertEqual({m.name: m.size for m in pins.members}, {'reader-packet.tar.gz': pin['archiveBytes'], 'packet-inventory.json': pin['inventoryBytes']})
+        download = (HERE / 'download.cjs').read_text()
+        for needle in ('runId: %d' % meta.run_id, "head: '%s'" % meta.head_sha, 'artifactId: %d' % meta.artifact_id, "name: '%s'" % meta.artifact_name,
+                       'bytes: %d' % meta.size_in_bytes, "sha256: '%s'" % pins.outer_sha256, "expiresAt: '%s'" % meta.expires_at):
+            self.assertIn(needle, download)
+
     def test_workflow_and_gate_pins_name_the_actual_bootstrap_and_wrapper(self):
         workflow = (ROOT / '.github/workflows/cowork-reader-native-reviewed.yml').read_text()
         gate = (ROOT / 'test/gates/release-gates.test.ts').read_text()

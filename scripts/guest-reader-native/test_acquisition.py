@@ -92,9 +92,12 @@ class Tests(unittest.TestCase):
 
     def test_production_pins_are_frozen_and_separate_from_injected_data(self):
         self.assertEqual(a.PRODUCTION_PINS.metadata.repository_id, 1358618589)
-        self.assertEqual(a.PRODUCTION_PINS.metadata.size_in_bytes, 81095921)
-        self.assertEqual(a.PRODUCTION_PINS.members[0].size, 81359155)
-        self.assertEqual(a.PRODUCTION_PINS.members[1].size, 243499)
+        self.assertEqual(a.PRODUCTION_PINS.metadata.run_id, 38715669708)
+        self.assertEqual(a.PRODUCTION_PINS.metadata.artifact_id, 11962257334)
+        self.assertEqual(a.PRODUCTION_PINS.metadata.expires_at, "2026-10-22T09:49:05Z")
+        self.assertEqual(a.PRODUCTION_PINS.metadata.size_in_bytes, 81111513)
+        self.assertEqual(a.PRODUCTION_PINS.members[0].size, 81378280)
+        self.assertEqual(a.PRODUCTION_PINS.members[1].size, 243843)
         with self.assertRaises(a.AcquisitionError):
             a.acquire_local_zip(self.source, self.destination, self.metadata, now=NOW)
         with self.assertRaises(AttributeError):
@@ -114,12 +117,12 @@ class Tests(unittest.TestCase):
         self.assertEqual(list(self.destination.iterdir()), [])
 
     def test_expiry_boundary_strictly_refuses_and_requires_aware_time(self):
-        for now in (datetime(2026, 10, 21, 2, 45, 33, tzinfo=timezone.utc),
-                    datetime(2026, 10, 22, tzinfo=timezone.utc), datetime(2026, 10, 14)):
+        for now in (datetime(2026, 10, 22, 9, 49, 5, tzinfo=timezone.utc),
+                    datetime(2026, 10, 23, tzinfo=timezone.utc), datetime(2026, 10, 14)):
             with self.subTest(now=now), self.assertRaises(a.AcquisitionError):
                 self.acquire(now=now)
         # One microsecond before expiry remains within the injected DATA gate.
-        self.acquire(now=datetime(2026, 10, 21, 2, 45, 32, 999999, tzinfo=timezone.utc))
+        self.acquire(now=datetime(2026, 10, 22, 9, 49, 4, 999999, tzinfo=timezone.utc))
 
     def test_metadata_does_not_coerce_equal_floats_or_boolean_expiry(self):
         for field in ("repository_id", "run_id", "artifact_id", "size_in_bytes"):

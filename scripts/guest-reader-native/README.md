@@ -9,9 +9,9 @@ the earlier B fixture is reused.
 
 `parent.py` validates the entire externally pinned reader packet and holds its
 descriptors. The leaf count is a measured value of the pinned packet, not a design
-constant: the reviewed two-artifact packet had 1472 leaves, and the three-artifact
-packet adds the dependency probe's C source leaf and the probe artifact leaf, so its
-count is whatever the one approved compile run measures and the repin (S8) records.
+constant: the earlier two-artifact packet had 1472 leaves, and compile run 38715669708's
+three-artifact packet, which the pin now names, has 1474 (it adds the dependency probe's C
+source leaf and the probe artifact leaf).
 `parent.py` then creates nine independent copies: the reader, launcher, dependency
 probe and six explicit packet libraries (three artifacts and six libraries, up from
 eight copies). It also creates one tenth leaf itself and never copies it: the outside
@@ -25,9 +25,9 @@ Root-owned `0555`, except the canary `0444` and the private view destination `07
 must itself be Root-owned `0700` under protected Root ancestry. There is no
 runner-library discovery or fallback, writable sealed runtime descriptor, or
 import of captured project code. DATA intake modes are not execution authority.
-The full capture of the reviewed 1472-leaf packet needed 1629 descriptors; that figure
-is derived from the leaf and directory counts, so the three-artifact packet needs a few
-more (two additional leaves), measured at repin. The actual parent preflights
+The full capture of the earlier 1472-leaf packet held 1629 descriptors; the capture of the
+1474-leaf three-artifact packet holds 1632 (measured offline with `capture_packet` on the
+rehydrated real packet; the figure follows from the leaf and directory counts). The actual parent preflights
 only its own soft limit within a fixed allowed bound before capture.
 
 `producer.py` registers one debt before effects and uses that same object for
@@ -495,7 +495,7 @@ of the view, not a probe failure, and the set still proceeds to the reader cases
 
 Packet and labels. The probe artifact makes the packet three artifacts plus six libraries, nine
 copies, with the canary as the tenth sealed leaf; the leaf and descriptor counts are measured values
-that the one approved compile run records and the repin (S8) pins, so none is fixed here. The
+(1474 leaves, 1632 held descriptors) taken from compile run 38715669708 and pinned by the repin. The
 compartment's perror labels were extracted at agent-sdk 687b9557 and re-extracted at the final overlay head 53082a74
 (the C and header are byte-identical there): 66 in the C file
 (63 literal `require` labels and 3 passed through `reader_expect` and `reader_entropy_identity`)

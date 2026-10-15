@@ -6,12 +6,13 @@ compiled output, inspect dependencies with `ldd`, implement a privileged parent,
 or confer native admission. Root callers are refused. It is separate from the
 held Mac VM and native-egress lanes.
 
-The default reviewed pin is compile38502659264. The inventory is independently
-pinned to SHA256 `21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f`
-(243,499 bytes), the archive to
-`e3863c0ebe91a7cbe4efc0c63cf5adb232dbb5bddd1c897cd447045b8c96482b`
-(81,359,155 bytes), and the receipt to
-`0842d1d5de60085564cf2185d048d2b7f8dccef222decac42a1169df03b2e346`.
+The default reviewed pin is compile38715669708 (builder 0dd4d8f2, workflow 75a4fe07). The
+inventory is independently pinned to SHA256
+`0893ae66d58aa577713d8d73a989a0b0e760a9f1c031eb1ce64bfb849302f6c7`
+(243,843 bytes), the archive to
+`e8249728f18bf37e2e22f299df3ad1829e2930e8ab589cabfb804d6ed6386f3c`
+(81,378,280 bytes), and the receipt to
+`6ae867037f315a8a9fcd50c311617816f66001f2e91883f49f99740bcef1a135`.
 The tracked pin additionally binds all four origin head/tree/inventory identities,
 all three compiled artifacts (the reader, its launcher and the reader dependency
 probe), six environment paths, the base, and all twelve explicit resolver aliases. No check invokes Git or code inside those origins. This exact
@@ -94,18 +95,18 @@ The CLI above validates only. An explicit `--destination /absolute/fresh-path`
 materializes DATA; `--layout siblings` selects the documented mapping. There is
 no execute/authority option. Tests use synthetic DATA, including synthetic
 compiled-role bodies. The retained real packet check separately validates all
-1,472 leaves and 243,601,045 body bytes, and checks both rehydrated layouts, modes
+1,474 leaves and 243,716,286 body bytes, and checks both rehydrated layouts, modes
 and aliases without executing or importing any captured code.
 
-The default pin named above is the earlier TWO-artifact packet (reader and launcher).
-With `ARTIFACTS` now naming three roles, that packet is no longer accepted by the exact
-role-set check and `verify_actual_data.py` against it refuses until the three-artifact
-compile pin exists. The 1,472 leaves and 243,601,045 body bytes are therefore measured
-values of the earlier packet only: the three-artifact packet adds the probe's C source
-leaf and the probe artifact leaf, and its leaf count, body bytes, inventory, archive and
-receipt hashes are replaced by values measured from the one approved compile run (S8).
-Nothing in the tests depends on those numbers: they synthesize their own three-artifact
-packets from the pin's non-artifact fields.
+The default pin is the three-artifact packet of compile run 38715669708 (reader, launcher and
+dependency probe). Every field of the pin is a measured value of that packet, taken from its
+inventory and its `receipt.json`; compared with the earlier two-artifact pin (run 38502659264,
+removed, still in git history) only the heads, trees and inventory digests of the overlay and
+builder origins, the launcher, the added probe, the archive and inventory identities, the leaf
+and byte counts, the receipt digest, the run and the workflow head changed. The reader, the
+base, the six runtime libraries, the twelve resolver bindings and the runtime and sdk origins
+are byte-identical to the earlier packet. Nothing in the tests depends on these numbers: they
+synthesize their own three-artifact packets from the pin's non-artifact fields.
 
 Source/packet review is required before push. ABI, rootfs identity, external
 parent, reader-native harness, guided profile and actual Linux runtime evidence

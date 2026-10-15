@@ -2,22 +2,22 @@
 
 `acquisition.py` is unprivileged, local ZIP DATA handling. It has no downloader,
 token or entrypoint. Production metadata and outer hash are fixed to artifact
-11866353126/run38502659264. Its bounded central/local parser admits exactly
+11962257334/run38715669708 (the compile run of the three-artifact packet). Its bounded central/local parser admits exactly
 `reader-packet.tar.gz` and `packet-inventory.json`. The inflater uses only captured
 bounded ranges, never a second mutable metadata parser; exact termination, CRC
 and output caps precede SHA checks. Both inner streams are hashed
 before creating output. Copying repeats the hash checks and retains an incomplete
 private directory on failure, without calling it valid. Expiry at
-2026-10-21T02:45:33Z refuses; no reupload/retention workaround. This validates the
-container and two member bodies, not the inner tree (1472 leaves for the reviewed two-artifact
-packet; the three-artifact packet's count is a measured value pinned at repin). The merged intake
-and parent perform that later complete validation.
+2026-10-22T09:49:05Z refuses; no reupload/retention workaround. This validates the
+container and two member bodies, not the inner tree (1474 leaves for the pinned three-artifact
+packet; the earlier two-artifact packet had 1472). The intake and parent perform that later
+complete validation.
 
 Future acquisition permissions are `contents:read` and `actions:read`. The token
 belongs only in the download action's `with.github-token`, never environment,
 `GITHUB_ENV`, Python or a privileged command. No workflow is added here. The outer
-ZIP (81,095,921 bytes) and its hash are distinct from the inner archive
-(81,359,155 bytes). All acquisition execution/admission flags remain false.
+ZIP (81,111,513 bytes) and its hash are distinct from the inner archive
+(81,378,280 bytes). All acquisition execution/admission flags remain false.
 
 `wrapper.py` is callable source, not a native admission mechanism. Its own bytes
 must be separately admitted by an external reviewed workflow before any Root
@@ -69,7 +69,7 @@ Portable checks create ordinary temporary files/ZIPs, execute inert test-source
 copies and inject orchestration tables. They do not run compiled ELF, Root guards,
 native helpers, namespaces, forks or signals. Read-only inspection of the retained
 actual ZIP verified its outer and both inner hashes without extraction/import or
-output copying. Existing 13 harness files, C/header, two ELF roles, six libraries,
+output copying. Existing 13 harness files, C/header, the ELF roles, six libraries,
 compiled packet and B remain unchanged.
 
 No native experiment, workflow push, production profile/provider/Core activation,

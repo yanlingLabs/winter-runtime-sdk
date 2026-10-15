@@ -8,10 +8,10 @@ const { createHash } = require('node:crypto');
 
 const FIXED = Object.freeze({
   owner: 'yanlingLabs', repo: 'winter-runtime-sdk', repositoryId: 1358618589,
-  runId: 38502659264, head: '29fe5cff1ea0b93d7970cfee566030f3532fdd74',
-  artifactId: 11866353126, name: 'reader-compile-packet-38502659264',
-  bytes: 81095921, sha256: 'bd586bafdcffeca4c4fbdfcdd65b4f8b807b2ff2b7ba8adfebbacf067874dfcd',
-  expiresAt: '2026-10-21T02:45:33Z',
+  runId: 38715669708, head: '75a4fe073f45c50b4ce3d53d01f7749a6829bacf',
+  artifactId: 11962257334, name: 'reader-compile-packet-38715669708',
+  bytes: 81111513, sha256: '233fd0f9717034c23cd0c35d4ce539ab1a3e02a0cac114d5262363b3960af8e8',
+  expiresAt: '2026-10-22T09:49:05Z',
 });
 const TIMEOUT_MS = 120_000;
 class DownloadRefusal extends Error {

@@ -26,19 +26,19 @@ MODULE_ORDER = (('control', 'control.py'), ('producer', 'producer.py'),
                 ('native_cases', 'native_cases.py'))
 MAX_FILE = 64 * 1024
 MAX_SOURCE_BYTES = 256 * 1024
-COMPILE_PIN = 'compile-38502659264.pin.json'
-COMPILE_PIN_SHA256 = 'e319e8a859dcc891a59c8a2d4134aa02ad8dd0da94bca45b339e49fdc92bae2b'
+COMPILE_PIN = 'compile-38715669708.pin.json'
+COMPILE_PIN_SHA256 = 'd95ebe794e7202ef430e393461e9b3926e7d30318fe1f7ed875b4686967566de'
 ACQUISITION_METADATA = {
-    'repository_id': 1358618589, 'run_id': 38502659264,
-    'head_sha': '29fe5cff1ea0b93d7970cfee566030f3532fdd74',
-    'artifact_id': 11866353126, 'artifact_name': 'reader-compile-packet-38502659264',
-    'size_in_bytes': 81095921, 'expired': False, 'expires_at': '2026-10-21T02:45:33Z',
+    'repository_id': 1358618589, 'run_id': 38715669708,
+    'head_sha': '75a4fe073f45c50b4ce3d53d01f7749a6829bacf',
+    'artifact_id': 11962257334, 'artifact_name': 'reader-compile-packet-38715669708',
+    'size_in_bytes': 81111513, 'expired': False, 'expires_at': '2026-10-22T09:49:05Z',
 }
 ACQUISITION_MEMBERS = {
-    'reader-packet.tar.gz': (81359155, 'e3863c0ebe91a7cbe4efc0c63cf5adb232dbb5bddd1c897cd447045b8c96482b'),
-    'packet-inventory.json': (243499, '21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f'),
+    'reader-packet.tar.gz': (81378280, 'e8249728f18bf37e2e22f299df3ad1829e2930e8ab589cabfb804d6ed6386f3c'),
+    'packet-inventory.json': (243843, '0893ae66d58aa577713d8d73a989a0b0e760a9f1c031eb1ce64bfb849302f6c7'),
 }
-OUTER_ZIP_SHA256 = 'bd586bafdcffeca4c4fbdfcdd65b4f8b807b2ff2b7ba8adfebbacf067874dfcd'
+OUTER_ZIP_SHA256 = '233fd0f9717034c23cd0c35d4ce539ab1a3e02a0cac114d5262363b3960af8e8'
 
 
 class Refusal(ValueError):

@@ -63,6 +63,18 @@ with the already preserved **builder fixture image**, not a guest rootfs:
   `GLIBC_2.33` and `GLIBC_2.34`. Thus a lower guest version is not automatically
   acceptable merely because the reader alone supports it.
 
+A second local DATA observation covers the three-artifact compile packet `38715669708`
+(archive SHA256 `e8249728f18bf37e2e22f299df3ad1829e2930e8ab589cabfb804d6ed6386f3c`), run through
+`preflight` with its three compiled roles and its six pinned runtime libraries (the same five
+distinct objects as above, byte-identical to the earlier packet's). 521 strong versioned imports
+were checked and every declared version matched. The launcher still requests `GLIBC_2.17`,
+`GLIBC_2.33` and `GLIBC_2.34` and needs only `libc.so.6` and the loader. The new dependency probe
+is a dynamic position-independent executable with the same `/lib/ld-linux-aarch64.so.1`
+interpreter, needs only `libc.so.6` and the loader, has no `DT_RPATH`/`DT_RUNPATH`, and requests
+`GLIBC_2.17`, `GLIBC_2.25`, `GLIBC_2.32`, `GLIBC_2.33` and `GLIBC_2.34`, all defined by the pinned
+`libc.so.6` (which defines versions up to `GLIBC_2.39`). The reader is byte-identical to the earlier
+packet's. Again only a same-build match, read as DATA with no execution.
+
 This observation is a **same-build match**, not guest compatibility evidence.
 The real guest-rootfs target and independent image intake remain open. It used
 bounded tar reads as DATA, without extraction, disk attachment, Docker/image

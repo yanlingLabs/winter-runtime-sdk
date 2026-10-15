@@ -298,7 +298,7 @@ class ValidatedPacket:
 
 
 def load_pin(path=None):
-    path = path or Path(__file__).with_name('compile-38502659264.pin.json')
+    path = path or Path(__file__).with_name('compile-38715669708.pin.json')
     return parse_json(read_bounded(path, MAX_INVENTORY))
 
 
