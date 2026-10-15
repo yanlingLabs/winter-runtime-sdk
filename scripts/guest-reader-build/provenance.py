@@ -13,12 +13,12 @@ MAX_DEPENDENCY_BYTES=128*1024*1024
 AUTOLOAD_FLAGS=('--no-compile-autoload-bunfig','--no-compile-autoload-dotenv','--no-compile-autoload-tsconfig','--no-compile-autoload-package-json')
 SDK_HEAD='8603da22d9fe7f1695166891cd29ccd254b1d21e'
 RUNTIME_HEAD='0394b36f674765c942f8db07f009b7ad20787dba'
-OVERLAY_HEAD='f6d88d9a2f8ae15bb50afb98868183ae769e3b11'  # still the pre-probe overlay; the integrator moves it with OVERLAY_SOURCE_SHA256 to the frozen agent-sdk sha
+OVERLAY_HEAD='0bd905b194905b8e82ed3d89ce01dca673815e61'  # agent-sdk cowork/reader-runtime-compatibility, tree 66c46ed213d0bb25d1083c91783599dfabde462c
 C_SOURCE='packages/runtime/src/guest/linux-instruction-reader-compartment.c'
 PROBE_SOURCE='packages/runtime/src/guest/linux-instruction-reader-dependency-probe.c'
 HEADER='packages/runtime/src/guest/linux-compartment.h'
-# The overlay sources' hashes at agent-sdk 687b9557 (the compartment C, the reader-v2 dependency probe C and the shared
-# header). OVERLAY_HEAD above moves separately, to the final agent-sdk head, once that head is frozen.
+# The overlay sources' hashes (the compartment C, the reader-v2 dependency probe C and the shared header). They were
+# taken at agent-sdk 687b9557 and are byte-identical at OVERLAY_HEAD, whose later commits touch only docs, tests and CI.
 OVERLAY_SOURCE_SHA256={
     C_SOURCE:'28aa279d6ecb560424fe24bf8ccc0893ffc61cfbb9ba6ba72d38c66b7b655893',
     PROBE_SOURCE:'39ad16cdd2ceee031817cf57787b8d9251b314da1fe18b707b20bc785ba59b3e',

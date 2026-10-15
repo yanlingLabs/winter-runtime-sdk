@@ -306,6 +306,11 @@ class PacketTests(unittest.TestCase):
                 with self.assertRaisesRegex(p.Refusal,'differs from its pin'):
                     b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,overlay_pins={**self.pins,name:'0'*64})
                 self.assertFalse(self.output.exists())
+    def test_overlay_head_is_the_frozen_agent_sdk_head(self):
+        # agent-sdk cowork/reader-runtime-compatibility; its tree is 66c46ed213d0bb25d1083c91783599dfabde462c. The three
+        # overlay sources are byte-identical to 687b9557 there (OVERLAY_SOURCE_SHA256 below).
+        self.assertEqual(p.OVERLAY_HEAD,'0bd905b194905b8e82ed3d89ce01dca673815e61')
+        self.assertEqual((p.RUNTIME_HEAD,p.SDK_HEAD),('0394b36f674765c942f8db07f009b7ad20787dba','8603da22d9fe7f1695166891cd29ccd254b1d21e'))
     def test_default_overlay_pins_are_the_agent_sdk_687b9557_hashes_and_refuse_fixture_bytes(self):
         self.assertEqual(set(p.OVERLAY_SOURCE_SHA256),{p.C_SOURCE,p.PROBE_SOURCE,p.HEADER})
         self.assertTrue(all(len(value)==64 and set(value)<=set('0123456789abcdef') for value in p.OVERLAY_SOURCE_SHA256.values()))
