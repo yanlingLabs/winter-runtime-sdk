@@ -113,10 +113,10 @@ describe("the release workflow", () => {
     }
     const checkouts = job?.steps?.filter((step) => step.uses?.startsWith("actions/checkout")) ?? [];
     expect(checkouts.map((step) => step.with?.ref)).toEqual([
-      "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
+      "0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27",
       "0394b36f674765c942f8db07f009b7ad20787dba",
       "8603da22d9fe7f1695166891cd29ccd254b1d21e",
-      "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
+      "53082a74a98120f5deffa75f04dc306976d75de8",
     ]);
     const uploads = job?.steps?.filter((step) => step.uses === "actions/upload-artifact@v4") ?? [];
     expect(uploads.length).toBe(2);
@@ -138,7 +138,7 @@ describe("the release workflow", () => {
     expect(rawCheck?.run).toContain("os.O_NOFOLLOW|os.O_NONBLOCK");
     expect(rawCheck?.run).toContain("diagnostic-only, unadmitted, public-source fixture");
     const text = readWorkflow("cowork-reader-compile-fixture.yml");
-    expect(text).toContain("--builder-head 1c867727a8a8519bff75cf78e857ddd60bf1b0da");
+    expect(text).toContain("--builder-head 0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27");
     expect(text).toContain("if name=='artifacts/native.d':continue");
     expect(text).toContain("tar.addfile(record,io.BytesIO(data))");
     expect(text).not.toContain("tar.addfile(record,incoming)");

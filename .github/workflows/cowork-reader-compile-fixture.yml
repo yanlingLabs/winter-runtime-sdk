@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 1c867727a8a8519bff75cf78e857ddd60bf1b0da
+          ref: 0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: yanlingLabs/winter-agent-sdk
-          ref: f6d88d9a2f8ae15bb50afb98868183ae769e3b11
+          ref: 53082a74a98120f5deffa75f04dc306976d75de8
           path: origins/overlay
           persist-credentials: false
       - name: Prepare pinned compiler as bounded data
@@ -99,7 +99,7 @@ jobs:
             --dependencies "$READER_FIXTURE/dependencies" \
             --compiler "$READER_FIXTURE/linux-bun" --base "$READER_FIXTURE/linux-bun" \
             --cc "$reader_cc" --sysroot / --out "$READER_FIXTURE/packet" \
-            --builder-head 1c867727a8a8519bff75cf78e857ddd60bf1b0da --resolver-map "$READER_FIXTURE/resolver-map.json"
+            --builder-head 0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27 --resolver-map "$READER_FIXTURE/resolver-map.json"
           cp "$READER_FIXTURE/acquisition.json" "$READER_FIXTURE/packet/compiler-acquisition.json"
       - name: Capture packet archive and fresh inventory
         shell: bash
@@ -153,7 +153,7 @@ jobs:
                               record.size=len(data);record.mode=0o400;tar.addfile(record,io.BytesIO(data))
           finally:os.close(root)
           with archive.open('rb') as incoming:archive_hash=hashlib.file_digest(incoming,'sha256').hexdigest()
-          evidence={'formatVersion':1,'kind':'winter-reader-compile-packet','builderHead':'1c867727a8a8519bff75cf78e857ddd60bf1b0da','workflowHead':os.environ['GITHUB_SHA'],'excludedScratch':['artifacts/native.d'],'files':inventory,'fileCount':len(inventory),'fileBytes':total,'archiveSha256':archive_hash,'archiveBytes':archive.stat().st_size,'outputsExecuted':False,'nativeAdmission':False,'vmExecutionVerified':False,'activationEnabled':False}
+          evidence={'formatVersion':1,'kind':'winter-reader-compile-packet','builderHead':'0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27','workflowHead':os.environ['GITHUB_SHA'],'excludedScratch':['artifacts/native.d'],'files':inventory,'fileCount':len(inventory),'fileBytes':total,'archiveSha256':archive_hash,'archiveBytes':archive.stat().st_size,'outputsExecuted':False,'nativeAdmission':False,'vmExecutionVerified':False,'activationEnabled':False}
           with (fixture/'packet-inventory.json').open('x') as target:json.dump(evidence,target,sort_keys=True,separators=(',',':'));target.write('\n')
           PY
       - uses: actions/upload-artifact@v4
