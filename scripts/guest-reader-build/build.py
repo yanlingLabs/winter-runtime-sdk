@@ -31,6 +31,9 @@ if observe_python_sources()!=PYTHON_SOURCE_OBSERVATIONS:raise ValueError('Python
 
 MAX_OUTPUT=16*1024*1024
 NATIVE_FLAGS=('-O2','-std=gnu11','-Wall','-Wextra','-Werror','-D_FORTIFY_SOURCE=2','-fstack-protector-strong','-fPIE','-pie','-Wl,-z,relro,-z,now,-z,noexecstack')
+PROBE_ROLE='instructionReaderDependencyProbe'
+ARTIFACT_ROLES=('instructionReader','instructionReaderLauncher',PROBE_ROLE)
+OVERLAY_NAMES=(p.C_SOURCE,p.PROBE_SOURCE,p.HEADER)
 class CommandFailure(p.Refusal):
     def __init__(self,code,stdout,stderr):
         super().__init__('compiler refused');self.code=code;self.stdout=stdout;self.stderr=stderr
@@ -163,24 +166,29 @@ def snapshot(packet,inputs_only=False):
     fd=p.root_fd(Path(packet).resolve())
     try:return p.inventory(fd,('source','dependencies') if inputs_only else None)
     finally:os.close(fd)
-def prepare_packet(runtime,sdk,overlay,dependencies,output,heads=None,builder_root=None,builder_head=None,resolver_map=None):
+def prepare_packet(runtime,sdk,overlay,dependencies,output,heads=None,builder_root=None,builder_head=None,resolver_map=None,overlay_pins=None):
     heads=heads or {'runtime':p.RUNTIME_HEAD,'sdk':p.SDK_HEAD,'overlay':p.OVERLAY_HEAD}
     builder_root=Path(builder_root) if builder_root is not None else Path(__file__).resolve().parents[2]
     if resolver_map is None:resolver_map={}
     if type(resolver_map)!=dict:p.refuse('plain third-party resolver map required')
     builder_head=builder_head or heads.get('builder')
+    # The pins are injectable like the heads; the CLI never replaces the constant.
+    overlay_pins=p.OVERLAY_SOURCE_SHA256 if overlay_pins is None else overlay_pins
+    if type(overlay_pins)!=dict or set(overlay_pins)!=set(OVERLAY_NAMES) or any(type(value)!=str for value in overlay_pins.values()):p.refuse('overlay source pin set')
     if builder_head is None:p.refuse('externally pinned builder head required')
     output=Path(output)
     refuse_ancestor_config(output)
     if not output.is_absolute() or output.exists() or output.parent.resolve()!=output.parent:p.refuse('new canonical packet directory')
     records=[];held=[];depfd=None
     try:
-        for role,path,names in [('runtime',runtime,None),('sdk',sdk,None),('overlay',overlay,[p.C_SOURCE,p.HEADER]),('builder',builder_root,BUILDER_FILES)]:
+        for role,path,names in [('runtime',runtime,None),('sdk',sdk,None),('overlay',overlay,list(OVERLAY_NAMES)),('builder',builder_root,BUILDER_FILES)]:
             record,fd,entries,eligible=eligible_capture(role,Path(path).resolve(),builder_head if role=='builder' else heads[role],names);records.append(record);held.append((fd,entries,eligible))
         for name,observation in PYTHON_SOURCE_OBSERVATIONS.items():
             if records[3]['eligibleFiles'].get(name)!={'kind':'file',**observation}:p.refuse('captured builder differs from Python source observation')
         sdk_header=records[1]['eligibleFiles'].get(p.HEADER);overlay_header=records[2]['eligibleFiles'][p.HEADER]
         if sdk_header!=overlay_header:p.refuse('SDK overlay header differs from main')
+        for name in OVERLAY_NAMES:
+            if records[2]['eligibleFiles'][name].get('sha256')!=overlay_pins[name]:p.refuse('overlay source differs from its pin')
         if p.READER_ENTRY not in records[0]['eligibleFiles']:p.refuse('actual private reader entry missing')
         depfd=p.root_fd(Path(dependencies));depmanifest=p.inventory(depfd)
         if any('@yanlinglabs+winter-' in name or '@yanlinglabs/winter-' in name for name in depmanifest):p.refuse('published SDK peers in dependency store')
@@ -457,6 +465,31 @@ def compiler_recipe(packet):
     return ['build','--no-env-file','--config='+str(packet/'stage/empty-bunfig.toml'),'--compile','--reject-unresolved',*p.AUTOLOAD_FLAGS,
       '--target='+p.BASE['target'],'--compile-executable-path='+str(packet/'stage/linux-bun-base'),'--metafile='+str(packet/'artifacts/instructionReader.metafile.json'),
       str(packet/'source/runtime'/p.READER_ENTRY),'--outfile',str(packet/'artifacts/instructionReader')]
+def native_command(packet,source,output):
+    # One argv builder for every native role, so the probe and the launcher cannot drift apart in flags.
+    return [*NATIVE_FLAGS,'-I'+str(packet/'source/overlay/packages/runtime/src/guest'),'-MD','-MF',str(packet/'artifacts/native.d'),str(source),'-o',str(output)]
+def header_observations(packet,sysroot,depfile):
+    # Full system header provenance is an observation, not trusted toolchain proof.
+    words=shlex.split(depfile.decode().replace('\\\n',' '),posix=True)
+    if not words or not words[0].endswith(':'):p.refuse('native dependency metadata')
+    headers={}
+    for raw in words[1:]:
+        path=Path(raw).resolve()
+        if not path.is_file() or len(headers)>=4096:p.refuse('native header inventory')
+        if path.is_relative_to(packet):key=path.relative_to(packet).as_posix()
+        elif path.is_relative_to(Path(sysroot)):key='sysroot/'+path.relative_to(Path(sysroot)).as_posix()
+        else:p.refuse('native header outside sysroot')
+        fd,meta=file_input(path,p.MAX_FILE)
+        try:headers[key]=meta
+        finally:os.close(fd)
+    return headers
+def merge_headers(first,second):
+    # The two compiles reuse one depfile path sequentially; a path both saw must have identical bytes.
+    merged=dict(first)
+    for key,meta in second.items():
+        if merged.setdefault(key,meta)!=meta:p.refuse('native header changed between compiles')
+    if len(merged)>4096:p.refuse('native header inventory')
+    return dict(sorted(merged.items()))
 def dependency_closure(artifacts,sysroot,destination):
     sysroot=Path(sysroot)
     if sysroot.resolve()!=sysroot:p.refuse('canonical sysroot')
@@ -519,10 +552,16 @@ def _dependency_closure(artifacts,sysroot,destination,sysroot_fd):
             if meta['interpreter']:pending.append(meta['interpreter'])
             pending.extend(needed_path(name) for name in meta['needed'])
         item['runtimeDependencyPaths']=sorted(paths)
+    if PROBE_ROLE in artifact_metadata:
+        # The probe measures the packet's own pinned libraries; it may not pull in a seventh object.
+        probe=artifact_metadata[PROBE_ROLE]
+        if not probe['elf']['interpreter']:p.refuse('probe must be dynamic')
+        packet_paths=set().union(*(item['runtimeDependencyPaths'] for name,item in artifact_metadata.items() if name!=PROBE_ROLE))
+        if not set(probe['runtimeDependencyPaths'])<=packet_paths:p.refuse('probe dependency outside reader closure')
     return artifact_metadata,result
-def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runner=command,heads=None,base_pin=None,builder_root=None,builder_head=None,resolver_map=None):
+def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runner=command,heads=None,base_pin=None,builder_root=None,builder_head=None,resolver_map=None,overlay_pins=None):
     """runner injection permits portable refusal tests; CLI never replaces the runner/pins."""
-    manifest=prepare_packet(runtime,sdk,overlay,dependencies,output,heads,builder_root,builder_head,resolver_map);packet=Path(output);pin=base_pin or p.BASE
+    manifest=prepare_packet(runtime,sdk,overlay,dependencies,output,heads,builder_root,builder_head,resolver_map,overlay_pins);packet=Path(output);pin=base_pin or p.BASE
     for name in ('stage','artifacts'): (packet/name).mkdir(mode=0o700)
     p.write_new(packet/'stage/empty-bunfig.toml',b'')
     tools=[]
@@ -541,27 +580,19 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
         compile_args=compiler_recipe(packet)
         semantic_evidence=compiler_semantic_evidence(runner,compiler_fd,base_fd,packet,compile_args)
         runner(['/proc/self/fd/'+str(compiler_fd),*compile_args],packet/'stage',120,(compiler_fd,))
-        native_args=[*NATIVE_FLAGS,'-I'+str(packet/'source/overlay/packages/runtime/src/guest'),'-MD','-MF',str(packet/'artifacts/native.d'),
-          str(packet/'source/overlay'/p.C_SOURCE),'-o',str(packet/'artifacts/instructionReaderLauncher')]
+        native_args=native_command(packet,packet/'source/overlay'/p.C_SOURCE,packet/'artifacts/instructionReaderLauncher')
         runner(['/proc/self/fd/'+str(cc_fd),*native_args],packet/'stage',120,(cc_fd,))
         reader_fd,_=file_input(packet/'artifacts/instructionReader',p.MAX_ELF)
         try:reader_flags=p.standalone_flags(reader_fd,base_fd)
         finally:os.close(reader_fd)
         if reader_flags['flagsNibble']!=15 or reader_flags['payload']['compileExecArgvBytes']!=0:p.refuse('reader embedded autoload flags')
-        # Full system header provenance is an observation, not trusted toolchain proof.
-        depfile=read_file(packet/'artifacts/native.d',p.MAX_JSON)
-        words=shlex.split(depfile.decode().replace('\\\n',' '),posix=True)
-        if not words or not words[0].endswith(':'):p.refuse('native dependency metadata')
-        headers={}
-        for raw in words[1:]:
-            path=Path(raw).resolve()
-            if not path.is_file() or len(headers)>=4096:p.refuse('native header inventory')
-            if path.is_relative_to(packet):key=path.relative_to(packet).as_posix()
-            elif path.is_relative_to(Path(sysroot)):key='sysroot/'+path.relative_to(Path(sysroot)).as_posix()
-            else:p.refuse('native header outside sysroot')
-            fd,meta=file_input(path,p.MAX_FILE)
-            try:headers[key]=meta
-            finally:os.close(fd)
+        headers=header_observations(packet,sysroot,read_file(packet/'artifacts/native.d',p.MAX_JSON))
+        # The dependency probe reuses the one excluded scratch path, sequentially: remove the launcher's
+        # depfile first so the second read can only be a fresh write, then merge both observations.
+        (packet/'artifacts/native.d').unlink()
+        probe_args=native_command(packet,packet/'source/overlay'/p.PROBE_SOURCE,packet/'artifacts'/PROBE_ROLE)
+        runner(['/proc/self/fd/'+str(cc_fd),*probe_args],packet/'stage',120,(cc_fd,))
+        headers=merge_headers(headers,header_observations(packet,sysroot,read_file(packet/'artifacts/native.d',p.MAX_JSON)))
         check_inputs(packet,manifest)
         metafile=json_data(read_file(packet/'artifacts/instructionReader.metafile.json',p.MAX_JSON))
         normalized,bundled=normalized_metafile(metafile,packet,manifest)
@@ -569,7 +600,7 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
         # Replace raw paths with normalized owned evidence; never preserve private CLI paths.
         (packet/'artifacts/instructionReader.metafile.json').unlink()
         meta_wire=write_wire(packet/'artifacts/instructionReader.metafile.json',normalized,packet)
-        artifacts={name:packet/'artifacts'/name for name in ('instructionReader','instructionReaderLauncher')}
+        artifacts={name:packet/'artifacts'/name for name in ARTIFACT_ROLES}
         bodies,closure=dependency_closure(artifacts,Path(sysroot),packet/'environment')
         if p.digest(read_file(packet/'stage/linux-bun-base',p.MAX_ELF))!=base_meta['sha256']:p.refuse('staged base changed')
         if reader_flags['outputSha256']!=bodies['instructionReader']['sha256'] or reader_flags['baseSha256']!=base_meta['sha256']:p.refuse('reader decoded hash mismatch')
@@ -578,7 +609,7 @@ def build(runtime,sdk,overlay,dependencies,compiler,base,cc,sysroot,output,runne
         receipt={'formatVersion':1,'kind':'winter-reader-compile','inputsSha256':p.digest(read_file(packet/'inputs.json',p.MAX_JSON)),'origins':manifest['origins'],
           'resolverBindings':manifest['resolverBindings'],'pythonSourceObservations':PYTHON_SOURCE_OBSERVATIONS,'executedPythonSourceAuthenticated':False,'reachableGraph':graph,'compilerSemanticEvidence':semantic_evidence,'readerEmbeddedFlags':reader_flags,'compiler':{'version':pin['version'],**compiler_meta},'base':{**pin,'archiveAcquisitionVerified':False},'nativeCompiler':{'version':first,**cc_meta},
           'recipe':{'target':p.BASE['target'],'autoloadFlags':list(p.AUTOLOAD_FLAGS),'environment':p.ENV,'cwd':'stage','outputsExecuted':False},
-          'commands':{'bun':['<held-compiler>',*[arg.replace(str(packet),'<packet>') for arg in compile_args]],'nativeCC':['<held-native-cc>',*[arg.replace(str(packet),'<packet>') for arg in native_args]]},'nativeFlags':list(NATIVE_FLAGS),'systemHeaders':headers,'bundledInputs':bundled,'metafileSha256':p.digest(meta_wire),'artifacts':bodies,'runtimeDependencies':closure,
+          'commands':{'bun':['<held-compiler>',*[arg.replace(str(packet),'<packet>') for arg in compile_args]],'nativeCC':['<held-native-cc>',*[arg.replace(str(packet),'<packet>') for arg in native_args]],'nativeProbeCC':['<held-native-cc>',*[arg.replace(str(packet),'<packet>') for arg in probe_args]]},'nativeFlags':list(NATIVE_FLAGS),'systemHeaders':headers,'bundledInputs':bundled,'metafileSha256':p.digest(meta_wire),'artifacts':bodies,'runtimeDependencies':closure,
           'dynamicRuntimeImportsVerified':False,'globalBunConfigurationExecutionVerified':False,'staticMetafileOnly':True,'trustedToolchainVerified':False,'dependencyPackageAttestationVerified':False,'autoloadExecutionVerified':False,'nativeOwnerVerified':False,'linuxExecutionVerified':False,'vmExecutionVerified':False,'activationEnabled':False}
         write_wire(packet/'receipt.json',receipt,packet);return receipt
     finally:

@@ -17,6 +17,9 @@ import unicodedata
 
 REVIEWED_PIN_SHA256 = 'e319e8a859dcc891a59c8a2d4134aa02ad8dd0da94bca45b339e49fdc92bae2b'
 REVIEWED_INVENTORY_SHA256 = '21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f'
+# A measured value of the reviewed packet, not a design constant: the three-artifact compile pin
+# (S8) replaces the pin hash, the inventory hash and this count together with the measured numbers.
+REVIEWED_FILE_COUNT = 1472
 MAX_JSON = 4 * 1024 * 1024
 MAX_LEAF = 128 * 1024 * 1024
 MAX_BYTES = 512 * 1024 * 1024
@@ -24,7 +27,15 @@ MAX_LEAVES = 20000
 CHUNK = 65536
 MAX_FDS = 65000
 VIEW_ID = 'reader-case'
-ARTIFACTS = frozenset(('instructionReader', 'instructionReaderLauncher'))
+ARTIFACTS = frozenset(('instructionReader', 'instructionReaderLauncher',
+                       'instructionReaderDependencyProbe'))
+# The B3 file canary. It is NOT a packet artifact and never copied: the harness itself creates it, so
+# the dependency probe can try to open "/winter-outside-canary" and expect ENOENT inside the reader view.
+CANARY_LEAF = 'winter-outside-canary'
+CANARY_CONTENT = b'NEVER-READER-OUTSIDE-CANARY\n'
+# 0444 on purpose: were the view to leak, the reader uid could open it. 0400 would turn a leak into a masking EACCES.
+CANARY_MODE = 0o444
+RUNTIME_FILE_MODE = 0o555
 ORIGINS = frozenset(('runtime', 'sdk', 'overlay', 'builder'))
 ENVIRONMENT = frozenset('/lib/' + name for name in (
     'ld-linux-aarch64.so.1', 'aarch64-linux-gnu/ld-linux-aarch64.so.1',
@@ -247,7 +258,7 @@ def load_pin(path=None, *, expected_sha256=REVIEWED_PIN_SHA256):
                 'compile pin version')
         if expected_sha256 == REVIEWED_PIN_SHA256:
             require(pin['inventorySha256'] == REVIEWED_INVENTORY_SHA256 and
-                    pin['fileCount'] == 1472, 'reviewed inventory identity')
+                    pin['fileCount'] == REVIEWED_FILE_COUNT, 'reviewed inventory identity')
         return ReviewedPin(raw, expected_sha256, path)
     finally:
         held.close()
@@ -380,7 +391,7 @@ def check_contract(inv, pin, blobs):
         resolved[name] = resolve_alias(name, binding['target'], leaves, directories)
         captured.add(name)
     require(captured == {n for n in leaves if n.startswith('source/')}, 'source completeness')
-    require(set(receipt['artifacts']) == set(pin['artifacts']) == ARTIFACTS, 'two artifact roles')
+    require(set(receipt['artifacts']) == set(pin['artifacts']) == ARTIFACTS, 'three artifact roles')
     for role in ARTIFACTS:
         artifact = receipt['artifacts'][role]
         require({k: artifact[k] for k in ('bytes', 'sha256')} == pin['artifacts'][role] and
@@ -545,8 +556,9 @@ class SealedRoot(Handles):
 
 
 def create_launch_root(snapshot, destination, ops=None):
-    """Copy only two artifacts and six pinned libraries, then permission-seal.
+    """Copy only three artifacts and six pinned libraries, then permission-seal.
 
+    The one other leaf, the outside canary, is created here (exclusively), never copied.
     This function does not require/elevate Root or grant native admission. Use
     guard_root_owner separately with real observations before any admitted run.
     Copies are ordinary independent files, never hardlinks to input or host /lib.
@@ -602,17 +614,38 @@ def create_launch_root(snapshot, destination, ops=None):
             copied = measure_fd(fd, expected)
             require(copied[:2] != observed[:2], 'copy shares input inode')
             result.files[target] = (fd, dict(expected), copied)
+        # The outside canary: created, never copied; O_EXCL refuses anything already at that name.
+        try:
+            fd = result.hold(os.open(CANARY_LEAF, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     0o600, dir_fd=root))
+        except FileExistsError as occupied:
+            raise Refusal('launch root canary leaf occupied') from occupied
+        result.edges.append((root, CANARY_LEAF, fd))
+        written = 0
+        while written < len(CANARY_CONTENT):
+            written += os.write(fd, CANARY_CONTENT[written:])
+        os.fsync(fd)
+        os.fchmod(fd, CANARY_MODE)
+        read_only = os.open(CANARY_LEAF, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+        require(identity(os.fstat(read_only)) == identity(os.fstat(fd)), 'sealed reopen race')
+        result.edges.remove((root, CANARY_LEAF, fd))
+        result.fds.remove(fd)
+        os.close(fd)
+        fd = result.hold(read_only)
+        result.edges.append((root, CANARY_LEAF, fd))
+        canary = {'bytes': len(CANARY_CONTENT), 'sha256': sha(CANARY_CONTENT)}
+        result.files[CANARY_LEAF] = (fd, canary, measure_fd(fd, canary))
         for name, fd in sorted(held_dirs.items(), key=lambda p: p[0].count('/'), reverse=True):
             os.fchmod(fd, 0o700 if name == view else 0o555)
             children = {n[len(name) + (1 if name else 0):].split('/')[0]
-                        for n in directories | set(sources) if n != name and
+                        for n in directories | set(sources) | {CANARY_LEAF} if n != name and
                         (not name or n.startswith(name + '/'))}
             children.discard('')
             result.directories[name] = (fd, children, identity(os.fstat(fd)))
         snapshot.recheck()
         result.recheck()
         result.measurements = dict(snapshot.measurements, kind='winter-reader-parent-sealed-data-root',
-            copiedFiles=8, rootOwnerVerified=False, syntheticOwnerObservations=result.synthetic_owner_observations)
+            copiedFiles=9, createdLeaves=1, rootOwnerVerified=False, syntheticOwnerObservations=result.synthetic_owner_observations)
         return result
     except BaseException as error:
         # Cleanup only through held descriptors: never traverse a replacement path.
@@ -625,6 +658,11 @@ def create_launch_root(snapshot, destination, ops=None):
                     os.fchmod(fd, 0o700)
                 for fd in locals().get('held_dirs', {}).values():
                     os.fchmod(fd, 0o700)
+                if 'held_dirs' in locals():
+                    try:
+                        os.unlink(CANARY_LEAF, dir_fd=held_dirs[''])
+                    except FileNotFoundError:
+                        pass
                 for target in sorted(locals().get('sources', {}), reverse=True):
                     upper, _, leaf = target.rpartition('/')
                     try:
@@ -640,6 +678,17 @@ def create_launch_root(snapshot, destination, ops=None):
                 error.add_note('sealed-root cleanup uncertain: ' + str(cleanup_error))
         result.close()
         raise
+
+
+def runtime_file_mode(name):
+    """Sealed runtime objects are 0555; the canary alone is a world-readable 0444 data file."""
+    return CANARY_MODE if name == CANARY_LEAF else RUNTIME_FILE_MODE
+
+
+def canary_ok(info):
+    """Root-created, Root-group, 0444 regular file. Unprivileged callers can only reach this through a Root guard."""
+    return (stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_gid == 0 and
+            stat.S_IMODE(info.st_mode) == CANARY_MODE and info.st_nlink == 1)
 
 
 def guard_root_owner(root):
@@ -658,7 +707,8 @@ def guard_root_owner(root):
         require(os.fstat(fd).st_uid == 0 and root.ops.owner(fd) == 0,
                 'actual Root ownership required')
     for name, (fd, _, _) in root.files.items():
-        require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o555, 'runtime object mode')
+        require(stat.S_IMODE(os.fstat(fd).st_mode) == runtime_file_mode(name), 'runtime object mode')
+    require(canary_ok(os.fstat(root.files[CANARY_LEAF][0])), 'canary leaf Root 0444 required')
     for name, (fd, _, _) in root.directories.items():
         expected = 0o700 if name == 'run/winter/instruction-reader-views/' + VIEW_ID else 0o555
         require(stat.S_IMODE(os.fstat(fd).st_mode) == expected, 'runtime directory mode')

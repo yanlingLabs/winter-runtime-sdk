@@ -48,6 +48,7 @@ class Fixture:
             self.links[name] = binding['target']
         self.data['artifacts/instructionReader'] = b'non-executable reader DATA'
         self.data['artifacts/instructionReaderLauncher'] = b'non-executable launcher DATA'
+        self.data['artifacts/instructionReaderDependencyProbe'] = b'non-executable dependency probe DATA'
         self.data['artifacts/instructionReader.metafile.json'] = b'{}'
         self.data['stage/linux-bun-base'] = b'non-executable base DATA'
         self.data['stage/empty-bunfig.toml'] = b''
@@ -176,6 +177,54 @@ class IntakeTests(unittest.TestCase):
 
     def test_complete_sibling_layout(self):
         self.check_output('siblings')
+
+    def test_three_compiled_artifacts_each_have_a_distinct_data_role_at_mode_0400(self):
+        self.assertEqual(len(intake.ARTIFACTS), 3)
+        roles = {name: intake.role_of('artifacts/' + name) for name in intake.ARTIFACTS}
+        self.assertEqual(roles, {'instructionReader': 'reader', 'instructionReaderLauncher': 'readerLauncher',
+                                 'instructionReaderDependencyProbe': 'readerDependencyProbe'})
+        for role in roles.values():
+            self.assertEqual(intake.ROLE_MODES[role], 0o400)
+        self.fixture.write()
+        with self.fixture.validate() as validated:
+            report = intake.rehydrate_packet(validated, self.root / 'output')
+        self.assertEqual(report['roleModes']['readerDependencyProbe'], 0o400)
+        probe = self.root / 'output/artifacts/instructionReaderDependencyProbe'
+        self.assertEqual(stat.S_IMODE(probe.stat().st_mode), 0o400)
+        self.assertEqual(probe.read_bytes(), self.fixture.data['artifacts/instructionReaderDependencyProbe'])
+        self.assertEqual(set(report['artifacts']), set(intake.ARTIFACTS))
+        # Data is never executable: no role may carry an execute bit.
+        for role, mode in intake.ROLE_MODES.items():
+            self.assertEqual(mode & 0o111, 0, role)
+
+    def test_every_artifact_leaf_is_classified_by_an_explicit_role_not_the_metadata_default(self):
+        for name in intake.ARTIFACTS:
+            self.assertNotEqual(intake.role_of('artifacts/' + name), 'metadata', name)
+        self.assertEqual(intake.role_of('artifacts/instructionReader.metafile.json'), 'metadata')
+
+    def test_two_artifact_packet_is_refused_by_the_exact_role_set(self):
+        # The earlier packet shape: a pin and receipt that name only the reader and the launcher.
+        with mock.patch.object(intake, 'ARTIFACTS', frozenset(('instructionReader', 'instructionReaderLauncher'))):
+            self.fixture.refresh_controls()
+        self.fixture.write()
+        with self.assertRaisesRegex(intake.Refusal, 'compiled reader roles'):
+            self.fixture.validate()
+
+    def test_a_fourth_artifact_role_is_refused_by_the_exact_role_set(self):
+        self.fixture.data['artifacts/instructionReaderExtra'] = b'unreviewed compiled DATA'
+        with mock.patch.object(intake, 'ARTIFACTS', intake.ARTIFACTS | {'instructionReaderExtra'}):
+            self.fixture.refresh_controls()
+        self.fixture.write()
+        with self.assertRaisesRegex(intake.Refusal, 'compiled reader roles'):
+            self.fixture.validate()
+
+    def test_missing_probe_leaf_and_probe_pin_tamper_are_refused(self):
+        self.fixture.write(missing='artifacts/instructionReaderDependencyProbe')
+        self.assert_refused()
+        self.fixture.write()
+        self.fixture.pin['artifacts']['instructionReaderDependencyProbe']['sha256'] = '0' * 64
+        with self.assertRaisesRegex(intake.Refusal, 'artifact pin'):
+            self.fixture.validate()
 
     def test_inventory_independent_pin(self):
         self.fixture.write()

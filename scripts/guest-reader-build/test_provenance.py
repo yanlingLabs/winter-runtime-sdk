@@ -51,7 +51,9 @@ class PacketTests(unittest.TestCase):
         for name,folder in p.SDK_PACKAGES.items():
             put(self.sdk,'packages/'+folder+'/package.json',json.dumps({'name':'@yanlinglabs/'+name,'version':'0.0.53','exports':{'.':{'bun':'./src/index.ts'}}}).encode())
             put(self.sdk,'packages/'+folder+'/src/index.ts',b'export const WINTER_BRAND = {};\n')
-        put(self.overlay,p.HEADER,b'/* same header */\n');put(self.overlay,p.C_SOURCE,b'#include "linux-compartment.h"\n')
+        put(self.overlay,p.HEADER,b'/* same header */\n');put(self.overlay,p.C_SOURCE,b'#include "linux-compartment.h"\n');put(self.overlay,p.PROBE_SOURCE,b'/* dependency probe fixture, never executed */\n')
+        # Fixture bytes cannot match the real placeholder pins, so the tests inject their own, exactly like heads and base_pin.
+        self.pins={name:p.digest((self.overlay/name).read_bytes()) for name in (p.C_SOURCE,p.PROBE_SOURCE,p.HEADER)}
         for name in b.BUILDER_FILES:
             data=(Path(__file__).resolve().parents[2]/name).read_bytes() if name in b.PYTHON_SOURCE_OBSERVATIONS else b'inert builder source data\n'
             put(self.builder,name,data)
@@ -59,7 +61,7 @@ class PacketTests(unittest.TestCase):
         self.heads={name:git_commit(path) for name,path in [('runtime',self.runtime),('sdk',self.sdk),('overlay',self.overlay),('builder',self.builder)]}
         self.output=self.root/'packet'
     def tearDown(self):self.temp.cleanup()
-    def prepare(self):return b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder)
+    def prepare(self):return b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,overlay_pins=self.pins)
     def test_actual_staging_and_candidate_aliases(self):
         manifest=self.prepare();b.check_inputs(self.output,manifest)
         self.assertEqual(len(manifest['origins']),4);self.assertEqual(len(manifest['resolverBindings']),12)
@@ -215,7 +217,7 @@ class PacketTests(unittest.TestCase):
     def test_falsey_resolver_maps_are_not_defaulted(self):
         for value in (False,[],0,''):
             with self.assertRaisesRegex(p.Refusal,'plain third-party resolver map'):
-                b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,resolver_map=value)
+                b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,resolver_map=value,overlay_pins=self.pins)
         path=self.root/'resolver-map.json'
         for value in (None,False,[],0,''):
             path.write_text(json.dumps(value))
@@ -247,12 +249,17 @@ class PacketTests(unittest.TestCase):
         pin={**p.BASE,'executableSha256':p.digest(standalone_pair()[0])};calls=[]
         def refusal(*args):calls.append(args);raise p.Refusal('injected compiler refusal')
         with self.assertRaisesRegex(p.Refusal,'injected compiler refusal'):
-            b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=refusal,heads=self.heads,base_pin=pin,builder_root=self.builder)
+            b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=refusal,heads=self.heads,base_pin=pin,builder_root=self.builder,overlay_pins=self.pins)
         self.assertEqual(len(calls),1);self.assertTrue((self.output/'inputs.json').is_file());self.assertFalse((self.output/'receipt.json').exists())
         manifest=json.loads((self.output/'inputs.json').read_bytes());b.check_inputs(self.output,manifest)
-    def synthetic_build(self,tamper_base=False):
+    INTERPRETER='/lib/ld-linux-aarch64.so.1'
+    def synthetic_sysroot(self):
+        # Inert sysroot DATA: the closure is read as bytes, nothing here is ever loaded or executed.
+        put(self.root,'lib/ld-linux-aarch64.so.1',elf());put(self.root,'lib/aarch64-linux-gnu/libc.so.6',elf());put(self.root,'lib/aarch64-linux-gnu/libextra.so.1',elf());put(self.root,'usr/include/fixture-system.h',b'/* system header fixture */\n')
+    def synthetic_build(self,tamper_base=False,probe=None,header_drift=False):
         # The injected runner writes inert ELF data; no compiler/output is invoked.
         import shlex
+        self.synthetic_sysroot();launcher=elf(('libc.so.6',),self.INTERPRETER);probe=elf(('libc.so.6',),self.INTERPRETER) if probe is None else probe;system_header=self.root/'usr/include/fixture-system.h'
         tools={}
         for name in ('compiler','base','cc'):
             path=self.root/name;path.write_bytes(standalone_pair()[0]);tools[name]=path
@@ -273,19 +280,91 @@ class PacketTests(unittest.TestCase):
                 data={'inputs':{str(self.output/name):{'bytes':(self.output/name).stat().st_size} for name in names},'outputs':{str(outfile):{}}}
                 metafile.write_bytes(json.dumps(data).encode())
             else:
-                put(self.output,'artifacts/instructionReaderLauncher',elf())
-                source=str(self.output/'source/overlay'/p.C_SOURCE)
-                put(self.output,'artifacts/native.d',('reader: '+shlex.quote(source)+'\n').encode())
+                # A native compile names its own source and output; the output is written as inert bytes and never run.
+                output=Path(argv[argv.index('-o')+1]);source=Path(argv[argv.index('-o')-1])
+                if output.name==b.PROBE_ROLE and header_drift:system_header.write_bytes(b'/* system header drifted between the two compiles */\n')
+                output.write_bytes(probe if output.name==b.PROBE_ROLE else launcher)
+                put(self.output,'artifacts/native.d',('reader: '+shlex.quote(str(source))+' '+shlex.quote(str(system_header))+'\n').encode())
                 if tamper_base:
                     staged=self.output/'stage/linux-bun-base';staged.chmod(0o600);staged.write_bytes(b'tampered base')
             return b'',b''
-        result=b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=runner,heads=self.heads,base_pin=pin,builder_root=self.builder)
+        result=b.build(self.runtime,self.sdk,self.overlay,self.deps,tools['compiler'],tools['base'],tools['cc'],self.root,self.output,runner=runner,heads=self.heads,base_pin=pin,builder_root=self.builder,overlay_pins=self.pins)
         return result,calls
     def test_actual_builder_synthetic_outputs_bind_closed_receipt(self):
         result,calls=self.synthetic_build()
-        self.assertEqual(len(calls),13);self.assertEqual(set(result['artifacts']),{'instructionReader','instructionReaderLauncher'})
+        self.assertEqual(len(calls),14);self.assertEqual(set(result['artifacts']),{'instructionReader','instructionReaderLauncher','instructionReaderDependencyProbe'})
         self.assertNotIn(str(self.root),p.canonical(result));self.assertFalse(result['linuxExecutionVerified']);self.assertFalse(result['base']['archiveAcquisitionVerified'])
         b.check_inputs(self.output,json.loads((self.output/'inputs.json').read_bytes()))
+    def test_overlay_capture_carries_the_probe_source_and_matches_every_pin(self):
+        manifest=self.prepare();overlay=next(origin for origin in manifest['origins'] if origin['role']=='overlay')
+        self.assertEqual(set(overlay['eligibleFiles']),{p.C_SOURCE,p.PROBE_SOURCE,p.HEADER})
+        self.assertEqual({name:value['sha256'] for name,value in overlay['eligibleFiles'].items()},self.pins)
+        self.assertTrue((self.output/'source/overlay'/p.PROBE_SOURCE).is_file())
+    def test_overlay_source_hash_pin_is_checked_per_file_before_any_output(self):
+        for name in self.pins:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(p.Refusal,'differs from its pin'):
+                    b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,overlay_pins={**self.pins,name:'0'*64})
+                self.assertFalse(self.output.exists())
+    def test_default_overlay_pins_are_the_placeholder_constants_and_refuse_fixture_bytes(self):
+        self.assertEqual(set(p.OVERLAY_SOURCE_SHA256),{p.C_SOURCE,p.PROBE_SOURCE,p.HEADER})
+        self.assertTrue(all(len(value)==64 and set(value)<=set('0123456789abcdef') for value in p.OVERLAY_SOURCE_SHA256.values()))
+        # No injected pins: the constants apply, so the fixture bytes must not be accepted.
+        with self.assertRaisesRegex(p.Refusal,'differs from its pin'):b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder)
+        self.assertFalse(self.output.exists())
+    def test_overlay_pin_set_is_exact_and_not_defaulted_when_falsey(self):
+        name=p.PROBE_SOURCE;without={key:value for key,value in self.pins.items() if key!=name}
+        for value in ({},without,{**self.pins,'packages/runtime/src/guest/other.c':'0'*64},{**self.pins,name:1},[],'',0,False):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(p.Refusal,'overlay source pin set'):
+                    b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,overlay_pins=value)
+                self.assertFalse(self.output.exists())
+    def test_overlay_without_the_probe_source_refuses_before_output(self):
+        (self.overlay/p.PROBE_SOURCE).unlink();self.heads['overlay']=git_commit(self.overlay)
+        with self.assertRaisesRegex(p.Refusal,'required source missing'):self.prepare()
+        self.assertFalse(self.output.exists())
+    def test_probe_is_compiled_with_identical_flags_to_its_own_artifact_and_never_run(self):
+        result,calls=self.synthetic_build()
+        native=[argv for argv in calls if '-o' in argv];self.assertEqual(len(native),2)
+        launcher,probe=native
+        def neutral(argv):return [item for index,item in enumerate(argv) if index not in (argv.index('-o')-1,argv.index('-o')+1)]
+        for argv in native:self.assertEqual(argv[1:1+len(b.NATIVE_FLAGS)],list(b.NATIVE_FLAGS))
+        self.assertEqual(neutral(launcher),neutral(probe))
+        self.assertEqual(launcher[-3:],[str(self.output/'source/overlay'/p.C_SOURCE),'-o',str(self.output/'artifacts/instructionReaderLauncher')])
+        self.assertEqual(probe[-3:],[str(self.output/'source/overlay'/p.PROBE_SOURCE),'-o',str(self.output/'artifacts/instructionReaderDependencyProbe')])
+        self.assertEqual(probe[probe.index('-MF')+1],str(self.output/'artifacts/native.d'));self.assertEqual(probe[probe.index('-MF')+1],launcher[launcher.index('-MF')+1])
+        outputs={str(self.output/'artifacts'/name) for name in b.ARTIFACT_ROLES}
+        for argv in calls:
+            self.assertTrue(argv[0].startswith('/proc/self/fd/'));self.assertNotIn(argv[0],outputs)
+            for index,item in enumerate(argv):
+                if item in outputs:self.assertIn(argv[index-1],('-o','--outfile'))
+        commands=result['commands'];self.assertEqual(set(commands),{'bun','nativeCC','nativeProbeCC'})
+        self.assertEqual(commands['nativeProbeCC'][1:-3],commands['nativeCC'][1:-3]);self.assertEqual(commands['nativeProbeCC'][-1],'<packet>/artifacts/instructionReaderDependencyProbe')
+        self.assertEqual(commands['nativeProbeCC'][-3],'<packet>/source/overlay/'+p.PROBE_SOURCE);self.assertEqual(commands['nativeCC'][-1],'<packet>/artifacts/instructionReaderLauncher')
+    def test_probe_artifact_is_measured_and_native_scratch_stays_one_excluded_path(self):
+        result,_=self.synthetic_build()
+        probe=(self.output/'artifacts/instructionReaderDependencyProbe').read_bytes()
+        self.assertEqual(result['artifacts']['instructionReaderDependencyProbe']['sha256'],p.digest(probe))
+        self.assertEqual(result['artifacts']['instructionReaderDependencyProbe']['runtimeDependencyPaths'],result['artifacts']['instructionReaderLauncher']['runtimeDependencyPaths'])
+        self.assertEqual(len(result['runtimeDependencies']),2)
+        # Both compiles' observations merge into one header inventory: each native source plus the shared system header.
+        self.assertEqual(set(result['systemHeaders']),{'source/overlay/'+p.C_SOURCE,'source/overlay/'+p.PROBE_SOURCE,'sysroot/usr/include/fixture-system.h'})
+        scratch=sorted(path.relative_to(self.output).as_posix() for path in (self.output/'artifacts').iterdir() if path.suffix=='.d');self.assertEqual(scratch,['artifacts/native.d'])
+        self.assertNotIn('artifacts/native.d',result['bundledInputs']);self.assertNotIn('native.d',result['artifacts'])
+    def test_native_header_changing_between_the_two_compiles_refuses_without_a_receipt(self):
+        with self.assertRaisesRegex(p.Refusal,'changed between compiles'):self.synthetic_build(header_drift=True)
+        self.assertFalse((self.output/'receipt.json').exists())
+    def test_header_merge_accepts_agreement_and_refuses_disagreement_or_bound(self):
+        one={'a':{'sha256':'1'*64,'bytes':1},'b':{'sha256':'2'*64,'bytes':2}};two={'b':{'sha256':'2'*64,'bytes':2},'c':{'sha256':'3'*64,'bytes':3}}
+        self.assertEqual(list(b.merge_headers(one,two)),['a','b','c'])
+        with self.assertRaisesRegex(p.Refusal,'changed between compiles'):b.merge_headers(one,{'b':{'sha256':'9'*64,'bytes':2}})
+        with self.assertRaisesRegex(p.Refusal,'header inventory'):b.merge_headers({str(index):{} for index in range(4096)},{'extra':{}})
+    def test_probe_closure_outside_the_reader_libraries_or_static_refuses_the_whole_build(self):
+        with self.assertRaisesRegex(p.Refusal,'outside reader closure'):self.synthetic_build(probe=elf(('libc.so.6','libextra.so.1'),self.INTERPRETER))
+        self.assertFalse((self.output/'receipt.json').exists())
+    def test_static_probe_refuses_the_whole_build(self):
+        with self.assertRaisesRegex(p.Refusal,'probe must be dynamic'):self.synthetic_build(probe=elf())
+        self.assertFalse((self.output/'receipt.json').exists())
     def test_staged_base_tamper_refuses_after_injected_compilation(self):
         with self.assertRaisesRegex(p.Refusal,'staged base changed'):self.synthetic_build(tamper_base=True)
         self.assertFalse((self.output/'receipt.json').exists())
@@ -303,7 +382,7 @@ class PacketTests(unittest.TestCase):
     def test_explicit_third_party_aliases_are_measured_and_unused_refuses(self):
         put(self.deps,'fixture-pkg@1/node_modules/fixture-pkg/package.json',b'{"name":"fixture-pkg","version":"1"}')
         put(self.deps,'fixture-pkg@1/node_modules/fixture-pkg/index.js',b'export default 1;')
-        manifest=b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,resolver_map={'fixture-pkg':'fixture-pkg@1/node_modules/fixture-pkg'})
+        manifest=b.prepare_packet(self.runtime,self.sdk,self.overlay,self.deps,self.output,self.heads,builder_root=self.builder,resolver_map={'fixture-pkg':'fixture-pkg@1/node_modules/fixture-pkg'},overlay_pins=self.pins)
         self.assertEqual(len(manifest['resolverBindings']),14)
         entry='source/runtime/'+p.READER_ENTRY;dependency='dependencies/fixture-pkg@1/node_modules/fixture-pkg/index.js'
         metadata={'inputs':{entry:{'imports':[]}}}
@@ -601,4 +680,26 @@ class PrimitiveTests(unittest.TestCase):
             bodies,closure=b.dependency_closure({'reader':path},sysroot,root/'env');self.assertEqual(len(closure),2);self.assertEqual(set(bodies['reader']['runtimeDependencyPaths']),set(closure))
             (sysroot/'lib/aarch64-linux-gnu/libc.so.6').unlink()
             with self.assertRaises(p.Refusal):b.dependency_closure({'reader':path},sysroot,root/'other-env')
+    def test_probe_closure_subset_of_reader_and_launcher_libraries_only(self):
+        interpreter='/lib/ld-linux-aarch64.so.1'
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp).resolve();sysroot=root/'sysroot';sysroot.mkdir()
+            for name in ('lib/ld-linux-aarch64.so.1','lib/aarch64-linux-gnu/libc.so.6','lib/aarch64-linux-gnu/libm.so.6','lib/aarch64-linux-gnu/libextra.so.1'):put(sysroot,name,elf())
+            reader=root/'reader';reader.write_bytes(elf(['libc.so.6','libm.so.6'],interpreter));launcher=root/'launcher';launcher.write_bytes(elf(['libc.so.6'],interpreter));probe=root/'probe'
+            artifacts={'instructionReader':reader,'instructionReaderLauncher':launcher,b.PROBE_ROLE:probe};count=[0]
+            def closure():
+                count[0]+=1;return b.dependency_closure(artifacts,sysroot,root/f'env-{count[0]}')
+            for needed in (['libc.so.6'],['libm.so.6'],['libc.so.6','libm.so.6']):
+                with self.subTest(needed=needed):
+                    probe.write_bytes(elf(needed,interpreter));bodies,union=closure()
+                    self.assertTrue(set(bodies[b.PROBE_ROLE]['runtimeDependencyPaths'])<=set(union))
+                    self.assertEqual(set(union),{interpreter,'/lib/aarch64-linux-gnu/libc.so.6','/lib/aarch64-linux-gnu/libm.so.6'})
+            probe.write_bytes(elf(['libc.so.6','libextra.so.1'],interpreter))
+            with self.assertRaisesRegex(p.Refusal,'outside reader closure'):closure()
+            probe.write_bytes(elf(['libc.so.6'],interpreter));reader.write_bytes(elf(['libc.so.6'],interpreter))
+            bodies,union=closure();self.assertTrue(set(bodies[b.PROBE_ROLE]['runtimeDependencyPaths'])<=set(union))
+            probe.write_bytes(elf(['libm.so.6'],interpreter))
+            with self.assertRaisesRegex(p.Refusal,'outside reader closure'):closure()
+            probe.write_bytes(elf())
+            with self.assertRaisesRegex(p.Refusal,'must be dynamic'):closure()
 if __name__=='__main__':unittest.main()

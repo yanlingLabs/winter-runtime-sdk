@@ -7,14 +7,27 @@ slice. Actual effects require a newly reviewed external parent on GitHub-hosted
 The Mac two-disk, native-egress and GUI holds remain unchanged. No admission from
 the earlier B fixture is reused.
 
-`parent.py` validates the entire externally pinned 1472-leaf reader packet and
-holds its descriptors. It then creates eight independent copies: the reader,
-launcher and six explicit packet libraries. Files and view ancestors become
-Root-owned `0555`, except the private view destination `0700`. The launch parent
+`parent.py` validates the entire externally pinned reader packet and holds its
+descriptors. The leaf count is a measured value of the pinned packet, not a design
+constant: the reviewed two-artifact packet had 1472 leaves, and the three-artifact
+packet adds the dependency probe's C source leaf and the probe artifact leaf, so its
+count is whatever the one approved compile run measures and the repin (S8) records.
+`parent.py` then creates nine independent copies: the reader, launcher, dependency
+probe and six explicit packet libraries (three artifacts and six libraries, up from
+eight copies). It also creates one tenth leaf itself and never copies it: the outside
+canary `winter-outside-canary`, created exclusively (`O_EXCL|O_NOFOLLOW`) with the fixed
+content `NEVER-READER-OUTSIDE-CANARY\n`, Root-owned `0444` (not `0400`, so a leaked
+view would let the reader uid open it instead of masking the leak with EACCES), at the
+TOP of the launch root: `/winter-outside-canary` once the producer has chrooted. It is
+part of the exact leaf set, the root directory's exact child set and the post-case
+recheck, and a pre-existing entry at that name refuses. Copies and view ancestors become
+Root-owned `0555`, except the canary `0444` and the private view destination `0700`. The launch parent
 must itself be Root-owned `0700` under protected Root ancestry. There is no
 runner-library discovery or fallback, writable sealed runtime descriptor, or
 import of captured project code. DATA intake modes are not execution authority.
-The full packet capture needs 1629 descriptors; the actual parent preflights
+The full capture of the reviewed 1472-leaf packet needed 1629 descriptors; that figure
+is derived from the leaf and directory counts, so the three-artifact packet needs a few
+more (two additional leaves), measured at repin. The actual parent preflights
 only its own soft limit within a fixed allowed bound before capture.
 
 `producer.py` registers one debt before effects and uses that same object for
@@ -136,7 +149,7 @@ case oracle, C bytes or compiled artifact.
 
 The unpublished 19d mount-identity proposal below is superseded and was never run.
 That SOURCE proposal removes Python's pre-exec NEWNS/unshare and
-propagation mount only. The sealed eight-file loader chroot, C peer checks,
+propagation mount only. The sealed nine-file loader chroot (plus the Root canary leaf), C peer checks,
 C detached clones then NEWNS/private propagation, UID/filter/limits and all case
 oracles remain unchanged. Before chroot, every tree-clone filesystem descriptor
 (reader/source/shared/six libraries) plus sealed root/launcher must return ordinary

@@ -28,7 +28,8 @@ MAX_PATH_DEPTH = 64
 MAX_PREFIX_VISITS = 60000
 CHUNK = 65536
 ORIGINS = frozenset(('runtime', 'sdk', 'overlay', 'builder'))
-ARTIFACTS = frozenset(('instructionReader', 'instructionReaderLauncher'))
+ARTIFACTS = frozenset(('instructionReader', 'instructionReaderLauncher',
+                       'instructionReaderDependencyProbe'))
 ENVIRONMENT = frozenset('/lib/' + x for x in (
     'ld-linux-aarch64.so.1', 'aarch64-linux-gnu/ld-linux-aarch64.so.1',
     'aarch64-linux-gnu/libc.so.6', 'aarch64-linux-gnu/libdl.so.2',
@@ -40,7 +41,7 @@ FALSE_RECEIPT_FLAGS = (
     'linuxExecutionVerified', 'nativeOwnerVerified', 'trustedToolchainVerified',
     'vmExecutionVerified')
 ROLE_MODES = dict.fromkeys(('source', 'metadata', 'environment', 'reader',
-                           'readerLauncher', 'base'), 0o400)
+                           'readerLauncher', 'readerDependencyProbe', 'base'), 0o400)
 
 
 class Refusal(ValueError):
@@ -404,6 +405,8 @@ def role_of(name):
         return 'reader'
     if name == 'artifacts/instructionReaderLauncher':
         return 'readerLauncher'
+    if name == 'artifacts/instructionReaderDependencyProbe':
+        return 'readerDependencyProbe'
     if name == 'stage/linux-bun-base':
         return 'base'
     return 'source' if name.startswith('source/') else 'environment' if name.startswith('environment/') else 'metadata'

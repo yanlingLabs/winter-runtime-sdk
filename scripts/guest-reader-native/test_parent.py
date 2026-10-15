@@ -157,15 +157,23 @@ class ParentTests(unittest.TestCase):
             self.assertEqual(len(snapshot.files) + len(snapshot.links), len(self.fixture.data) + 12)
             self.assertEqual(len(snapshot.links), 12)
             with parent.create_launch_root(snapshot, self.root / 'sealed', SyntheticOwnerOps()) as sealed:
-                self.assertEqual(set(sealed.files), {'artifacts/' + r for r in parent.ARTIFACTS} |
-                                 {p.lstrip('/') for p in parent.ENVIRONMENT})
-                self.assertEqual(len(sealed.files), 8)
+                copies = {'artifacts/' + r for r in parent.ARTIFACTS} | {p.lstrip('/') for p in parent.ENVIRONMENT}
+                self.assertEqual(len(parent.ARTIFACTS), 3)
+                self.assertEqual(len(copies), 9)
+                # Nine copied objects plus the one Root-created canary leaf.
+                self.assertEqual(set(sealed.files), copies | {parent.CANARY_LEAF})
+                self.assertEqual(len(sealed.files), 10)
+                self.assertEqual(sealed.measurements['copiedFiles'], 9)
+                self.assertEqual(sealed.measurements['createdLeaves'], 1)
                 for name, (fd, _, _) in sealed.files.items():
+                    self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), parent.runtime_file_mode(name))
+                    with self.assertRaises(OSError):
+                        os.write(fd, b'x')
+                    if name == parent.CANARY_LEAF:
+                        continue
                     self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o555)
                     source = name if name.startswith('artifacts/') else 'environment/' + name
                     self.assertNotEqual(os.fstat(fd).st_ino, os.fstat(snapshot.files[source][0]).st_ino)
-                    with self.assertRaises(OSError):
-                        os.write(fd, b'x')
                 self.assertEqual(list((sealed.path / 'run/winter/instruction-reader-views/reader-case').iterdir()), [])
                 self.assertEqual(stat.S_IMODE((sealed.path / 'run/winter/instruction-reader-views/reader-case').stat().st_mode), 0o700)
                 for measurement in (snapshot.measurements, sealed.measurements, parent.recheck_runtime(sealed)):
@@ -176,6 +184,130 @@ class ParentTests(unittest.TestCase):
                     parent.guard_root_owner(sealed)
         self.assertTrue(snapshot.closed)
         self.assertTrue(sealed.closed)
+
+    def canary_path(self, sealed):
+        return sealed.path / parent.CANARY_LEAF
+
+    def test_outside_canary_is_a_root_created_0444_leaf_at_the_top_and_not_a_copied_artifact(self):
+        self.assertEqual(parent.CANARY_LEAF, 'winter-outside-canary')
+        self.assertEqual(parent.CANARY_CONTENT, b'NEVER-READER-OUTSIDE-CANARY\n')
+        self.assertEqual(parent.CANARY_MODE, 0o444)
+        self.assertNotIn(parent.CANARY_LEAF, {r.rsplit('/', 1)[-1] for r in parent.ARTIFACTS})
+        with self.fixture.capture() as snapshot:
+            self.assertNotIn(parent.CANARY_LEAF, snapshot.files)
+            with parent.create_launch_root(snapshot, self.root / 'sealed', SyntheticOwnerOps()) as sealed:
+                canary = self.canary_path(sealed)
+                self.assertEqual(canary.parent, sealed.path)
+                info = canary.lstat()
+                self.assertTrue(stat.S_ISREG(info.st_mode))
+                self.assertEqual(stat.S_IMODE(info.st_mode), 0o444)
+                self.assertEqual((info.st_uid, info.st_gid, info.st_nlink), (os.geteuid(), os.getegid(), 1))
+                self.assertEqual(canary.read_bytes(), parent.CANARY_CONTENT)
+                self.assertIn(parent.CANARY_LEAF, os.listdir(sealed.path))
+                held_fd, expected, observed = sealed.files[parent.CANARY_LEAF]
+                self.assertEqual(expected, {'bytes': len(parent.CANARY_CONTENT), 'sha256': parent.sha(parent.CANARY_CONTENT)})
+                self.assertEqual(os.fstat(held_fd).st_ino, info.st_ino)
+                with self.assertRaises(OSError):
+                    os.write(held_fd, b'x')
+                self.assertIn(parent.CANARY_LEAF, sealed.directories[''][1])
+                # The 0444 file is readable by an unrelated reader uid; the sealed 0555 objects are not writable.
+                self.assertTrue(info.st_mode & stat.S_IROTH)
+                parent.recheck_runtime(sealed)
+
+    def test_canary_mode_expectations_guard_the_canary_apart_from_the_runtime_objects(self):
+        self.assertEqual(parent.runtime_file_mode(parent.CANARY_LEAF), 0o444)
+        self.assertEqual(parent.runtime_file_mode('artifacts/instructionReaderDependencyProbe'), 0o555)
+        self.assertEqual(parent.runtime_file_mode('lib/aarch64-linux-gnu/libc.so.6'), 0o555)
+        from types import SimpleNamespace
+        def info(**changes):
+            fields = dict(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_gid=0, st_nlink=1)
+            fields.update(changes)
+            return SimpleNamespace(**fields)
+        self.assertTrue(parent.canary_ok(info()))
+        for changes in ({'st_uid': 1000}, {'st_gid': 1000}, {'st_mode': stat.S_IFREG | 0o400},
+                        {'st_mode': stat.S_IFREG | 0o644}, {'st_mode': stat.S_IFREG | 0o555},
+                        {'st_mode': stat.S_IFLNK | 0o444}, {'st_mode': stat.S_IFDIR | 0o444}, {'st_nlink': 2}):
+            with self.subTest(changes=changes):
+                self.assertFalse(parent.canary_ok(info(**changes)))
+
+    def test_pre_existing_canary_name_refuses_and_leaves_no_destination(self):
+        real_mkdir = os.mkdir
+        def plant(path, mode=0o777, *, dir_fd=None):
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            if path == 'sealed':
+                root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY, dir_fd=dir_fd)
+                try:
+                    os.close(os.open(parent.CANARY_LEAF, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root_fd))
+                finally:
+                    os.close(root_fd)
+        with self.fixture.capture() as snapshot:
+            with mock.patch.object(parent.os, 'mkdir', side_effect=plant):
+                with self.assertRaisesRegex(parent.Refusal, 'launch root canary leaf occupied'):
+                    parent.create_launch_root(snapshot, self.root / 'sealed')
+            self.assertFalse((self.root / 'sealed').exists())
+
+    def test_canary_symlink_at_the_name_is_never_followed(self):
+        outside = self.root / 'outside-target'
+        real_mkdir = os.mkdir
+        def plant(path, mode=0o777, *, dir_fd=None):
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            if path == 'sealed':
+                root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY, dir_fd=dir_fd)
+                try:
+                    os.symlink(str(outside), parent.CANARY_LEAF, dir_fd=root_fd)
+                finally:
+                    os.close(root_fd)
+        with self.fixture.capture() as snapshot:
+            with mock.patch.object(parent.os, 'mkdir', side_effect=plant):
+                with self.assertRaisesRegex(parent.Refusal, 'launch root canary leaf occupied'):
+                    parent.create_launch_root(snapshot, self.root / 'sealed')
+            self.assertFalse(outside.exists())
+            self.assertFalse((self.root / 'sealed').exists())
+
+    def test_late_failure_after_the_canary_exists_removes_it_with_the_whole_root(self):
+        with self.fixture.capture() as snapshot:
+            with mock.patch.object(parent.SealedRoot, 'recheck', side_effect=parent.Refusal('injected late failure')):
+                with self.assertRaisesRegex(parent.Refusal, 'injected late failure'):
+                    parent.create_launch_root(snapshot, self.root / 'sealed')
+            self.assertFalse((self.root / 'sealed').exists())
+
+    def test_missing_extra_or_altered_canary_fails_the_post_case_recheck(self):
+        for mutation in ('missing', 'extra', 'content', 'mode', 'replaced', 'moved'):
+            with self.subTest(mutation=mutation):
+                with self.fixture.capture() as snapshot:
+                    with parent.create_launch_root(snapshot, self.root / 'sealed') as sealed:
+                        parent.recheck_runtime(sealed)
+                        canary = self.canary_path(sealed)
+                        sealed.path.chmod(0o700)
+                        if mutation == 'missing':
+                            canary.unlink()
+                        elif mutation == 'extra':
+                            (sealed.path / 'second-leaf').write_bytes(b'')
+                        elif mutation == 'content':
+                            canary.chmod(0o600)
+                            canary.write_bytes(b'X' * len(parent.CANARY_CONTENT))
+                            canary.chmod(0o444)
+                        elif mutation == 'mode':
+                            canary.chmod(0o400)
+                        elif mutation == 'replaced':
+                            canary.unlink()
+                            canary.write_bytes(parent.CANARY_CONTENT)
+                            canary.chmod(0o444)
+                        else:
+                            canary.rename(sealed.path / 'moved-canary')
+                        sealed.path.chmod(0o555)
+                        with self.assertRaises((parent.Refusal, OSError)):
+                            parent.recheck_runtime(sealed)
+                clean(self.root / 'sealed')
+
+    def test_a_planted_second_top_level_leaf_is_an_extra_directory_entry(self):
+        with self.fixture.capture() as snapshot:
+            with parent.create_launch_root(snapshot, self.root / 'sealed') as sealed:
+                sealed.path.chmod(0o700)
+                (sealed.path / 'other').write_bytes(b'')
+                sealed.path.chmod(0o555)
+                with self.assertRaisesRegex(parent.Refusal, 'sealed directory changed|extra physical directory entry'):
+                    parent.recheck_runtime(sealed)
 
     def test_external_pin_and_inventory_bytes_bound(self):
         with self.assertRaisesRegex(parent.Refusal, 'external compile pin hash'):
@@ -188,6 +320,11 @@ class ParentTests(unittest.TestCase):
         data['fileCount'] = 1
         with self.fixture.capture() as snapshot:
             self.assertGreater(snapshot.measurements['fileCount'], 1)
+
+    def test_reviewed_file_count_is_one_named_measured_constant(self):
+        # The count the reviewed pin is held to lives in one named constant, replaced together with the pin at repin.
+        self.assertEqual(parent.REVIEWED_FILE_COUNT, 1472)
+        self.assertEqual(parent.load_pin().data['fileCount'], parent.REVIEWED_FILE_COUNT)
 
     def test_requires_reviewed_pin_not_packet_dict(self):
         with self.assertRaisesRegex(parent.Refusal, 'separately reviewed'):
