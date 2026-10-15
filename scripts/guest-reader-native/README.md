@@ -281,34 +281,39 @@ and the occasion literal, or the `: version \`` prefix of a missing-version line
 inside a line that is a prefix of the next expected line. Empty input is `unknown`. Any
 exception, a non-`bytes` value or more than 16384 bytes is `classification_error`.
 
-`bun_report_shape` is Bun's Linux, plain-stderr banner, 1.3.x only (derived at oven-sh/bun tag
-bun-v1.3.14, src/crash_handler/crash_handler.zig, and read against public 1.3.0-1.3.14 reports;
-the long-run `=` line and the bun.report URL are the reason the sample is rejected): 60 `=`
-(260); `Bun [Canary ]v<semver>[-canary.N][ (<sha>)] Linux arm64|x64[ (baseline)]` (850-864,
-Global.zig:20-27); `Linux Kernel v<d>.<d>.<d> | glibc v<ver>|musl` (1009, 1013); optional `CPU:`
-with the CPUFeatures flags in field order (1029-1031); `Args: "..."` (1033-1043); optional
-`Features:` and `Builtins:` lines, each token followed by a space, so the line ends in one
-(analytics.zig:129-161); optional `Elapsed:`/`RSS:` pair (1066-1083); a blank line (1089);
-optional x64 AVX warning (1091-1094); `panic[(main thread)]: <printable reason>` (306-332), absent
-only for the out-of-memory variant (301), optionally followed by exactly one empty line (a
-message that itself ends in LF, as `Output.panic("...\n")` produces, is followed by line 332's
-own LF; the reason stays one line of printable ASCII, at most 1024 bytes); optional `Crashed
-while ...` (336); `oh no: Bun has crashed. This indicates a bug in Bun, not your code.` or `oh
-no: Bun has run out of memory.` (424, 415); blank, the two `To send a redacted crash report...`
-lines and a blank (424-430); ` https://bun.report/<semver>/<L|l|B><command char><1|2><7 hex|
-unknown><trace>` (438-446, 1358-1368); a final blank line (448, 454).
+`bun_report_shape` is Bun's Linux, plain-stderr banner in its 1.3.x shape (derived at oven-sh/bun
+tag bun-v1.3.14, src/crash_handler/crash_handler.zig; the long-run `=` line and the bun.report URL
+are the reason the sample is rejected): 60 `=` (260); `Bun [Canary ]v<semver>[-canary.N][ (<sha>)]
+Linux arm64|x64[ (baseline)]` (850-864, Global.zig:20-27); `Linux Kernel v<d>.<d>.<d> | glibc
+v<ver>|musl` (1009, 1013); optional `CPU:` with the CPUFeatures flags in field order (1029-1031);
+`Args: "..."` (1033-1043); optional `Features:` and `Builtins:` lines, each token followed by a
+space, so the line ends in one (analytics.zig:129-161); optional `Elapsed:`/`RSS:` pair
+(1066-1083); a blank line (1089); optional x64 AVX warning (1091-1094);
+`panic[(main thread)]: <printable reason>` (306-332), absent only for the out-of-memory variant
+(301), optionally followed by exactly one empty line: a message that itself ends in LF is
+followed by line 332's own LF, as in `Output.panic("...\n")` after stdio init at this tag
+(src/bun.zig:1606, src/shell/interpreter.zig:1642, src/jsc/web_worker.zig:432); the reason stays
+one line of printable ASCII, at most 1024 bytes. Then optional `Crashed while ...` (336); `oh no:
+Bun has crashed. This indicates a bug in Bun, not your code.` or `oh no: Bun has run out of
+memory.` (424, 415); blank, the two `To send a redacted crash report...` lines and a blank
+(424-430); ` https://bun.report/<semver>/<L|l|B><command char><1|2><7 hex|unknown><trace>`
+(438-446, 1358-1368); a final blank line (448, 454).
 
-The grammar is version-specific. Bun 1.4.x prints `RSS: 14.82 MB` with a space, a 9-hex sha and
-a blank line before `Elapsed:`, so its banner is `unknown`; a Bun bump needs the grammar
-re-derived from that tag, not assumed. Also `unknown`: ANSI-coloured banners (the colour flag
-defaults to on until `Output.Source.Stdio.init` runs, main.zig:58, output.zig:425, and then
-follows the stderr TTY unless `FORCE_COLOR` is set, output.zig:381-408 and 103-119; the harness's
-pipe and six-variable environment give the plain form after init, so only a crash before init is
-coloured), Debug, non-Linux and WSL banners, native-plugin and libuv message blocks,
-"multiple threads are crashing", "panicked during a panic", and any text before or after the
-banner. That includes the x64 `warn: CPU lacks AVX support, strange crashes may occur...`
-preamble that Bun writes to the same stderr at startup (c-bindings.cpp:26-41, called at
-main.zig:59): preamble plus banner is two things, so it is `unknown`.
+The grammar scopes by shape, not by version number: a `Bun v1.4.2` line in the 1.3 shape still
+classifies as `bun_report_shape`. The 1.3.x claim is evidenced by the 1.3.14 source derivation and
+the four real goldens in `test_report_family.py` (1.3.1, 1.3.2, Canary 1.3.11 and 1.3.14). Bun
+1.4.x prints `RSS: 14.82 MB` with a space, a 9-hex sha and a blank line before `Elapsed:`, so its
+actual banner is `unknown`; a Bun bump needs the grammar re-derived from that tag, not assumed.
+Also `unknown`: ANSI-coloured banners (the colour flag defaults to on until
+`Output.Source.Stdio.init` runs, main.zig:57 and output.zig:425, and then follows the stderr TTY
+unless `FORCE_COLOR` is set, output.zig:381-408 and 103-119; the harness's pipe and six-variable
+environment give the plain form after init, so only a crash before init is coloured, such as
+main.zig:54's `Output.panic("Failed to initialize argv...\n")`), Debug, non-Linux and WSL banners,
+native-plugin and libuv message blocks, "multiple threads are crashing", "panicked during a
+panic", and any text before or after the banner. That includes the x64 `warn: CPU lacks AVX
+support, strange crashes may occur...` preamble that Bun writes to the same stderr at startup
+(c-bindings.cpp:26-41, called at main.zig:60): preamble plus banner is two things, so it is
+`unknown`.
 
 `webkit_assertion_shape` is WTF's assertion text (oven-sh/WebKit 5488984d,
 Source/WTF/wtf/Assertions.cpp, StackTrace.cpp): `ASSERTION FAILED: <expr>` or `SHOULD NEVER
@@ -332,19 +337,26 @@ missing-version line, weak-version lines, a program name outside that charset, a
 fatal shape (ELF-class, exec and debug output) and anything beside the one report are `unknown`.
 
 `failure_record` adds the always-present key `postInitReportFamily`, a single string from
-the six values above plus `not_same_owner_failure` (another case kind, or a failure before any
-case stage) and `capture_absent` (a same-owner stage without a complete bounded capture: before
-the existing Observation and Reaps, no handles after a launch or a later-phase failure, or no
-bytes capture inside the bound). Where a failure carries no handles, the family follows the
-case stage exactly as the sample reason does: a `case:same-owner:*` stage reports
-`capture_absent`, anything else `not_same_owner_failure`. The two markers mirror the
-`postInitStderrSample` reasons of the same names by case kind and capture presence, NOT by
-provenance: the family deliberately skips the exporter's provenance gate (`provenance_unverified`
-never applies to it), because only a closed enum leaves, never content. Any other value, a read
-failure, or a recognized family beside post-init evidence of an empty stderr becomes
-`classification_error`. `log_result_projection` passes only those values. The sample can still
-be `scrub_rejected` for a recognized report, and then no sample bytes, Base64, hash or
-content-derived value exist outside the pre-existing `stderrSha256`.
+the six values above plus two markers. With handles they come from `native_cases`:
+`not_same_owner_failure` for another case kind, `capture_absent` for a same-owner failure before
+the existing Observation and Reaps or without a bytes capture inside the bound. A failure with
+no handles (a launch failure, a later phase, anything outside `run_cases`) has no capture, so
+the stage decides: the `unexpected-parent` and `parent-exit` case stages and `close` (which runs
+after all three cases, where the exporter's last kind is `parent-exit`) report
+`not_same_owner_failure`, every other stage `capture_absent`. In that no-handles case the family
+equals the sample reason, which is `capture_absent` when no lease sample exists (`bootstrap:*`,
+`source:*`, and a `preflight` failure before `run_cases`' `try`) and otherwise what the exporter
+returns for the stage's case kind. The one exception is the provenance skip: where the sample
+reason is `provenance_unverified` (the stages up to `fixture` inside `run_cases`, or a same-owner
+exporter that is not eligible) the family still says what case kind and capture presence give,
+`capture_absent` for those stages. A handle that explicitly carries a value is never rewritten.
+The two markers follow the `postInitStderrSample` reasons of the same names by case kind and
+capture presence, NOT by provenance: the family deliberately skips the exporter's provenance gate,
+because only a closed enum leaves, never content. Any other value, a read failure, or a
+recognized family beside post-init evidence of an empty stderr becomes `classification_error`.
+`log_result_projection` passes only those values. The sample can still be `scrub_rejected` for
+a recognized report, and then no sample bytes, Base64, hash or content-derived value exist
+outside the pre-existing `stderrSha256`.
 
 Portable fixtures are whole buffers: synthetic ones for every variant, plus four real public
 Linux banners kept verbatim from oven-sh/bun issues 32418 (arm64, 1.3.14), 25105, 28648 (Canary

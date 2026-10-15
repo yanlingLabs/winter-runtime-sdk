@@ -398,17 +398,20 @@ def _walk(items, at, lines, row, tail):
 # --- bun_report_shape: Bun's crash banner on Linux, plain (non-ANSI) stderr. --------------
 # Written by crashHandler (crash_handler.zig:260-261, 301-336, 383-456) and printMetadata
 # (986-1096), release build, `bun.Environment.os == .linux`, enable_ansi_colors_stderr false.
-# That flag defaults to true (output.zig:425) until Output.Source.Stdio.init runs (main.zig:58)
+# That flag defaults to true (output.zig:425) until Output.Source.Stdio.init runs (main.zig:57)
 # and then follows the stderr TTY (output.zig:381-408) unless FORCE_COLOR is set (output.zig:
 # 103-119): a crash in the pre-init window, or under FORCE_COLOR, is coloured (ESC bytes) and
 # is `unknown`; the harness's pipe and six-variable environment give the plain form after init.
-# Version scope: the line shapes are those of 1.3.x (derived at tag bun-v1.3.14 and read against
-# public 1.3.0-1.3.14 reports). 1.4.x prints `RSS: 14.82 MB` with a space, a 9-hex sha and a blank
-# line before `Elapsed:` (and reasons like `panic: abort() called`, which are free text and would
-# pass on their own): it is `unknown`, so a Bun bump needs the grammar re-derived. Also `unknown`: Debug builds, macOS/Windows/FreeBSD/Android/WSL, native-
-# plugin and libuv message blocks, "multiple threads are crashing", "panicked during a panic",
-# and any text before the banner (such as c-bindings.cpp:26-41's x64 `warn: CPU lacks AVX
-# support` preamble, written to the same stderr before the crash).
+# Version scope: the grammar is the 1.3.x banner shape, derived at tag bun-v1.3.14. It scopes by
+# SHAPE, not by version number (a `Bun v1.4.2` line in this shape would classify); the 1.3.x
+# claim rests on that derivation plus the four real goldens in test_report_family.py (1.3.1,
+# 1.3.2, Canary 1.3.11, 1.3.14). 1.4.x prints `RSS: 14.82 MB` with a space, a 9-hex sha and a
+# blank line before `Elapsed:` (and reasons like `panic: abort() called`, which are free text
+# and would pass on their own): its banner is `unknown`, so a Bun bump needs the grammar
+# re-derived. Also `unknown`: Debug builds, macOS/Windows/FreeBSD/Android/WSL, native-plugin
+# and libuv message blocks, "multiple threads are crashing", "panicked during a panic", and
+# any text before the banner (such as c-bindings.cpp:26-41's x64 `warn: CPU lacks AVX support`
+# preamble, written to the same stderr before the crash).
 _DEC = _cls('0-9', 1, 20)
 _SIZE = (_cls('0-9', 1, 12), _opt(_lit('.'), _cls('0-9', 1, 3)), _cls('A-Za-z', 1, 4), _cls(' ', 0, 4))  # {B:<3.2}, :1072-1080
 _SEMVER = (_cls('0-9', 1, 4), _lit('.'), _cls('0-9', 1, 4), _lit('.'), _cls('0-9', 1, 4))
@@ -435,9 +438,12 @@ _USAGE = _block((_lit('Elapsed: '), _DEC, _lit('ms | User: '), _DEC, _lit('ms | 
 _BLANK = _line()
 _NO_AVX = _maybe(_lit('CPU lacks AVX support. Please consider upgrading to a newer CPU.'))  # :1091-1094 (x64 only)
 _PANIC = _line(_lit('panic'), _opt(_lit('(main thread)')), _lit(': '), _cls(_PRINT, 0, 1024))  # :306-332; reason text is free (@panic message)
-# A message that itself ends in LF (Output.panic("...\n"), output.zig:535, main.zig:55; panicImpl
-# crash_handler.zig:816) prints that LF and then :332's own, so one empty line may follow the panic
-# line. It is the only variant: still one line of printable ASCII, no embedded LF.
+# A message that itself ends in LF (Output.panic("...\n"), output.zig:535; panicImpl
+# crash_handler.zig:816) prints that LF and then :332's own, so one empty line may follow the
+# panic line. After stdio init, at tag bun-v1.3.14: bun.zig:1606, shell/interpreter.zig:1642 and
+# jsc/web_worker.zig:432. (main.zig:54's "Failed to initialize argv" runs before Stdio.init at
+# main.zig:57, so that banner is coloured and `unknown`.) This is the only variant: still one
+# line of printable ASCII, no embedded LF.
 _PANIC_LF = _maybe()
 _ACTION = _maybe(_lit('Crashed while '), _any((_lit('parsing '),), (_lit('visiting '),), (_lit('printing '),),
                  (_lit('loading native module: '),)), _cls(_PRINT, 1, 4096))                # :336, Action.format :130-162

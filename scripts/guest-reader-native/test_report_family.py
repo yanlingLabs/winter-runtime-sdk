@@ -231,9 +231,9 @@ class Capture:
         return Capture.export_error(SimpleNamespace(handles=SimpleNamespace(fixture_stderr_capture=raw)), kind)
 
     @staticmethod
-    def export_error(error, kind):
+    def export_error(error, kind, synthetic=False):
         lease = object.__new__(w.SourceLease)
-        lease.path = Path('/run/fixed/sources'); lease.synthetic = False; lease.closed = False; lease.unresolved = False
+        lease.path = Path('/run/fixed/sources'); lease.synthetic = synthetic; lease.closed = False; lease.unresolved = False
         lease.snapshot = object(); lease.runtime = object(); lease.fixture = SimpleNamespace(path=lease.path.parent / 'fixture')
         modules = {'reader_fixture': f, 'producer': p, 'reader_parent': object(), 'control': object(), 'native_cases': cases}
         lease.modules = modules
@@ -539,22 +539,24 @@ class Projection(unittest.TestCase):
         self.assertFalse(set(b.REPORT_FAMILY_ABSENT) & set(b.REPORT_FAMILIES))
 
     def test_failure_record_validates_strictly_and_never_echoes_foreign_values(self):
-        for value in b.REPORT_FAMILIES + b.REPORT_FAMILY_ABSENT:
-            self.assertEqual(self.record(value, stage='case:parent-exit:run')['postInitReportFamily'], value)
-            self.assertEqual(self.record(value)['postInitReportFamily'], 'capture_absent' if value == 'not_same_owner_failure' else value)
+        for value in b.REPORT_FAMILIES + b.REPORT_FAMILY_ABSENT:  # A value the handles carry is never rewritten, at any stage.
+            for stage in ('case:parent-exit:run', 'case:same-owner:run', 'preflight'):
+                self.assertEqual(self.record(value, stage=stage)['postInitReportFamily'], value, (value, stage))
         for value in ('/private/path', 'Bun_report_shape', 'bun_report_shape ', '', 'missing_urandom', 'missing_maps', b'bun_report_shape', 1, True, 0.5, [], {}, ('unknown',),
                       {'reportFamily': 'unknown'}, 'bun_report_shape\n', 'unknown\x00', 'Kunknown', 'ＵＮＫＮＯＷＮ'):
             record = self.record(value)
             self.assertEqual(record['postInitReportFamily'], 'classification_error', value)
             if isinstance(value, str) and value: self.assertNotIn(json.dumps(value), json.dumps(record))
-        self.assertEqual(b.failure_record(w.Refusal('x'))['postInitReportFamily'], 'not_same_owner_failure')
-        self.assertEqual(self.record(None, stage='preflight')['postInitReportFamily'], 'not_same_owner_failure')
+        self.assertEqual(b.failure_record(w.Refusal('x'))['postInitReportFamily'], 'capture_absent')  # No handles, no case stage: no capture.
+        self.assertEqual(self.record(None, stage='preflight')['postInitReportFamily'], 'capture_absent')
         self.assertEqual(self.record(None, stage='case:parent-exit:run')['postInitReportFamily'], 'not_same_owner_failure')
         self.assertEqual(self.record(None)['postInitReportFamily'], 'capture_absent')  # A same-owner stage with no handles.
         chain = [SimpleNamespace(handles=SimpleNamespace(postinit_report_family=None)), SimpleNamespace(handles=SimpleNamespace(postinit_report_family='unknown')),
                  SimpleNamespace(handles=SimpleNamespace(postinit_report_family='incomplete'))]
         self.assertEqual(b.report_family_record(chain), 'unknown')
-        self.assertEqual(b.report_family_record([]), 'not_same_owner_failure')
+        self.assertEqual(b.report_family_record([]), 'capture_absent')
+        self.assertEqual(b.report_family_record([], 'case:unexpected-parent:run'), 'not_same_owner_failure')
+        self.assertEqual(b.report_family_record(chain, 'case:parent-exit:run'), 'unknown')  # The stage only fills a gap.
         with patch.object(b, 'report_family_record', side_effect=ValueError('private')):
             self.assertEqual(self.record('unknown')['postInitReportFamily'], 'classification_error')
 
@@ -738,6 +740,9 @@ class RealBanners(unittest.TestCase):
         for old, new in ((b'(0d9b296a)', b'(744846f84)'), (b'RSS: 52.30MB | Peak: 52.30MB | Commit: 38.10MB', b'RSS: 52.30 MB | Peak: 52.30 MB | Commit: 38.10 MB'),
                          (b'Features: jsc \n', b'Features: jsc \n\n'), (b'Elapsed:', b'\nElapsed:')):
             self.assertEqual(cases.classify_report_family(base.replace(old, new, 1)), 'unknown', old)
+        # The grammar scopes by SHAPE, not by version number: a 1.4 version line in the 1.3 shape still classifies.
+        self.assertEqual(cases.classify_report_family(bun(version=b'Bun v1.4.2 (0d9b296a) Linux ')), 'bun_report_shape')
+        self.assertEqual(cases.classify_report_family(bun(version=b'Bun v1.3.14 (744846f84) Linux ')), 'unknown')
         # The panic text itself is free: `panic: abort() called` alone does not make a 1.3 banner unknown.
         self.assertEqual(cases.classify_report_family(bun(panic=b'panic: abort() called')), 'bun_report_shape')
 
@@ -774,10 +779,30 @@ class RealBanners(unittest.TestCase):
 
 
 class StageAlignment(unittest.TestCase):
-    """The family mirrors case kind and capture presence, as the sample reason does; it never consults provenance."""
+    """Without handles the family follows the stage and agrees with the sample reason, except for the provenance skip."""
     def sample_reason(self, error, kind): return Capture.export_error(error, kind)['reason']
 
-    def family(self, error, stage): return b.failure_record(w.Uncertain(SimpleNamespace(stage=stage), error))['postInitReportFamily']
+    def record(self, error, stage): return b.failure_record(w.Uncertain(SimpleNamespace(stage=stage), error))
+
+    def family(self, error, stage): return self.record(error, stage)['postInitReportFamily']
+
+    def run_cases_failure(self, fail_at):
+        """The real w.run_cases up to one stage, with inert stand-ins for the modules. Returns what it raises."""
+        def boom(*_, **__): raise RuntimeError('stand-in failure')
+        def fine(*_, **__): return SimpleNamespace()
+        def at(stage): return boom if stage == fail_at else fine
+        modules = {'control': object(), 'producer': SimpleNamespace(selected_host_exec_environment=at('preflight'), descriptor_preflight=fine),
+                   'reader_parent': SimpleNamespace(load_pin=at('load_pin'), capture_packet=at('capture'), create_launch_root=at('launch_root'),
+                                                    guard_root_owner=at('guard'), recheck_runtime=fine),
+                   'reader_fixture': SimpleNamespace(create_fixture=at('fixture')), 'native_cases': SimpleNamespace(run_case=boom)}
+        lease = object.__new__(w.SourceLease)
+        lease.path = Path('/run/fixed/sources'); lease.synthetic = False; lease.closed = False; lease.unresolved = False
+        lease.modules = dict(modules); lease.recheck = lambda: None; lease.snapshot = lease.runtime = lease.fixture = None
+        with patch.object(w, 'check_acquisition_record'), patch.object(w, 'native_guard'):
+            with self.assertRaises(w.Uncertain) as caught:
+                w.run_cases(lease, 'packet', 'inventory', lease.path.parent / 'runtime', lease.path.parent / 'fixture',
+                            acquisition_record={}, loaded_modules=modules)
+        return caught.exception
 
     def test_a_launch_failure_has_no_handles_and_says_what_the_sample_says(self):
         for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
@@ -798,21 +823,68 @@ class StageAlignment(unittest.TestCase):
             self.assertEqual(self.sample_reason(error, 'same-owner'), 'capture_absent', phase)
             self.assertEqual(self.family(error, 'case:parent-exit:' + phase), 'not_same_owner_failure', phase)
 
-    def test_family_and_sample_reason_agree_for_every_stage_without_handles(self):
+    def test_case_stages_and_close_agree_with_the_real_exporter(self):
         error = w.Refusal('injected')
         for stage in b.FAILURE_STAGES:
-            kind = stage.split(':')[1] if stage.startswith('case:') else None
+            if not (stage.startswith('case:') or stage == 'close'): continue
+            kind = stage.split(':')[1] if stage.startswith('case:') else 'parent-exit'  # run_cases leaves `kind` at its last value after the loop.
             self.assertEqual(self.family(error, stage), self.sample_reason(error, kind), stage)
-        for stage in (None, 7, 'case:same-owner', 'case:same-owner:unknown', 'unknown'):  # Not a stage of the closed list: no kind is claimed.
-            self.assertEqual(b.failure_record(w.Uncertain(SimpleNamespace(stage=stage), error))['postInitReportFamily'], 'not_same_owner_failure', stage)
+        self.assertEqual(set(b.NOT_SAME_OWNER_STAGES), {stage for stage in b.FAILURE_STAGES if stage == 'close' or stage.startswith(('case:unexpected-parent:', 'case:parent-exit:'))})
 
-    def test_only_the_not_same_owner_marker_is_rewritten_and_only_for_a_same_owner_stage(self):
+    def test_failures_outside_run_cases_say_capture_absent_as_the_sample_does(self):
+        def agree(error, stage):
+            record = b.failure_record(error)
+            self.assertEqual(record['stage'], stage)
+            self.assertEqual(record['postInitStderrSample'], {'available': False, 'reason': 'capture_absent'})  # No lease sample: stderr_sample_record's default.
+            self.assertEqual(record['postInitReportFamily'], 'capture_absent')
+        agree(w.Refusal('x'), 'preflight')
+        for stage in ('bootstrap:copy', 'bootstrap:load'):  # run_root marks the exception with its stage.
+            error = w.Refusal('bootstrap source hash/identity'); error.reader_stage = stage
+            agree(error, stage)
+        with patch.object(b.sys, 'platform', 'linux'), patch.object(b.os, 'getuid', return_value=0), patch.object(b.os, 'geteuid', return_value=0), \
+                patch.object(b, 'checked_bytes', side_effect=b.Refusal('bootstrap source hash/identity')):
+            with self.assertRaises(b.Refusal) as caught:
+                b.run_root('/base', '/run/inert', {}, '0' * 64, wrapper_source='/successor/wrapper.py', harness_source='/successor/native')
+        agree(caught.exception, 'bootstrap:copy')
+        with self.assertRaises(w.Uncertain) as caught:  # A real wrapper failure before any run_cases: stage source:capture.
+            w.copy_external_sources('/nonexistent-reader-source', '/nonexistent-reader-destination/sources')
+        agree(caught.exception, 'source:capture')
+        with self.assertRaises(w.Refusal) as caught:  # The first statement of run_cases, before its try.
+            w.run_cases(object.__new__(w.SourceLease), 'packet', 'inventory', 'runtime', 'fixture', acquisition_record={})
+        self.assertNotIsInstance(caught.exception, w.Uncertain)
+        agree(caught.exception, 'preflight')
+        with patch.object(w, 'check_acquisition_record'):  # native_guard also refuses before the try, here on a non-Linux/non-Root host.
+            lease = object.__new__(w.SourceLease); lease.synthetic = True
+            with self.assertRaises(w.Refusal) as caught:
+                w.run_cases(lease, 'packet', 'inventory', 'runtime', 'fixture', acquisition_record={})
+        self.assertNotIsInstance(caught.exception, w.Uncertain)
+        agree(caught.exception, 'preflight')
+
+    def test_the_provenance_skip_is_the_only_disagreement_inside_run_cases(self):
+        for stage in ('preflight', 'load_pin', 'capture', 'launch_root', 'guard', 'fixture'):
+            error = self.run_cases_failure(stage)
+            record = b.failure_record(error)
+            self.assertEqual(record['stage'], stage)
+            self.assertEqual(record['postInitStderrSample'], {'available': False, 'reason': 'provenance_unverified'}, stage)  # Real run_cases output.
+            self.assertEqual(record['postInitReportFamily'], 'capture_absent', stage)  # The family never reports provenance.
+        # A same-owner exporter that is not eligible is the same skip: sample provenance_unverified, family from the case alone.
+        error = w.Refusal('injected')
+        self.assertEqual(Capture.export_error(error, 'same-owner', synthetic=True), {'available': False, 'reason': 'provenance_unverified'})
+        self.assertEqual(Capture.export_error(error, 'parent-exit', synthetic=True), {'available': False, 'reason': 'not_same_owner_failure'})
+        self.assertEqual(self.family(error, 'case:same-owner:run'), 'capture_absent')
+        self.assertEqual(self.family(error, 'case:parent-exit:run'), 'not_same_owner_failure')
+
+    def test_a_stage_outside_the_closed_list_claims_no_case_kind(self):
+        error = w.Refusal('injected')
+        for stage in (None, 7, 'case:same-owner', 'case:parent-exit', 'case:parent-exit:unknown', 'close ', 'unknown', ''):
+            self.assertEqual(b.failure_record(w.Uncertain(SimpleNamespace(stage=stage), error))['postInitReportFamily'], 'capture_absent', stage)
+
+    def test_explicit_values_from_the_handles_pass_through_every_stage(self):
         for value in b.REPORT_FAMILIES + b.REPORT_FAMILY_ABSENT:
-            for stage in ('case:same-owner:run', 'case:parent-exit:run', 'preflight'):
+            for stage in b.FAILURE_STAGES:
                 handles = SimpleNamespace(postinit_report_family=value, postinit_diagnostics=None)
                 error = w.Uncertain(SimpleNamespace(stage=stage), SimpleNamespace(handles=handles, cause=None))
-                want = 'capture_absent' if value == 'not_same_owner_failure' and stage == 'case:same-owner:run' else value
-                self.assertEqual(b.failure_record(error)['postInitReportFamily'], want, (value, stage))
+                self.assertEqual(b.failure_record(error)['postInitReportFamily'], value, (value, stage))
 
     def test_the_family_does_not_consult_provenance(self):
         raw = bun()

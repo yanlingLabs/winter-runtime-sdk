@@ -528,22 +528,28 @@ SAMPLE_REASONS=('not_same_owner_failure','scrub_rejected','provenance_unverified
 
 
 # Closed crash-report-family enum (native_cases.REPORT_FAMILIES, asserted equal by tests) plus the two
-# non-classified markers: not_same_owner_failure (another case kind, or a failure before any case
-# stage) and capture_absent (a same-owner stage without a complete bounded capture: before the existing
-# Observation/Reaps, no handles after a launch or later-phase failure, or stderr not bytes). They mirror
-# the sample reasons of the same names by case kind and capture presence, NOT by provenance: the family
-# deliberately skips the exporter's provenance gate because only a closed enum leaves, never content.
+# non-classified markers. With handles they come from native_cases: not_same_owner_failure for another
+# case kind, capture_absent for a same-owner failure before the existing Observation/Reaps or without a
+# bytes capture. Without handles (a launch failure, a later phase, any failure outside run_cases) no
+# capture exists, so the stage decides: the stages of the other two case kinds, and `close` (which runs
+# after all three cases, where the exporter's last kind is parent-exit), report not_same_owner_failure;
+# every other stage reports capture_absent, as the sample does when no exporter ran. The markers follow
+# the sample reasons by case kind and capture presence, NOT by provenance: the family deliberately skips
+# the exporter's provenance gate (the stages up to `fixture` inside run_cases carry the sample reason
+# provenance_unverified; the family says capture_absent) because only a closed enum leaves, never content.
 REPORT_FAMILIES=('bun_report_shape','webkit_assertion_shape','loader_error_shape','unknown','incomplete','classification_error')
 REPORT_FAMILY_ABSENT=('not_same_owner_failure','capture_absent')
+NOT_SAME_OWNER_STAGES=tuple(name for name in FAILURE_STAGES if name=='close' or (name.startswith('case:') and not name.startswith('case:same-owner:')))
 
 
-def report_family_record(chain):
+def report_family_record(chain,stage=None):
     """One closed string. A malformed or foreign value never reaches result.json or logs."""
     raw=None
     for item in chain:
         observed=getattr(getattr(item,'handles',None),'postinit_report_family',None)
         if observed is not None:raw=observed;break
-    if raw is None:return 'not_same_owner_failure'
+    if raw is None:  # No handles: no capture exists. Only the stage of another case kind says otherwise.
+        return 'not_same_owner_failure' if type(stage) is str and stage in NOT_SAME_OWNER_STAGES else 'capture_absent'
     if type(raw) is str and raw in REPORT_FAMILIES+REPORT_FAMILY_ABSENT:return raw
     return 'classification_error'
 
@@ -624,14 +630,10 @@ def failure_record(error, *, stage='preflight'):
                 or len(base64.b64decode(sample['bytesBase64']))!=min(size,4096)
                 or (not sample['truncated'] and sample['sampleSha256']!=postinit['stderrSha256'])):
             sample={'available':False,'reason':'projection_error'}
-    try:family=report_family_record(chain)
+    try:family=report_family_record(chain,stage)
     except BaseException:family='classification_error'
     if family in REPORT_FAMILIES[:3]+('incomplete',) and postinit.get('available') is True and postinit.get('stderrBytes')==0:
         family='classification_error'  # A report cannot come from an empty capture.
-    # A same-owner stage without handles (launch failed, or a later phase failed after a passing case)
-    # has no capture either: say what the sample says, not that the case kind differed.
-    if family=='not_same_owner_failure' and type(stage) is str and stage in FAILURE_STAGES and stage.startswith('case:same-owner:'):
-        family='capture_absent'
     name,reason,symbol=closed(error)
     cause_name,cause_reason,cause_errno=closed(chain[-1])
     return {'readerCaseSetPassed':False, 'stage':stage if type(stage) is str and stage in FAILURE_STAGES else 'unknown',

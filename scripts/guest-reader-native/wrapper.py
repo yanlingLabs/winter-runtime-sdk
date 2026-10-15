@@ -19,7 +19,7 @@ SOURCE_PINS = {
     'producer.py': 'e7da78e4ae7c02303101059f4b43bf261d26fc56153a50f2aed8daed651a9a57',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
-    'native_cases.py': '5efca3ec7a190065b7ac89e1bc6c2d3ce8cd3866b674640e0c178e757f81cc4c',
+    'native_cases.py': '6daab94ac05da5bb245604cb9e06cf7c8a6d41a630bb4b2128b2aaaaef3d56ee',
 }
 MODULE_ORDER = (('control', 'control.py'), ('producer', 'producer.py'),
                 ('reader_parent', 'parent.py'), ('reader_fixture', 'fixture.py'),
