@@ -189,6 +189,21 @@ describe("the release workflow", () => {
     expect(steps[5]?.with?.path).toBe("${{ steps.download.outputs.private }}/result.json");
   });
 
+  // The compile packet carries three compiled outputs: the reader, its launcher and the dependency probe. No step script
+  // may mention any of the three as a whole path token (the path followed by whitespace or the end of a line), which is the
+  // only way one could be run. The alternation is closed, not a prefix, so `instructionReader.metafile.json` stays allowed.
+  const COMPILE_FIXTURE_NO_EXECUTION = /sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher|DependencyProbe)?(?:\s|$)/;
+
+  test("the compile-fixture no-execution pattern names all three compiled outputs exactly", () => {
+    for (const name of ["instructionReader", "instructionReaderLauncher", "instructionReaderDependencyProbe"]) {
+      expect(`./packet/artifacts/${name}`).toMatch(COMPILE_FIXTURE_NO_EXECUTION);
+      expect(`run ./packet/artifacts/${name} --flag`).toMatch(COMPILE_FIXTURE_NO_EXECUTION);
+      expect(`./packet/artifacts/${name}\nnext`).toMatch(COMPILE_FIXTURE_NO_EXECUTION);
+    }
+    for (const safe of ["artifacts/instructionReader.metafile.json", "artifacts/instructionReaderDependencyProbe.sha256", "artifacts/instructionReaderDependency", "artifacts/instructionReaderDependencyProbes", "artifacts/instructionReaderLauncherX"])
+      expect(safe).not.toMatch(COMPILE_FIXTURE_NO_EXECUTION);
+  });
+
   test("the reader compile fixture has exact feature triggers and no output execution", () => {
     const source = parseWorkflow("cowork-reader-compile-fixture.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ name?: string; if?: string; uses?: string; run?: string; with?: Record<string, unknown> }> }> };
     expect(source.on).toEqual({
@@ -202,7 +217,7 @@ describe("the release workflow", () => {
     expect(job?.steps?.length).toBe(10);
     for (const step of job?.steps ?? []) {
       if (step.uses?.startsWith("actions/checkout")) expect(step.with?.["persist-credentials"]).toBe(false);
-      if (step.run) expect(step.run).not.toMatch(/sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher)?(?:\s|$)/);
+      if (step.run) expect(step.run).not.toMatch(COMPILE_FIXTURE_NO_EXECUTION);
     }
     const checkouts = job?.steps?.filter((step) => step.uses?.startsWith("actions/checkout")) ?? [];
     expect(checkouts.map((step) => step.with?.ref)).toEqual([
