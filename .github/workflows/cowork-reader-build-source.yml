@@ -1,7 +1,7 @@
 name: reader-build-source
 on:
   push:
-    branches: [cowork/instruction-reader-build, cowork/reader-compile-semantics]
+    branches: [cowork/instruction-reader-build, cowork/reader-compile-semantics, cowork/reader-probe-integration]
     paths:
       - scripts/guest-reader-build/**
       - .github/workflows/cowork-reader-build-source.yml

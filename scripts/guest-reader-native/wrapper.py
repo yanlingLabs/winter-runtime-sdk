@@ -5,6 +5,8 @@ with python3 -I -S -B. Tokens are never inputs to this module. Captured packet
 Python is DATA and is never imported. Host Python/libc remain trusted tooling.
 """
 import hashlib
+import base64
+import re
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -13,30 +15,30 @@ import sys
 import types
 
 SOURCE_PINS = {
-    'parent.py': '856dc389f06ae973b1c1a65149671d984288cf558d7a461e32c89758036c63af',
-    'producer.py': 'a3c8dee9d422a6dd9bf39235c549843c70e40892c6294f41f5e8c34da972feab',
+    'parent.py': 'eb23f44276f11c84fc8495410e9c444e997f7834ab1482c8de72d08ae0f5b6e5',
+    'producer.py': '061d6e92b95dc397313c2f2d5bbd1ab3ab8c1c1dc270025add7bbf074504f3a8',
     'control.py': '05b63cfda7ef6022e13dce89e2f653db7a1b476a2904e9f57787bc12f99f1722',
     'fixture.py': '108715d6d4b182e1a7d162fb3096cba1620b71e201dc4338c3da968a0a9d5814',
-    'native_cases.py': '4d2824ab9ee4abbf92e0930f77926368d4a102b2c864bd4c38dffad2c4fb588f',
+    'native_cases.py': '90698d3789f356046da4468e2a134b97b4c09ed875735817a354360cad87b5f8',
 }
 MODULE_ORDER = (('control', 'control.py'), ('producer', 'producer.py'),
                 ('reader_parent', 'parent.py'), ('reader_fixture', 'fixture.py'),
                 ('native_cases', 'native_cases.py'))
 MAX_FILE = 64 * 1024
 MAX_SOURCE_BYTES = 256 * 1024
-COMPILE_PIN = 'compile-38502659264.pin.json'
-COMPILE_PIN_SHA256 = 'e319e8a859dcc891a59c8a2d4134aa02ad8dd0da94bca45b339e49fdc92bae2b'
+COMPILE_PIN = 'compile-38715669708.pin.json'
+COMPILE_PIN_SHA256 = 'd95ebe794e7202ef430e393461e9b3926e7d30318fe1f7ed875b4686967566de'
 ACQUISITION_METADATA = {
-    'repository_id': 1358618589, 'run_id': 38502659264,
-    'head_sha': '29fe5cff1ea0b93d7970cfee566030f3532fdd74',
-    'artifact_id': 11866353126, 'artifact_name': 'reader-compile-packet-38502659264',
-    'size_in_bytes': 81095921, 'expired': False, 'expires_at': '2026-10-21T02:45:33Z',
+    'repository_id': 1358618589, 'run_id': 38715669708,
+    'head_sha': '75a4fe073f45c50b4ce3d53d01f7749a6829bacf',
+    'artifact_id': 11962257334, 'artifact_name': 'reader-compile-packet-38715669708',
+    'size_in_bytes': 81111513, 'expired': False, 'expires_at': '2026-10-22T09:49:05Z',
 }
 ACQUISITION_MEMBERS = {
-    'reader-packet.tar.gz': (81359155, 'e3863c0ebe91a7cbe4efc0c63cf5adb232dbb5bddd1c897cd447045b8c96482b'),
-    'packet-inventory.json': (243499, '21e790a4c3564510398f8630581493eb606b078b408cf880bb833485290b7c5f'),
+    'reader-packet.tar.gz': (81378280, 'e8249728f18bf37e2e22f299df3ad1829e2930e8ab589cabfb804d6ed6386f3c'),
+    'packet-inventory.json': (243843, '0893ae66d58aa577713d8d73a989a0b0e760a9f1c031eb1ce64bfb849302f6c7'),
 }
-OUTER_ZIP_SHA256 = 'bd586bafdcffeca4c4fbdfcdd65b4f8b807b2ff2b7ba8adfebbacf067874dfcd'
+OUTER_ZIP_SHA256 = '233fd0f9717034c23cd0c35d4ce539ab1a3e02a0cac114d5262363b3960af8e8'
 
 
 class Refusal(ValueError):
@@ -127,6 +129,7 @@ class SourceLease:
                           or data_pin_digest != COMPILE_PIN_SHA256)
         self.fds, self.edges, self.files, self.modules = [], [], {}, {}
         self.closed, self.unresolved = False, False
+        self.stage = 'source:capture'
         self.runtime = self.snapshot = self.fixture = self.case_failure = None
 
     def recheck(self):
@@ -213,6 +216,7 @@ def copy_external_sources(source, destination, *, ops=None, pins=None,
         check_edges(pin_edges)
         captured[COMPILE_PIN] = pin_raw
         upper, held, edges = directory(destination.parent)
+        lease.stage = 'source:copy'
         lease.fds.extend(held); lease.edges.extend(edges)
         lease.ancestor_fds = tuple(held)
         for fd in held:
@@ -273,6 +277,7 @@ def load_external_modules(lease):
             'module alias already occupied')
     try:
         for name, filename in MODULE_ORDER:
+            lease.stage = 'source:load:' + name
             lease.recheck()
             raw = read_fd(lease.files[filename][0], MAX_FILE)
             require(hashlib.sha256(raw).hexdigest() == lease.pins[filename], 'source import pin')
@@ -342,40 +347,135 @@ def check_acquisition_record(record, now):
                 'acquisition member pin mismatch')
 
 
+
+FIXTURE_REQUEST_SHA256='22989cd840ad060f0d509c61c83c0fd5aadf760c08d02767f96144117e9f0714'
+FIXTURE_CONTENT_HASHES={'source':'a8d64a39a0fbb765db51afd62c057d8023a144a964e7ae82180cb328e7c74511',
+                        'shared':'9422204aaa965fce450bb6fa702b0bc04b44bbd28a3d16b616ae23e757344568'}
+
+
+def _sample_unavailable(reason):
+    return {'available':False,'reason':reason}
+
+
+def _fixture_stderr_exporter(lease,pin,modules,selected_environment):
+    """Hosted fixture-only lexical binding; this is never native/read authority."""
+    data=modules['reader_fixture'];producer=modules['producer']
+    eligible=(type(lease) is SourceLease and not lease.synthetic and not lease.closed
+        and not lease.unresolved and getattr(pin,'sha256',None)==COMPILE_PIN_SHA256
+        and type(modules) is dict and set(modules)=={name for name,_ in MODULE_ORDER}
+        and all(lease.modules.get(name) is modules[name] for name,_ in MODULE_ORDER)
+        and getattr(lease,'snapshot',None) is not None and getattr(lease,'runtime',None) is not None
+        and getattr(lease,'fixture',None) is not None
+        and lease.fixture.path==lease.path.parent/'fixture'
+        and data.SOURCE=='/workspace/folders/source' and data.SHARED=='/run/winter/shared-instructions'
+        and type(data.CONTENTS) is dict and set(data.CONTENTS)==set(FIXTURE_CONTENT_HASHES)
+        and all(type(raw) is bytes and hashlib.sha256(raw).hexdigest()==FIXTURE_CONTENT_HASHES[key]
+                for key,raw in data.CONTENTS.items())
+        and hashlib.sha256(data.request_bytes()).hexdigest()==FIXTURE_REQUEST_SHA256
+        and dict(producer.checked_host_exec_environment(selected_environment))==dict(producer.FIXED_HOST_EXEC_ENV))
+    # Binding is minted only after the existing native_guard and full packet/
+    # fixture preparation in run_cases. No incoming DTO or Boolean can mint it.
+    def export(error,kind):
+        if kind!='same-owner':return _sample_unavailable('not_same_owner_failure')
+        if not eligible:return _sample_unavailable('provenance_unverified')
+        raw=getattr(getattr(error,'handles',None),'fixture_stderr_capture',None)
+        if type(raw) is not bytes or len(raw)>16384:return _sample_unavailable('capture_absent')
+        # Reject the COMPLETE capture before taking a prefix; never redact text.
+        if re.search(rb'gh[pousr]_|github_pat_|Authorization|Bearer |AKIA|-----BEGIN|[A-Za-z0-9+/=_-]{40,}',raw,re.IGNORECASE):
+            return _sample_unavailable('scrub_rejected')
+        sample=raw[:4096]
+        return {'available':True,'bytesBase64':base64.b64encode(sample).decode('ascii'),
+                'truncated':len(raw)>4096,'sampleSha256':hashlib.sha256(sample).hexdigest()}
+    return export
+
+
 def run_cases(lease, packet_directory, inventory_file, launch_destination, fixture_destination,
-              *, acquisition_record, now=None):
+              *, acquisition_record, now=None, effects_factory=None, loaded_modules=None):
     """Unexecuted privileged orchestration, not granted by input shape.
 
     Exact external-parent/source/artifact/workflow admission remains required.
     On uncertainty this function retains every context; it cannot print a pass.
     """
+    lease.stage = 'preflight'
     check_acquisition_record(acquisition_record, datetime.now(timezone.utc) if now is None else now)
     native_guard(lease)
     require(Path(launch_destination) == lease.path.parent/'runtime'
             and Path(fixture_destination) == lease.path.parent/'fixture',
             'fixed protected fixture siblings required')
-    modules = load_external_modules(lease)
+    if loaded_modules is None:
+        modules = load_external_modules(lease)
+    else:
+        lease.recheck()
+        require(type(loaded_modules) is dict and set(loaded_modules) ==
+                {name for name, _ in MODULE_ORDER} and all(loaded_modules[name] is
+                    lease.modules.get(name) for name, _ in MODULE_ORDER),
+                'only checked lease modules may be reused')
+        modules = loaded_modules
     parent, producer = modules['reader_parent'], modules['producer']
     data, cases = modules['reader_fixture'], modules['native_cases']
+    sample_exporter=None
+    kind=None
     try:
+        lease.stage = 'preflight'
+        selected_environment=producer.selected_host_exec_environment()
         producer.descriptor_preflight()
+        lease.stage = 'load_pin'
         pin = parent.load_pin(lease.path/COMPILE_PIN)
+        lease.stage = 'capture'
         lease.snapshot = parent.capture_packet(packet_directory, inventory_file, pin=pin)
+        lease.stage = 'launch_root'
         lease.runtime = parent.create_launch_root(lease.snapshot, launch_destination)
+        lease.stage = 'guard'
         parent.guard_root_owner(lease.runtime)
+        lease.stage = 'fixture'
         lease.fixture = data.create_fixture(fixture_destination)
+        try:
+            sample_exporter=_fixture_stderr_exporter(lease,pin,modules,selected_environment)
+        except BaseException:
+            sample_exporter=lambda error,kind:_sample_unavailable('provenance_unverified')
         def factory(debt, pair_factory):
             lease.recheck(); lease.fixture.recheck()
             return producer.NativeOperation(debt, lease.runtime,
                 lease.fixture.fds['source'], lease.fixture.fds['shared'],
                 parent.guard_root_owner, parent.recheck_runtime,
-                control_pair_factory=pair_factory)
+                control_pair_factory=pair_factory,source_path=lease.fixture.path/'source',
+                shared_path=lease.fixture.path/'shared',exec_environment=selected_environment)
+        def probe_factory(debt, pair_factory):
+            # The dependency probe uses the reader's exact launch envelope; only the executable role differs.
+            lease.recheck(); lease.fixture.recheck()
+            return producer.NativeOperation(debt, lease.runtime,
+                lease.fixture.fds['source'], lease.fixture.fds['shared'],
+                parent.guard_root_owner, parent.recheck_runtime,
+                control_pair_factory=pair_factory,source_path=lease.fixture.path/'source',
+                shared_path=lease.fixture.path/'shared',exec_environment=selected_environment,
+                executable_role='instructionReaderDependencyProbe')
         outcomes = []
+        # The probe runs FIRST so it yields data even when the reader later fails. Its content never feeds
+        # readerCaseSetPassed; only a teardown failure (CaseUncertain) stops the set, as for any case.
+        kind = 'dependency-probe'
+        lease.stage = 'case:dependency-probe:run'
+        if effects_factory is None:
+            probed = cases.run_probe_case(probe_factory, exec_environment=selected_environment)
+        else:
+            probed = cases.run_probe_case(probe_factory, effects=effects_factory(kind), exec_environment=selected_environment)
+        lease.dependency_probe = probed.record
+        lease.stage = 'case:dependency-probe:verify'
+        require(type(probed.record) is dict and probed.record.get('ran') is True
+                and probed.record.get('readerSuccessImplied') is False
+                and probed.record.get('bunCompatibilityProven') is False, 'probe record proof flags')
+        lease.stage = 'case:dependency-probe:recheck'
+        lease.fixture.recheck(); parent.recheck_runtime(lease.runtime); lease.recheck()
         for kind in ('same-owner', 'unexpected-parent', 'parent-exit'):
-            observed = cases.run_case(kind, factory,
-                data.request_bytes() if kind == 'same-owner' else b'')
+            lease.stage = 'case:' + kind + ':run'
+            request = data.request_bytes() if kind == 'same-owner' else b''
+            if effects_factory is None:
+                observed = cases.run_case(kind, factory, request)
+            else:
+                observed = cases.run_case(kind, factory, request, effects=effects_factory(kind))
             if kind == 'same-owner':
+                lease.stage = 'case:' + kind + ':verify'
                 data.verify_response(observed.observation.stdout, observed.observation.stderr)
+            lease.stage = 'case:' + kind + ':recheck'
             lease.fixture.recheck(); parent.recheck_runtime(lease.runtime); lease.recheck()
             outcomes.append({'kind': kind, 'descriptorsClosed': observed.descriptors_closed,
                              'elapsedSeconds': observed.elapsed_seconds,
@@ -385,12 +485,17 @@ def run_cases(lease, packet_directory, inventory_file, launch_destination, fixtu
                              'nativeReapReceiptObserved': observed.observation.native_wait_status is not None,
                              'controlAndStdinHeldForParentExit': observed.keepalive_before_parent_exit})
         # Close only confirmed case resources. No directory/stage removal claim.
+        lease.stage = 'close'
         lease.fixture.close(); lease.runtime.close(); lease.snapshot.close()
         lease.recheck()
         return {'kind': 'winter-reader-only-case-set', 'cases': outcomes,
                 'readerCaseSetPassed': True, 'configEffectProven': False,
                 'guidedGuestTurnVerified': False, 'productionActivation': False,
-                'vmExecutionVerified': False, 'fixtureRemovalConfirmed': False}
+                'vmExecutionVerified': False, 'fixtureRemovalConfirmed': False,
+                'dependencyProbe': lease.dependency_probe}
     except BaseException as error:
+        try:
+            lease.fixture_stderr_sample=sample_exporter(error,kind) if sample_exporter is not None else _sample_unavailable('provenance_unverified')
+        except BaseException:lease.fixture_stderr_sample=_sample_unavailable('projection_error')
         lease.unresolved = True; lease.case_failure = error
         raise Uncertain(lease, error) from error

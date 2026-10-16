@@ -1,7 +1,7 @@
 name: reader-intake-source
 on:
   push:
-    branches: [cowork/reader-packet-intake]
+    branches: [cowork/reader-packet-intake, cowork/reader-probe-integration]
     paths:
       - scripts/guest-reader-intake/**
       - .github/workflows/cowork-reader-intake-source.yml

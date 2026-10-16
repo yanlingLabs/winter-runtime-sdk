@@ -1,0 +1,174 @@
+name: reader-native-reviewed
+on:
+  push:
+    branches: [cowork/reader-hosted-fixture-stderr]
+    paths:
+      - .github/workflows/cowork-reader-native-reviewed.yml
+      - scripts/guest-reader-native/bootstrap.py
+      - scripts/guest-reader-native/download.cjs
+      - scripts/guest-reader-native/wrapper.py
+permissions:
+  contents: read
+  actions: read
+jobs:
+  reader-only:
+    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-fixture-stderr' && github.run_attempt == '1'
+    concurrency:
+      group: reader-native-reviewed
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: a94c4c89d489103e09bcc5c799312c9a44cbf86e
+          path: origins/base
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: origins/bootstrap
+          persist-credentials: false
+      - name: Acquire only the exact raw ZIP
+        id: download
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),Module=require('node:module');
+            if(context.payload.repository.id!==1358618589 || process.env.RUNNER_ENVIRONMENT!=='github-hosted') throw new Error('venue_refused');
+            // The checked helper intentionally bypasses action proxy fetch: no proxy configuration is admitted.
+            for(const key of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']) if(process.env[key]) throw new Error('proxy_refused');
+            const privateDir=fs.realpathSync(fs.mkdtempSync(path.join(process.env.RUNNER_TEMP,'reader-native-')));fs.chmodSync(privateDir,0o700);
+            const source=path.join(process.env.GITHUB_WORKSPACE,'origins/bootstrap/scripts/guest-reader-native/download.cjs');
+            const fd=fs.openSync(source,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
+            let raw;try {const s=fs.fstatSync(fd);if(!s.isFile()||s.nlink!==1||s.size>65536)throw new Error('download_source_refused');const buffer=Buffer.alloc(65537);let at=0,n;while((n=fs.readSync(fd,buffer,at,buffer.length-at,null))>0){at+=n;if(at>65536)throw new Error('download_source_bound');}const end=fs.fstatSync(fd);if(at!==s.size||s.dev!==end.dev||s.ino!==end.ino||s.size!==end.size||s.mtimeMs!==end.mtimeMs||s.ctimeMs!==end.ctimeMs)throw new Error('download_source_changed');raw=buffer.subarray(0,at);}finally{fs.closeSync(fd);}
+            if(crypto.createHash('sha256').update(raw).digest('hex')!=='6745b668d5d6418cb6b8021e05d73eaeaf35d4ada3e3e3b2f76aaae71d1c2757') throw new Error('download_source_pin');
+            const checked=new Module(source);checked.filename=source;checked.paths=[];checked._compile(raw.toString('utf8'),source);
+            const result=await checked.exports.download({github,context,destination:path.join(privateDir,'download')});
+            const record=path.join(privateDir,'download.json');fs.writeFileSync(record,JSON.stringify(result),{flag:'wx',mode:0o600});
+            const identity=fs.statSync(privateDir);core.setOutput('identity',JSON.stringify({dev:identity.dev,ino:identity.ino,uid:identity.uid,gid:identity.gid,mode:identity.mode}));core.setOutput('private',privateDir);core.setOutput('record',record);
+      - name: Token-free complete packet DATA intake
+        id: data
+        env:
+          READER_PRIVATE: ${{ steps.download.outputs.private }}
+          READER_DOWNLOAD_RECORD: ${{ steps.download.outputs.record }}
+        run: |
+          python3 -I -S -B - "$GITHUB_WORKSPACE/origins/base" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native/bootstrap.py" "$READER_DOWNLOAD_RECORD" "$READER_PRIVATE" <<'PY'
+          import hashlib,json,os,stat,sys,types
+          from pathlib import Path
+          repo,source,record,private=map(Path,sys.argv[1:])
+          fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+          try:
+              info=os.fstat(fd)
+              if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
+              raw=os.read(fd,65537)
+          finally:os.close(fd)
+          if hashlib.sha256(raw).hexdigest()!='456cffc6d76d39262f76b9bf856020bbbd8df57ed6ea2814f307370051d90190':raise ValueError('bootstrap_source_pin')
+          module=types.ModuleType('_reader_data_bootstrap');module.__file__=str(source);sys.modules[module.__name__]=module
+          exec(compile(raw,str(source),'exec'),module.__dict__)
+          fd=os.open(record,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+          try:
+              info=os.fstat(fd)
+              if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('download_record')
+              metadata=json.loads(os.read(fd,65537))
+          finally:os.close(fd)
+          result=module.prepare_data(repo,metadata['archivePath'],metadata['metadata'],private)
+          out=private/'data.json'
+          with out.open('x') as writer:os.chmod(out,0o600);json.dump(result,writer)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as writer:writer.write('record='+str(out)+'\n')
+          PY
+      - name: One separately admitted reader-only case set
+        env:
+          READER_DATA_RECORD: ${{ steps.data.outputs.record }}
+          READER_PRIVATE_IDENTITY: ${{ steps.download.outputs.identity }}
+          READER_PRIVATE: ${{ steps.download.outputs.private }}
+        run: |
+          sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B - "$GITHUB_WORKSPACE/origins/base" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native/bootstrap.py" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native/wrapper.py" "$READER_DATA_RECORD" "$READER_PRIVATE/result.json" "$READER_PRIVATE_IDENTITY" "$GITHUB_WORKSPACE/origins/bootstrap/scripts/guest-reader-native" <<'PY'
+          import hashlib,json,os,stat,sys,tempfile,types
+          from pathlib import Path
+          base,source,wrapper,data_file,result_file=map(Path,sys.argv[1:6])
+          expected=json.loads(sys.argv[6]);harness_source=Path(sys.argv[7]);module=None
+          output_dir=os.open(result_file.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+          owner=os.fstat(output_dir)
+          if not stat.S_ISDIR(owner.st_mode) or stat.S_IMODE(owner.st_mode)!=0o700 or {'dev':owner.st_dev,'ino':owner.st_ino,'uid':owner.st_uid,'gid':owner.st_gid,'mode':owner.st_mode}!=expected:raise ValueError('output_parent')
+          named=os.stat(result_file.parent,follow_symlinks=False)
+          if (named.st_dev,named.st_ino)!=(owner.st_dev,owner.st_ino):raise ValueError('output_parent_replaced')
+          root=Path(tempfile.mkdtemp(prefix='winter-reader-native-',dir='/run'));os.chmod(root,0o700)
+          try:
+              fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+              try:
+                  info=os.fstat(fd)
+                  if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536:raise ValueError('bootstrap_source')
+                  raw=os.read(fd,65537)
+              finally:os.close(fd)
+              if hashlib.sha256(raw).hexdigest()!='456cffc6d76d39262f76b9bf856020bbbd8df57ed6ea2814f307370051d90190':raise ValueError('bootstrap_source_pin')
+              protected=root/'bootstrap.py'
+              fd=os.open(protected,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+              try:
+                  at=0
+                  while at<len(raw):
+                      n=os.write(fd,raw[at:])
+                      if n<=0:raise ValueError('bootstrap_copy')
+                      at+=n
+                  os.fsync(fd);os.fchmod(fd,0o400)
+              finally:os.close(fd)
+              fd=os.open(protected,os.O_RDONLY|os.O_NOFOLLOW)
+              try:checked=os.read(fd,65537)
+              finally:os.close(fd)
+              if hashlib.sha256(checked).hexdigest()!='456cffc6d76d39262f76b9bf856020bbbd8df57ed6ea2814f307370051d90190':raise ValueError('protected_bootstrap_pin')
+              checked_module=types.ModuleType('_reader_root_bootstrap');checked_module.__file__=str(protected);sys.modules[checked_module.__name__]=checked_module
+              exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module
+              if data_file.parent!=result_file.parent or data_file.name!='data.json':raise ValueError('data_record_path')
+              fd=os.open('data.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=output_dir)
+              try:
+                  info=os.fstat(fd)
+                  if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>1048576:raise ValueError('data_record')
+                  data=json.loads(os.read(fd,1048577))
+              finally:os.close(fd)
+              result=module.run_root(base,root,data,'1f4a4222c91cecd8057eb45f367af24452027737781264d0aeae6a85be37ba7a',wrapper_source=wrapper,harness_source=harness_source)
+              if hashlib.sha256(protected.read_bytes()).hexdigest()!='456cffc6d76d39262f76b9bf856020bbbd8df57ed6ea2814f307370051d90190':raise ValueError('bootstrap_final_pin')
+          except BaseException as error:
+              if module is not None:
+                  result=module.failure_record(error)
+              else:
+                  early=('bootstrap_source','bootstrap_source_pin','bootstrap_copy','protected_bootstrap_pin')
+                  reason=error.args[0] if len(error.args)==1 and type(error.args[0]) is str and error.args[0] in early else 'unclassified'
+                  result={'readerCaseSetPassed':False,'stage':'bootstrap:copy','reason':reason,'exceptionClass':type(error).__name__ if type(error).__name__ in ('ValueError','OSError') else 'Other','errnoSymbol':'unknown','causeClass':'Other','causeReason':'unclassified','causeErrnoSymbol':'unknown','nativeCleanupConfirmed':False,'configEffectProven':False,'vmExecutionVerified':False,'productionActivation':False}
+              fd=os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)
+              try:
+                  payload=json.dumps(result,sort_keys=True).encode()+b'\n'
+                  at=0
+                  while at<len(payload):
+                      n=os.write(fd,payload[at:])
+                      if n<=0:raise ValueError('result_write')
+                      at+=n
+                  os.fsync(fd);os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)
+                  copied=os.fstat(fd)
+                  if copied.st_nlink!=1 or copied.st_uid!=owner.st_uid or stat.S_IMODE(copied.st_mode)!=0o600:raise ValueError('result_identity')
+              finally:os.close(fd)
+              os.close(output_dir)
+              print(json.dumps(module.log_result_projection(result) if module is not None else result,sort_keys=True));raise SystemExit(78) from None
+          fd=os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)
+          try:
+              payload=json.dumps(result,sort_keys=True).encode()+b'\n'
+              at=0
+              while at<len(payload):
+                  n=os.write(fd,payload[at:])
+                  if n<=0:raise ValueError('result_write')
+                  at+=n
+              os.fsync(fd);os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)
+              copied=os.fstat(fd)
+              if copied.st_nlink!=1 or copied.st_uid!=owner.st_uid or stat.S_IMODE(copied.st_mode)!=0o600:raise ValueError('result_identity')
+          finally:os.close(fd)
+          os.close(output_dir)
+          print(json.dumps(module.log_result_projection(result),sort_keys=True))
+          PY
+      - name: Retain only closed experiment result
+        if: always() && steps.download.outputs.private != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reader-only-result-${{ github.run_id }}
+          path: ${{ steps.download.outputs.private }}/result.json
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,15 +1,16 @@
 # Reader-only compile packet — source prerequisite
 
 This new unprivileged builder captures RuntimeSDK 0394, SDK 8603, the four builder source files and only the exact
-SDK19 f6 reader C/header overlay. The main SDK header must equal the overlay header.
+SDK19 reader C, reader dependency-probe C and header overlay (three files, each checked
+against `OVERLAY_SOURCE_SHA256`). The main SDK header must equal the overlay header.
 Source bytes must match the pinned Git trees, and all dependencies and relative
 alias resolutions remain inside the new packet. SDK-family aliases select all six
 captured 0.0.53 source packages; published 0.0.28/global resolution refuses. No
 production manifests, dependency installations, consumer pins or B paths change.
 
 The eventual ordinary Linux ARM64 CLI compiles only the actual private reader
-entry and its native reader launcher, records individual recursive ELF dependency
-files, and never executes an output. It requires official pinned Bun 1.3.14
+entry, its native reader launcher and the native reader dependency probe, records
+individual recursive ELF dependency files, and never executes an output. It requires official pinned Bun 1.3.14
 compiler/base bytes and all four literal autoload-off flags; there is no unsupported
 flag fallback. Empty build cwd/config, no dotenv and closed environment apply.
 Source/data tests inject compiler refusal: **no actual compilation or download has
@@ -93,8 +94,8 @@ The replacement gates are complementary compiler/data measurements:
 Each bounded observation (exit, stdout/stderr hashes, output inventory, malformed
 capture/inventory refusal) is written before semantic refusal. Measurement sources
 and ELF controls live outside the packet and are never admitted or archived as
-executable roles; exactly the reader and its launcher remain admitted compile
-outputs. No output is executed. The first reviewed new job must confirm the exact
+executable roles; exactly the reader, its launcher and the dependency probe remain
+admitted compile outputs. No output is executed. The first reviewed new job must confirm the exact
 source-derived diagnostic envelopes or fail honestly; portable fixtures do not
 establish real compiler behavior. The copied Linux base is rehashed after compiling.
 
@@ -114,7 +115,7 @@ descendant-termination proof is claimed. Inert mock regressions cover these case
 The compile recipe uses gnu11; SDK19's historical full-role object source proof used
 c11. This is a distinct recipe requiring fresh ordinary build review. Native cc1/as/ld
 and compiler-opened headers are not a sealed or measured complete toolchain. Each
-ELF's runtime dependency path list is separate from the union; both-role union stays
+ELF's runtime dependency path list is separate from the union; the three-role union stays
 within the native reader's 32-dependency ceiling. Sysroot absolute symlinks refuse;
 only bounded relative public-library resolution is supported.
 
@@ -166,3 +167,30 @@ same-specifier edges from the same origin must agree. Export condition order is
 pinned to `types`, `bun`, `default`, placing the source bun condition before the
 unconditional default. Staged tsconfig.json/jsconfig.json in importer ancestry
 and nearer family aliases refuse; this helper never models their path overrides.
+
+## Dependency probe (third compiled artifact)
+
+`artifacts/instructionReaderDependencyProbe` is compiled from the overlay's
+`linux-instruction-reader-dependency-probe.c` with the identical `NATIVE_FLAGS` and the
+same single argv builder (`native_command`) as the launcher; only the source and `-o` differ. It
+is a dynamic ELF like the launcher. Its dependency under test is the packet's own pinned libc,
+so there is no static probe: the build refuses a probe without an interpreter, and refuses a
+probe whose recursive library paths are not a subset of the reader's and launcher's, so the
+packet keeps its six libraries. The receipt `commands` gain `nativeProbeCC` beside `nativeCC`.
+
+The probe reuses the one excluded scratch path `artifacts/native.d` sequentially: the launcher
+depfile is read and removed, the probe compile writes it fresh, and the two header observations
+merge into one `systemHeaders` map. A header seen by both compiles with different bytes refuses.
+The scratch stays a single path, so the workflow's exclusion and the inventory's
+`excludedScratch` do not change.
+
+`OVERLAY_SOURCE_SHA256` (C, probe C, header) in `provenance.py` holds the hashes of those three
+files at the frozen agent-sdk head, which is also `OVERLAY_HEAD`: 53082a74 (tree a4a66851). The
+per-file pin check enforces them before any output exists. The compartment C and the header are
+byte-identical to agent-sdk 687b9557; the probe C differs from it only in comments (it now says
+the probe is dynamic against the packet libc). The compile-fixture workflow still checks out the
+earlier overlay ref and moves to `OVERLAY_HEAD` in its own separately approved step; until then a
+compile run would refuse at the overlay head check. Tests inject their own pins the same way they
+inject heads. Like every
+source test, none of them compiles anything, and no test executes the probe or any other output:
+the injected runner only writes inert bytes.

@@ -13,9 +13,16 @@ MAX_DEPENDENCY_BYTES=128*1024*1024
 AUTOLOAD_FLAGS=('--no-compile-autoload-bunfig','--no-compile-autoload-dotenv','--no-compile-autoload-tsconfig','--no-compile-autoload-package-json')
 SDK_HEAD='8603da22d9fe7f1695166891cd29ccd254b1d21e'
 RUNTIME_HEAD='0394b36f674765c942f8db07f009b7ad20787dba'
-OVERLAY_HEAD='f6d88d9a2f8ae15bb50afb98868183ae769e3b11'
+OVERLAY_HEAD='53082a74a98120f5deffa75f04dc306976d75de8'  # agent-sdk cowork/reader-runtime-compatibility, tree a4a66851f800d6a768eb60a7e698b3ddf5f60ad6
 C_SOURCE='packages/runtime/src/guest/linux-instruction-reader-compartment.c'
+PROBE_SOURCE='packages/runtime/src/guest/linux-instruction-reader-dependency-probe.c'
 HEADER='packages/runtime/src/guest/linux-compartment.h'
+# The overlay sources' hashes (the compartment C, the reader-v2 dependency probe C and the shared header) at OVERLAY_HEAD.
+# The compartment C and the header are byte-identical to agent-sdk 687b9557; the probe C differs from it only in comments.
+OVERLAY_SOURCE_SHA256={
+    C_SOURCE:'28aa279d6ecb560424fe24bf8ccc0893ffc61cfbb9ba6ba72d38c66b7b655893',
+    PROBE_SOURCE:'77ce6f1cdc02cef122eb2806e9df06514fdc7a2f9191d107a897df62d045b20a',
+    HEADER:'92fef7c0708a23b1e930c5b2560dae6bef27294dfd682346e69d35c0484b967d'}
 READER_ENTRY='src/guest/instruction-reader-entry.ts'
 SDK_PACKAGES={'winter-agent-sdk':'sdk','winter-agent-runtime':'runtime','winter-provider-catalog':'provider-catalog','winter-provider-runtime':'provider-runtime','winter-conformance':'conformance','winter-provider-conformance':'provider-conformance'}
 BASE={'version':'1.3.14','target':'bun-linux-arm64','archiveSha256':'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b','executableSha256':'37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086'}

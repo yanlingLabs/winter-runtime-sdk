@@ -163,7 +163,7 @@ class CasesTests(unittest.TestCase):
         self.assertNotIn('close-after-proof', fx.events)
         self.assertTrue(fx.h.retained)
 
-    def test_ancillary_truncation_recovers_and_closes_every_installed_fd(self):
+    def test_ancillary_truncation_retains_every_installed_fd(self):
         class InertSocket:
             def recvmsg(self, *_):
                 return b'H', [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
@@ -171,8 +171,9 @@ class CasesTests(unittest.TestCase):
         closed = []
         with patch.object(cases.socket, 'MSG_CMSG_CLOEXEC', 0x40000000, create=True), \
              patch.object(cases.os, 'close', side_effect=closed.append):
-            with self.assertRaises(cases.Refusal): cases.recv_rights(InertSocket(), 5)
-        self.assertEqual(closed, [70, 71])
+            with self.assertRaises(cases.CaseUncertain) as caught: cases.recv_rights(InertSocket(), 6)
+        self.assertEqual(closed, [])
+        self.assertEqual(caught.exception.handles, (70, 71))
 
     def test_source_preserves_actual_branch_topology_and_no_fake_debt_completion(self):
         source = Path(cases.__file__).read_text()
@@ -190,7 +191,7 @@ class CasesTests(unittest.TestCase):
         self.assertLess(segments.index('sendmsg'), segments.index('os.close(op.input_fd)'))
         self.assertIn('os.waitpid(debt.pid, os.WNOHANG)', segments)
 
-    def test_received_rights_close_failure_attempts_all_and_retains_failed_fd(self):
+    def test_received_rights_refusal_never_attempts_implicit_close(self):
         class InertSocket:
             def recvmsg(self, *_):
                 return b'H', [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
@@ -202,9 +203,9 @@ class CasesTests(unittest.TestCase):
         with patch.object(cases.socket, 'MSG_CMSG_CLOEXEC', 0x40000000, create=True), \
              patch.object(cases.os, 'close', side_effect=close):
             with self.assertRaises(cases.CaseUncertain) as caught:
-                cases.recv_rights(InertSocket(), 5)
-        self.assertEqual(attempted, [70, 71])
-        self.assertEqual(caught.exception.handles, (70,))
+                cases.recv_rights(InertSocket(), 6)
+        self.assertEqual(attempted, [])
+        self.assertEqual(caught.exception.handles, (70, 71))
 
     def test_actual_producer_exit_zero_is_required(self):
         fx = InertEffects('parent-exit'); fx.reaps = cases.Reaps(78 << 8, 9, 9)
@@ -237,6 +238,8 @@ class CasesTests(unittest.TestCase):
         h = InertEffects('parent-exit').h
         h.control, h.transport = InertSocket('control'), InertSocket('transport')
         h.init_pidfd = 25
+        h.bootstrap_error = 27
+        h.received_handles = [22, 23, 24, 21, 25, 27, 28]
         h.subreaper_changed = True
         libc = SimpleNamespace(prctl=lambda *_: 0)
         def close(fd):
@@ -245,7 +248,7 @@ class CasesTests(unittest.TestCase):
         with patch.object(cases.os, 'close', side_effect=close), \
              patch.object(cases.ctypes, 'CDLL', return_value=libc):
             with self.assertRaises(cases.Refusal): cases.LinuxEffects().close_confirmed(h)
-        self.assertEqual(attempted, ['control', 'transport', 22, 23, 24, 21, 25, 20])
+        self.assertEqual(attempted, ['control', 'transport', 22, 23, 24, 21, 25, 20, 27, 28])
         self.assertTrue(h.retained)
         self.assertFalse(h.subreaper_changed)
         self.assertEqual(h.failed_close_handles, [h.control, 22])
@@ -260,7 +263,7 @@ class CasesTests(unittest.TestCase):
         # Inert readiness and EOF: no os fd is read, opened, polled or closed.
         with patch.object(cases.os, 'set_blocking'), \
              patch.object(cases.os, 'read', return_value=b''), \
-             patch.object(cases.select, 'select', side_effect=lambda read, *_: (list(read), [], [])), \
+             patch.object(cases, 'poll_ready', side_effect=lambda read, **_: (list(read), [])), \
              patch.object(cases, 'recv_rights', return_value=(b'', [])), \
              patch.object(cases.time, 'monotonic', return_value=0):
             observation = cases.LinuxEffects().observe(h, 3)

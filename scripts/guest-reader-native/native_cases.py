@@ -7,15 +7,18 @@ The intermediate producer uses the unchanged sealed-root bootstrap and ENV.
 """
 import array
 import ctypes
+import hashlib
 import os
-import select
+import re
+import selectors
 import socket
 import struct
 import time
 from dataclasses import dataclass
 
 from producer import (Registry, Refusal, IO_MAX, parse_receipt, require,
-                      root_linux, start_registered, validate_init_pidfd)
+                      root_linux, start_registered, validate_init_pidfd,
+                      BOOTSTRAP_ERRNOS, decode_bootstrap_record, view_contract_sha256)
 
 KINDS = ('same-owner', 'unexpected-parent', 'parent-exit')
 NEGATIVE_SECONDS = 3.0  # From BEFORE fork, strictly before C's 4000ms deadline.
@@ -32,10 +35,22 @@ class Handles:
     stdin: int | None = None
     stdout: int | None = None
     stderr: int | None = None
+    bootstrap_error: int | None = None
     init_pid: int | None = None
     init_pidfd: int | None = None
     retained: bool = True
     subreaper_before: int = 0
+    producer_owned: bool = False
+    launcher_identity_validated: bool = False
+    initial_control: object = None
+    preinit_diagnostics: object = None
+    postinit_diagnostics: object = None
+    fixture_stderr_capture: object = None
+    postinit_report_family: object = None
+    received_handles: object = None
+    preinit_launcher_wait_status: int | None = None
+    preinit_producer_wait_status: int | None = None
+    dependency_probe: object = None  # Closed record of run_probe_case, success or failure.
 
 
 @dataclass(frozen=True)
@@ -48,6 +63,8 @@ class Observation:
     stdout: bytes
     stderr: bytes
     native_wait_status: int | None = None  # Only an actual decoded R packet.
+    bootstrap_eof: bool = False
+    bootstrap_record_observed: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +110,8 @@ def run_case(kind, operation_factory, request=b'', *, effects=None):
     started = fx.now()
     deadline = started + (6.0 if kind == 'same-owner' else NEGATIVE_SECONDS)
     handles = fx.launch(kind, operation_factory, deadline)
+    observed = None
+    reaps = None
     try:
         fx.receive_handles(handles, deadline)
         input_bytes = 0
@@ -110,6 +129,9 @@ def run_case(kind, operation_factory, request=b'', *, effects=None):
         observed = fx.observe(handles, deadline)
         require(observed.launcher_ready and observed.stdout_eof and observed.stderr_eof
                 and observed.control_eof, 'independent launcher and pipe teardown')
+        if handles.bootstrap_error is not None:
+            require(observed.bootstrap_eof and not observed.bootstrap_record_observed,
+                    'bootstrap pipe drained without failure record')
         if kind == 'unexpected-parent':
             require(handles.init_pid is None and handles.init_pidfd is None
                     and observed.native_wait_status is None and observed.stdout == b'',
@@ -142,10 +164,26 @@ def run_case(kind, operation_factory, request=b'', *, effects=None):
     except BaseException as error:
         # Do not close deliberate keepalives, synthesize terminal receipts, or
         # lose pidfds on uncertain cleanup. External owner must inspect handles.
+        if kind == 'same-owner' and observed is not None and reaps is not None:
+            try:
+                if type(observed.stderr) is bytes and len(observed.stderr)<=16384:
+                    handles.fixture_stderr_capture=observed.stderr
+                handles.postinit_diagnostics = postinit_diagnostics(observed, reaps)
+            except BaseException: handles.postinit_diagnostics = {'available': False}
+        # Separate from the diagnostics above and independent of the wrapper's
+        # scrub: one closed enum derived from the same complete capture.
+        try: handles.postinit_report_family = report_family_for_case(handles, kind, observed, reaps)
+        except BaseException:
+            try: handles.postinit_report_family = 'classification_error'
+            except BaseException: pass  # Original refusal/debt is never replaced.
+        if kind != 'unexpected-parent' and handles.init_pid is None \
+                and hasattr(fx, 'diagnose_preinit'):
+            try: fx.diagnose_preinit(handles, deadline)
+            except BaseException: pass  # Original refusal/debt is never replaced.
         raise CaseUncertain(handles, error) from error
 
 
-def recv_rights(sock, maximum):
+def recv_rights(sock, maximum, owner=None, packet_attribute=None):
     """Recover all delivered rights before checking envelope/truncation."""
     data, ancillary, flags, _ = sock.recvmsg(32, socket.CMSG_SPACE(32 * 4),
                                           socket.MSG_CMSG_CLOEXEC)
@@ -155,25 +193,470 @@ def recv_rights(sock, maximum):
             if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
                 values = array.array('i'); values.frombytes(raw[:len(raw) // 4 * 4])
                 rights.extend(values)
+        if owner is not None:
+            owner.received_handles = list(owner.received_handles or []) + rights
+            if packet_attribute is not None:
+                setattr(owner, packet_attribute, control_observation(data, rights))
         require(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC), 'case receipt truncation')
         require(len(rights) <= maximum and all(level == socket.SOL_SOCKET
                 and kind == socket.SCM_RIGHTS and len(raw) % 4 == 0
                 for level, kind, raw in ancillary), 'case ancillary envelope')
         return data, rights
     except BaseException as error:
-        failed = []
-        for fd in rights:
-            try: os.close(fd)
-            except OSError: failed.append(fd)
-        if failed:
-            # Error owns these opaque received descriptors, not a success claim.
-            raise CaseUncertain(tuple(failed), error) from error
+        if owner is None and rights:
+            # No implicit closure/discharge on malformed envelopes. All installed
+            # rights remain visible to the actual caller, including extra rights.
+            raise CaseUncertain(tuple(rights), error) from error
         raise
+
+
+def control_observation(data, rights):
+    require(type(data) is bytes, 'control observation bytes')
+    tag = 'EOF' if data == b'' else 'I' if data[:1] == b'I' else 'R' if data[:1] == b'R' else 'other'
+    return {'packetObserved': True, 'byteCount': len(data), 'tag': tag,
+            'rightsCount': len(rights), 'eof': data == b''}
+
+
+# Exact static require/perror labels of the compartment C (63 literal + 3 passed through reader_expect and
+# reader_entropy_identity = 66) and its header (4: bind, bind flags, fixture path, seccomp), extracted at agent-sdk
+# 687b9557 and re-extracted at 53082a74 (C sha256 28aa279d...5893 and header sha256 92fef7c0...967d at both).
+# 57 were audited earlier; 13 are new in the
+# probe-era compartment (the /proc, /dev, mount and descriptor inventories). test_bootstrap pins the full list as a literal.
+STDERR_LABELS = ('bind', 'bind flags', 'fixture path', 'reader Root peer', 'reader admitted clone',
+    'reader bounding capabilities', 'reader close-on-exec', 'reader created entropy identity',
+    'reader descriptor inventory', 'reader descriptor kind', 'reader directory mountpoint',
+    'reader empty readonly cwd', 'reader entropy node', 'reader explicit pipe',
+    'reader explicit pipe-only envelope', 'reader file mountpoint', 'reader final entropy identity',
+    'reader immutable exec', 'reader immutable file', 'reader independent primary gid',
+    'reader independent uid', 'reader inherited descriptor', 'reader init process id',
+    'reader monitor control', 'reader monitor control copy', 'reader monitor death', 'reader monitor init',
+    'reader monitor init copy', 'reader monitor originals', 'reader monotonic deadline',
+    'reader mount attach', 'reader mount inventory', 'reader namespace init', 'reader namespace kill',
+    'reader namespace pidfd', 'reader namespaces', 'reader no new privileges', 'reader parent pidfd',
+    'reader pipe descriptor', 'reader pipe flags', 'reader private device directory', 'reader private proc',
+    'reader private propagation', 'reader private temporary files', 'reader proc cwd identity',
+    'reader proc root identity', 'reader proc root inventory', 'reader readonly device directory',
+    'reader readonly skeleton', 'reader receipt type', 'reader recursive mount flags',
+    'reader resource ceiling', 'reader root', 'reader seccomp', 'reader selected directory',
+    'reader selected workspace group', 'reader service death', 'reader service pidfd',
+    'reader setup monitor death', 'reader shared identity', 'reader skeleton', 'reader skeleton ancestor',
+    'reader source identity', 'reader surviving pipe', 'reader view ancestor', 'reader view cwd',
+    'reader view ownership', 'reader view root', 'reader zero capabilities', 'seccomp')
+
+
+def classify_stderr(raw):
+    require(type(raw) is bytes and len(raw) <= 4096, 'diagnostic stderr bound')
+    result = {'byteCount': len(raw), 'classification': 'empty' if not raw else 'unrecognized',
+              'label': 'unknown', 'errno': 0}
+    if not raw.endswith(b'\n') or raw.count(b'\n') != 1:
+        return result
+    parts = raw[:-1].split(b': ', 1)
+    if len(parts) != 2:
+        return result
+    for label in STDERR_LABELS:
+        if parts[0] != label.encode('utf-8'):
+            continue
+        for code in BOOTSTRAP_ERRNOS:
+            if parts[1] == os.strerror(code).encode('utf-8'):
+                return {**result, 'classification': 'audited_perror', 'label': label, 'errno': code}
+        # Preserve the audited step even when libc's errno text has no closed
+        # mapping. The remainder is never returned or rendered.
+        return {**result, 'classification': 'audited_label', 'label': label}
+    return result
+
+
+
+def postinit_diagnostics(observed, reaps):
+    """Fixture-only closed DATA from captured bytes/reaps. No effects or cleanup."""
+    from control import wait_exit_code
+    native=observed.native_wait_status
+    if native is not None:wait_exit_code(native)
+    wait_exit_code(reaps.launcher_status);wait_exit_code(reaps.producer_status)
+    stdout,stderr=observed.stdout,observed.stderr
+    require(type(stdout) is bytes and len(stdout)<=IO_MAX and type(stderr) is bytes
+            and len(stderr)<=16384,'post-init bounded captures')
+    framing=('empty' if not stdout else 'unterminated' if not stdout.endswith(b'\n')
+             else 'one_lf' if stdout.count(b'\n')==1 else 'multiple_lf')
+    classified=(classify_stderr(stderr) if len(stderr)<=4096 else
+                {'classification':'over_classifier_bound','label':'unknown','errno':0})
+    return {'available':True,'nativeWaitStatus':native,
+            'launcherWaitStatus':reaps.launcher_status,'producerWaitStatus':reaps.producer_status,
+            'stdoutBytes':len(stdout),'stdoutSha256':hashlib.sha256(stdout).hexdigest(),
+            'stdoutFraming':framing,'stderrBytes':len(stderr),
+            'stderrSha256':hashlib.sha256(stderr).hexdigest(),
+            'stderrClassification':classified['classification'],
+            'stderrLabel':classified['label'],'stderrErrno':classified['errno']}
+
+
+# ---------------------------------------------------------------------------
+# Reader dependency probe line, grammar `reader-v2`. DATA in, closed scalars out.
+#
+#   probe=reader-v2 stack_rc=N stack_bounds=B stack_contains=B urandom_open=N urandom_read=B
+#   getrandom=N proc_list=N proc_numeric=N proc_root=B canary_open=N\n
+#
+# N is 0|[1-9][0-9]{0,9}, at most 4294967295; B is [01]. Fixed key order, single spaces, exactly
+# one trailing LF, ASCII only, at most 256 bytes, matched with fullmatch over the whole buffer.
+# Cross-field rules (anything else is `unknown`): stack_rc!=0 implies bounds=0 and contains=0;
+# contains=1 implies bounds=1; urandom_open!=0 implies urandom_read=0; proc_list!=0 implies
+# proc_numeric=0; proc_numeric is 0..65535. The line states are `valid` (the whole grammar),
+# `absent` (an empty buffer) and `unknown` (everything else, including any exception).
+#
+# The raw line is never stored. The errno-valued fields (stack_rc, urandom_open, getrandom,
+# proc_list, canary_open) become symbols: 0 is `OK`, a Linux number in the closed table below is
+# its symbol, any other number is `unknown`. The table is the LINUX guest numbering (the probe
+# runs on Linux), never the host `errno` module, so a macOS test host reports the same symbols
+# as the hosted runner. Its symbol set equals bootstrap.ERRNO_SYMBOLS except EOPNOTSUPP, which
+# shares number 95 with ENOTSUP, reported as ENOTSUP as everywhere else in the harness.
+#
+# A probe line is untrusted runtime text. It is NOT a cause, NOT a reader success and NOT
+# evidence that Bun runs: the probe exercises only the pinned libc.
+# ---------------------------------------------------------------------------
+PROBE_MAX_LINE = 256
+PROBE_FIELDS = (('stack_rc', 'stackRc', 'n'), ('stack_bounds', 'stackBounds', 'b'),
+                ('stack_contains', 'stackContains', 'b'), ('urandom_open', 'urandomOpen', 'n'),
+                ('urandom_read', 'urandomRead', 'b'), ('getrandom', 'getrandom', 'n'),
+                ('proc_list', 'procList', 'n'), ('proc_numeric', 'procNumeric', 'n'),
+                ('proc_root', 'procRoot', 'b'), ('canary_open', 'canaryOpen', 'n'))
+PROBE_ERRNO_FIELDS = ('stackRc', 'urandomOpen', 'getrandom', 'procList', 'canaryOpen')
+PROBE_LINE_STATES = ('valid', 'absent', 'unknown')
+PROBE_CANARY_STATES = ('not_visible', 'visible', 'unknown', 'not_checked')
+PROBE_ERRNO_OK = 'OK'
+PROBE_ERRNO_UNKNOWN = 'unknown'
+PROBE_LINUX_ERRNO_SYMBOLS = {
+    1: 'EPERM', 2: 'ENOENT', 3: 'ESRCH', 4: 'EINTR', 5: 'EIO', 6: 'ENXIO', 7: 'E2BIG', 8: 'ENOEXEC',
+    9: 'EBADF', 10: 'ECHILD', 11: 'EAGAIN', 12: 'ENOMEM', 13: 'EACCES', 14: 'EFAULT', 16: 'EBUSY',
+    17: 'EEXIST', 18: 'EXDEV', 19: 'ENODEV', 20: 'ENOTDIR', 21: 'EISDIR', 22: 'EINVAL', 23: 'ENFILE',
+    24: 'EMFILE', 26: 'ETXTBSY', 28: 'ENOSPC', 30: 'EROFS', 32: 'EPIPE', 36: 'ENAMETOOLONG',
+    38: 'ENOSYS', 40: 'ELOOP', 75: 'EOVERFLOW', 80: 'ELIBBAD', 87: 'EUSERS', 95: 'ENOTSUP',
+    104: 'ECONNRESET', 110: 'ETIMEDOUT'}
+_PROBE_NUMBER = rb'(0|[1-9][0-9]{0,9})'
+_PROBE_BIT = rb'([01])'
+_PROBE_LINE = re.compile(b'probe=reader-v2 ' + b' '.join(
+    key.encode('ascii') + b'=' + (_PROBE_NUMBER if kind == 'n' else _PROBE_BIT)
+    for key, _, kind in PROBE_FIELDS) + b'\n')
+
+
+def probe_errno_symbol(number):
+    """OK for 0, the closed Linux symbol for a known number, otherwise `unknown`."""
+    return PROBE_ERRNO_OK if number == 0 else PROBE_LINUX_ERRNO_SYMBOLS.get(number, PROBE_ERRNO_UNKNOWN)
+
+
+def probe_outside_canary(line, fields, init_bound):
+    """The two B3 halves. The raw numbers are already symbols; no content is added.
+
+    process: `visible` when more than one numeric /proc entry was listed; `not_visible` only for
+    a valid line whose /proc listing succeeded and held exactly the namespace's own pid 1 AND the
+    case held the validated init binding; `unknown` otherwise. file: the canary open reported
+    ENOENT (`not_visible`), succeeded (`visible`, an escape) or anything else (`unknown`)."""
+    if line != 'valid' or type(fields) is not dict:
+        return {'process': 'unknown', 'file': 'unknown'}
+    if fields['procNumeric'] > 1: process = 'visible'
+    elif (init_bound is True and fields['procList'] == PROBE_ERRNO_OK
+            and fields['procNumeric'] == 1 and fields['procRoot'] is True): process = 'not_visible'
+    else: process = 'unknown'
+    canary = fields['canaryOpen']
+    return {'process': process,
+            'file': 'not_visible' if canary == 'ENOENT' else 'visible' if canary == PROBE_ERRNO_OK else 'unknown'}
+
+
+def _probe_unknown():
+    return {'line': 'unknown', 'fields': None, 'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
+
+
+def parse_probe_line(raw, *, init_bound=False):
+    """Closed scalars for one complete stdout capture. Never raises, never returns content."""
+    try:
+        if type(raw) is bytes and raw == b'':
+            return {'line': 'absent', 'fields': None,
+                    'outsideCanary': {'process': 'unknown', 'file': 'unknown'}}
+        if type(raw) is not bytes or len(raw) > PROBE_MAX_LINE: raise ValueError
+        matched = _PROBE_LINE.fullmatch(raw)
+        if matched is None: raise ValueError
+        numbers = [int(group) for group in matched.groups()]
+        if any(number > 0xFFFFFFFF for number in numbers): raise ValueError
+        (stack_rc, bounds, contains, urandom_open, urandom_read,
+         _getrandom, proc_list, proc_numeric, _proc_root, _canary) = numbers
+        if stack_rc != 0 and (bounds or contains): raise ValueError
+        if contains and not bounds: raise ValueError
+        if urandom_open != 0 and urandom_read: raise ValueError
+        if proc_list != 0 and proc_numeric != 0: raise ValueError
+        if proc_numeric > 65535: raise ValueError
+        fields = {}
+        for (_, name, kind), number in zip(PROBE_FIELDS, numbers):
+            fields[name] = (number == 1) if kind == 'b' else (
+                probe_errno_symbol(number) if name in PROBE_ERRNO_FIELDS else number)
+        return {'line': 'valid', 'fields': fields,
+                'outsideCanary': probe_outside_canary('valid', fields, init_bound)}
+    except Exception:
+        return _probe_unknown()
+
+
+# ---------------------------------------------------------------------------
+# Closed crash-report-family classifier. DATA in, one literal of REPORT_FAMILIES
+# out. It reads only the complete bounded same-owner stderr capture, never decodes
+# it, and returns nothing derived from its content: no line, token, address, path,
+# URL, count or hash. A report is untrusted runtime text; the label is NOT an
+# authenticated reached-phase receipt and is NOT a cause.
+#
+# A family is recognised only when the WHOLE buffer is exactly one report of the
+# fixed grammar below, line by line, ending where the grammar ends. Anything else
+# (extra/missing/reordered line, second report, ANSI, CR, NUL, non-ASCII, trailing
+# bytes) is `unknown`. A buffer that stops inside a grammar, after the family's
+# opening frame was complete, is `incomplete`. Any exception is
+# `classification_error`. Sources (public, read-only; line numbers are those files):
+#   Bun   oven-sh/bun tag bun-v1.3.14 (0d9b296a) src/crash_handler/crash_handler.zig,
+#         src/crash_handler/CPUFeatures.zig, src/analytics/analytics.zig,
+#         src/bun_core/Global.zig, src/bun_core/env.zig, src/options_types/CommandTag.zig
+#   WTF   oven-sh/WebKit 5488984d Source/WTF/wtf/Assertions.cpp, StackTrace.cpp, StackTrace.h
+#   ld.so bminor/glibc ef321e23 (2.39) elf/dl-catch.c, elf/rtld.c, elf/dl-version.c,
+#         elf/dl-lookup.c, sysdeps/generic/ldsodefs.h
+# ---------------------------------------------------------------------------
+REPORT_FAMILIES = ('bun_report_shape', 'webkit_assertion_shape', 'loader_error_shape',
+                   'unknown', 'incomplete', 'classification_error')
+_PRINT = r'\x20-\x7e'
+
+
+def _lit(text): return ('lit', text.encode('ascii'))
+def _cls(body, low=1, high=1): return ('cls', body.encode('ascii'), low, high)
+def _opt(*parts): return ('any', (parts, ()))
+def _any(*options): return ('any', tuple(options))
+def _rep(parts, low, high): return ('rep', parts, low, high)
+
+
+def _full(parts):
+    """Regex for exactly the strings of the element sequence."""
+    out = b''
+    for part in parts:
+        if part[0] == 'lit': out += re.escape(part[1])
+        elif part[0] == 'cls': out += b'[' + part[1] + b']{%d,%d}' % part[2:]
+        elif part[0] == 'any': out += b'(?:' + b'|'.join(_full(option) for option in part[1]) + b')'
+        else: out += b'(?:' + _full(part[1]) + b'){%d,%d}' % part[2:]
+    return out
+
+
+def _stem(part):
+    """Regex for every prefix (including complete and empty) of one element."""
+    if part[0] == 'lit':
+        out = b''
+        for byte in reversed(part[1]): out = b'(?:' + re.escape(bytes((byte,))) + out + b')?'
+        return out
+    if part[0] == 'cls': return b'[' + part[1] + b']{0,%d}' % part[3]
+    if part[0] == 'any': return b'(?:' + b'|'.join(_prefix(option) for option in part[1]) + b')'
+    return b'(?:' + _full(part[1]) + b'){0,%d}' % (part[3] - 1) + _prefix(part[1])
+
+
+def _prefix(parts):
+    """Regex for every prefix of the sequence: a partial element, or a complete
+    element followed by a prefix of the rest."""
+    if not parts: return b''
+    return b'(?:' + _stem(parts[0]) + b'|' + _full(parts[:1]) + _prefix(parts[1:]) + b')'
+
+
+class _Line:
+    """One LF-free line of a report: the whole-line regex and its prefix regex."""
+    def __init__(self, *parts):
+        self.full = re.compile(_full(parts))
+        self.stem = re.compile(_prefix(parts))
+
+
+def _line(*parts): return ('line', _Line(*parts))
+def _maybe(*parts): return ('block', (_Line(*parts),))
+def _block(*lines): return ('block', tuple(_Line(*parts) for parts in lines))
+def _run(factory, high, low=0): return ('run', tuple(_Line(*factory(i)) for i in range(1, high + 1)), low)
+def _last(*parts): return ('last', _Line(*parts))
+
+
+def _better(first, second):
+    for state in ('full', 'incomplete'):
+        if state in (first, second): return state
+    return None
+
+
+def _walk(items, at, lines, row, tail):
+    """'full' when the buffer is exactly one report, 'incomplete' when it stops
+    inside one (lines[row:] are complete lines, `tail` the unterminated rest)."""
+    if at == len(items): return 'full' if row == len(lines) and not tail else None
+    kind, body = items[at][0], items[at][1]
+    if kind == 'last':  # Text that the source emits without a closing LF.
+        if row != len(lines): return None
+        if body.full.fullmatch(tail): return _walk(items, at + 1, lines, row, b'')
+        return 'incomplete' if tail and body.stem.fullmatch(tail) else None
+    if kind == 'line' or kind == 'block':
+        specs = (body,) if kind == 'line' else body
+        count = 0
+        while count < len(specs) and row + count < len(lines) and specs[count].full.fullmatch(lines[row + count]): count += 1
+        found = None
+        if count == len(specs): found = _walk(items, at + 1, lines, row + count, tail)
+        elif row + count == len(lines):  # The buffer ends inside this line or block.
+            if tail: found = 'incomplete' if specs[count].stem.fullmatch(tail) else None
+            elif kind == 'line' or count: found = 'incomplete'
+        if kind == 'block' and found != 'full': found = _better(found, _walk(items, at + 1, lines, row, tail))
+        return found
+    specs, low = body, items[at][2]  # A run of consecutively numbered lines.
+    count = 0
+    while count < len(specs) and row + count < len(lines) and specs[count].full.fullmatch(lines[row + count]): count += 1
+    found = None
+    for taken in range(count, low - 1, -1):
+        found = _better(found, _walk(items, at + 1, lines, row + taken, tail))
+        if found == 'full': return found
+    if row + count == len(lines) and count < len(specs) and (specs[count].stem.fullmatch(tail) if tail else count < low):
+        found = _better(found, 'incomplete')
+    return found
+
+
+# --- bun_report_shape: Bun's crash banner on Linux, plain (non-ANSI) stderr. --------------
+# Written by crashHandler (crash_handler.zig:260-261, 301-336, 383-456) and printMetadata
+# (986-1096), release build, `bun.Environment.os == .linux`, enable_ansi_colors_stderr false.
+# That flag defaults to true (output.zig:425) until Output.Source.Stdio.init runs (main.zig:57)
+# and then follows the stderr TTY (output.zig:381-408) unless FORCE_COLOR is set (output.zig:
+# 103-119): a crash in the pre-init window, or under FORCE_COLOR, is coloured (ESC bytes) and
+# is `unknown`; the harness's pipe and six-variable environment give the plain form after init.
+# Version scope: the grammar is the 1.3.x banner shape, derived at tag bun-v1.3.14. It scopes by
+# SHAPE, not by version number (a `Bun v1.4.2` line in this shape would classify); the 1.3.x
+# claim rests on that derivation plus the four real goldens in test_report_family.py (1.3.1,
+# 1.3.2, Canary 1.3.11, 1.3.14). 1.4.x prints `RSS: 14.82 MB` with a space, a 9-hex sha and a
+# blank line before `Elapsed:` (and reasons like `panic: abort() called`, which are free text
+# and would pass on their own): its banner is `unknown`, so a Bun bump needs the grammar
+# re-derived. Also `unknown`: Debug builds, macOS/Windows/FreeBSD/Android/WSL, native-plugin
+# and libuv message blocks, "multiple threads are crashing", "panicked during a panic", and
+# any text before the banner (such as c-bindings.cpp:26-41's x64 `warn: CPU lacks AVX support`
+# preamble, written to the same stderr before the crash).
+_DEC = _cls('0-9', 1, 20)
+_SIZE = (_cls('0-9', 1, 12), _opt(_lit('.'), _cls('0-9', 1, 3)), _cls('A-Za-z', 1, 4), _cls(' ', 0, 4))  # {B:<3.2}, :1072-1080
+_SEMVER = (_cls('0-9', 1, 4), _lit('.'), _cls('0-9', 1, 4), _lit('.'), _cls('0-9', 1, 4))
+
+
+def _flag_subsets(names):  # CPUFeatures.format (CPUFeatures.zig): set flags in field order, space separated.
+    return tuple((_lit(' '.join(name for bit, name in enumerate(names) if mask >> bit & 1)),) for mask in range(1, 1 << len(names)))
+
+
+_BANNER = _line(_lit('=' * 60))                                                   # :260
+_BUN_VERSION = _line(_lit('Bun '), _opt(_lit('Canary ')), _lit('v'), *_SEMVER,     # :850-864, Global.zig:20-27, env.zig:102-110
+                     _opt(_lit('-canary.'), _cls('0-9', 1, 8)), _opt(_lit(' ('), _cls('0-9a-f', 1, 8), _lit(')')),
+                     _lit(' Linux '), _any((_lit('arm64'),), (_lit('x64'),)), _opt(_lit(' (baseline)')))
+_KERNEL = _line(_lit('Linux Kernel v'), _DEC, _lit('.'), _DEC, _lit('.'), _DEC, _lit(' | '),  # :1009, :1013
+                _any((_lit('glibc v'), _cls('0-9A-Za-z._+-', 0, 32)), (_lit('musl'),)))
+_CPU = _maybe(_lit('CPU: '), _any(*_flag_subsets(('neon', 'fp', 'aes', 'crc32', 'atomics', 'sve')),  # :1029-1031
+                                  *_flag_subsets(('sse42', 'popcnt', 'avx', 'avx2', 'avx512'))))
+_ARGS = _line(_lit('Args: "'), _cls(_PRINT, 0, 600), _lit('"'), _opt(_lit('...')))   # :1033-1043; quoted tokens, 196-char budget
+_FEATURES = _maybe(_lit('Features: '), _rep((_cls('A-Za-z0-9_.:-', 1, 64), _opt(_lit('('), _DEC, _lit(')')), _lit(' ')), 1, 128))  # analytics.zig:129-146
+_BUILTINS = _maybe(_lit('Builtins: '), _rep((_lit('"'), _cls('A-Za-z0-9_:/.-', 1, 64), _lit('" ')), 1, 160))  # analytics.zig:148-161
+_USAGE = _block((_lit('Elapsed: '), _DEC, _lit('ms | User: '), _DEC, _lit('ms | Sys: '), _DEC, _lit('ms')),  # :1066-1083
+                (_lit('RSS: '), *_SIZE, _lit(' | Peak: '), *_SIZE, _lit(' | Commit: '), *_SIZE, _lit(' | Faults: '), _DEC,
+                 _opt(_lit(' | Machine: '), *_SIZE)))
+_BLANK = _line()
+_NO_AVX = _maybe(_lit('CPU lacks AVX support. Please consider upgrading to a newer CPU.'))  # :1091-1094 (x64 only)
+_PANIC = _line(_lit('panic'), _opt(_lit('(main thread)')), _lit(': '), _cls(_PRINT, 0, 1024))  # :306-332; reason text is free (@panic message)
+# A message that itself ends in LF (Output.panic("...\n"), output.zig:535; panicImpl
+# crash_handler.zig:816) prints that LF and then :332's own, so one empty line may follow the
+# panic line. After stdio init, at tag bun-v1.3.14: bun.zig:1606, shell/interpreter.zig:1642 and
+# jsc/web_worker.zig:432. (main.zig:54's "Failed to initialize argv" runs before Stdio.init at
+# main.zig:57, so that banner is coloured and `unknown`.) This is the only variant: still one
+# line of printable ASCII, no embedded LF.
+_PANIC_LF = _maybe()
+_ACTION = _maybe(_lit('Crashed while '), _any((_lit('parsing '),), (_lit('visiting '),), (_lit('printing '),),
+                 (_lit('loading native module: '),)), _cls(_PRINT, 1, 4096))                # :336, Action.format :130-162
+_OH_NO = _line(_lit('oh no: Bun has crashed. This indicates a bug in Bun, not your code.'))  # :383-386, :424
+_OH_NO_MEMORY = _line(_lit('oh no: Bun has run out of memory.'))                               # :413-415, reason == .out_of_memory
+_SEND = (_BLANK, _line(_lit("To send a redacted crash report to Bun's team,")),            # :424-430
+         _line(_lit('please file a GitHub issue using the link below:')), _BLANK)
+_REPORT_URL = _line(_lit(' https://bun.report/'), *_SEMVER, _lit('/'), _cls('lBL'), _cls('A-Za-z_'),  # :438-446, :1358-1370
+                    _cls('12'), _any((_lit('unknown'),), (_cls('0-9a-f', 7, 7),)), _cls('A-Za-z0-9+/_-', 1, 1024))
+_BUN_HEAD = (_BANNER, _BUN_VERSION, _KERNEL, _CPU, _ARGS, _FEATURES, _BUILTINS, _USAGE, _BLANK, _NO_AVX)
+_BUN_TAIL = (*_SEND, _REPORT_URL, _BLANK)                                                     # :448, :454
+_BUN_COMMIT = re.compile(rb'={60}\n')
+
+# --- webkit_assertion_shape: WTF assertion text (Assertions.cpp:257-292, 348-357). --------
+# `ASSERTION FAILED: <expr>` / `SHOULD NEVER BE REACHED` (:275-282) or the message form
+# (:284-292), then the call site "file(line) : function" (:265), then WTF_BACKTRACE frames
+# "%-3d %p name" numbered 1..N (StackTrace.cpp:162, StackTrace.h:149; at most 31 shown,
+# Assertions.cpp:315) or the unterminated "no stacktrace available" (:357). The source has no
+# end marker after the last frame, so a cut exactly at a frame boundary is a shorter valid
+# trace; the harness's complete bounded capture, not this grammar, rules truncation out there.
+# In release, CRASH() is std::abort() (Assertions.h:353), which Bun does not catch. A
+# developer-mode WTFCrash is followed by a Bun banner: two reports, `unknown`.
+_CALLSITE = _line(_cls(r'\x20-\x27\x2a-\x7e', 1, 1024), _lit('('), _cls('0-9', 1, 9), _lit(') : '), _cls(_PRINT, 1, 2048))
+_FRAMES = _run(lambda number: (_lit('%-3d ' % number), _any((_lit('0x'), _cls('0-9a-f', 1, 16)), (_lit('(nil)'),)),
+                               _lit(' '), _cls(_PRINT, 0, 2048)), 31)
+_NO_STACK = _last(_lit('no stacktrace available'))
+_ASSERT = _line(_lit('ASSERTION FAILED: '), _cls(_PRINT, 0, 4096))
+_NEVER = _line(_lit('SHOULD NEVER BE REACHED'))
+_EXPRESSION = _line(_cls(_PRINT, 1, 4096))  # The stringified assertion that follows a formatted message (:290).
+_WEBKIT_COMMIT = re.compile(rb'(?:ASSERTION FAILED: [\x20-\x7e]{0,4096}|SHOULD NEVER BE REACHED)\n')
+
+# --- loader_error_shape: ld.so fatal text (dl-catch.c:79-91; rtld.c:2422-2427). -----------
+# "PROG: OCCASION: [OBJECT: ]ERROR[: STRERROR]\n" with the occasion literals of dl-catch.c:85,
+# dl-lookup.c:813 and dl-version.c:147, or one or more rtld.c "PROG: OBJECT: version `V'
+# not found (required by REQUIRER)" lines (dl-version.c:142-144). PROG is rtld_progname or
+# "<program name unknown>" (ldsodefs.h:179). One report is one such line group, nothing else.
+# Bounds: at most 16 missing-version lines; PROG is [A-Za-z0-9_./+@%-]{1,255} (no space or colon);
+# the remainder of an occasion line is printable ASCII, 1-2048 bytes. Other ld.so fatal shapes
+# (e.g. "cannot execute binary file", ELF-class, `--list`/`LD_DEBUG` output, weak-version lines,
+# or a program name outside that charset) are `unknown`.
+_PROG = _any((_lit('<program name unknown>'),), (_cls('A-Za-z0-9_./+@%-', 1, 255),))
+_LOADER = _line(_PROG, _lit(': '), _any((_lit('error while loading shared libraries'),), (_lit('symbol lookup error'),),
+                (_lit('version lookup error'),)), _lit(': '), _cls(_PRINT, 1, 2048))
+_VERSIONS = _run(lambda _: (_PROG, _lit(': '), _any((_lit('<main program>'),), (_cls('A-Za-z0-9_./+@%:-', 1, 255),)),
+                            _lit(": version `"), _cls('A-Za-z0-9_.-', 1, 64), _lit("' not found (required by "),
+                            _cls('A-Za-z0-9_./+@%-', 1, 255), _lit(')')), 16, 1)
+_LOADER_COMMIT = re.compile(rb'(?:<program name unknown>|[A-Za-z0-9_./+@%-]{1,255}): (?:error while loading shared libraries|symbol lookup error|version lookup error): ')
+_VERSIONS_COMMIT = re.compile(rb'[^\n]*: version `')
+
+_GRAMMAR = (
+    ('bun_report_shape', (
+        (_BUN_HEAD + (_PANIC, _PANIC_LF, _ACTION, _OH_NO) + _BUN_TAIL, _BUN_COMMIT),
+        (_BUN_HEAD + (_ACTION, _OH_NO_MEMORY) + _BUN_TAIL, _BUN_COMMIT))),
+    ('webkit_assertion_shape', tuple(
+        (head + (_CALLSITE, tail), _WEBKIT_COMMIT)
+        for head in ((_ASSERT,), (_NEVER,), (_ASSERT, _EXPRESSION))
+        for tail in (_FRAMES, _NO_STACK))),
+    ('loader_error_shape', (((_LOADER,), _LOADER_COMMIT), ((_VERSIONS,), _VERSIONS_COMMIT))),
+)
+
+
+def classify_report_family(raw):
+    """One literal of REPORT_FAMILIES for one complete bounded stderr capture."""
+    try:
+        if type(raw) is not bytes or len(raw) > 16384: raise TypeError
+        *lines, tail = raw.split(b'\n')
+        verdicts = []
+        for family, productions in _GRAMMAR:
+            best = None
+            for items, commit in productions:
+                state = _walk(items, 0, lines, 0, tail)
+                if state == 'incomplete' and not commit.match(raw): state = None
+                best = _better(best, state)
+            if best is not None: verdicts.append((family, best))
+        if len(verdicts) != 1: return 'unknown'  # No report, or two families claim the same bytes.
+        family, state = verdicts[0]
+        return family if state == 'full' else 'incomplete'
+    except BaseException:
+        return 'classification_error'
+
+
+def report_family_for_case(handles, kind, observed, reaps):
+    """Family of the retained same-owner capture, or why there is none."""
+    if kind != 'same-owner': return 'not_same_owner_failure'
+    capture = handles.fixture_stderr_capture
+    if observed is None or reaps is None or capture is None: return 'capture_absent'
+    return classify_report_family(capture)
+
+
+def poll_ready(readers=(), writers=(), timeout=0):
+    """Readiness without select()'s FD_SETSIZE ceiling. No ownership is inferred."""
+    with selectors.DefaultSelector() as poll:
+        for fd in readers:
+            poll.register(fd, selectors.EVENT_READ)
+        for fd in writers:
+            poll.register(fd, selectors.EVENT_WRITE)
+        events = poll.select(timeout)
+        return ([key.fd for key, mask in events if mask & selectors.EVENT_READ],
+                [key.fd for key, mask in events if mask & selectors.EVENT_WRITE])
 
 
 def ready(fd, deadline):
     left = deadline - time.monotonic()
-    require(left > 0 and select.select([fd], [], [], left)[0], 'case absolute deadline')
+    require(left > 0 and poll_ready([fd], timeout=left)[0], 'case absolute deadline')
 
 
 class LinuxEffects:
@@ -216,7 +699,7 @@ class LinuxEffects:
                     debt, op = start_registered(Registry(), lambda debt:
                         factory(debt, ancestor_pair if pair is not None else None))
                     descriptors = array.array('i', [op.control.fileno(), op.input_fd,
-                        op.output_fd, op.error_fd, op.pidfd])
+                        op.output_fd, op.error_fd, op.pidfd, op.bootstrap_error_fd])
                     require(child_transport.sendmsg([b'H' + struct.pack('<I', debt.pid)],
                         [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptors)]) == 5,
                         'actual handle transfer')
@@ -238,6 +721,7 @@ class LinuxEffects:
                     os._exit(78)
             h.producer_pid = pid
             h.producer_pidfd = os.pidfd_open(pid, 0)
+            h.producer_owned = True  # Actual os.fork result and its held pidfd.
             child_transport.close(); child_transport = None
             if pair is not None:
                 for sock in pair: sock.close()
@@ -250,20 +734,20 @@ class LinuxEffects:
 
     def receive_handles(self, h, deadline):
         ready(h.transport, deadline)
-        data, rights = recv_rights(h.transport, 5)
+        data, rights = recv_rights(h.transport, 6, owner=h)
         # Retain every received fd even if later type/PID checks fail.
-        h.received_handles = rights
-        require(len(data) == 5 and data[:1] == b'H' and len(rights) == 5,
+        require(len(data) == 5 and data[:1] == b'H' and len(rights) == 6,
                 'actual child handle envelope')
         h.launcher_pid = struct.unpack('<I', data[1:])[0]
         require(h.launcher_pid > 1, 'launcher pid')
         h.control = socket.socket(fileno=rights[0])
-        h.stdin, h.stdout, h.stderr, h.launcher_pidfd = rights[1:]
+        h.stdin, h.stdout, h.stderr, h.launcher_pidfd, h.bootstrap_error = rights[1:]
         require(os.readlink('/proc/self/fd/' + str(h.launcher_pidfd)) == 'anon_inode:[pidfd]',
                 'launcher pidfd type')
         # This pidfd originated in the trusted producer; validate its live target
         # and exact PPid too, before accepting any I.
         self._launcher_identity(h)
+        h.launcher_identity_validated = True
 
     def _launcher_identity(self, h):
         def bounded(path, maximum):
@@ -282,13 +766,98 @@ class LinuxEffects:
 
     def receive_init(self, h, deadline):
         ready(h.control, deadline)
-        data, rights = recv_rights(h.control, 1)
+        data, rights = recv_rights(h.control, 1, owner=h, packet_attribute='initial_control')
         h.pending_rights = rights
         require(data == b'I' and len(rights) == 1, 'actual initial I required')
         h.init_pidfd = rights[0]
         h.init_pid = validate_init_pidfd(h.init_pidfd, h.launcher_pid)
-        require(not select.select([h.init_pidfd, h.launcher_pidfd], [], [], 0)[0],
+        require(not poll_ready([h.init_pidfd, h.launcher_pidfd])[0],
                 'live init and launcher before case trigger')
+
+    def diagnose_preinit(self, h, deadline):
+        """Closed observations only. No receipt synthesis or cleanup discharge.
+
+        Reaping is restricted to the actual fork owner and its corroborated
+        launcher, after pidfd readiness. The unchanged W actor does the launcher
+        waitpid; this observer alone owns the actual producer waitpid.
+        """
+        d = {'controlObserved': False, 'controlBytes': 0, 'controlTag': 'unknown',
+             'controlRights': 0, 'controlEof': False, 'stderrBytes': 0,
+             'stderrEof': False, 'nativeClassification': 'empty',
+             'nativeLabel': 'unknown', 'nativeErrno': 0, 'bootstrapBytes': 0,
+             'bootstrapRecordObserved': False, 'bootstrapStep': 'unknown',
+             'bootstrapErrno': 0, 'bootstrapEof': False,
+             'bootstrapClassification': 'empty', 'launcherExitCode': None,
+             'producerExitCode': None, 'diagnosticsComplete': False}
+        h.preinit_diagnostics = d
+        if h.initial_control is not None:
+            p = h.initial_control
+            d.update(controlObserved=p['packetObserved'], controlBytes=p['byteCount'],
+                     controlTag=p['tag'], controlRights=p['rightsCount'], controlEof=p['eof'])
+        # Partial/malformed H attribution never permits a wait query or proc read.
+        if not (h.producer_owned and h.launcher_identity_validated
+                and h.init_pid is None and h.bootstrap_error is not None): return
+        captures = {h.stderr: bytearray(), h.bootstrap_error: bytearray()}
+        for fd in captures: os.set_blocking(fd, False)
+        pending = set(captures) | {h.launcher_pidfd}
+        sent_wait = False
+        while pending:
+            left = deadline - self.now()
+            if left <= 0: break
+            readable = poll_ready(list(pending), timeout=left)[0]
+            if not readable: break
+            for fd in readable:
+                if fd in captures:
+                    limit = 4096 if fd == h.stderr else 8
+                    chunk = os.read(fd, limit + 1 - len(captures[fd]))
+                    if not chunk:
+                        pending.remove(fd)
+                        d['stderrEof' if fd == h.stderr else 'bootstrapEof'] = True
+                    else:
+                        captures[fd].extend(chunk)
+                        if len(captures[fd]) > limit: pending.remove(fd)
+                    if fd == h.stderr:
+                        d['stderrBytes'] = len(captures[fd])
+                        result = classify_stderr(bytes(captures[fd])) if len(captures[fd]) <= limit else {'classification': 'overflow', 'label': 'unknown', 'errno': 0}
+                        d.update(nativeClassification=result['classification'], nativeLabel=result['label'], nativeErrno=result['errno'])
+                    else:
+                        d['bootstrapBytes'] = len(captures[fd])
+                        if len(captures[fd]) > limit:
+                            d['bootstrapClassification'] = 'overflow'
+                        elif d['bootstrapEof']:
+                            try:
+                                record = decode_bootstrap_record(bytes(captures[fd]))
+                                d.update(bootstrapRecordObserved=record['recordObserved'],
+                                         bootstrapStep=record['step'], bootstrapErrno=record['errno'],
+                                         bootstrapClassification='record' if record['recordObserved'] else 'empty')
+                            except Refusal: d['bootstrapClassification'] = 'invalid'
+                elif fd == h.launcher_pidfd:
+                    pending.remove(fd)
+                    if deadline - self.now() <= 0: return
+                    require(h.transport.send(b'W') == 1, 'diagnostic owned launcher wait query')
+                    sent_wait = True; pending.add(h.transport.fileno())
+                elif fd == h.transport.fileno() and sent_wait:
+                    data, rights = recv_rights(h.transport, 0, owner=h)
+                    require(not rights and len(data) == 5 and data[:1] == b'W',
+                            'diagnostic actual producer wait response')
+                    status = struct.unpack('<I', data[1:])[0]
+                    from control import wait_exit_code
+                    wait_exit_code(status)
+                    h.preinit_launcher_wait_status = status
+                    d['launcherExitCode'] = os.waitstatus_to_exitcode(status)
+                    pending.remove(fd); pending.add(h.producer_pidfd)
+                elif fd == h.producer_pidfd:
+                    waited, status = os.waitpid(h.producer_pid, os.WNOHANG)
+                    require(waited == h.producer_pid, 'diagnostic actual owned producer reap')
+                    from control import wait_exit_code
+                    wait_exit_code(status)
+                    h.preinit_producer_wait_status = status
+                    d['producerExitCode'] = os.waitstatus_to_exitcode(status)
+                    pending.remove(fd)
+        d['diagnosticsComplete'] = (d['stderrEof'] and d['bootstrapEof']
+            and d['launcherExitCode'] is not None and d['producerExitCode'] is not None
+            and d['nativeClassification'] != 'overflow'
+            and d['bootstrapClassification'] not in ('overflow', 'invalid'))
 
     def verify_keepalive(self, h):
         import fcntl
@@ -299,7 +868,7 @@ class LinuxEffects:
                 'duplicated control and stdin write endpoints alive')
 
     def exit_parent(self, h, deadline):
-        require(not select.select([h.init_pidfd, h.launcher_pidfd], [], [], 0)[0],
+        require(not poll_ready([h.init_pidfd, h.launcher_pidfd])[0],
                 'both native processes live at parent-exit trigger')
         require(h.transport.send(b'X') == 1, 'parent exit command')
         ready(h.producer_pidfd, deadline)
@@ -309,35 +878,39 @@ class LinuxEffects:
         at = 0
         while at < len(request):
             left = deadline - self.now()
-            require(left > 0 and select.select([], [h.stdin], [], left)[1], 'request deadline')
+            require(left > 0 and poll_ready(writers=[h.stdin], timeout=left)[1], 'request deadline')
             try: count = os.write(h.stdin, request[at:])
             except BlockingIOError: continue
             require(count > 0, 'request progress'); at += count
-        os.close(h.stdin); h.stdin = None  # Reader's exact framing is EOF JSON.
+        os.close(h.stdin)
+        if h.received_handles is not None:
+            h.received_handles = [fd for fd in h.received_handles if fd != h.stdin]
+        h.stdin = None  # Reader's exact framing is EOF JSON.
         return at
 
     def observe(self, h, deadline):
         captures = {h.stdout: bytearray(), h.stderr: bytearray()}
+        if h.bootstrap_error is not None: captures[h.bootstrap_error] = bytearray()
         for fd in captures: os.set_blocking(fd, False)
         h.control.setblocking(False)
-        pending = {h.stdout, h.stderr, h.control.fileno(), h.launcher_pidfd}
+        pending = set(captures) | {h.control.fileno(), h.launcher_pidfd}
         if h.init_pidfd is not None: pending.add(h.init_pidfd)
         eof, exited, native_wait = set(), set(), None
         while pending:
             left = deadline - self.now()
             require(left > 0, 'negative teardown before C deadline')
-            for fd in select.select(list(pending), [], [], left)[0]:
+            for fd in poll_ready(list(pending), timeout=left)[0]:
                 if fd in (h.launcher_pidfd, h.init_pidfd):
                     exited.add(fd); pending.remove(fd)
                 elif fd in captures:
-                    chunk = os.read(fd, 65536)
+                    chunk = os.read(fd, 9 - len(captures[fd]) if fd == h.bootstrap_error else 65536)
                     if not chunk: eof.add(fd); pending.remove(fd)
                     else:
-                        limit = IO_MAX if fd == h.stdout else 16384
+                        limit = 8 if fd == h.bootstrap_error else IO_MAX if fd == h.stdout else 16384
                         require(len(captures[fd]) + len(chunk) <= limit, 'case pipe bound')
                         captures[fd].extend(chunk)
                 else:
-                    data, rights = recv_rights(h.control, 1)
+                    data, rights = recv_rights(h.control, 1, owner=h)
                     if rights:
                         h.unexpected_rights = rights
                         raise Refusal('unexpected native rights after I or pre-init negative')
@@ -347,9 +920,17 @@ class LinuxEffects:
                         require(kind == 'reaped' and h.init_pidfd is not None
                                 and native_wait is None, 'only actual terminal R')
                         native_wait = status
+        bootstrap_eof, bootstrap_record = False, False
+        if h.bootstrap_error is not None:
+            bootstrap_eof = h.bootstrap_error in eof
+            record = decode_bootstrap_record(bytes(captures[h.bootstrap_error]))
+            h.bootstrap_observation = {**record, 'eof': bootstrap_eof,
+                                       'byteCount': len(captures[h.bootstrap_error])}
+            bootstrap_record = record['recordObserved']
         return Observation(h.launcher_pidfd in exited, h.init_pidfd in exited,
                            h.stdout in eof, h.stderr in eof, h.control.fileno() in eof,
-                           bytes(captures[h.stdout]), bytes(captures[h.stderr]), native_wait)
+                           bytes(captures[h.stdout]), bytes(captures[h.stderr]), native_wait,
+                           bootstrap_eof, bootstrap_record)
 
     def reap(self, h, kind, observed, deadline):
         init_status = None
@@ -364,7 +945,7 @@ class LinuxEffects:
         else:
             require(h.transport.send(b'W') == 1, 'reap command after pidfd readiness')
             ready(h.transport, deadline)
-            data, rights = recv_rights(h.transport, 0)
+            data, rights = recv_rights(h.transport, 0, owner=h)
             require(not rights and len(data) == 5 and data[:1] == b'W', 'actual producer reap')
             launcher_status = struct.unpack('<I', data[1:])[0]
         ready(h.producer_pidfd, deadline)
@@ -379,14 +960,21 @@ class LinuxEffects:
     def close_confirmed(self, h):
         # Deliberate keepalives survive until both readiness/reap and EOF checks.
         failures = []
+        known = {fd for fd in (h.stdin, h.stdout, h.stderr, h.launcher_pidfd,
+                 h.init_pidfd, h.producer_pidfd, h.bootstrap_error) if fd is not None}
+        socket_fds = {sock.fileno() for sock in (h.control, h.transport)
+                       if hasattr(sock, 'fileno')}
         for sock in (h.control, h.transport):
             try: sock.close()
             except OSError: failures.append(sock)
         for fd in (h.stdin, h.stdout, h.stderr, h.launcher_pidfd,
-                   h.init_pidfd, h.producer_pidfd):
+                   h.init_pidfd, h.producer_pidfd, h.bootstrap_error):
             if fd is not None:
                 try: os.close(fd)
                 except OSError: failures.append(fd)
+        for fd in set(h.received_handles or []) - known - socket_fds:
+            try: os.close(fd)
+            except OSError: failures.append(fd)
         h.failed_close_handles = failures
         libc = ctypes.CDLL(None, use_errno=True)
         libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
@@ -396,3 +984,99 @@ class LinuxEffects:
         h.subreaper_changed = False
         require(not failures, 'case descriptor close failures retained')
         h.retained = False
+
+
+# ---------------------------------------------------------------------------
+# The dependency-probe case. A SEPARATE function: run_case and LinuxEffects are unchanged and
+# unaware of it (the unchanged effects table is reused through the `effects` seam). Sequence:
+# receive_handles -> receive_init -> NO request is sent -> observe -> reap -> close_confirmed.
+#
+# Teardown predicates raise CaseUncertain exactly as the reader cases do. Content predicates
+# (the native wait status, an empty stderr, the stdout grammar) are only RECORDED and never
+# raise: a probe that crashed, wrote the wrong line or wrote to stderr still hands a closed
+# record to the wrapper. The record never feeds readerCaseSetPassed.
+# ---------------------------------------------------------------------------
+PROBE_KIND = 'dependency-probe'
+PROBE_SECONDS = 6.0  # Same envelope as the same-owner reader case.
+
+
+@dataclass(frozen=True)
+class ProbeEvidence:
+    record: dict
+    elapsed_seconds: float
+    observation: Observation
+    reaps: Reaps
+    descriptors_closed: bool
+    config_effect_proven: bool = False
+
+
+def build_probe_record(observed, reaps, *, init_bound, view_contract, complete):
+    """The closed dependencyProbe record. Pure DATA, no effect, never raises, no raw content.
+
+    `observed`/`reaps` may be None (a failure before them): then nothing was checked. `complete` is True only
+    when the case passed every teardown predicate. "Exactly one line" needs stdout EOF, and a case that did not
+    finish proves nothing, so without both the line and both canary halves are `unknown`, never `not_visible`."""
+    parsed = {'line': 'unknown', 'fields': None, 'outsideCanary': {'process': 'not_checked', 'file': 'not_checked'}}
+    observation, family = {'available': False}, 'capture_absent'
+    if observed is not None:
+        try: parsed = parse_probe_line(observed.stdout, init_bound=init_bound)
+        except Exception: parsed = _probe_unknown()
+        if complete is not True or getattr(observed, 'stdout_eof', None) is not True: parsed = _probe_unknown()
+        try: family = classify_report_family(observed.stderr)
+        except Exception: family = 'classification_error'
+        if reaps is not None:
+            try: observation = postinit_diagnostics(observed, reaps)
+            except Exception: observation = {'available': False}
+    return {'ran': True, 'line': parsed['line'], 'fields': parsed['fields'], 'observation': observation,
+            'stderrFamily': family, 'outsideCanary': parsed['outsideCanary'],
+            'viewContractSha256': view_contract,
+            'readerSuccessImplied': False, 'bunCompatibilityProven': False}
+
+
+def run_probe_case(operation_factory, *, effects=None, exec_environment=None):
+    """Run the dependency probe through the reader's launch envelope. Returns ProbeEvidence.
+
+    The operation is built by the factory inside the forked producer child, so this parent never holds it. The
+    record's viewContractSha256 is therefore computed from the fixed recipe plus the exec environment the caller
+    hands the operation (default: the selected one), which NativeOperation accepts only if it is the closed one."""
+    view_contract = view_contract_sha256(exec_environment)
+    fx = effects if effects is not None else LinuxEffects()
+    started = fx.now()
+    deadline = started + PROBE_SECONDS
+    handles = fx.launch(PROBE_KIND, operation_factory, deadline)
+    observed = None
+    reaps = None
+    init_bound = False
+    try:
+        fx.receive_handles(handles, deadline)
+        fx.receive_init(handles, deadline)
+        require(type(handles.init_pid) is int and handles.init_pid > 1
+                and handles.init_pidfd is not None, 'validated init required')
+        init_bound = True
+        # No request: the probe never reads stdin, and nothing is written or closed early.
+        observed = fx.observe(handles, deadline)
+        require(observed.launcher_ready and observed.stdout_eof and observed.stderr_eof
+                and observed.control_eof, 'independent launcher and pipe teardown')
+        if handles.bootstrap_error is not None:
+            require(observed.bootstrap_eof and not observed.bootstrap_record_observed,
+                    'bootstrap pipe drained without failure record')
+        require(observed.init_ready, 'independent init pidfd teardown')
+        reaps = fx.reap(handles, PROBE_KIND, observed, deadline)
+        require(reaps.producer_status == 0, 'producer actually reaped exit zero')
+        elapsed = fx.now() - started
+        require(0 <= elapsed < deadline - started, 'bounded case before native deadline')
+        fx.close_confirmed(handles)
+        require(not handles.retained, 'confirmed descriptor discharge')
+        elapsed = fx.now() - started
+        require(0 <= elapsed < deadline - started, 'descriptor discharge before case deadline')
+        record = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract, complete=True)
+        handles.dependency_probe = record
+        return ProbeEvidence(record, elapsed, observed, reaps, True)
+    except BaseException as error:
+        # Keep whatever was observed; never close keepalives or lose pidfds on uncertainty.
+        try: handles.dependency_probe = build_probe_record(observed, reaps, init_bound=init_bound, view_contract=view_contract, complete=False)
+        except BaseException: pass  # Original refusal/debt is never replaced.
+        if handles.init_pid is None and hasattr(fx, 'diagnose_preinit'):
+            try: fx.diagnose_preinit(handles, deadline)
+            except BaseException: pass  # Original refusal/debt is never replaced.
+        raise CaseUncertain(handles, error) from error

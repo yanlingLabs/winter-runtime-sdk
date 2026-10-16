@@ -7,14 +7,30 @@ slice. Actual effects require a newly reviewed external parent on GitHub-hosted
 The Mac two-disk, native-egress and GUI holds remain unchanged. No admission from
 the earlier B fixture is reused.
 
-`parent.py` validates the entire externally pinned 1472-leaf reader packet and
-holds its descriptors. It then creates eight independent copies: the reader,
-launcher and six explicit packet libraries. Files and view ancestors become
-Root-owned `0555`, except the private view destination `0700`. The launch parent
+`parent.py` validates the entire externally pinned reader packet and holds its
+descriptors. The leaf count is a measured value of the pinned packet, not a design
+constant: the earlier two-artifact packet had 1472 leaves, and compile run 38715669708's
+three-artifact packet, which the pin now names, has 1474 (it adds the dependency probe's C
+source leaf and the probe artifact leaf).
+`parent.py` then creates nine independent copies: the reader, launcher, dependency
+probe and six explicit packet libraries (three artifacts and six libraries, up from
+eight copies). It also creates one tenth leaf itself and never copies it: the outside
+canary `winter-outside-canary`, created exclusively (`O_EXCL|O_NOFOLLOW`) with the fixed
+content `NEVER-READER-OUTSIDE-CANARY\n`, Root-owned `0444` (not `0400`, so a leaked
+view would let the reader uid open it instead of masking the leak with EACCES), at the
+TOP of the launch root: `/winter-outside-canary` once the producer has chrooted. It is
+part of the exact leaf set, the root directory's exact child set and the post-case
+recheck, and a pre-existing entry at that name refuses. Copies and view ancestors become
+Root-owned `0555`, except the canary `0444` and the private view destination `0700`. The launch parent
 must itself be Root-owned `0700` under protected Root ancestry. There is no
 runner-library discovery or fallback, writable sealed runtime descriptor, or
 import of captured project code. DATA intake modes are not execution authority.
-The full packet capture needs 1629 descriptors; the actual parent preflights
+The capture of the 1474-leaf three-artifact packet holds 1604 descriptors for the packet itself
+(1462 regular files, 140 directories and 2 controls) plus the ancestor descriptors of the tree, pin
+and inventory paths, which grow with the venue's path depth. An offline `capture_packet` on the
+rehydrated real packet held about 1630 in all (1631 at a 10-component tree path, 1635 at 14), so the
+total is not an invariant. The earlier 1472-leaf packet's 1629 was measured the same way. The real
+guard is the parent's `descriptor_need = leaves + dirs + 2·path_parts + 64`: the actual parent preflights
 only its own soft limit within a fixed allowed bound before capture.
 
 `producer.py` registers one debt before effects and uses that same object for
@@ -59,6 +75,8 @@ control and stdin writer endpoints alive in the observer until actual init and
 monitor pidfd readiness and adopted reaps, within three seconds from before fork
 (before C's four-second deadline). Negative observations never invent `R` or
 complete producer debt. Uncertain case handles remain available to their owner.
+The dependency-probe case (below) is a separate function beside them: it runs first and is
+never one of the reader cases.
 
 Portable validation is ordinary temporary DATA and injected operation tables:
 
@@ -81,3 +99,423 @@ Atomic per-root attribution of racing source imports, tool-readable canonical
 generation replay, cold/child continuity and the full guided guest turn remain
 unimplemented. No personal memory, credentials, provider, production activation,
 release or consumer pin is enabled.
+
+The first hosted attempt (38559323552 at da51ed68) failed after successful
+acquisition and complete DATA intake. Its retained result reports Uncertain /
+ValueError with no finer cause or cleanup proof; it is not reader execution
+success. The old admitted branch is frozen. The successor uses scalable readiness
+for the many held capture descriptors. A high-FD DATA reproduction establishes the
+old select() defect, without proving that it caused the hosted failure.
+
+Successor failure observations contain only a closed stage, error class, literal
+reason and allowlisted errno symbol. The reason tuple is mechanically generated
+from literal require/Refusal/ValueError and exception-super constructor arguments
+in the seven externally reviewed modules (plus fixed inline workflow literals);
+computed messages remain unclassified. Tests compare the static tuple to that AST
+inventory. A retained source lease tracks capture/copy/load and the case
+run/verify/recheck/close phase, without changing uncertainty or cleanup outcomes.
+The five harness modules come explicitly from the reviewed successor source
+checkout; the compile DATA pin, acquisition and intake remain pinned to merged
+4d5dfcec. Artifact, C, runtime roles, libraries and downloader are unchanged.
+Fresh source/whole-chain review and a new one-run admission are required; the
+failed attempt grants no retry, profile activation, guided turn or VM proof.
+
+The next SOURCE successor preserves both failed hosted attempts and adds a
+registered CLOEXEC exec-error pipe. The fixed eight-byte record contains only a
+closed bootstrap step index and errno; the child writes it on pre-exec refusal
+and exits 78. The writer never enters C argv or survives successful exec. EOF alone
+also follows process death and is not exec proof. The intermediate H packet now
+transfers exactly six descriptors: control, stdin writer, stdout reader, stderr
+reader, launcher pidfd and bootstrap-error reader. Normal observations drain this
+extra pipe within the original deadline; a failure record cannot become success.
+
+Pre-I failure observations retain control packet size/tag/rights/EOF, bounded
+4 KiB stderr classified only by the pinned C/header's exact static require labels
+and closed errno text, and only actually reaped producer/launcher statuses. No raw
+stderr or bootstrap bytes appear in result.json. The diagnostic projection accepts
+an exact bounded typed schema; unknown or malformed snapshots remain unavailable.
+No synthetic R, reset of uncertainty, changed deadline or cleanup success follows.
+The C/table audit corrected three nested-call literals before this source freeze;
+C, the compiled packet, libraries and acquisition/downloader are unchanged.
+Another hosted attempt requires exact source/whole-chain review and fresh one-run
+admission; no retry or activation is granted by these SOURCE changes.
+
+
+Diagnostic errno coverage includes the fixed Linux exec/FD/mount error codes used
+by this source recipe. A one-line, exact audited C label remains `audited_label`
+when its errno text has no closed mapping; the text is discarded. Numeric native
+errno 0 is interpreted with `nativeClassification`: `empty` has no error line,
+`audited_label` has unmapped text, and `audited_perror` matched the fixed errno
+renderer (including code 0). Linux errno 95 projects explicitly to `ENOTSUP`.
+For bootstrap observations, `recordObserved:false` with errno 0 means no record;
+`recordObserved:true` with errno 0 means an observed record with unknown errno.
+Neither means that exec or cleanup succeeded. The correction changes no deadline,
+case oracle, C bytes or compiled artifact.
+
+The unpublished 19d mount-identity proposal below is superseded and was never run.
+That SOURCE proposal removes Python's pre-exec NEWNS/unshare and
+propagation mount only. The sealed nine-file loader chroot (plus the Root canary leaf), C peer checks,
+C detached clones then NEWNS/private propagation, UID/filter/limits and all case
+oracles remain unchanged. Before chroot, every tree-clone filesystem descriptor
+(reader/source/shared/six libraries) plus sealed root/launcher must return ordinary
+STATX_MNT_ID in a bounded current mountinfo snapshot. The socket is internal sockfs,
+not a filesystem clone input; its existing C peer/shape guards remain independent.
+Two snapshots must match; equality does not rule out transient changes between reads. There is no unsupported
+statx, missing-mask, unique-ID or pathname fallback. Failure emits the appended
+closed bootstrap step `mount_identity` (index 10); existing step numbers are stable.
+
+Kernel basis: Linux v6.12's [check_mnt and detached clone path](https://github.com/torvalds/linux/blob/v6.12/fs/namespace.c#L906)
+compare an ordinary supplied mount with the current namespace; `open_detached_copy`
+passes through `__do_loopback`, which can return EINVAL when that check fails.
+[Namespace copying](https://github.com/torvalds/linux/blob/v6.12/fs/namespace.c#L3699)
+clones mounts and updates filesystem root/cwd references, leaving earlier file
+references attached to their old mount objects. This explains the SOURCE defect;
+it is an inference for the hosted run, not a complete measured causal proof.
+[statx implementation](https://github.com/torvalds/linux/blob/v6.12/fs/stat.c#L231)
+returns the supplied path mount's ordinary ID for this mask. The
+[UAPI layout](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/stat.h#L94)
+places the mask at byte 0 and mount ID at byte 0x90 in a 256-byte structure.
+
+Portable regressions model old descriptor IDs versus copied namespace IDs, test
+actual child-bootstrap ordering with every privileged operation replaced, verify
+all supplied filesystem roles, and inject bounded statx/mountinfo results/failures.
+They execute no mount, namespace, chroot, helper or compiled packet. Runtime
+compatibility and the namespace hypothesis require a freshly reviewed hosted run.
+All old experiment branches remain frozen; no retrospective cleanup claim follows.
+
+
+The reopened-mount SOURCE successor instead creates Python NEWNS while still on
+real `/`, makes real `/` recursively private, and nonrecursively binds the sealed
+loader directory onto itself. It reopens the 11 filesystem inputs from canonical
+protected paths derived solely from the sealed root and fixture. Every ancestor
+is opened nofollow and checked Root-owned/nonwritable to other identities. Each
+new descriptor must be distinct from original targets and match the already
+hash-validated held input's dev/inode/type/uid/gid/mode/nlink/size/mtime/ctime and
+readonly access; no additional 99 MiB rehash or host-library fallback occurs.
+Ordinary mount IDs must belong to current mountinfo, and the loader root's
+STATX_ATTR_MOUNT_ROOT must be explicitly supported and set. Only then are new
+FDs installed onto original numbers, followed by sealed chroot and unchanged C
+exec. Internal sockets/pidfds are never reopened; neither `/proc/self/fd` nor
+pathname aliases can replace these comparisons. Newly acquired FDs get one close
+attempt on failure; close uncertainty is retained, with no unmount/repair claim.
+
+[Linux propagation checks](https://github.com/torvalds/linux/blob/v6.12/fs/namespace.c#L2544)
+require a mountpoint. Chrooting into an ordinary directory alone does not supply
+one; the self-bind plus explicit attribute check addresses that separate source
+precondition. Earlier descriptor-mismatch causality remains unmeasured. Matching
+before/after mountinfo snapshots report endpoint equality only, not absence of
+transient changes. All C/artifact/deadline/case predicates remain unchanged.
+Steps 11 `loader_bind` and 12 `reopen_inputs` append to stable existing indices.
+Source/injected success is not hosted execution, cleanup, boot or activation proof.
+
+The post-init diagnostic SOURCE successor adds only scalar observations on a
+same-owner failure after both existing Observation and Reaps were captured. It
+performs no new IO, waits, closure or cleanup. Raw validated terminal16-bit native,
+launcher and producer wait statuses preserve normal exits versus signals/core bit;
+null native status means missing actual R and is never replaced by zero. Existing
+bounded captures supply full SHA256/byte counts and closed stdout LF framing.
+The unchanged stderr classifier handles at most4096 bytes; valid captures above
+that through the unchanged16384-byte limit report over_classifier_bound. No raw
+content, path, PID, FD or object is attached or printed. Diagnostic/classifier/
+projection failure reports available:false while preserving cause/debt/proof flags.
+These hashes and lengths are ONLY for disposable fixed fixture data: never reuse
+this diagnostic for real guidance, private instructions or personal memory.
+The original success predicates, deadlines, C/artifact and close ordering remain
+unchanged. Source review and new execution admission remain separate.
+
+
+Fixture-only PUBLIC stderr successor (source, no run admission)
+
+The failed D78 attempt 38637458454 remains frozen, failed and consumed. This
+successor does not diagnose its signal 5/core-bit observation or confirm cleanup.
+Only the existing same-owner failure path after captured Observation and Reaps
+retains its bounded stderr bytes in the exception-owned handles. No new IO,
+wait, process, cancellation, discharge, oracle, limit or deadline is introduced.
+
+The hosted wrapper selects an immutable exact six-value host exec environment
+before case effects, rejects missing/extra/changed values, and forwards that same
+record through NativeOperation and child_bootstrap to os.execve. This is the
+actual host argument, not an observation of the eventual C child environment.
+The unchanged C literal environment remains source evidence only.
+
+A lexical exporter is prepared only after the existing hosted Root source guard,
+full fixed compile DATA validation, fixed fake fixture creation and exact packet,
+request, shared/source view and fake file hash checks. It cannot mint native
+admission. Production, Core, owner and VM code import no exporter. A capture is
+exportable only for a same-owner failure with complete scalar post-init evidence.
+The entire already-captured stderr (at most 16384 bytes) is checked before taking
+a prefix. Credential patterns gh[pousr]_, github_pat_, Authorization, Bearer,
+AKIA, PEM BEGIN, and Base64-like runs of 40+ characters reject export rather than
+redact. False refusal is accepted. This mechanical scrub is not a secret detector
+for general/private content: all sample bytes are PUBLIC, cacheable fixture DATA,
+and real guidance, credentials, user directories or provider content must never
+reuse it.
+
+The exact result.json alone holds postInitStderrSample. Available samples have
+exact keys available, bytesBase64, truncated, sampleSha256; the prefix is at most
+4096 bytes, canonical Base64 at most 5464 characters, and its SHA is checked.
+Truncation is tied to the original complete stderr length; when untruncated its
+SHA equals the original full hash. The original twelve-key postInitDiagnostics
+is unchanged. Unavailable results carry only available:false plus a closed
+reason. Malformed projections fail unavailable and retain the original cause,
+stage, debt and false proof flags. CI stdout/summary uses log_result_projection,
+which omits bytesBase64 and retains only availability/reason/truncation/hash.
+Evidence collection must compare that scalar projection to the actual CI JSON,
+not deep-equal the full artifact when a sample is present; retain/hash the exact
+artifact before offline canonical decoding. No raw or Base64 sample is printed.
+
+New branch cowork/reader-hosted-fixture-stderr requires fresh exact Root/45/Astra
+source review and separate one-run admission; no push, native execution, retry or
+availability follows from portable tests or this source.
+
+
+Closed crash-report-family classifier (source, no run admission)
+
+The consumed fixture-stderr attempt returned an unrecognized 718-byte stderr whose
+public sample was `scrub_rejected`: Bun's standard crash banner starts with a 60-character
+`=` line, which the unchanged 40+ character long-run scrub rejects. That scrub, the
+`postInitStderrSample` semantics, the twelve-key `postInitDiagnostics` and every existing
+key, flag, stage, debt, hash, deadline and close ordering stay as they were. This slice adds
+one orthogonal label that exports no content. It is not a cause, not an authenticated
+reached-phase receipt and not a success oracle; a runtime report is untrusted text.
+
+`native_cases.classify_report_family` reads only `handles.fixture_stderr_capture` (the
+complete bounded same-owner capture, at most 16384 bytes) and returns exactly one literal
+of `bun_report_shape`, `webkit_assertion_shape`, `loader_error_shape`, `unknown`,
+`incomplete` or `classification_error`. It never decodes the bytes and derives nothing else
+from them: no line, token, address, function, path, URL, count, length or hash. It never
+emits a specific cause such as a missing device or `/proc` file. It runs inside the same
+`kind == 'same-owner'` failure gate, after the existing Observation and Reaps were captured,
+in its own `try` after the unchanged diagnostics, so neither can alter the other, the
+original refusal, the retained handles or cleanup. The wrapper's exporter does not call it.
+
+Recognition is a fixed grammar over whole lines, matched against the whole buffer. A family
+is reported only when the buffer is exactly one complete report of that grammar. Extra,
+missing, reordered or duplicated lines, a second report, ANSI escapes, CR, NUL, any byte
+outside 0x20-0x7e (so any malformed UTF-8), text before or after the report, and a lookalike
+inserted label are `unknown`. `incomplete` means the family's opening frame matched in full
+(Bun: the 60-`=` line with its LF; WebKit: the complete first line; ld.so: the program name
+and the occasion literal, or the `: version \`` prefix of a missing-version line) and the buffer then stops inside the grammar, at a line boundary or
+inside a line that is a prefix of the next expected line. Empty input is `unknown`. Any
+exception, a non-`bytes` value or more than 16384 bytes is `classification_error`.
+
+`bun_report_shape` is Bun's Linux, plain-stderr banner in its 1.3.x shape (derived at oven-sh/bun
+tag bun-v1.3.14, src/crash_handler/crash_handler.zig; the long-run `=` line and the bun.report URL
+are the reason the sample is rejected): 60 `=` (260); `Bun [Canary ]v<semver>[-canary.N][ (<sha>)]
+Linux arm64|x64[ (baseline)]` (850-864, Global.zig:20-27); `Linux Kernel v<d>.<d>.<d> | glibc
+v<ver>|musl` (1009, 1013); optional `CPU:` with the CPUFeatures flags in field order (1029-1031);
+`Args: "..."` (1033-1043); optional `Features:` and `Builtins:` lines, each token followed by a
+space, so the line ends in one (analytics.zig:129-161); optional `Elapsed:`/`RSS:` pair
+(1066-1083); a blank line (1089); optional x64 AVX warning (1091-1094);
+`panic[(main thread)]: <printable reason>` (306-332), absent only for the out-of-memory variant
+(301), optionally followed by exactly one empty line: a message that itself ends in LF is
+followed by line 332's own LF, as in `Output.panic("...\n")` after stdio init at this tag
+(src/bun.zig:1606, src/shell/interpreter.zig:1642, src/jsc/web_worker.zig:432); the reason stays
+one line of printable ASCII, at most 1024 bytes. Then optional `Crashed while ...` (336); `oh no:
+Bun has crashed. This indicates a bug in Bun, not your code.` or `oh no: Bun has run out of
+memory.` (424, 415); blank, the two `To send a redacted crash report...` lines and a blank
+(424-430); ` https://bun.report/<semver>/<L|l|B><command char><1|2><7 hex|unknown><trace>`
+(438-446, 1358-1368); a final blank line (448, 454).
+
+The grammar scopes by shape, not by version number: a `Bun v1.4.2` line in the 1.3 shape still
+classifies as `bun_report_shape`. The 1.3.x claim is evidenced by the 1.3.14 source derivation and
+the four real goldens in `test_report_family.py` (1.3.1, 1.3.2, Canary 1.3.11 and 1.3.14). Bun
+1.4.x prints `RSS: 14.82 MB` with a space, a 9-hex sha and a blank line before `Elapsed:`, so its
+actual banner is `unknown`; a Bun bump needs the grammar re-derived from that tag, not assumed.
+Also `unknown`: ANSI-coloured banners (the colour flag defaults to on until
+`Output.Source.Stdio.init` runs, main.zig:57 and output.zig:425, and then follows the stderr TTY
+unless `FORCE_COLOR` is set, output.zig:381-408 and 103-119; the harness's pipe and six-variable
+environment give the plain form after init, so only a crash before init is coloured, such as
+main.zig:54's `Output.panic("Failed to initialize argv...\n")`), Debug, non-Linux and WSL banners,
+native-plugin and libuv message blocks, "multiple threads are crashing", "panicked during a
+panic", and any text before or after the banner. That includes the x64 `warn: CPU lacks AVX
+support, strange crashes may occur...` preamble that Bun writes to the same stderr at startup
+(c-bindings.cpp:26-41, called at main.zig:60): preamble plus banner is two things, so it is
+`unknown`.
+
+`webkit_assertion_shape` is WTF's assertion text (oven-sh/WebKit 5488984d,
+Source/WTF/wtf/Assertions.cpp, StackTrace.cpp): `ASSERTION FAILED: <expr>` or `SHOULD NEVER
+BE REACHED` (275-282), or the formatted-message form with a following assertion line
+(284-292); the call site `<file>(<n>) : <function>` (265); then either no backtrace, frame
+lines `%-3d %p <name>` numbered 1..N with N at most 31 (StackTrace.cpp:162, StackTrace.h:149,
+Assertions.cpp:315), or the unterminated `no stacktrace available` (357). Release `CRASH()` is
+`std::abort()` (Assertions.h:353), which Bun does not catch. The source has no end marker, so
+a buffer cut exactly after the call site or after a frame line is indistinguishable from a
+shorter trace and reads as complete; only the existing complete bounded capture excludes that
+case. A developer-mode crash that adds a Bun banner is two reports and is `unknown`.
+
+`loader_error_shape` is glibc 2.39's ld.so (bminor/glibc ef321e23): the single fatal line
+`<program>: error while loading shared libraries|symbol lookup error|version lookup error:
+<printable text>` (elf/dl-catch.c:79-91, with the occasions at dl-catch.c:85,
+dl-lookup.c:813 and dl-version.c:147), or one to sixteen rtld.c lines `<program>: <object>:
+version \`<v>' not found (required by <requirer>)` (rtld.c:2422-2427, dl-version.c:142-144).
+`<program>` is `[A-Za-z0-9_./+@%-]{1,255}` (no space or colon) or `<program name unknown>`
+(ldsodefs.h:179); an occasion line's remainder is 1-2048 printable ASCII bytes. A seventeenth
+missing-version line, weak-version lines, a program name outside that charset, any other ld.so
+fatal shape (ELF-class, exec and debug output) and anything beside the one report are `unknown`.
+
+`failure_record` adds the always-present key `postInitReportFamily`, a single string from
+the six values above plus two markers. With handles they come from `native_cases`:
+`not_same_owner_failure` for another case kind, `capture_absent` for a same-owner failure before
+the existing Observation and Reaps or without a bytes capture inside the bound. A failure with
+no handles (a launch failure, a later phase, anything outside `run_cases`) has no capture, so
+the stage decides: the `unexpected-parent` and `parent-exit` case stages and `close` (which runs
+after all three cases, where the exporter's last kind is `parent-exit`) report
+`not_same_owner_failure`, every other stage `capture_absent`. In that no-handles case the family
+equals the sample reason, which is `capture_absent` when no lease sample exists (`bootstrap:*`,
+`source:*`, and a `preflight` failure before `run_cases`' `try`) and otherwise what the exporter
+returns for the stage's case kind. The one exception is the provenance skip: where the sample
+reason is `provenance_unverified` (the stages up to `fixture` inside `run_cases`, or a same-owner
+exporter that is not eligible) the family still says what case kind and capture presence give,
+`capture_absent` for those stages. A handle that explicitly carries a value is never rewritten.
+The two markers follow the `postInitStderrSample` reasons of the same names by case kind and
+capture presence, NOT by provenance: the family deliberately skips the exporter's provenance gate,
+because only a closed enum leaves, never content. Any other value, a read failure, or a
+recognized family beside post-init evidence of an empty stderr becomes `classification_error`.
+`log_result_projection` passes only those values. The sample can still be `scrub_rejected` for
+a recognized report, and then no sample bytes, Base64, hash or content-derived value exist
+outside the pre-existing `stderrSha256`.
+
+Portable fixtures are whole buffers: synthetic ones for every variant, plus four real public
+Linux banners kept verbatim from oven-sh/bun issues 32418 (arm64, 1.3.14), 25105, 28648 (Canary
+1.3.11) and 24290 (the x64 AVX line), a real 1.4.2 banner (44276, `unknown`) and the hand-trimmed
+paste of 32701 (not a whole report). The only edits are LF line endings, the trailing space on
+`Features:`/`Builtins:` lines where the paste lost it, and the closing blank line where the paste
+dropped it; the text is public and nothing else is removed. `test_report_family.py` covers each family,
+all CPU flag subsets and optional-line combinations, truncation at every byte boundary,
+single-line insertion, deletion, duplication and swapping, inserted family labels, ANSI,
+lookalikes, malformed UTF-8 and non-printable bytes at every position, multiple reports,
+empty/oversized/non-bytes input, forbidden secret tokens in every free-text region (family
+reported, sample still `scrub_rejected`), classifier exceptions in both directions, the gate
+for every case kind, bounded time on adversarial input, and that every source-hash pin names
+the bytes present. The classifier changed `native_cases.py`, so `wrapper.py`'s pin for it, the
+reviewed workflow's `bootstrap.py` and `wrapper.py` pins and the release-gate test were
+recomputed together. Branch `cowork/reader-report-classifier` is not named by the reviewed
+workflow, which still admits only `cowork/reader-hosted-fixture-stderr`; no push, native
+execution, retry, workflow change or run admission follows from this source.
+
+
+Reader dependency probe (source, no run admission)
+
+The consumed fixture-stderr attempt left C59 undiagnosed: the reader crashed inside the view
+with a Bun banner, and the only evidence is a family label. This slice adds a measurement that
+does not depend on Bun running. It diagnoses nothing by itself, is not reader success, does not
+clear Bun and does not explain C59. It records what the pinned libc and the view let a tiny
+program see, so a later reading of the reader's failure has data beside it.
+
+What runs. A third compiled packet artifact, `artifacts/instructionReaderDependencyProbe`, built
+from the agent-sdk overlay `linux-instruction-reader-dependency-probe.c` with the same native
+flags as the launcher (the reader is a Bun compile, not a native build), dynamic only: its one dependency under test is the packet's
+pinned libc, and there is no static probe. It reads nothing from stdin, prints one stdout line (a
+failure to write exits 70) and writes nothing to stderr, so it adds no perror label to the
+classifier. `producer.NativeOperation` takes a closed `executable_role`, `instructionReader`
+(default) or `instructionReaderDependencyProbe`. The role selects only the executable-FD slot
+(launcher argv[2]) and that leaf's reopen path. The launcher, argv, UID 20002, GROUP 10000, view,
+six libraries, host exec environment and pipe envelope are identical for both roles, and
+`viewContractSha256` (a SHA-256 over the descriptor-masked launcher argv, the exec environment and
+the view constants) is the same value for both, so a record names the view contract it ran under,
+never a descriptor or a role. The operation is built by its factory inside the forked producer
+child, so the parent never holds it and cannot ask it for its own digest. The wrapper therefore
+hands `run_probe_case` the exec environment it passes to the operation, and the digest is computed
+from the fixed recipe plus that environment, which `NativeOperation` accepts only if it is the one
+closed environment: it is by construction the digest `NativeOperation.view_contract_sha256` returns
+for any operation that can launch (a test builds one and compares), and any other environment is
+refused before a single effect. A reference positive control (the probe as an ordinary Root process
+outside the view) is left out of this attempt.
+
+When it runs. `native_cases.run_probe_case` is a separate function; `run_case` and `LinuxEffects`
+are unchanged and the same effects table is reused through the `effects` seam. The sequence is
+receive_handles, receive_init, no request, observe, reap, close_confirmed, under the same six
+second envelope as the same-owner case. `run_cases` runs it first, before same-owner, with the
+stages `case:dependency-probe:run|verify|recheck`, so it yields data even when a reader case
+fails afterwards. Teardown predicates (validated init, independent launcher, pipe and init
+teardown, the bootstrap pipe drained without a record, producer reaped with exit zero, the
+deadlines, confirmed descriptor discharge) raise `CaseUncertain` exactly as for any case and stop
+the set with the handles retained. The record such a failed case leaves on its handles claims
+nothing from its capture: `line` is `unknown` with no `fields`, and both canary halves are
+`unknown`, never `not_visible` (even when the capture looks healthy, and even for a leak), because
+"exactly one line" cannot be shown without stdout EOF and a case that did not finish its teardown
+proves nothing. Only a case that passed every teardown predicate with stdout EOF reports the parsed
+line and the derived halves. Content predicates (the native wait status, stderr, the stdout
+grammar) are only recorded, never raised: a probe that crashed, wrote a bad line or wrote to
+stderr still hands a closed record on. The record never feeds `readerCaseSetPassed`, which
+is still decided by the three reader cases alone; `readerSuccessImplied` and
+`bunCompatibilityProven` are constant `false` and a record carrying anything else is dropped.
+
+The line, grammar `reader-v2`, identical in the C and `native_cases.parse_probe_line`:
+
+    probe=reader-v2 stack_rc=N stack_bounds=B stack_contains=B urandom_open=N urandom_read=B getrandom=N proc_list=N proc_numeric=N proc_root=B canary_open=N\n
+
+N is `0|[1-9][0-9]{0,9}` and at most 4294967295, B is `[01]`; fixed key order, single spaces,
+exactly one trailing LF, ASCII only, at most 256 bytes, matched with `fullmatch` over the whole
+stdout capture. Cross-field rules, or the line is `unknown`: `stack_rc!=0` implies both stack bits 0;
+`stack_contains=1` implies `stack_bounds=1`; `urandom_open!=0` implies `urandom_read=0`;
+`proc_list!=0` implies `proc_numeric=0`; `proc_numeric` is 0..65535. The line state is `valid`,
+`absent` (empty stdout) or `unknown` (everything else, including any exception). The healthy line
+preregistered for a hosted run is `stack_rc=0 stack_bounds=1 stack_contains=1 urandom_open=0
+urandom_read=1 getrandom=0 proc_list=0 proc_numeric=1 proc_root=1 canary_open=2`, where 2 is
+ENOENT. The raw line is never stored. The errno-valued fields (`stack_rc`, `urandom_open`,
+`getrandom`, `proc_list`, `canary_open`) become symbols: `OK` for 0, a symbol of a closed table of
+Linux numbers (the guest numbering, never the host `errno` module; it includes ENXIO), or `unknown`.
+
+The closed `dependencyProbe` record has the keys `ran`, `line` (`valid|absent|unknown`), `fields`
+(null unless valid), `observation` (the scalar post-init diagnostics of the case, or
+`available:false`), `stderrFamily` (the closed report-family classifier over the probe's stderr
+capture, which is where a loader failure shows up), `outsideCanary`, `viewContractSha256`,
+`readerSuccessImplied` and `bunCompatibilityProven`. It appears under `dependencyProbe` in the
+success result and, through the same strict projection, in every failure record and in
+`log_result_projection`; a record that fails the projection's shape, type, value or cross-field
+checks is replaced by `{"ran": false}`. The Root stage (`bootstrap.run_root`) applies that
+projection to the success record before `result.json` is written, because the wrapper cannot import
+the bootstrap that loads it, so a tampered success record collapses there too and the key is always
+present. A probe that never produced a line (a failure before `observe`) reports `line: unknown`
+with `outsideCanary` `not_checked` on both halves; a failure after `observe` reports `unknown` on
+both halves (above), and keeps the post-init scalars once the reaps exist.
+
+The outside canary (the B3 isolation check) has two halves, both read from the line. Neither
+carries any content, only a closed state.
+
+- `file`: the harness itself creates a Root-owned `0444` regular file `winter-outside-canary`,
+  exclusively and never copied, at the top of the sealed launch root; that is `/` after the
+  producer's chroot and is NOT inside the reader's view. `0444` is deliberate: were the view to
+  leak, the reader uid could open it, whereas `0400` would turn a leak into a masking EACCES. The
+  probe opens `/winter-outside-canary` with `O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, closes the
+  descriptor at once on success and never reads it. Only ENOENT (`canary_open=2`) means
+  `not_visible`. A successful open (`0`) means `visible`, an escape. Anything else (EACCES, ELOOP,
+  ENXIO, EINTR, a number outside the closed table, and so on) is `unknown`: an error other than
+  ENOENT does not show that the name was absent, so it is never read as not visible.
+- `process`: `visible` when the probe listed more than one numeric `/proc` entry; `not_visible`
+  only for a `valid` line whose `/proc` listing succeeded (`proc_list=0`) and held exactly one
+  numeric entry (`proc_numeric=1`), where `/proc/1/root` has the same device and inode as `/`
+  (`proc_root=1`), while the case held the validated init binding (a received init pid greater than
+  1 and its pidfd); `unknown` otherwise. Even then it is a statement about the view's `/proc`, not
+  a claim about which process the one entry is beyond that binding.
+
+A passing line says the pinned libc started, read its own stack bounds, opened and read
+`/dev/urandom`, called `getrandom`, listed `/proc` and could not see the canary file; it says nothing
+about Bun or a JavaScript runtime. A `visible` file or process half is an isolation failure
+of the view, not a probe failure, and the set still proceeds to the reader cases.
+
+Packet and labels. The probe artifact makes the packet three artifacts plus six libraries, nine
+copies, with the canary as the tenth sealed leaf; the leaf and descriptor counts are measured values
+(1474 leaves; about 1630 held descriptors, depending on path depth) taken from compile run 38715669708
+and pinned by the repin. The compile DATA pin, acquisition and intake now come from `origins/base` at
+a94c4c89d489103e09bcc5c799312c9a44cbf86e on this branch, which carries exactly the three files the
+bootstrap pins by hash; the earlier attempt's 4d5dfcec could not stay, since it held the two-artifact intake. The
+compartment's perror labels were extracted at agent-sdk 687b9557 and re-extracted at the final overlay head 53082a74
+(the C and header are byte-identical there): 66 in the C file
+(63 literal `require` labels and 3 passed through `reader_expect` and `reader_entropy_identity`)
+plus 4 in the shared header, 70 in all, of which 13 are new (the `/proc` root, mount, descriptor and
+entropy inventories and the private `/dev` and `/proc` setup). `native_cases.STDERR_LABELS`,
+`bootstrap.NATIVE_STDERR_LABELS` and a test literal in `test_bootstrap.py` carry the same 70.
+The C also has exits that print nothing (the `_exit(64)` contract refusals and the bare `_exit(77)`
+liveness failures); those are classified by exit status only. Two of the new labels can carry an
+errno outside the closed table (EFBIG on the mount inventory, EBADMSG while scanning a directory);
+those stay `audited_label` with the errno dropped.
+
+Pins and admission. This slice changes `producer.py`, `native_cases.py`, `parent.py`, `wrapper.py`
+and `bootstrap.py`, so `SOURCE_PINS`, the reviewed workflow's bootstrap and wrapper hash lines and
+the release-gate pins are recomputed together in one final integration commit. The compile pin, the
+acquisition pin and, on this integration branch, the reviewed workflow's branch list (`cowork/reader-hosted-fixture-stderr`)
+are untouched; the integration branch is named only by the three source-only workflows. No
+native execution, compile run, hosted run, retry or activation follows from this source.

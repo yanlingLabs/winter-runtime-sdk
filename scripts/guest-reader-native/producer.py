@@ -6,6 +6,7 @@ Tests inject operation tables; no compiled role, namespace or privileged call ru
 import ctypes
 import hashlib
 import fcntl
+import json
 import types
 from pathlib import Path
 import os
@@ -13,6 +14,7 @@ import platform
 import socket
 import stat
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -61,6 +63,51 @@ def launcher_argv(reader_fd, receipt_fd, source_fd, shared_fd, libraries):
             str(reader_fd), VIEW, str(receipt_fd), str(UID), str(GROUP),
             str(source_fd), SOURCE, SOURCE, str(shared_fd), str(len(libraries)),
             *(value for fd, path in libraries for value in (str(fd), path))]
+
+
+# Closed executable roles. The role selects ONLY which sealed artifact leaf is the launcher's
+# executable-FD slot (and that leaf's reopen path). Everything else in the launch recipe - the
+# launcher, UID, GROUP, view, libraries, environment, pipe envelope - is role-independent.
+DEFAULT_EXECUTABLE_ROLE = 'instructionReader'
+EXECUTABLE_ROLES = types.MappingProxyType({
+    'instructionReader': 'artifacts/instructionReader',
+    'instructionReaderDependencyProbe': 'artifacts/instructionReaderDependencyProbe'})
+LAUNCHER_ARGV_LENGTH = 12 + 2 * len(LIBRARIES)
+# argv slots that carry a process-local descriptor number: executable, receipt, source, shared
+# and each library descriptor. They are masked in the view contract.
+LAUNCHER_FD_SLOTS = (2, 4, 7, 10) + tuple(12 + 2 * index for index in range(len(LIBRARIES)))
+
+
+def masked_launcher_argv(argv):
+    require(type(argv) is list and len(argv) == LAUNCHER_ARGV_LENGTH
+            and all(type(value) is str for value in argv)
+            and all(argv[index].isascii() and argv[index].isdigit() for index in LAUNCHER_FD_SLOTS),
+            'closed launcher argv')
+    return ['<fd>' if index in LAUNCHER_FD_SLOTS else value for index, value in enumerate(argv)]
+
+
+def view_contract_digest(argv, env):
+    """SHA-256 over the masked launcher argv, the exec environment and the view constants.
+
+    Descriptor numbers are masked, so the digest is stable across runs and across executable
+    roles: it names the view contract in force, never a descriptor or a role."""
+    contract = {'argv': masked_launcher_argv(argv), 'env': dict(env),
+                'constants': {'uid': UID, 'group': GROUP, 'view': VIEW, 'source': SOURCE,
+                              'home': HOME, 'libraries': list(LIBRARIES),
+                              'ioMax': IO_MAX, 'deadlineMs': DEADLINE_MS}}
+    raw = json.dumps(contract, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+    return hashlib.sha256(raw.encode('ascii')).hexdigest()
+
+
+def view_contract_sha256(exec_environment=None):
+    """The contract digest of the fixed launch recipe (placeholder descriptors, masked anyway).
+
+    With `exec_environment` it is the digest for exactly that environment, which must be the one closed
+    environment a NativeOperation accepts; it then equals NativeOperation.view_contract_sha256 for any
+    operation built with it."""
+    libraries = tuple((10 + index, path) for index, path in enumerate(LIBRARIES))
+    environment = selected_host_exec_environment() if exec_environment is None else checked_host_exec_environment(exec_environment)
+    return view_contract_digest(launcher_argv(3, 4, 5, 6, libraries), environment)
 
 
 def parse_receipt(data, descriptors):
@@ -181,39 +228,266 @@ def validate_stdio(pipe_fds, pass_fds, *, get_stat=os.fstat, get_flags=None):
                 'stdio access direction')
 
 
-def child_bootstrap(root_fd, argv, pass_fds, pipe_fds):
+
+BOOTSTRAP_STEPS = ('child_setup', 'gate', 'root_guard', 'stdio', 'unshare',
+                   'propagation', 'chroot', 'descriptor_envelope', 'exec', 'mount_identity', 'loader_bind', 'reopen_inputs')
+BOOTSTRAP_ERRNOS = (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+                    18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 32, 36, 38, 40,
+                    75, 80, 87, 95, 110)
+
+
+def bootstrap_record(step, code):
+    require(type(step) is int and 1 <= step <= len(BOOTSTRAP_STEPS), 'closed bootstrap step')
+    require(type(code) is int and code in BOOTSTRAP_ERRNOS, 'closed bootstrap errno')
+    return struct.pack('<II', step, code)
+
+
+def decode_bootstrap_record(raw):
+    require(type(raw) is bytes and len(raw) in (0, 8), 'bootstrap record length')
+    if not raw:return {'recordObserved':False,'step':'unknown','errno':0}
+    step,code=struct.unpack('<II',raw)
+    bootstrap_record(step,code)
+    return {'recordObserved':True,'step':BOOTSTRAP_STEPS[step-1],'errno':code}
+
+
+def emit_bootstrap_failure(fd, step, error):
+    # One atomic nonblocking PIPE_BUF-sized write. Refusal/death cannot invent EOF exec proof.
+    code=getattr(error,'errno',None)
+    if type(code) is not int:
+        code=ctypes.get_errno() if step in (5,6,10,11,12) else 0
+    if code not in BOOTSTRAP_ERRNOS:code=0
+    return os.write(fd,bootstrap_record(step,code)) == 8
+
+
+
+STATX_MNT_ID = 0x1000
+MOUNTINFO_MAX = 1024 * 1024
+
+
+def mount_ids(raw):
+    """Bounded current-namespace mountinfo DATA; no path is used as authority."""
+    require(type(raw) is bytes and 0 < len(raw) <= MOUNTINFO_MAX and raw.endswith(b'\n'),
+            'complete bounded bootstrap mountinfo')
+    result=set()
+    for line in raw.splitlines():
+        fields=line.split()
+        require(len(fields)>=10 and b'-' in fields[6:] and len(fields[0])<=10
+                and fields[0].isdigit(), 'bootstrap mountinfo shape')
+        value=int(fields[0])
+        require(0 < value <= 0x7fffffff and value not in result,
+                'unique bootstrap mount IDs')
+        result.add(value)
+        require(len(result)<=20000,'bootstrap mount count bound')
+    return result
+
+
+def statx_mount_id(raw):
+    # Linux UAPI statx: 256-byte struct, mask@0, ordinary stx_mnt_id@0x90.
+    require(type(raw) is bytes and len(raw)==256,'bootstrap statx shape')
+    mask=struct.unpack_from('<I',raw,0)[0]
+    value=struct.unpack_from('<Q',raw,0x90)[0]
+    require(mask & STATX_MNT_ID and not mask & 0x4000
+            and 0 < value <= 0x7fffffff,'ordinary bootstrap mount ID required')
+    return value
+
+
+def require_mount_membership(fds, raw, observe):
+    require(type(fds) is tuple and 1<=len(fds)<=16
+            and all(type(fd) is int and fd>=3 for fd in fds) and len(set(fds))==len(fds), 'closed bootstrap mount FDs')
+    ids=mount_ids(raw)
+    for fd in fds:
+        observed=observe(fd)
+        require(type(observed) is int and observed in ids,
+                'bootstrap FD outside current mount namespace')
+
+
+def verify_mount_namespace(fds,*,mount_root_fd=None):
+    """Unexecuted Linux observation. No unshare/mount or path reopen fallback."""
+    require(sys.byteorder=='little','bootstrap statx endian')
+    libc=ctypes.CDLL(None,use_errno=True)
+    try: call=libc.statx
+    except AttributeError:raise Refusal('bootstrap statx unavailable') from None
+    call.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_uint,ctypes.c_void_p]
+    call.restype=ctypes.c_int
+    def observe(fd):
+        raw=ctypes.create_string_buffer(256)
+        ctypes.set_errno(0)
+        require(call(fd,b'',0x1000,STATX_MNT_ID,ctypes.byref(raw))==0,'bootstrap statx syscall')
+        if fd==mount_root_fd:
+            attributes=struct.unpack_from('<Q',raw.raw,8)[0]
+            supported=struct.unpack_from('<Q',raw.raw,56)[0]
+            require(supported & 0x2000 and attributes & 0x2000,'supported loader mount root required')
+        return statx_mount_id(raw.raw)
+    def read_current():
+        held=os.open('/proc/self/mountinfo',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            raw=bytearray()
+            while True:
+                chunk=os.read(held,min(65536,MOUNTINFO_MAX+1-len(raw)))
+                if not chunk:break
+                raw.extend(chunk);require(len(raw)<=MOUNTINFO_MAX,'bootstrap mountinfo byte bound')
+            return bytes(raw)
+        finally:os.close(held)
+    before=read_current()
+    require_mount_membership(fds,before,observe)
+    require(read_current()==before,'bootstrap mount snapshots differ')
+
+
+
+def immutable_identity(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink,
+            info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+
+def prepare_reopen_inputs(paths):
+    require(type(paths) is tuple and 1<=len(paths)<=16,'closed reopen inventory')
+    require(all(type(fd) is int and 3<=fd<=65535 for fd,_ in paths)
+            and len({fd for fd,_ in paths})==len(paths),'distinct original reopen FDs')
+    result=[]
+    for fd,value in paths:
+        path=Path(value)
+        require(path.is_absolute() and str(path).startswith('/run/') and len(path.parts)<=64
+                and len(str(path).encode())<=4096 and '..' not in path.parts,
+                'canonical protected reopen path')
+        info=os.fstat(fd)
+        require(info.st_uid==0 and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                and not stat.S_IMODE(info.st_mode)&0o222
+                and fcntl.fcntl(fd,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY,
+                'held immutable reopen input')
+        result.append((fd,str(path),immutable_identity(info)))
+    return tuple(result)
+
+
+def reopen_protected_path(value):
+    path=Path(value);owned=[];failed=[]
+    def close_new(fd):
+        owned.remove(fd)  # Each close is attempted once; errors retain explicit debt.
+        try:os.close(fd)
+        except OSError:failed.append(fd);raise
+    try:
+        upper=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);owned.append(upper)
+        for part in path.parts[1:-1]:
+            info=os.fstat(upper)
+            require(info.st_uid==0 and not stat.S_IMODE(info.st_mode)&0o022,'protected reopen ancestry')
+            upper=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=upper);owned.append(upper)
+        info=os.fstat(upper)
+        require(info.st_uid==0 and not stat.S_IMODE(info.st_mode)&0o022,'protected reopen ancestry')
+        leaf=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=upper);owned.append(leaf)
+        for fd in tuple(owned[:-1]):close_new(fd)
+        owned.remove(leaf)
+        return leaf
+    except BaseException as error:
+        for fd in tuple(owned):
+            try:close_new(fd)
+            except OSError:pass
+        if failed:
+            refusal=Refusal('new reopen ancestry descriptors retained');refusal.retained_fds=failed
+            raise refusal from error
+        raise
+
+
+def install_reopened_inputs(records,root_fd,verify=None):
+    verify=verify_mount_namespace if verify is None else verify
+    targets={fd for fd,_,_ in records};opened=[]
+    try:
+        for target,path,expected in records:
+            require(immutable_identity(os.fstat(target))==expected,'parent held reopen identity changed')
+            new=reopen_protected_path(path)
+            require(new not in targets and new not in opened,'new reopen descriptors distinct')
+            opened.append(new)
+            info=os.fstat(new)
+            require(immutable_identity(info)==expected
+                    and fcntl.fcntl(new,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY,
+                    'reopened immutable identity mismatch')
+        verify(tuple(opened),mount_root_fd=opened[[fd for fd,_,_ in records].index(root_fd)])
+        for (target,_,expected),new in zip(records,opened):
+            require(immutable_identity(os.fstat(target))==expected
+                    and immutable_identity(os.fstat(new))==expected,'reopen identity changed before install')
+            os.dup2(new,target)
+    finally:
+        failed=[]
+        for fd in opened:
+            try:os.close(fd)
+            except OSError:failed.append(fd)
+        if failed:
+            error=Refusal('new reopen descriptors retained');error.retained_fds=failed;raise error
+
+
+
+FIXED_HOST_EXEC_ENV = (('LANG','C'),('LC_ALL','C'),('TZ','UTC'),('HOME',HOME),
+                       ('TMPDIR','/tmp'),('PATH','/usr/bin:/bin'))
+
+
+def selected_host_exec_environment():
+    """Actual selected exec argument, not observed post-exec/C reader environment."""
+    require(type(ENV) is dict and ENV==dict(FIXED_HOST_EXEC_ENV), 'fixed selected exec environment')
+    return types.MappingProxyType(dict(FIXED_HOST_EXEC_ENV))
+
+
+def checked_host_exec_environment(value):
+    require(type(value) is types.MappingProxyType and dict(value)==dict(FIXED_HOST_EXEC_ENV),
+            'immutable selected exec environment')
+    return value
+
+
+def child_bootstrap(root_fd, argv, pass_fds, pipe_fds, *, error_fd=None, stage=None, reopen_inputs=None, exec_environment=None):
     """Actual privileged effects. Not called by source/portable tests.
 
     Python/libc are trusted parent tooling, not measured packet runtime objects.
     No PID namespace precedes C's SO_PEERCRED/original-parent check.
     """
+    exec_environment=checked_host_exec_environment(selected_host_exec_environment() if exec_environment is None else exec_environment)
+    def mark(index):
+        ctypes.set_errno(0)
+        if stage is not None:stage(index)
+    mark(3)
     root_linux()
+    if error_fd is not None:
+        require(type(error_fd) is int and error_fd >= 3 and error_fd not in pass_fds
+                and error_fd not in pipe_fds and error_fd != root_fd, 'independent bootstrap error writer')
     require(len(set(pass_fds)) == len(pass_fds), 'explicit child fd inventory')
+    mark(4)
     validate_stdio(pipe_fds, pass_fds)
     for target, inherited in enumerate(pipe_fds):
         os.dup2(inherited, target)
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.unshare.argtypes = [ctypes.c_int]
-    libc.unshare.restype = ctypes.c_int
-    libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
-    libc.mount.restype = ctypes.c_int
-    require(libc.unshare(0x00020000) == 0, 'private bootstrap mount namespace')
-    require(libc.mount(None, b'/', None, 0x4000 | 0x40000, None) == 0,
-            'private bootstrap propagation')
+    require(type(reopen_inputs) is tuple and root_fd in {fd for fd,_,_ in reopen_inputs},
+            'explicit bootstrap reopen scope')
+    root_path=next(path for fd,path,_ in reopen_inputs if fd==root_fd)
+    libc=ctypes.CDLL(None,use_errno=True)
+    libc.unshare.argtypes=[ctypes.c_int];libc.unshare.restype=ctypes.c_int
+    libc.mount.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_ulong,ctypes.c_void_p]
+    libc.mount.restype=ctypes.c_int
+    mark(5)
+    require(libc.unshare(0x00020000)==0,'private bootstrap mount namespace')
+    mark(6)
+    require(libc.mount(None,b'/',None,0x4000|0x40000,None)==0,'private real root propagation')
+    mark(11)
+    checked=reopen_protected_path(root_path)
+    try:
+        require(immutable_identity(os.fstat(checked))==next(identity for fd,_,identity in reopen_inputs if fd==root_fd),
+                'loader bind target identity')
+    finally:os.close(checked)
+    encoded=os.fsencode(root_path)
+    require(libc.mount(encoded,encoded,None,0x1000,None)==0,'nonrecursive loader root bind')
+    mark(12)
+    install_reopened_inputs(reopen_inputs,root_fd)
+    mark(7)
     os.fchdir(root_fd)
     os.chroot('.')
     os.chdir('/')
     # This filesystem was independently sealed before fork: captured loader and
     # six libraries only, never the runner's /lib or /etc/ld.so.preload/cache.
-    keep = sorted(set(pass_fds))
+    mark(8)
+    keep = sorted(set(pass_fds) | ({error_fd} if error_fd is not None else set()))
     begin = 3
     for fd in keep:
         require(fd >= begin, 'child fd ordering')
         os.closerange(begin, fd)
-        os.set_inheritable(fd, True)
+        os.set_inheritable(fd, fd != error_fd)
         begin = fd + 1
     os.closerange(begin, 1 << 20)
-    os.execve(argv[0], argv, ENV)
+    mark(9)
+    os.execve(argv[0], argv, exec_environment)
     raise Refusal('exec returned')
 
 
@@ -294,9 +568,14 @@ class NativeOperation:
     Root-owned fixture source/shared FDs carry scope; request bytes carry no paths.
     """
     def __init__(self, debt, root, source_fd, shared_fd, guard, recheck,
-                 pidfd_validator=validate_init_pidfd, control_pair_factory=None):
+                 pidfd_validator=validate_init_pidfd, control_pair_factory=None, source_path=None, shared_path=None, exec_environment=None,
+                 executable_role=DEFAULT_EXECUTABLE_ROLE):
+        require(type(executable_role) is str and executable_role in EXECUTABLE_ROLES, 'closed executable role')
+        self.executable_role = executable_role
+        self.exec_environment=checked_host_exec_environment(selected_host_exec_environment() if exec_environment is None else exec_environment)
         self.debt, self.root = debt, root
         self.source_fd, self.shared_fd = source_fd, shared_fd
+        self.source_path,self.shared_path=source_path,shared_path
         self.guard, self.recheck = guard, recheck
         self.pidfd_validator = pidfd_validator
         # Trusted external harness seam for the intentional ancestor-peer negative,
@@ -314,6 +593,8 @@ class NativeOperation:
         self.captures = {}
         self.eof_fds = set()
         self.control_eof = False
+        self.bootstrap_error_fd = None
+        self.bootstrap_error_bytes = bytearray()
 
     def start(self):
         try:
@@ -364,6 +645,29 @@ class NativeOperation:
         # No I/R native proof was produced: even confirmed setup cleanup is not a
         # successful native reader lifetime. Keep complete() false.
 
+    def launch_recipe(self, receipt_fd):
+        """The launch recipe as DATA: argv, inherited descriptors, root descriptor, reopen paths.
+
+        No effect. The executable role changes only the executable-FD slot (argv[2], the first
+        inherited descriptor) and that leaf's reopen path."""
+        leaf = EXECUTABLE_ROLES[self.executable_role]
+        executable_fd = self.root.files[leaf][0]
+        libraries = tuple((self.root.files[path.lstrip('/')][0], path) for path in LIBRARIES)
+        argv = launcher_argv(executable_fd, receipt_fd, self.source_fd, self.shared_fd, libraries)
+        pass_fds = (executable_fd, receipt_fd, self.source_fd, self.shared_fd,
+                    *(fd for fd, _ in libraries))
+        root_fd = self.root.directories[''][0]
+        require(self.source_path is not None and self.shared_path is not None,'explicit fixture reopen paths')
+        paths=((root_fd,self.root.path),
+               (self.root.files['artifacts/instructionReaderLauncher'][0],self.root.path/'artifacts/instructionReaderLauncher'),
+               (executable_fd,self.root.path/leaf),
+               (self.source_fd,self.source_path),(self.shared_fd,self.shared_path),
+               *((fd,self.root.path/path.lstrip('/')) for fd,path in libraries))
+        return argv, pass_fds, root_fd, paths
+
+    def view_contract_sha256(self, receipt_fd):
+        return view_contract_digest(self.launch_recipe(receipt_fd)[0], self.exec_environment)
+
     def _start(self):
         root_linux()
         require(self.debt.phase == 'registered', 'registration before effects')
@@ -392,40 +696,45 @@ class NativeOperation:
         a, b = pair_factory(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.control, self.peer = a, b
         pipes = []
-        for _ in range(4):
+        for _ in range(5):
             pair = os.pipe2(os.O_CLOEXEC)
             self.fds.update(pair)
             pipes.append(pair)
-        stdin, stdout, stderr, gate = pipes
+        stdin, stdout, stderr, gate, bootstrap_error = pipes
+        os.set_blocking(bootstrap_error[1], False)
         self.fds.update(fd for pair in pipes for fd in pair)
-        reader_fd = self.root.files['artifacts/instructionReader'][0]
-        libraries = tuple((self.root.files[path.lstrip('/')][0], path) for path in LIBRARIES)
-        argv = launcher_argv(reader_fd, b.fileno(), self.source_fd, self.shared_fd, libraries)
-        pass_fds = (reader_fd, b.fileno(), self.source_fd, self.shared_fd,
-                    *(fd for fd, _ in libraries))
-        root_fd = self.root.directories[''][0]
+        argv, pass_fds, root_fd, paths = self.launch_recipe(b.fileno())
+        reopen_inputs=prepare_reopen_inputs(paths)
         self.recheck(self.root)  # Immediately before owned fork/bootstrap/exec.
         pid = os.fork()
         if pid == 0:
+            step=[1]
+            def stage(index):step[0]=index
             try:
                 a.close()
+                os.close(bootstrap_error[0])
                 os.close(gate[1])
+                stage(2)
                 require(os.read(gate[0], 1) == b'G', 'registered child start gate')
                 os.close(gate[0])
                 child_bootstrap(root_fd, argv, pass_fds,
-                                (stdin[0], stdout[1], stderr[1]))
-            except BaseException:
-                os._exit(78)  # Fixed code; no paths/request/metadata on stderr.
+                                (stdin[0], stdout[1], stderr[1]),
+                                error_fd=bootstrap_error[1], stage=stage, reopen_inputs=reopen_inputs, exec_environment=self.exec_environment)
+            except BaseException as error:
+                try: emit_bootstrap_failure(bootstrap_error[1], step[0], error)
+                except BaseException: pass  # Unknown observation; never claim exec/cleanup.
+                os._exit(78)
         # Child cannot bootstrap until its PID/pidfd are registered here.
         self.debt.pid = pid
         self.pidfd = os.pidfd_open(pid, 0)
         self.fds.add(self.pidfd)
         self.debt.phase = 'running'
         b.close()
-        for fd in (stdin[0], stdout[1], stderr[1], gate[0]):
+        for fd in (stdin[0], stdout[1], stderr[1], gate[0], bootstrap_error[1]):
             os.close(fd)
             self.fds.remove(fd)
         self.input_fd, self.output_fd, self.error_fd = stdin[1], stdout[0], stderr[0]
+        self.bootstrap_error_fd = bootstrap_error[0]
         require(os.write(gate[1], b'G') == 1, 'start gate write')
         self.gate_released = True
         os.close(gate[1])
@@ -495,6 +804,9 @@ class NativeOperation:
                 poll.register(self.control, selectors.EVENT_READ, 'control')
             if request is not None and self.init_pidfd is not None:
                 poll.register(self.input_fd, selectors.EVENT_WRITE, 'input')
+            if self.bootstrap_error_fd is not None and self.bootstrap_error_fd not in self.eof_fds:
+                os.set_blocking(self.bootstrap_error_fd,False)
+                poll.register(self.bootstrap_error_fd,selectors.EVENT_READ,'bootstrap')
             for fd in captures:
                 if fd not in self.eof_fds:
                     os.set_blocking(fd, False)
@@ -514,6 +826,13 @@ class NativeOperation:
                             poll.unregister(self.input_fd)
                             os.close(self.input_fd)
                             self.fds.remove(self.input_fd)
+                    elif key.data == 'bootstrap':
+                        raw=os.read(key.fd,9)
+                        if not raw:
+                            poll.unregister(key.fd);self.eof_fds.add(key.fd)
+                        else:
+                            self.bootstrap_error_bytes.extend(raw)
+                            require(len(self.bootstrap_error_bytes)<=8,'bootstrap record byte bound')
                     elif key.data == 'pipe':
                         data = os.read(key.fd, 65536)
                         if not data:
@@ -573,6 +892,7 @@ class NativeOperation:
             require(waited == self.debt.pid, 'launcher not reaped after native drain')
             self.debt.launcher_reaped = True
             require(self.debt.wait_status is not None, 'missing native reap receipt')
+            require(not self.bootstrap_error_bytes,'pre-exec failure is not successful lifetime')
             native_exit = parse_receipt(b'R' + struct.pack('<I', self.debt.wait_status), ())[1]
             # Compare terminal status directly; C monitor returns namespace-init exit.
             expected_exit = (native_exit >> 8) if native_exit & 0xFF == 0 else 128 + (native_exit & 0x7F)

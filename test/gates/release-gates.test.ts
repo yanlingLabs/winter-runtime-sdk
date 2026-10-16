@@ -71,7 +71,7 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "cowork-reader-native-source.yml", "release.yml"]);
+    expect(workflows).toEqual(["ci.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "cowork-reader-native-reviewed.yml", "cowork-reader-native-source.yml", "release.yml"]);
     for (const name of workflows.filter((name) => name !== "release.yml")) {
       const source = readWorkflow(name);
       // Non-release workflows may explain this rule in comments, but cannot run publication.
@@ -83,7 +83,7 @@ describe("the release workflow", () => {
 
   test("the reader source workflow is credential-free portable data checking only", () => {
     const source = parseWorkflow("cowork-reader-build-source.yml") as { on?: { push?: { branches?: unknown } }; permissions?: unknown; jobs?: Record<string, unknown> };
-    expect(source.on?.push?.branches).toEqual(["cowork/instruction-reader-build", "cowork/reader-compile-semantics"]);
+    expect(source.on?.push?.branches).toEqual(["cowork/instruction-reader-build", "cowork/reader-compile-semantics", "cowork/reader-probe-integration"]);
     expect(source.permissions).toEqual({ contents: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["portable-data"]);
     expect(source.jobs?.["portable-data"]).toEqual({
@@ -117,7 +117,7 @@ describe("the release workflow", () => {
   test("the reader intake workflow uses only unprivileged synthetic data", () => {
     const source = parseWorkflow("cowork-reader-intake-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-intake/**", ".github/workflows/cowork-reader-intake-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-packet-intake"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-packet-intake", "cowork/reader-probe-integration"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(Object.keys(source.jobs ?? {})).toEqual(["portable-data"]);
     expect(source.jobs?.["portable-data"]).toEqual({
@@ -134,11 +134,11 @@ describe("the release workflow", () => {
   test("the native reader source workflow runs only injected and temporary DATA tests", () => {
     const source = parseWorkflow("cowork-reader-native-source.yml") as { on?: unknown; permissions?: unknown; jobs?: Record<string, unknown> };
     const paths = ["scripts/guest-reader-native/**", "test/guest/reader-harness-consumer.test.ts", ".github/workflows/cowork-reader-native-source.yml", "test/gates/release-gates.test.ts"];
-    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper"], paths }, pull_request: { paths } });
+    expect(source.on).toEqual({ push: { branches: ["cowork/reader-linux-native-harness", "cowork/reader-native-wrapper", "cowork/reader-hosted-fixture-stderr", "cowork/reader-probe-integration"], paths }, pull_request: { paths } });
     expect(source.permissions).toEqual({ contents: "read" });
     expect(source.jobs).toEqual({
       "portable-data": {
-        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper'",
+        if: "github.event_name == 'push' || github.head_ref == 'cowork/reader-linux-native-harness' || github.head_ref == 'cowork/reader-native-wrapper' || github.head_ref == 'cowork/reader-hosted-fixture-stderr'",
         "runs-on": "ubuntu-24.04-arm", "timeout-minutes": 5,
         steps: [
           { uses: "actions/checkout@v4", with: { "persist-credentials": false } },
@@ -146,6 +146,66 @@ describe("the release workflow", () => {
         ],
       },
     });
+  });
+
+  test("the reviewed reader workflow pins origins, actions and the isolated bootstrap chain", () => {
+    const source = parseWorkflow("cowork-reader-native-reviewed.yml") as { on?: Record<string, unknown>; permissions?: unknown; jobs?: Record<string, { if?: unknown; steps?: Array<{ name?: string; uses?: string; with?: Record<string, unknown>; run?: string }> }> };
+    expect(Object.keys(source.on ?? {})).toEqual(["push"]);
+    expect(source.on?.push).toEqual({
+      branches: ["cowork/reader-hosted-fixture-stderr"],
+      paths: [".github/workflows/cowork-reader-native-reviewed.yml", "scripts/guest-reader-native/bootstrap.py", "scripts/guest-reader-native/download.cjs", "scripts/guest-reader-native/wrapper.py"],
+    });
+    expect(source.permissions).toEqual({ contents: "read", actions: "read" });
+    expect(Object.keys(source.jobs ?? {})).toEqual(["reader-only"]);
+    const job = source.jobs?.["reader-only"], steps = job?.steps ?? [];
+    expect(job?.if).toBe("github.repository == 'yanlingLabs/winter-runtime-sdk' && github.ref == 'refs/heads/cowork/reader-hosted-fixture-stderr' && github.run_attempt == '1'");
+    expect(steps.length).toBe(6);
+    for (const step of steps.filter(step => step.uses)) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);
+    expect(steps[0]?.with).toEqual({ ref: "a94c4c89d489103e09bcc5c799312c9a44cbf86e", path: "origins/base", "persist-credentials": false });
+    expect(steps[1]?.with).toEqual({ ref: "${{ github.sha }}", path: "origins/bootstrap", "persist-credentials": false });
+    expect(steps[2]?.uses).toBe("actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b");
+    expect(steps[2]?.with?.["github-token"]).toBe("${{ github.token }}");
+    const text = readWorkflow("cowork-reader-native-reviewed.yml");
+    expect(text.match(/\$\{\{ github.token \}\}/g)?.length).toBe(1);
+    expect(text).not.toContain("GITHUB_ENV");
+    expect(text).not.toContain("_SHA_PENDING");
+    expect(text).toContain("fs.chmodSync(privateDir,0o700)");
+    expect(text).toContain("6745b668d5d6418cb6b8021e05d73eaeaf35d4ada3e3e3b2f76aaae71d1c2757");
+    expect(text).toContain("456cffc6d76d39262f76b9bf856020bbbd8df57ed6ea2814f307370051d90190");
+    expect(text).toContain("1f4a4222c91cecd8057eb45f367af24452027737781264d0aeae6a85be37ba7a");
+    expect(text).toContain("sudo env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC /usr/bin/python3 -I -S -B");
+    expect(text).toContain("checked._compile(raw.toString('utf8'),source)");
+    expect(text).toContain("exec(compile(checked,str(protected),'exec'),checked_module.__dict__);module=checked_module");
+    expect(text).toContain("group: reader-native-reviewed");
+    expect(text).toContain("cancel-in-progress: false");
+    expect(text).toContain("Buffer.alloc(65537)");
+    expect(text).not.toContain("fs.readFileSync(fd)");
+    expect(text).toContain("os.open('result.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=output_dir)");
+    expect(text).toContain("os.fchown(fd,owner.st_uid,owner.st_gid);os.fchmod(fd,0o600)");
+    expect(text).toContain("causeReason");
+    expect(text).toContain("module.failure_record(error)");
+    expect(text.match(/module.log_result_projection\(result\)/g)?.length).toBe(2);
+    expect(text).not.toContain("print(json.dumps(result,sort_keys=True))");
+    expect(text).toContain("wrapper_source=wrapper,harness_source=harness_source");
+    const bootstrap = readFileSync(resolve(import.meta.dir, "../../scripts/guest-reader-native/bootstrap.py"), "utf8");
+    for (const reason of ["outer namespace changed before launch", "outer namespace changed while live", "outer namespace changed after teardown", "actual child handle envelope", "actual initial I required", "negative teardown before C deadline"])
+      expect(bootstrap).toContain(`'${reason}'`);
+    expect(steps[5]?.with?.path).toBe("${{ steps.download.outputs.private }}/result.json");
+  });
+
+  // The compile packet carries three compiled outputs: the reader, its launcher and the dependency probe. No step script
+  // may mention any of the three as a whole path token (the path followed by whitespace or the end of a line), which is the
+  // only way one could be run. The alternation is closed, not a prefix, so `instructionReader.metafile.json` stays allowed.
+  const COMPILE_FIXTURE_NO_EXECUTION = /sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher|DependencyProbe)?(?:\s|$)/;
+
+  test("the compile-fixture no-execution pattern names all three compiled outputs exactly", () => {
+    for (const name of ["instructionReader", "instructionReaderLauncher", "instructionReaderDependencyProbe"]) {
+      expect(`./packet/artifacts/${name}`).toMatch(COMPILE_FIXTURE_NO_EXECUTION);
+      expect(`run ./packet/artifacts/${name} --flag`).toMatch(COMPILE_FIXTURE_NO_EXECUTION);
+      expect(`./packet/artifacts/${name}\nnext`).toMatch(COMPILE_FIXTURE_NO_EXECUTION);
+    }
+    for (const safe of ["artifacts/instructionReader.metafile.json", "artifacts/instructionReaderDependencyProbe.sha256", "artifacts/instructionReaderDependency", "artifacts/instructionReaderDependencyProbes", "artifacts/instructionReaderLauncherX"])
+      expect(safe).not.toMatch(COMPILE_FIXTURE_NO_EXECUTION);
   });
 
   test("the reader compile fixture has exact feature triggers and no output execution", () => {
@@ -161,14 +221,14 @@ describe("the release workflow", () => {
     expect(job?.steps?.length).toBe(10);
     for (const step of job?.steps ?? []) {
       if (step.uses?.startsWith("actions/checkout")) expect(step.with?.["persist-credentials"]).toBe(false);
-      if (step.run) expect(step.run).not.toMatch(/sudo|ldd|(?:^|\n)\s*[^\n]*artifacts\/instructionReader(?:Launcher)?(?:\s|$)/);
+      if (step.run) expect(step.run).not.toMatch(COMPILE_FIXTURE_NO_EXECUTION);
     }
     const checkouts = job?.steps?.filter((step) => step.uses?.startsWith("actions/checkout")) ?? [];
     expect(checkouts.map((step) => step.with?.ref)).toEqual([
-      "1c867727a8a8519bff75cf78e857ddd60bf1b0da",
+      "0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27",
       "0394b36f674765c942f8db07f009b7ad20787dba",
       "8603da22d9fe7f1695166891cd29ccd254b1d21e",
-      "f6d88d9a2f8ae15bb50afb98868183ae769e3b11",
+      "53082a74a98120f5deffa75f04dc306976d75de8",
     ]);
     const uploads = job?.steps?.filter((step) => step.uses === "actions/upload-artifact@v4") ?? [];
     expect(uploads.length).toBe(2);
@@ -190,7 +250,15 @@ describe("the release workflow", () => {
     expect(rawCheck?.run).toContain("os.O_NOFOLLOW|os.O_NONBLOCK");
     expect(rawCheck?.run).toContain("diagnostic-only, unadmitted, public-source fixture");
     const text = readWorkflow("cowork-reader-compile-fixture.yml");
-    expect(text).toContain("--builder-head 1c867727a8a8519bff75cf78e857ddd60bf1b0da");
+    expect(text).toContain("--builder-head 0dd4d8f2a74fd168ea2c9a2ebfd11d391c3dec27");
+    // The pinned packet is the one this workflow builds: its builder and overlay heads are the workflow's.
+    const pins = readdirSync(join(REPO_ROOT, "scripts", "guest-reader-intake")).filter((name) => /^compile-\d+\.pin\.json$/.test(name));
+    expect(pins.length).toBe(1);
+    const pin = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "guest-reader-intake", pins[0]!), "utf8")) as { builderHead: string; origins: Array<{ role: string; head: string }> };
+    expect(text).toContain(`--builder-head ${pin.builderHead}`);
+    expect(text).toContain(`'builderHead':'${pin.builderHead}'`);
+    expect(checkouts[0]?.with?.ref).toBe(pin.builderHead);
+    expect(checkouts[3]?.with?.ref).toBe(pin.origins.find((origin) => origin.role === "overlay")?.head);
     expect(text).toContain("if name=='artifacts/native.d':continue");
     expect(text).toContain("tar.addfile(record,io.BytesIO(data))");
     expect(text).not.toContain("tar.addfile(record,incoming)");
