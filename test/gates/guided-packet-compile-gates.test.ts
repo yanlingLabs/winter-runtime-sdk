@@ -31,6 +31,7 @@ const GUARD: Array<[string, string]> = [
   ["the unarmed refusal", `test "$BUILDER_HEAD" != "${ZERO_HEAD}"`],
   ["the ancestor check", 'git merge-base --is-ancestor "$BUILDER_HEAD" "$GITHUB_SHA"'],
   ["the single-file check", `test "$(git diff --name-only "$BUILDER_HEAD" "$GITHUB_SHA")" = "${WORKFLOW_PATH}"`],
+  ["the numstat check", `test "$(git diff --numstat "$BUILDER_HEAD" "$GITHUB_SHA")" = "$(printf '1\\t1\\t%s' ${WORKFLOW_PATH})"`],
   ["the diff capture", `armed_diff=$(git diff -U0 --no-color "$BUILDER_HEAD" "$GITHUB_SHA" | grep -E '^[-+][^-+]' || true)`],
   ["the exact one-line diff check", `test "$armed_diff" = "$(printf '%s\\n%s' "-  BUILDER_HEAD: '${ZERO_HEAD}'" "+  BUILDER_HEAD: '$BUILDER_HEAD'")"`],
   ["the builder-head checkout", 'git checkout --detach --quiet "$BUILDER_HEAD"'],
@@ -396,6 +397,8 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
   ["guard: ancestor check made advisory", sub('"$GITHUB_SHA"\n          test "$(git diff --name-only', '"$GITHUB_SHA" || true\n          test "$(git diff --name-only'), "arming guard lacks the ancestor check"],
   ["guard: single-file check removed", sub(/ *test "\$\(git diff --name-only[^\n]*\n/, ""), "arming guard lacks the single-file check"],
   ["guard: single-file check allows a second file", sub('= ".github/workflows/cowork-guided-packet-compile-fixture.yml"', '!= ""'), "arming guard lacks the single-file check"],
+  ["guard: numstat check removed", sub(/ *test "\$\(git diff --numstat[^\n]*\n/, ""), "arming guard lacks the numstat check"],
+  ["guard: numstat check allows two added lines", sub("'1\\t1\\t%s'", "'2\\t1\\t%s'"), "arming guard lacks the numstat check"],
   ["guard: diff capture removed", sub(/ *armed_diff=\$\([^\n]*\n/, ""), "arming guard lacks the diff capture"],
   ["guard: one-line diff check removed", sub(/ *test "\$armed_diff"[^\n]*\n/, ""), "arming guard lacks the exact one-line diff check"],
   ["guard: one-line diff check accepts two lines", sub("grep -E '^[-+][^-+]'", "grep -E '^[+][^+]'"), "arming guard lacks the diff capture"],
@@ -498,6 +501,12 @@ describe("arming guard behaviour (runs the workflow's own guard script against t
     expect(run((dir, builder) => { const side = git(dir, "commit-tree", `${builder}^{tree}`, "-m", "side"); writeFileSync(join(dir, WORKFLOW_PATH), workflow(side)); return side; })).not.toBe(0);
     // Control: the same shape with an ancestor passes, so the failure above is the ancestry and nothing else.
     expect(run((dir, builder) => { const child = git(dir, "commit-tree", `${builder}^{tree}`, "-p", builder, "-m", "child"); git(dir, "reset", "-q", "--soft", child); writeFileSync(join(dir, WORKFLOW_PATH), workflow(child)); return child; })).toBe(0);
+  });
+  test("caught by the numstat check alone: the arming commit also adds a `---` line, which the changed-line filter cannot see", () => {
+    expect(run((dir, builder) => { writeFileSync(join(dir, WORKFLOW_PATH), `${workflow(builder)}---\n`); return builder; })).not.toBe(0);
+  });
+  test("caught by the numstat check alone: the arming commit also adds a line starting with a plus", () => {
+    expect(run((dir, builder) => { writeFileSync(join(dir, WORKFLOW_PATH), `${workflow(builder)}+x\n`); return builder; })).not.toBe(0);
   });
   test("caught: a two-line diff (the BUILDER_HEAD line plus another line of the workflow)", () => {
     expect(run((dir, builder) => { writeFileSync(join(dir, WORKFLOW_PATH), workflow(builder).replace("OTHER: 1", "OTHER: 2")); return builder; })).not.toBe(0);

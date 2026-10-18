@@ -51,7 +51,7 @@ block, and both test files fail when any copy drifts.
 
 | Pin | Value | Moves when |
 | --- | --- | --- |
-| agent-sdk head | `6370e0adedb8a0f9706e6fcc4fe0456cfdde46fe` (main, compartment C applied by PR 34) | PR 35 (Root reader service) merges: see below |
+| agent-sdk head | `68e57c646f23feba09b00c78d05d8c80d6f2962d` (main, compartment C applied by PR 34, Root reader service by PR 35) | a later agent-sdk change; see below |
 | runtime-sdk head | `29eede4b3e085044f5ed6bc6cf99e8f6c4daf6a1` (main, includes the guided provider stub and the reader entry) | never for this run |
 | Winter Core head | `8b52ef83d1ba721a4dd80cdbb205c617f8656555` on `cowork/output-integration` (an exact commit, never the branch name) | Core's cowork sources change |
 | Bun | 1.3.14, archive and executable SHA-256 in the `bun` object | the owner chooses another version |
@@ -123,10 +123,10 @@ respelled line each fail on their own check. No ruleset or repository setting is
 
 ### Moving a pinned origin
 
-* **PR 35 merges (agent-sdk).** Change the one constant `origins.agentSdk.head` (and `.tree`) in the pin file and the
+* **A later agent-sdk change (PR 35 is already in the pin).** Change the one constant `origins.agentSdk.head` (and `.tree`) in the pin file and the
   mirrored `AGENT_SDK_HEAD` line; the agreement tests name whichever is left behind. The Root reader service is a
   Python supervisor change (data in the captured SDK tree, not compiled here), so the compiled outputs only change
-  if PR 35 touches a bundled TypeScript file or one of the six C sources. If the lockfile changed, rerun
+  if it touches a bundled TypeScript file or one of the six C sources. If the lockfile changed, rerun
   `pin-deps.ts` (it prints the whole `dependencies` block) and update `dependencies.lst` and its env hash.
 * **Bun version.** Edit the `bun` object in the pin file (version, archive SHA-256, executable SHA-256) and the
   three mirrored `BUN_*` lines, then re-pin the run output. This is the owner's decision before the run. The

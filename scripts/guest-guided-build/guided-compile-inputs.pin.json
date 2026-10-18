@@ -13,9 +13,9 @@
  "origins": {
   "agentSdk": {
    "repository": "yanlingLabs/winter-agent-sdk",
-   "head": "6370e0adedb8a0f9706e6fcc4fe0456cfdde46fe",
-   "tree": "f75dec1fe7c1f4870641cd29e3be7456a172fc6d",
-   "note": "main with compartment C applied (PR 34). PR 35 (Root reader service) moves this one constant to its merged commit."
+   "head": "68e57c646f23feba09b00c78d05d8c80d6f2962d",
+   "tree": "86dcb48155e40f6b084e8b0ffea529679b5274c2",
+   "note": "main with compartment C applied (PR 34) and the Root reader service (PR 35, merge commit 68e57c64)."
   },
   "runtimeSdk": {
    "repository": "yanlingLabs/winter-runtime-sdk",
