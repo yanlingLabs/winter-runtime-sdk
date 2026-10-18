@@ -36,6 +36,10 @@ equal the bytes captured with the builder origin.
 | `ownerLibrary` | `linux-session-owner.c` | `... -shared -fPIC` |
 | `instructionReaderLauncher` | `linux-instruction-reader-compartment.c` | the reader packet's hardened dynamic flags |
 
+**Placeholders.** The `providerWorker` and `hostClient` outputs are placeholders: compile-only adapters that refuse if
+started. Their hashes are NOT final. They change when the real host client and the provider runner replace the
+adapters, and the hosted-run slice must not bind to them.
+
 The two entry adapters are new reviewed source and are the only authored TypeScript here. They exist so the
 packet carries the real bytes and import graph of the stub and of Core's planner/resolver/mapper; they add no
 behaviour. `scripts/guest-host-query/host-client.ts` does not import Core, so it cannot be relabelled as this role.
@@ -106,7 +110,16 @@ neither explains nor clears it.
 
 1. The owner chooses the Bun version (default 1.3.14, matching the guest base and the reader pins). The owner approves the single run.
 2. One commit on top of the reviewed builder commit sets `BUILDER_HEAD` in the workflow to that builder commit.
+   That commit changes nothing else: it is the single `BUILDER_HEAD: '<sha>'` line, with the same quoting as the zeros line.
 3. The branch is created once from that exact commit.
+
+The owner's approval of that exact arming commit is the control, and the controller verifies the one-line diff by hand
+too. The workflow adds a second, mechanical check: its first two steps (a full-history checkout of the pushed commit,
+then a shell guard) refuse unless `BUILDER_HEAD` is non-zero, is an ancestor of the pushed commit, and the whole diff
+`BUILDER_HEAD..pushed` is that one line of that one file. Only then does the guard check out the builder head, so an
+unreviewed commit's `build.py` or `acquire.py` is never reached. Unarmed (all zeros) still fails closed. The gate test
+runs the guard script for real against temporary repositories: an extra file, a non-ancestor head, a two-line diff and a
+respelled line each fail on their own check. No ruleset or repository setting is involved.
 
 ### Moving a pinned origin
 

@@ -362,11 +362,12 @@ class AcquireTests(unittest.TestCase):
         result=acquire.extract_deps(self.root/'tarballs',out,pin);self.assertEqual(result['packages'],2)
         store=out/'dependencies/.pnpm'
         self.assertEqual((store/'@s+a@1.0.0/node_modules/@s/a/lib/index.js').read_bytes(),b'x')
+        for written in (store/'@s+a@1.0.0/node_modules/@s/a/lib/index.js',store/'b@2.0.0/node_modules/b/package.json'):self.assertEqual(written.stat().st_mode&0o777,0o400)
         link=store/'@s+a@1.0.0/node_modules/b';self.assertTrue(link.is_symlink());self.assertEqual(os.readlink(link),'../../b@2.0.0/node_modules/b')
         self.assertEqual((link/'package.json').read_bytes(),(store/'b@2.0.0/node_modules/b/package.json').read_bytes())
     def test_dependency_tarball_refusals(self):
         good=lambda name:(('package/package.json',json.dumps({'name':name,'version':'2.0.0'}).encode(),tarfile.REGTYPE),)
-        cases={'path':(('package/../evil',b'x',tarfile.REGTYPE),),'prefix':(('other/x',b'x',tarfile.REGTYPE),),'link':(('package/l',b'',tarfile.SYMTYPE),),
+        cases={'path':(('package/../evil',b'x',tarfile.REGTYPE),),'prefix':(('other/x',b'x',tarfile.REGTYPE),),'link':(('package/l',b'',tarfile.SYMTYPE),),'hardlink':(('package/h',b'',tarfile.LNKTYPE),),
                'identity':(('package/package.json',b'{"name":"b","version":"0.0.1"}',tarfile.REGTYPE),)}
         for label,members in cases.items():
             pin=self.pin(mutate=('b@2.0.0',members));out=self.root/('fx-'+label);out.mkdir()
@@ -429,7 +430,7 @@ class PinCascadeTests(unittest.TestCase):
 
 class NoExecutionTests(unittest.TestCase):
     SOURCES=('build.py','graph.py','acquire.py','pins.py')
-    FORBIDDEN=re.compile(r'\b(os\.(system|exec\w*|spawn\w*|popen|posix_spawn\w*)|subprocess\.(run|call|check_call|check_output|getoutput)|ctypes|dlopen|pty\.|runpy|os\.fork|os\.startfile)\b')
+    FORBIDDEN=re.compile(r'\b(os\.(system|exec\w*|spawn\w*|popen|posix_spawn\w*)|subprocess\.(run|call|check_call|check_output|getoutput|Popen|getstatusoutput)|\bPopen\(|ctypes|dlopen|pty\.|runpy|os\.fork|os\.startfile)\b')
     def test_no_source_can_start_a_process_other_than_through_the_injected_runner(self):
         for name in self.SOURCES:self.assertIsNone(self.FORBIDDEN.search((HERE/name).read_text()),name)
     def test_every_runner_call_names_the_held_compiler_or_held_cc(self):

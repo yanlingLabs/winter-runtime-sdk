@@ -5,8 +5,10 @@
 // the bottom feeds it a deliberately broken copy per gate and requires that every single removal is caught by its OWN
 // named violation, so a gate that silently stopped checking fails here.
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..", "..");
@@ -21,6 +23,18 @@ const ALLOWED_ACTIONS = new Set(["actions/checkout", "actions/upload-artifact"])
 const USED_BRANCHES = ["cowork/instruction-reader-compile-fixture", "cowork/reader-hosted-dependency-probe", "cowork/reader-hosted-fixture-stderr", "cowork/guided-packet-build"];
 const ZERO_HEAD = "0".repeat(40);
 const BUN_URL = "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-aarch64.zip";
+const WORKFLOW_PATH = ".github/workflows/cowork-guided-packet-compile-fixture.yml";
+/** The arming guard, line for line. It runs before any builder code is checked out and refuses unless BUILDER_HEAD is an
+ * ancestor of the pushed commit AND the whole difference is the one BUILDER_HEAD line of this workflow. */
+const GUARD: Array<[string, string]> = [
+  ["the strict shell", "set -euo pipefail"],
+  ["the unarmed refusal", `test "$BUILDER_HEAD" != "${ZERO_HEAD}"`],
+  ["the ancestor check", 'git merge-base --is-ancestor "$BUILDER_HEAD" "$GITHUB_SHA"'],
+  ["the single-file check", `test "$(git diff --name-only "$BUILDER_HEAD" "$GITHUB_SHA")" = "${WORKFLOW_PATH}"`],
+  ["the diff capture", `armed_diff=$(git diff -U0 --no-color "$BUILDER_HEAD" "$GITHUB_SHA" | grep -E '^[-+][^-+]' || true)`],
+  ["the exact one-line diff check", `test "$armed_diff" = "$(printf '%s\\n%s' "-  BUILDER_HEAD: '${ZERO_HEAD}'" "+  BUILDER_HEAD: '$BUILDER_HEAD'")"`],
+  ["the builder-head checkout", 'git checkout --detach --quiet "$BUILDER_HEAD"'],
+];
 const CC_LINE = `guided_cc=$(python3 -I -S -B -c 'import pathlib,shutil; print(pathlib.Path(shutil.which("cc")).resolve())')`;
 
 type Step = { name?: string; id?: string; "continue-on-error"?: boolean; uses?: string; run?: string; if?: string; shell?: string; env?: Record<string, unknown>; with?: Record<string, unknown> };
@@ -67,7 +81,6 @@ function logicalLines(run: string): string[] {
 
 /** Every reviewed command shape. Anything else in a run block is a violation: the list is closed on purpose. */
 const SHAPES: RegExp[] = [
-  /^set -euo pipefail$/,
   /^guided_fixture=\$\(mktemp -d \/var\/tmp\/winter-guided-compile\.XXXXXXXX\)$/,
   /^printf 'GUIDED_FIXTURE=%s\\n' "\$guided_fixture" >> "\$GITHUB_ENV"$/,
   /^mkdir -m 700 "\$guided_fixture\/dependencies" "\$guided_fixture\/archive" "\$guided_fixture\/tarballs"$/,
@@ -130,21 +143,28 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
   }
   if (/download-artifact|actions\/cache|setup-bun|setup-node|setup-python|pnpm\/action-setup/.test(text)) bad("unexpected action");
 
-  // 5. Checkouts: four, each credential-free, each at the pin file's commit through the env block.
+  // 5. Checkouts: four, each credential-free. The first is the pushed commit with full history (the arming guard reads
+  //    it); the builder head is checked out by the guard itself, only after it passes.
   const checkouts = steps.filter((s) => s.uses?.startsWith("actions/checkout@"));
   const expectedCheckouts = [
-    { ref: "${{ env.BUILDER_HEAD }}", repository: undefined, path: undefined },
-    { ref: "${{ env.RUNTIME_SDK_HEAD }}", repository: "yanlingLabs/winter-runtime-sdk", path: "origins/runtime" },
-    { ref: "${{ env.AGENT_SDK_HEAD }}", repository: "yanlingLabs/winter-agent-sdk", path: "origins/sdk" },
-    { ref: "${{ env.WINTER_HEAD }}", repository: "yanlingLabs/winter", path: "origins/winter" },
+    { ref: "${{ github.sha }}", repository: undefined, path: undefined, depth: 0 },
+    { ref: "${{ env.RUNTIME_SDK_HEAD }}", repository: "yanlingLabs/winter-runtime-sdk", path: "origins/runtime", depth: undefined },
+    { ref: "${{ env.AGENT_SDK_HEAD }}", repository: "yanlingLabs/winter-agent-sdk", path: "origins/sdk", depth: undefined },
+    { ref: "${{ env.WINTER_HEAD }}", repository: "yanlingLabs/winter", path: "origins/winter", depth: undefined },
   ];
   if (checkouts.length !== 4) bad("exactly four checkouts");
   checkouts.forEach((step, index) => {
     const want = expectedCheckouts[index];
     if (step.with?.["persist-credentials"] !== false) bad("every checkout must set persist-credentials: false");
-    if (!want || step.with?.ref !== want.ref || step.with?.repository !== want.repository || step.with?.path !== want.path) bad(`checkout ${index} is not the reviewed origin`);
-    if (Object.keys(step.with ?? {}).some((key) => !["ref", "repository", "path", "persist-credentials"].includes(key))) bad("checkout has extra with: keys");
+    if (!want || step.with?.ref !== want.ref || step.with?.repository !== want.repository || step.with?.path !== want.path || step.with?.["fetch-depth"] !== want.depth) bad(`checkout ${index} is not the reviewed origin`);
+    if (Object.keys(step.with ?? {}).some((key) => !["ref", "repository", "path", "fetch-depth", "persist-credentials"].includes(key))) bad("checkout has extra with: keys");
   });
+  if (steps[0] !== checkouts[0] || steps[0]?.with?.["fetch-depth"] !== 0) bad("the first step must be the pushed-commit checkout with full history");
+  const guardStep = steps[1];
+  const guardLines = logicalLines(guardStep?.run ?? "");
+  if (!guardStep || guardStep.run === undefined || steps.indexOf(guardStep) !== 1) bad("the arming guard must be the second step");
+  for (const [label, line] of GUARD) if (!guardLines.includes(line)) bad(`arming guard lacks ${label}`);
+  if (JSON.stringify(guardLines) !== JSON.stringify(GUARD.map(([, line]) => line))) bad("arming guard is not exactly the reviewed script");
 
   // 6. The env block is the pin file, line for line.
   const env = (doc.env ?? {}) as Record<string, unknown>;
@@ -193,7 +213,7 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
 
   // 9. Nothing is executed: every shell line is a reviewed shape, and no execution or privilege word appears at all.
   for (const line of lines) {
-    if (line === CC_LINE) continue;
+    if (line === CC_LINE || GUARD.some(([, guardLine]) => guardLine === line)) continue;
     if (!SHAPES.some((shape) => shape.test(line))) bad(`unreviewed command line: ${line}`);
   }
   if (!lines.includes(CC_LINE)) bad("the native compiler path must be resolved exactly as reviewed");
@@ -308,7 +328,7 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
   ["an unlisted action", sub("      - name: Fetch", `      - uses: actions/cache@${"2".repeat(40)}\n      - name: Fetch`), "action not allowed: actions/cache"],
   ["a package-manager action", sub("      - name: Fetch", `      - uses: pnpm/action-setup@${"3".repeat(40)}\n      - name: Fetch`), "unexpected action"],
   ["checkout keeps credentials", sub("persist-credentials: false", "persist-credentials: true"), "every checkout must set persist-credentials: false"],
-  ["checkout drops credential setting", sub("          ref: ${{ env.BUILDER_HEAD }}\n          persist-credentials: false\n", "          ref: ${{ env.BUILDER_HEAD }}\n"), "every checkout must set persist-credentials: false"],
+  ["checkout drops credential setting", sub("          fetch-depth: 0\n          persist-credentials: false\n", "          fetch-depth: 0\n"), "every checkout must set persist-credentials: false"],
   ["checkout a mutable ref", sub("ref: ${{ env.WINTER_HEAD }}", "ref: cowork/output-integration"), "checkout 3 is not the reviewed origin"],
   ["checkout the wrong repository", sub("repository: yanlingLabs/winter\n", "repository: someone/else\n"), "checkout 3 is not the reviewed origin"],
   ["checkout into the wrong path", sub("path: origins/sdk", "path: origins/other"), "checkout 2 is not the reviewed origin"],
@@ -371,8 +391,22 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
   ["list checksum moves after the loop", (t) => { const m = /( *printf '%s  %s\\n' "\$DEPENDENCY_LIST_SHA256"[^\n]*\n)/.exec(t)!; return t.replace(m[1]!, "").replace(/( *python3 -I -S -B scripts\/guest-guided-build\/acquire\.py deps[^\n]*\n)/, `$1${m[1]}`); }, "order must be list checksum, download loop with per-file checksum, then unpack"],
   ["a command names a compiled output path", sub("          guided_cc=", "          printf '%s' \"$GUIDED_FIXTURE/packet/artifacts/hostClient\"\n          guided_cc="), "a compiled output path appears in a command"],
   ["a trailing step after the diagnostics upload", (t) => `${t}      - run: printf 'x'\n`, "diagnostics upload is the last step"],
+  ["guard: unarmed refusal removed", sub(/ *test "\$BUILDER_HEAD" != "0+"\n/, ""), "arming guard lacks the unarmed refusal"],
+  ["guard: ancestor check removed", sub(/ *git merge-base --is-ancestor[^\n]*\n/, ""), "arming guard lacks the ancestor check"],
+  ["guard: ancestor check made advisory", sub('"$GITHUB_SHA"\n          test "$(git diff --name-only', '"$GITHUB_SHA" || true\n          test "$(git diff --name-only'), "arming guard lacks the ancestor check"],
+  ["guard: single-file check removed", sub(/ *test "\$\(git diff --name-only[^\n]*\n/, ""), "arming guard lacks the single-file check"],
+  ["guard: single-file check allows a second file", sub('= ".github/workflows/cowork-guided-packet-compile-fixture.yml"', '!= ""'), "arming guard lacks the single-file check"],
+  ["guard: diff capture removed", sub(/ *armed_diff=\$\([^\n]*\n/, ""), "arming guard lacks the diff capture"],
+  ["guard: one-line diff check removed", sub(/ *test "\$armed_diff"[^\n]*\n/, ""), "arming guard lacks the exact one-line diff check"],
+  ["guard: one-line diff check accepts two lines", sub("grep -E '^[-+][^-+]'", "grep -E '^[+][^+]'"), "arming guard lacks the diff capture"],
+  ["guard: builder-head checkout removed", sub(/ *git checkout --detach --quiet[^\n]*\n/, ""), "arming guard lacks the builder-head checkout"],
+  ["guard: an extra line after the checkout", sub('git checkout --detach --quiet "$BUILDER_HEAD"\n', 'git checkout --detach --quiet "$BUILDER_HEAD"\n          git submodule update --init\n'), "arming guard is not exactly the reviewed script"],
+  ["guard step removed", sub(/      - name: Refuse any arming commit[\s\S]*?git checkout --detach --quiet "\$BUILDER_HEAD"\n/, ""), "the arming guard must be the second step"],
+  ["pushed checkout is shallow", sub("          fetch-depth: 0\n", ""), "the first step must be the pushed-commit checkout with full history"],
+  ["pushed checkout of a mutable ref", sub("ref: ${{ github.sha }}", "ref: main"), "checkout 0 is not the reviewed origin"],
+  ["builder checkout reappears before the guard", sub("    steps:\n", "    steps:\n      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          ref: ${{ env.BUILDER_HEAD }}\n          persist-credentials: false\n"), "the first step must be the pushed-commit checkout with full history"],
   ["uploads reordered after a trailing step", (t) => `${t}      - run: printf 'x'\n`, "unreviewed command line"],
-  ["build before fetch", (t) => { const parts = t.split("      - name: "); return [parts[0], parts[2], parts[1], ...parts.slice(3)].join("      - name: "); }, "order must be checkouts, fetch, build, packet upload, diagnostics upload"],
+  ["build before fetch", (t) => { const parts = t.split("      - name: "); return [parts[0], parts[1], parts[3], parts[2], ...parts.slice(4)].join("      - name: "); }, "order must be checkouts, fetch, build, packet upload, diagnostics upload"],
 ];
 
 // A mutation is only evidence if it changed the text and was caught by the violation it names.
@@ -410,5 +444,68 @@ describe("guided packet compile-fixture workflow gate mutations", () => {
     expect(violations(WORKFLOW, { ...ctx, pin: badUrlPin, dependencyList: badUrlList }).join("\n")).toContain("dependencies.lst has a line that is not a registry sha512 pin");
     expect(violations(WORKFLOW, { ...ctx, exists: () => false }).join("\n")).toContain("the reviewed scripts must exist");
     expect(violations(WORKFLOW, { ...ctx, buildPy: ctx.buildPy.replace("'archive-dir',", "") }).join("\n")).toContain("build flags differ from build.py's argparse");
+  });
+});
+
+// The guard is run for real, as bash, against throwaway Git repositories: each way an arming commit can be wrong must fail.
+describe("arming guard behaviour (runs the workflow's own guard script against temporary repositories)", () => {
+  const doc = yaml.parse(read(`.github/workflows/${WORKFLOW_NAME}`)) as Doc;
+  const script = (Object.values(doc.jobs ?? {})[0]?.steps ?? [])[1]?.run ?? "";
+  const workflow = (head: string, extra = "") => `name: x\nenv:\n  BUILDER_HEAD: '${head}'\n  OTHER: 1\n${extra}`;
+  function git(cwd: string, ...args: string[]): string {
+    const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@invalid", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8", env: { PATH: process.env.PATH ?? "", HOME: cwd, GIT_CONFIG_NOSYSTEM: "1" } });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  }
+  /** Builds: builder commit B (unarmed workflow), then a pushed commit C produced by `arm`. Returns the guard's exit status. */
+  function run(arm: (dir: string, builder: string) => string | void, options: { headOverride?: (builder: string, dir: string) => string } = {}): number {
+    const dir = mkdtempSync(join(tmpdir(), "guided-arming-guard-"));
+    try {
+      git(dir, "init", "-q", "-b", "main");
+      mkdirSync(join(dir, ".github/workflows"), { recursive: true });
+      writeFileSync(join(dir, WORKFLOW_PATH), workflow(ZERO_HEAD));
+      writeFileSync(join(dir, "builder.txt"), "builder\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "builder");
+      const builder = git(dir, "rev-parse", "HEAD");
+      const head = arm(dir, builder) ?? builder;
+      git(dir, "add", "-A");
+      git(dir, "commit", "-q", "-m", "arming");
+      const pushed = git(dir, "rev-parse", "HEAD");
+      const builderHead = options.headOverride ? options.headOverride(builder, dir) : head;
+      return spawnSync("bash", ["-c", script], { cwd: dir, env: { PATH: process.env.PATH ?? "", HOME: dir, GIT_CONFIG_NOSYSTEM: "1", BUILDER_HEAD: builderHead, GITHUB_SHA: pushed } }).status ?? -1;
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  const armLine = (dir: string, builder: string) => { writeFileSync(join(dir, WORKFLOW_PATH), workflow(builder)); return builder; };
+
+  test("the extracted script is the guard under test", () => {
+    expect(script).toContain("git merge-base --is-ancestor");
+  });
+  test("an arming commit that changes exactly the BUILDER_HEAD line passes", () => {
+    expect(run(armLine)).toBe(0);
+  });
+  test("unarmed (all zeros) still fails closed", () => {
+    expect(run((dir, builder) => { writeFileSync(join(dir, "note.txt"), "x"); return ZERO_HEAD; })).not.toBe(0);
+  });
+  test("caught: an arming commit with an extra file change (an empty file adds no diff line, so only the file-list check sees it)", () => {
+    expect(run((dir, builder) => { armLine(dir, builder); writeFileSync(join(dir, "extra-empty-file"), ""); return builder; })).not.toBe(0);
+  });
+  test("caught: an arming commit that also edits the builder files in place", () => {
+    expect(run((dir, builder) => { armLine(dir, builder); writeFileSync(join(dir, "builder.txt"), "changed\n"); return builder; })).not.toBe(0);
+  });
+  test("caught: a BUILDER_HEAD that is not an ancestor of the pushed commit, with an otherwise perfect one-line diff", () => {
+    // S has exactly the builder commit's tree but is unrelated to the pushed history; the diff S..pushed is the one reviewed line.
+    expect(run((dir, builder) => { const side = git(dir, "commit-tree", `${builder}^{tree}`, "-m", "side"); writeFileSync(join(dir, WORKFLOW_PATH), workflow(side)); return side; })).not.toBe(0);
+    // Control: the same shape with an ancestor passes, so the failure above is the ancestry and nothing else.
+    expect(run((dir, builder) => { const child = git(dir, "commit-tree", `${builder}^{tree}`, "-p", builder, "-m", "child"); git(dir, "reset", "-q", "--soft", child); writeFileSync(join(dir, WORKFLOW_PATH), workflow(child)); return child; })).toBe(0);
+  });
+  test("caught: a two-line diff (the BUILDER_HEAD line plus another line of the workflow)", () => {
+    expect(run((dir, builder) => { writeFileSync(join(dir, WORKFLOW_PATH), workflow(builder).replace("OTHER: 1", "OTHER: 2")); return builder; })).not.toBe(0);
+  });
+  test("caught: a BUILDER_HEAD line written with different spelling than the reviewed one", () => {
+    expect(run((dir, builder) => { writeFileSync(join(dir, WORKFLOW_PATH), workflow(builder).replace(`'${builder}'`, builder)); return builder; })).not.toBe(0);
+  });
+  test("caught: an arming commit that arms to a commit other than the recorded builder head", () => {
+    expect(run(armLine, { headOverride: () => "1".repeat(40) })).not.toBe(0);
   });
 });

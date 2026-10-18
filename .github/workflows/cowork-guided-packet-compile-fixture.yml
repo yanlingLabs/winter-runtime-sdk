@@ -5,6 +5,7 @@ name: guided-packet-compile-fixture
 # The pins below are mirrored from scripts/guest-guided-build/guided-compile-inputs.pin.json; the gate test
 # (test/gates/guided-packet-compile-gates.test.ts) fails if any of them drifts from that file.
 # BUILDER_HEAD is all zeros until the owner-approved arming step sets it to the reviewed builder commit.
+# The first steps refuse unless BUILDER_HEAD is an ancestor of the pushed commit and the whole diff is that one line.
 on:
   push:
     branches: [cowork/guided-packet-compile-fixture]
@@ -27,8 +28,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ env.BUILDER_HEAD }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Refuse any arming commit that is not the one reviewed line, then check out the builder head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BUILDER_HEAD" != "0000000000000000000000000000000000000000"
+          git merge-base --is-ancestor "$BUILDER_HEAD" "$GITHUB_SHA"
+          test "$(git diff --name-only "$BUILDER_HEAD" "$GITHUB_SHA")" = ".github/workflows/cowork-guided-packet-compile-fixture.yml"
+          armed_diff=$(git diff -U0 --no-color "$BUILDER_HEAD" "$GITHUB_SHA" | grep -E '^[-+][^-+]' || true)
+          test "$armed_diff" = "$(printf '%s\n%s' "-  BUILDER_HEAD: '0000000000000000000000000000000000000000'" "+  BUILDER_HEAD: '$BUILDER_HEAD'")"
+          git checkout --detach --quiet "$BUILDER_HEAD"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           repository: yanlingLabs/winter-runtime-sdk
