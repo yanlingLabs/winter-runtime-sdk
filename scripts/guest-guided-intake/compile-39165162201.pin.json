@@ -1,0 +1,283 @@
+{
+ "formatVersion": 1,
+ "kind": "winter-guided-compile-pin",
+ "note": "Intake pin for the ONE guided compile-fixture run. DATA only: nothing here executes, imports or admits anything. providerWorker and hostClient are placeholders; this packet is not the hosted-run packet.",
+ "run": {
+  "id": 39165162201,
+  "attempt": 1,
+  "event": "push",
+  "conclusion": "success",
+  "branch": "cowork/guided-packet-compile-fixture",
+  "branchState": "FROZEN: never push to, delete or recreate",
+  "armingCommit": "5f3e7c955438e56e2dd2629fc46175dcc0ec05ef",
+  "armingCommitNote": "reachable only from the frozen branch; its parent is the builder head and it changes only the BUILDER_HEAD line",
+  "workflow": "cowork-guided-packet-compile-fixture.yml",
+  "createdAt": "2026-10-18T20:50:42Z"
+ },
+ "artifact": {
+  "id": 12149668717,
+  "name": "guided-packet-compile-39165162201",
+  "zipSha256": "0c8e72cdb174d8a7e5a963532524633dd7713132f496f1cc28bc34458c933ed4",
+  "zipBytes": 195333087,
+  "expiresAt": "2026-10-25T20:51:38Z",
+  "members": [
+   "guided-packet.tar.gz",
+   "packet-inventory.json"
+  ]
+ },
+ "archive": {
+  "sha256": "f4ec23c814a0380d6c47f96126aa89df50dafbc43dc9a9741e19c00a10c7d754",
+  "bytes": 196017982
+ },
+ "inventory": {
+  "sha256": "e098273e904c3edfebaea10b3dbe71a38b6d3be0f7085a2905a767b58796ac43",
+  "bytes": 712967,
+  "kind": "winter-guided-compile-packet",
+  "fileCount": 4072,
+  "fileBytes": 568414016,
+  "excludedScratch": [
+   "artifacts/native.d"
+  ]
+ },
+ "receipt": {
+  "path": "receipt.json",
+  "sha256": "f6f335dfb7ceb2a9317c9e116044b89df0bbad9ac73d418fdaa92dc35f0c0c88",
+  "bytes": 1028255
+ },
+ "inputs": {
+  "path": "inputs.json",
+  "sha256": "86fd6e909e855ff9c400ae1f7461c568601b6d5a3eda3026aba82a0c866d03b7",
+  "bytes": 1370123
+ },
+ "compilerAcquisition": {
+  "path": "compiler-acquisition.json",
+  "sha256": "34e8cf481755a78f57ea0b15458fb364bcdaa80ddad77e13ae95a1be4e2babbb",
+  "bytes": 407
+ },
+ "builder": {
+  "head": "5c762d2bd673a8f4e2503a15fed375a020159ac6",
+  "tree": "c98f09efdec6caeacd2c1e4ad954b1b0be00ea72",
+  "files": {
+   "scripts/guest-guided-build/README.md": "b283062cbfb9060301f70b5f822957a1cb79d899b2e2d4d8fbabbd4a225dc3bd",
+   "scripts/guest-guided-build/acquire.py": "cbdf652f3d95a4fb22389f1d6b61718307136109b605cbea08aad730686c6266",
+   "scripts/guest-guided-build/build.py": "b0d2d38b7fb6f3483256523f6c7e905470f9e31cca2d8201450de77256611a63",
+   "scripts/guest-guided-build/dependencies.lst": "f8255bc2b622416d260ff522134beca24b5c0c503700343012a6d2a7e29cdfbe",
+   "scripts/guest-guided-build/entries/host-client.ts": "a8a0e2cd7fa2d8c5a5e28109d68dd3f37f7a9441e2d6b0c2ac065563a61b8775",
+   "scripts/guest-guided-build/entries/provider-worker.ts": "4c7bd33552dcc01cf582172f812c956195b7c0b637548f49d5e4b5d0c1c66a65",
+   "scripts/guest-guided-build/graph.py": "f593a64f793a9f42458c5521d6dd7c61bfa58a921f054460c78765c695710636",
+   "scripts/guest-guided-build/guided-compile-inputs.pin.json": "80da5173652a8ae158d69f7cb3d3de6c1db9e5efc8eb4ab58961e7bfa92a2a76",
+   "scripts/guest-guided-build/pin-deps.ts": "e959269967d7746dc94567434cd3a73a81bb9a21a6186de24655c53ece984975",
+   "scripts/guest-guided-build/pins.py": "873a239e9b5a916acde1bdf2ece10195d4d94ff6efff0294ac069ac2cbd55448",
+   "scripts/guest-guided-build/test_guided_build.py": "acdc2f5ba904e92d328b5581d40bc0c75144b6be4ff643dd5dd9a477fc2f44a6",
+   "scripts/guest-reader-build/build.py": "9a2ae2e13ec1be61d1ae15a5585078bab022bd139f2f584e3a29174b6f12ec90",
+   "scripts/guest-reader-build/provenance.py": "ed66e087c919325459126a27f45aa0a7639e25385c9b3c332d563d44336110a9"
+  }
+ },
+ "workflowHead": "5f3e7c955438e56e2dd2629fc46175dcc0ec05ef",
+ "origins": {
+  "runtime": {
+   "repository": "yanlingLabs/winter-runtime-sdk",
+   "head": "29eede4b3e085044f5ed6bc6cf99e8f6c4daf6a1",
+   "tree": "5eba2966b84ee23ddcd76298cc58427c97095277",
+   "inventorySha256": "97bec1640978225a0610b8fe89107161768d5740a3a8863977d9aa80580c6cb1",
+   "fileCount": 124
+  },
+  "sdk": {
+   "repository": "yanlingLabs/winter-agent-sdk",
+   "head": "68e57c646f23feba09b00c78d05d8c80d6f2962d",
+   "tree": "86dcb48155e40f6b084e8b0ffea529679b5274c2",
+   "inventorySha256": "eac0125e3e7492f147a9fe7f1d7458045a1f50d39485a220847de6711d50cfa7",
+   "fileCount": 1400
+  },
+  "winter": {
+   "repository": "yanlingLabs/winter",
+   "head": "8b52ef83d1ba721a4dd80cdbb205c617f8656555",
+   "tree": "703ad5263ef0a249e9666faa1eaf18a0f19c8be1",
+   "inventorySha256": "9d29d7907af48ca82561986e23c3054be94494ace24e5d602b3b02147a8aefc4",
+   "fileCount": 88
+  }
+ },
+ "bun": {
+  "version": "1.3.14",
+  "target": "bun-linux-arm64",
+  "archiveSha256": "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b",
+  "executableSha256": "37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086",
+  "stageBase": {
+   "path": "stage/linux-bun-base",
+   "sha256": "37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086",
+   "bytes": 91801560
+  }
+ },
+ "dependencies": {
+  "listSha256": "f8255bc2b622416d260ff522134beca24b5c0c503700343012a6d2a7e29cdfbe",
+  "packages": 20,
+  "storeEntries": 2384,
+  "storeSha256": "599db0f5fb5d998c6673ffc6d651e74bac9ffc6df5be93be643d7ce7dc1156d8",
+  "links": 18
+ },
+ "actions": {
+  "actions/checkout": "34e114876b0b11c390a56381ad16ebd13914f8d5",
+  "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02"
+ },
+ "artifacts": {
+  "roles": {
+   "runtimeEntry": {
+    "sha256": "ce3f5c38652d9104c83f489101079f9fecfe2782f5858bc4f3f38371266cb012",
+    "bytes": 102410384
+   },
+   "providerWorker": {
+    "sha256": "99051ec12f09bd755195a8597635d1d0148c212cff1685aa3820d58312872c6e",
+    "bytes": 93694096,
+    "placeholder": true
+   },
+   "hostClient": {
+    "sha256": "e2b62843ad191e5b67907293ec780684414f3703e06052662841f88eb9a2b524",
+    "bytes": 99854480,
+    "placeholder": true
+   },
+   "instructionReader": {
+    "sha256": "4d0702b25869cd133156fd91bdb20fee81bd2c6170aa06befa2a2d25a0f396ad",
+    "bytes": 99264656
+   }
+  },
+  "natives": {
+   "toolLauncher": {
+    "sha256": "d52f1e5aa89a040634266906c3068d50469edc94088981fb78f37bfbcd80a2bc",
+    "bytes": 715168
+   },
+   "runtimeLauncher": {
+    "sha256": "c68c3b87f211ca12640887e4b1283d49f0b1b48b348e065dc7067772d9f1a41c",
+    "bytes": 714448
+   },
+   "fileWorker": {
+    "sha256": "7c3237f9751883ecb56cb54ef163accc01e5c00b5355c3e2119cb0ee6d388b22",
+    "bytes": 707040
+   },
+   "processWorker": {
+    "sha256": "230b6b6784c076281034a728b494671a5368271fc16ae1682b8fd61dd5a327ba",
+    "bytes": 709416
+   },
+   "ownerLibrary": {
+    "sha256": "cd785018b0a14c0c58db0943736b1f28bbbf8147b4f9f9c5c2480e6dfad564ae",
+    "bytes": 73328
+   },
+   "instructionReaderLauncher": {
+    "sha256": "d8f26cedbd807d1ab091179d6274fa273d3b424a34e1cdb48f7f73fc3f961a61",
+    "bytes": 73624
+   }
+  }
+ },
+ "metafiles": {
+  "runtimeEntry": {
+   "sha256": "928597c9fb3a9859dc5e03b1cdcd1e074e05c7fb44d378208f1ec22103be195e",
+   "bytes": 377008
+  },
+  "providerWorker": {
+   "sha256": "5cde263089402832091d5300fd899cd74efbb960b1ab394e5af234f758854d4d",
+   "bytes": 857
+  },
+  "hostClient": {
+   "sha256": "32971b022adb0b5de9229520ae85a417d113412589eb22a0bc23fd73af285485",
+   "bytes": 66422
+  },
+  "instructionReader": {
+   "sha256": "a41e9547b4b4c91445084ceb38d430ed3be1c207027e81ea174ac1a90994d9c2",
+   "bytes": 27030
+  }
+ },
+ "environment": {
+  "environment/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1": {
+   "sha256": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505",
+   "bytes": 203968
+  },
+  "environment/lib/aarch64-linux-gnu/libc.so.6": {
+   "sha256": "0f1905dc27dbc6715875c70527bc8da846a10084c9c483e9d8ff76dce8d69d0e",
+   "bytes": 1722920
+  },
+  "environment/lib/aarch64-linux-gnu/libdl.so.2": {
+   "sha256": "1c16b2692a155191c97d7fdc5ce937d37c242435f05745046a794a9832b16af4",
+   "bytes": 67440
+  },
+  "environment/lib/aarch64-linux-gnu/libm.so.6": {
+   "sha256": "5e0391562de36de323fb9cb0f2c1b6bd6d034c840b1dac018499f5fe4ded1b4a",
+   "bytes": 591800
+  },
+  "environment/lib/aarch64-linux-gnu/libpthread.so.0": {
+   "sha256": "6f1ab9e7d7de142dc5e2feaf6d19faceff0a0f40d5e225c922899f5362b8c353",
+   "bytes": 67440
+  },
+  "environment/lib/ld-linux-aarch64.so.1": {
+   "sha256": "390027e5f45f236bd1838bc54bf464c5ff01d260ab9f8b415ea8276641bce505",
+   "bytes": 203968
+  }
+ },
+ "resolverBindings": {
+  "source/builder/node_modules/@yanlinglabs/winter-agent-runtime": "../../../sdk/packages/runtime",
+  "source/builder/node_modules/@yanlinglabs/winter-agent-sdk": "../../../sdk/packages/sdk",
+  "source/builder/node_modules/@yanlinglabs/winter-conformance": "../../../sdk/packages/conformance",
+  "source/builder/node_modules/@yanlinglabs/winter-provider-catalog": "../../../sdk/packages/provider-catalog",
+  "source/builder/node_modules/@yanlinglabs/winter-provider-conformance": "../../../sdk/packages/provider-conformance",
+  "source/builder/node_modules/@yanlinglabs/winter-provider-runtime": "../../../sdk/packages/provider-runtime",
+  "source/runtime/node_modules/@yanlinglabs/winter-agent-runtime": "../../../sdk/packages/runtime",
+  "source/runtime/node_modules/@yanlinglabs/winter-agent-sdk": "../../../sdk/packages/sdk",
+  "source/runtime/node_modules/@yanlinglabs/winter-conformance": "../../../sdk/packages/conformance",
+  "source/runtime/node_modules/@yanlinglabs/winter-provider-catalog": "../../../sdk/packages/provider-catalog",
+  "source/runtime/node_modules/@yanlinglabs/winter-provider-conformance": "../../../sdk/packages/provider-conformance",
+  "source/runtime/node_modules/@yanlinglabs/winter-provider-runtime": "../../../sdk/packages/provider-runtime",
+  "source/sdk/node_modules/@modelcontextprotocol/client": "../../../../dependencies/.pnpm/@modelcontextprotocol+client@2.1.0/node_modules/@modelcontextprotocol/client",
+  "source/sdk/node_modules/@yanlinglabs/winter-agent-runtime": "../../packages/runtime",
+  "source/sdk/node_modules/@yanlinglabs/winter-agent-sdk": "../../packages/sdk",
+  "source/sdk/node_modules/@yanlinglabs/winter-conformance": "../../packages/conformance",
+  "source/sdk/node_modules/@yanlinglabs/winter-provider-catalog": "../../packages/provider-catalog",
+  "source/sdk/node_modules/@yanlinglabs/winter-provider-conformance": "../../packages/provider-conformance",
+  "source/sdk/node_modules/@yanlinglabs/winter-provider-runtime": "../../packages/provider-runtime",
+  "source/sdk/node_modules/ajv": "../../../dependencies/.pnpm/ajv@8.20.0/node_modules/ajv",
+  "source/sdk/node_modules/ignore": "../../../dependencies/.pnpm/ignore@7.0.5/node_modules/ignore",
+  "source/winter/node_modules/@yanlinglabs/winter-agent-runtime": "../../../sdk/packages/runtime",
+  "source/winter/node_modules/@yanlinglabs/winter-agent-sdk": "../../../sdk/packages/sdk",
+  "source/winter/node_modules/@yanlinglabs/winter-conformance": "../../../sdk/packages/conformance",
+  "source/winter/node_modules/@yanlinglabs/winter-protocol": "../../packages/protocol",
+  "source/winter/node_modules/@yanlinglabs/winter-provider-catalog": "../../../sdk/packages/provider-catalog",
+  "source/winter/node_modules/@yanlinglabs/winter-provider-conformance": "../../../sdk/packages/provider-conformance",
+  "source/winter/node_modules/@yanlinglabs/winter-provider-runtime": "../../../sdk/packages/provider-runtime",
+  "source/winter/node_modules/zod": "../../../dependencies/.pnpm/zod@4.4.3/node_modules/zod"
+ },
+ "archiveRules": {
+  "regularFileMode": "0400",
+  "symlinkMode": "0777",
+  "uid": 0,
+  "gid": 0,
+  "mtime": 0,
+  "directories": false,
+  "hardlinks": false,
+  "note": "The archiver forces every mode. Modes are not build evidence: a rehydrator must assign executable modes itself and recreate the symlinks."
+ },
+ "symlinks": {
+  "total": 47,
+  "resolverAliases": 29,
+  "dependencyLinks": 18
+ },
+ "flags": {
+  "outputsExecuted": false,
+  "nativeAdmission": false,
+  "linuxExecutionVerified": false,
+  "vmExecutionVerified": false,
+  "activationEnabled": false
+ },
+ "binding": {
+  "bindable": [
+   "artifact id 12149668717 with zip digest 0c8e72cd...3ed4 (expires 2026-10-25T20:51:38Z)",
+   "guided-packet.tar.gz f4ec23c8...d754",
+   "packet-inventory.json e098273e...ac43",
+   "receipt.json f6f335df...0c88",
+   "roles runtimeEntry and instructionReader",
+   "the six native artifacts",
+   "the six environment libraries and the Bun base"
+  ],
+  "notBindable": [
+   "providerWorker",
+   "hostClient"
+  ],
+  "reason": "providerWorker and hostClient are compile-only adapters that throw when started; their hashes change when the real host client and provider runner replace them. A hosted guided run needs a second owner-approved compile run once those exist."
+ }
+}
