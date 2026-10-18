@@ -1,0 +1,98 @@
+name: guided-packet-compile-fixture
+# ONE-RUN, COMPILE-ONLY workflow for the guided packet (four compiled roles, six native artifacts).
+# It is authored and NEVER triggered by its author: the owner approves the single run, then the branch below is
+# created once, from the exact reviewed commit, and frozen. Nothing here executes a compiled output.
+# The pins below are mirrored from scripts/guest-guided-build/guided-compile-inputs.pin.json; the gate test
+# (test/gates/guided-packet-compile-gates.test.ts) fails if any of them drifts from that file.
+# BUILDER_HEAD is all zeros until the owner-approved arming step sets it to the reviewed builder commit.
+on:
+  push:
+    branches: [cowork/guided-packet-compile-fixture]
+permissions:
+  contents: read
+env:
+  BUILDER_HEAD: '0000000000000000000000000000000000000000'
+  RUNTIME_SDK_HEAD: 29eede4b3e085044f5ed6bc6cf99e8f6c4daf6a1
+  AGENT_SDK_HEAD: 6370e0adedb8a0f9706e6fcc4fe0456cfdde46fe
+  WINTER_HEAD: 8b52ef83d1ba721a4dd80cdbb205c617f8656555
+  BUN_VERSION: '1.3.14'
+  BUN_ARCHIVE_SHA256: a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b
+  BUN_EXECUTABLE_SHA256: 37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086
+  DEPENDENCY_LIST_SHA256: f8255bc2b622416d260ff522134beca24b5c0c503700343012a6d2a7e29cdfbe
+jobs:
+  compile-only:
+    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guided-packet-compile-fixture' && github.event.created == true && github.run_attempt == '1'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ env.BUILDER_HEAD }}
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: yanlingLabs/winter-runtime-sdk
+          ref: ${{ env.RUNTIME_SDK_HEAD }}
+          path: origins/runtime
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: ${{ env.AGENT_SDK_HEAD }}
+          path: origins/sdk
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: yanlingLabs/winter
+          ref: ${{ env.WINTER_HEAD }}
+          path: origins/winter
+          persist-credentials: false
+      - name: Fetch the pinned inputs as bounded data
+        shell: bash
+        run: |
+          set -euo pipefail
+          guided_fixture=$(mktemp -d /var/tmp/winter-guided-compile.XXXXXXXX)
+          printf 'GUIDED_FIXTURE=%s\n' "$guided_fixture" >> "$GITHUB_ENV"
+          mkdir -m 700 "$guided_fixture/dependencies" "$guided_fixture/archive" "$guided_fixture/tarballs"
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 --max-filesize 134217728 "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-aarch64.zip" --output "$guided_fixture/bun.zip"
+          printf '%s  %s\n' "$BUN_ARCHIVE_SHA256" "$guided_fixture/bun.zip" | sha256sum --check --strict -
+          printf '%s  %s\n' "$DEPENDENCY_LIST_SHA256" scripts/guest-guided-build/dependencies.lst | sha256sum --check --strict -
+          while read -r dependency_sha512 dependency_file dependency_url; do
+            curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 --max-filesize 33554432 "$dependency_url" --output "$guided_fixture/tarballs/$dependency_file"
+            printf '%s  %s\n' "$dependency_sha512" "$guided_fixture/tarballs/$dependency_file" | sha512sum --check --strict -
+          done < scripts/guest-guided-build/dependencies.lst
+          python3 -I -S -B scripts/guest-guided-build/acquire.py bun "$guided_fixture/bun.zip" "$guided_fixture"
+          python3 -I -S -B scripts/guest-guided-build/acquire.py deps "$guided_fixture/tarballs" "$guided_fixture"
+      - name: Compile guided roles and native artifacts without executing outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          guided_cc=$(python3 -I -S -B -c 'import pathlib,shutil; print(pathlib.Path(shutil.which("cc")).resolve())')
+          python3 -I -S -B scripts/guest-guided-build/build.py \
+            --runtime "$GITHUB_WORKSPACE/origins/runtime" \
+            --sdk "$GITHUB_WORKSPACE/origins/sdk" \
+            --winter "$GITHUB_WORKSPACE/origins/winter" \
+            --dependencies "$GUIDED_FIXTURE/dependencies" \
+            --compiler "$GUIDED_FIXTURE/linux-bun" --base "$GUIDED_FIXTURE/linux-bun" \
+            --cc "$guided_cc" --sysroot / --out "$GUIDED_FIXTURE/packet" \
+            --archive-dir "$GUIDED_FIXTURE/archive" --acquisition "$GUIDED_FIXTURE/acquisition.json" \
+            --builder-head "$BUILDER_HEAD" --workflow-head "$GITHUB_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: guided-packet-compile-${{ github.run_id }}
+          path: |
+            ${{ env.GUIDED_FIXTURE }}/archive/guided-packet.tar.gz
+            ${{ env.GUIDED_FIXTURE }}/archive/packet-inventory.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain bounded refusal diagnostics
+        if: failure() && env.GUIDED_FIXTURE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: guided-packet-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ env.GUIDED_FIXTURE }}/packet/diagnostics/*.json
+            ${{ env.GUIDED_FIXTURE }}/packet/artifacts/*.metafile.json
+            ${{ env.GUIDED_FIXTURE }}/acquisition.json
+          if-no-files-found: ignore
+          retention-days: 7

@@ -71,7 +71,7 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "cowork-reader-native-reviewed.yml", "cowork-reader-native-source.yml", "release.yml"]);
+    expect(workflows).toEqual(["ci.yml", "cowork-guided-build-source.yml", "cowork-guided-packet-compile-fixture.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "cowork-reader-native-reviewed.yml", "cowork-reader-native-source.yml", "release.yml"]);
     for (const name of workflows.filter((name) => name !== "release.yml")) {
       const source = readWorkflow(name);
       // Non-release workflows may explain this rule in comments, but cannot run publication.
