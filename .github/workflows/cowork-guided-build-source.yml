@@ -1,0 +1,27 @@
+name: guided-build-source
+# Portable source and data checks for the guided packet builder. It compiles nothing, downloads nothing and
+# executes no compiled output. The compile-fixture workflow is a different file with a different trigger.
+on:
+  push:
+    branches: [cowork/guided-packet-build]
+    paths:
+      - scripts/guest-guided-build/**
+      - .github/workflows/cowork-guided-build-source.yml
+      - test/gates/guided-packet-compile-gates.test.ts
+  pull_request:
+    paths:
+      - scripts/guest-guided-build/**
+      - .github/workflows/cowork-guided-build-source.yml
+      - test/gates/guided-packet-compile-gates.test.ts
+permissions:
+  contents: read
+jobs:
+  portable-data:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Portable source and data checks
+        run: python3 -I -S -B scripts/guest-guided-build/test_guided_build.py
