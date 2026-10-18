@@ -24,12 +24,13 @@ class Fixture(unittest.TestCase):
         for name,folder in p.SDK_PACKAGES.items():
             put(self.sdk,'packages/'+folder+'/package.json',json.dumps({'name':'@yanlinglabs/'+name,'version':'0.0.53','exports':{'.':{'types':'./dist/index.d.ts','bun':'./src/index.ts','default':'./dist/index.js'}}}).encode())
             put(self.sdk,'packages/'+folder+'/src/index.ts',b'export const WINTER_BRAND = {};\n')
-        for name in ('linux-guided-host-query-main.ts','linux-session-entry.ts','linux-session-admission.ts','linux-compartment.h'):put(self.sdk,GUEST+name,b'/* guest fixture */\n')
+        for name in ('linux-guided-host-query-main.ts','linux-session-entry.ts','linux-session-admission.ts','linux-guided-host-query-profile.ts','linux-compartment.h'):put(self.sdk,GUEST+name,b'/* guest fixture */\n')
+        put(self.sdk,'packages/sdk/src/guided-query-reader.ts',b'export const reader = 1;\n')
         for spec in pins.NATIVE.values():put(self.sdk,GUEST+spec['source'],b'#include "linux-compartment.h"\n')
         put(self.winter,'package.json',b'{"name":"winter-fixture"}');put(self.winter,'packages/core/package.json',b'{"name":"@yanlinglabs/winter-core"}')
         put(self.winter,'packages/protocol/package.json',json.dumps({'name':'@yanlinglabs/winter-protocol','version':'0.124.0','exports':{'.':'./src/index.ts'}}).encode())
         put(self.winter,'packages/protocol/src/index.ts',b'import { z } from "zod";\nexport const protocol = z;\n')
-        for name in ('current-context','current-context-resolver','structured-instruction-mapper','authority','guest-paths','types'):put(self.winter,'packages/core/src/cowork/'+name+'.ts',b'export const fixture = 1;\n')
+        for name in ('current-context','current-context-resolver','structured-instruction-mapper','guided-reader-adapter','authority','guest-paths','types'):put(self.winter,'packages/core/src/cowork/'+name+'.ts',b'export const fixture = 1;\n')
         put(self.winter,'packages/core/src/cowork/current-context.test.ts',b'test only\n');put(self.winter,'packages/core/test/cowork/x.ts',b'test only\n')
         put(self.winter,'packages/core/src/daemon.ts',b'outside the closed slice\n')
         put(self.winter,'packages/core/src/runtime-state/records.ts',b'export const records = 1;\n');put(self.winter,'packages/core/src/runtime-sdk/model-tag.ts',b'export const tag = 1;\n')
@@ -408,7 +409,7 @@ class PinCascadeTests(unittest.TestCase):
         self.assertNotIn('zod',pins.ALIASES['sdk'])
         self.assertTrue(any(item['id']=='zod@4.5.4' for item in pins.DEPENDENCY_PACKAGES))
     def test_the_bun_record_has_exactly_one_home_in_the_sources(self):
-        for name in ('pins.py','graph.py','acquire.py','build.py','pin-deps.ts','entries/provider-worker.ts','entries/host-client.ts'):
+        for name in ('pins.py','graph.py','acquire.py','build.py','pin-deps.ts','guided-entries.test.ts','entries/provider-worker.ts','entries/provider-worker-core.ts','entries/host-client.ts','entries/host-client-core.ts'):
             text=(HERE/name).read_text()
             for literal in (self.PIN['bun']['archiveSha256'],self.PIN['bun']['executableSha256'],'bun-v'+self.PIN['bun']['version'],'1.3.14'):
                 self.assertNotIn(literal,text,name)
@@ -426,7 +427,7 @@ class PinCascadeTests(unittest.TestCase):
         self.assertEqual(pins.MAX_PACKET_BYTES,1024**3)
     def test_trigger_branch_is_new_and_not_a_reader_or_hosted_name(self):
         for used in ('cowork/instruction-reader-compile-fixture','cowork/reader-hosted-dependency-probe','cowork/reader-hosted-fixture-stderr','cowork/guided-packet-build'):self.assertNotEqual(pins.TRIGGER_BRANCH,used)
-        self.assertEqual(pins.TRIGGER_BRANCH,'cowork/guided-packet-compile-fixture')
+        self.assertEqual(pins.TRIGGER_BRANCH,'cowork/guided-packet-compile-fixture-2')
 
 class NoExecutionTests(unittest.TestCase):
     SOURCES=('build.py','graph.py','acquire.py','pins.py')
@@ -437,10 +438,39 @@ class NoExecutionTests(unittest.TestCase):
         text=(HERE/'build.py').read_text()
         calls=re.findall(r"runner\(\[([^\]]*)\]",text);self.assertEqual(len(calls),4)
         for argv in calls:self.assertRegex(argv,r"^'/proc/self/fd/'\+str\((compiler_fd|cc_fd)\)")
-    def test_the_entry_adapters_refuse_when_started_and_import_nothing_dynamic(self):
-        for name in ('provider-worker.ts','host-client.ts'):
+    ENTRIES=('provider-worker.ts','provider-worker-core.ts','host-client.ts','host-client-core.ts')
+    BANNED=re.compile(r'\bimport\s*\(|child_process|node:(net|http|https|http2|dgram|tls|dns|worker_threads|cluster|vm)\b|\bfetch\s*\(|\bWebSocket\b|Bun\.(spawn|spawnSync|listen|connect|serve|udpSocket|\$)|\beval\s*\(|new Function|process\.env|require\s*\(')
+    def test_no_entry_can_reach_the_network_a_child_process_or_dynamic_code(self):
+        for name in self.ENTRIES:self.assertIsNone(self.BANNED.search((HERE/'entries'/name).read_text()),name)
+    def test_the_two_cores_import_nothing_and_name_no_native_symbol(self):
+        for name in ('provider-worker-core.ts','host-client-core.ts'):
             text=(HERE/'entries'/name).read_text()
-            self.assertIn('if (import.meta.main)',text);self.assertIn('throw new Error("compile-only',text)
-            self.assertNotRegex(text,r'\bimport\s*\(');self.assertNotRegex(text,r'child_process|node:net|fetch\(|Bun\.spawn|dlopen')
+            self.assertIsNone(re.search(r'^\s*import\b|\bdlopen\b|bun:ffi|node:fs|\bprocess\.[a-z]|\bBun\.|console\.',text,re.M),name)
+    def test_dlopen_exists_once_in_the_provider_runner_and_names_only_the_owner_library_descriptor(self):
+        runner=(HERE/'entries/provider-worker.ts').read_text()
+        self.assertEqual(re.findall(r'dlopen\(([^,]*),',runner),['"/proc/self/fd/5"'])
+        self.assertEqual(len(re.findall(r'\bdlopen\b',runner)),2)  # the import and the one call
+        self.assertNotIn('bun:ffi',(HERE/'entries/host-client.ts').read_text())
+    def test_each_runner_starts_only_when_it_is_the_main_module_and_its_imports_are_the_reviewed_set(self):
+        for name,imports in (('provider-worker.ts',{'bun:ffi','node:fs','../../../../runtime/scripts/guest-guided-provider/stub.ts','./provider-worker-core.ts'}),
+            ('host-client.ts',{'node:fs','@yanlinglabs/winter-agent-sdk','../../../../sdk/packages/sdk/src/guided-query-reader.ts','../../../../sdk/packages/runtime/src/guest/linux-guided-host-query-profile.ts',
+              '../../../../winter/packages/core/src/cowork/guided-reader-adapter.ts','../../../../winter/packages/core/src/cowork/current-context.ts','../../../../winter/packages/core/src/cowork/current-context-resolver.ts',
+              '../../../../winter/packages/core/src/cowork/structured-instruction-mapper.ts','./host-client-core.ts'})):
+            text=(HERE/'entries'/name).read_text()
+            self.assertEqual(set(re.findall(r'^import [^;]*? from "([^"]+)"',text,re.M)),imports,name)
+            self.assertEqual(text.count('if (import.meta.main)'),1,name)
+            self.assertTrue(text.startswith('// @ts-nocheck'),name)
+    def test_the_runners_write_only_to_stdout_and_their_own_pipes_never_to_stderr(self):
+        provider=(HERE/'entries/provider-worker.ts').read_text();host=(HERE/'entries/host-client.ts').read_text()
+        self.assertEqual(re.findall(r'writeSync\((\w+)',provider),['1'])
+        self.assertEqual(sorted(set(re.findall(r'writeAll\(([\w.]+),',host))),['1','FDS.cancel','FDS.input'])
+        for text in (provider,host):self.assertNotRegex(text,r'console\.|process\.std(out|err)|writeAll\(2|writeSync\(2')
+
+    def test_the_contract_ids_are_defined_in_the_readme_and_cited_by_the_entry_spec(self):
+        readme=(HERE/'README.md').read_text();spec=(HERE/'guided-entries.test.ts').read_text()
+        ids=[f'C-P{n}' for n in range(1,12)]+[f'C-H{n}' for n in range(1,13)]
+        for identifier in ids:
+            self.assertRegex(readme,r'\*\*'+identifier+r'\*\*',identifier);self.assertIn(identifier,spec,identifier)
+        self.assertEqual(set(re.findall(r'\*\*(C-[PH]\d+)\*\*',readme)),set(ids))
 
 if __name__=='__main__':unittest.main()

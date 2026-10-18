@@ -51,6 +51,12 @@ type Inputs = {
 };
 export interface Context { inputs: Inputs; dependencyListSha256: string; pinsPy: string; files: (path: string) => string | null; workflow: string; limits: { packetBytes: number } }
 
+/** Builder files the real-entries change superseded AFTER run 39165162201: they are historical records of what that run
+ * compiled (the compile-only adapters, the run-1 trigger branch), checked at that run's builder head, not against the
+ * working tree. Everything else the run pinned (the build logic, the dependency list, the reader helpers) must still
+ * match, so an edit to the logic that produced the artifact still fails here. */
+export const SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/host-client.ts`, `${BUILD}/entries/provider-worker.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/pins.py`, `${BUILD}/test_guided_build.py`] as const;
+
 export function pinFiles(): string[] {
   return readdirSync(join(ROOT, INTAKE)).filter((name) => /^compile-\d+\.pin\.json$/.test(name));
 }
@@ -128,8 +134,9 @@ export function pinViolations(pin: Pin, ctx: Context): string[] {
   for (const [path, digest] of Object.entries(pin.builder.files)) {
     const actual = ctx.files(path);
     if (actual === null) bad(`pinned builder file is gone: ${path}`);
-    else if (actual !== digest) bad(`pinned builder file changed: ${path}`);
+    else if (actual !== digest && !(SUPERSEDED_BUILDER_FILES as readonly string[]).includes(path)) bad(`pinned builder file changed: ${path}`);
   }
+  for (const path of SUPERSEDED_BUILDER_FILES) if (!(path in pin.builder.files)) bad(`pin builder files omit superseded ${path}`);
   for (const required of [`${BUILD}/build.py`, `${BUILD}/graph.py`, `${BUILD}/acquire.py`, `${BUILD}/pins.py`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/dependencies.lst`, "scripts/guest-reader-build/build.py", "scripts/guest-reader-build/provenance.py"]) {
     if (!(required in pin.builder.files)) bad(`pin builder files omit ${required}`);
   }
@@ -216,7 +223,9 @@ const MUTATIONS: Array<[string, Mutate, string]> = [
   ["an alias dropped", (p) => { delete p.resolverBindings[Object.keys(p.resolverBindings)[0]!]; }, "pin resolver aliases equal the builder's alias count"],
   ["symlink total drifts", (p) => { p.symlinks.total = 46; }, "pin symlink total"],
   ["archive rules claim executable modes", (p) => { p.archiveRules.regularFileMode = "0755"; }, "pin archive rules"],
-  ["a builder file changes", (p) => { const k = Object.keys(p.builder.files)[0]!; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed"],
+  ["a builder file changes", (p) => { const k = `${BUILD}/build.py`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed"],
+  ["a frozen-core builder file changes (graph)", (p) => { const k = `${BUILD}/graph.py`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed"],
+  ["a superseded file is no longer in the pin", (p) => { delete p.builder.files[`${BUILD}/entries/host-client.ts`]; }, "pin builder files omit superseded"],
   ["a builder file is gone", (p) => { p.builder.files["scripts/guest-guided-build/nope.py"] = "0".repeat(64); }, "pinned builder file is gone"],
   ["the reader helper is no longer pinned", (p) => { delete p.builder.files["scripts/guest-reader-build/provenance.py"]; }, "pin builder files omit scripts/guest-reader-build/provenance.py"],
   ["no builder files", (p) => { p.builder.files = {}; }, "pin builder files"],
@@ -253,5 +262,13 @@ describe("guided compile packet intake pin mutations", () => {
     const drift = ["pin dependency list hash differs from the workflow env", "pins.py does not name ", "pinned builder file changed", "pinned builder file is gone", "pin archive exceeds the builder's bound"];
     const uncovered = messages.filter((message) => message.length > 0 && !MUTATIONS.some(([, , e]) => e.includes(message) || message.includes(e)) && !drift.some((d) => d.includes(message) || message.includes(d)));
     expect(uncovered).toEqual([]);
+  });
+});
+
+describe("the superseded builder files are a short, explicit list", () => {
+  test("only the real-entries change is superseded; the build logic that produced the artifact never is", () => {
+    expect([...SUPERSEDED_BUILDER_FILES].sort()).toEqual([
+      `${BUILD}/README.md`, `${BUILD}/entries/host-client.ts`, `${BUILD}/entries/provider-worker.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/pins.py`, `${BUILD}/test_guided_build.py`]);
+    for (const frozen of ["build.py", "graph.py", "acquire.py", "pin-deps.ts", "dependencies.lst"]) expect(SUPERSEDED_BUILDER_FILES as readonly string[]).not.toContain(`${BUILD}/${frozen}`);
   });
 });

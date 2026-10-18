@@ -6,13 +6,20 @@ nothing here executes, imports, extracts or admits anything, and no root caller 
 
 ```
 python3 -I -B scripts/guest-guided-intake/verify_packet.py <guided-packet.tar.gz> <packet-inventory.json>
-python3 -I -B scripts/guest-guided-intake/test_verify_packet.py        # synthetic packets, 34 tests
+python3 -I -B scripts/guest-guided-intake/test_verify_packet.py        # synthetic packets, 40 tests
 bun test test/gates/guided-packet-pin.test.ts                          # the cascade and its mutation table
 ```
 
 The run's branch `cowork/guided-packet-compile-fixture` is **FROZEN**: never push to, delete or recreate it. The arming
 commit `5f3e7c95` is reachable only from it; its parent is the builder head `5c762d2b` and it changes only the
 `BUILDER_HEAD` line. The workflow on `main` stays unarmed (all zeros), so nothing on `main` can fire it.
+
+## Exit codes (the hosted path's gate)
+
+`verify_packet.py` exits **0** only when every check holds (`allChecksHold: true`), **1** when a check failed
+(`allChecksHold: false`), **2** for anything else (usage, missing or unreadable file, malformed archive or pin, running as
+root). Hosted-path contract: run it on the DOWNLOADED artifact and bind nothing unless it exits 0. CI cannot catch a
+well-formed wrong hash in a pin, because the real-archive test is skipped without the artifact.
 
 ## What was verified (and how to repeat it)
 
