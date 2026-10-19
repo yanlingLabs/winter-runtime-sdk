@@ -29,13 +29,23 @@ export function checkRootPipe(stat: HostInputStat): void { if (!stat.isFIFO() ||
 
 export interface HostMetadata {
   workspaceKey: string; incarnationId: string; leaseEpoch: number; prompts: readonly [string, string];
-  runtimeConfig: Record<string, unknown>; readerRegistration: unknown; fixture: FixtureData;
+  runtimeConfig: Record<string, unknown>; readerRegistration: Record<string, unknown>; fixture: FixtureData;
 }
 export interface FixtureData {
   registration: any; capture: any; runtimeRow: Record<string, unknown>; workspace: any; binding: any; policy: any; sources: any[];
   grants: { folder: Record<string, any>; repository: Record<string, any> }; bootId: string;
 }
 const FIXTURE_KEYS = ["binding", "bootId", "capture", "grants", "policy", "registration", "runtimeRow", "sources", "workspace"];
+/** The host-side query options come from Root's trusted runtime config by a closed list (the v1 host client's mapping), never by
+ * spreading it: homes, the runtime executable and anything else the config carries stay out of the SDK's options. */
+export function hostQueryOptions(config: Record<string, unknown>): Record<string, unknown> {
+  const c = config as Record<string, any>;
+  return { executionPosture: "confined-guest", sessionId: c.sessionId, model: c.model, cwd: c.cwd, persistSession: c.persistSession, permissionMode: c.permissionMode,
+    tools: c.tools, allowedTools: c.allowedTools, settingSources: c.settingSources, plugins: c.plugins, skills: c.skills, mcpServers: c.mcpServers, strictMcpConfig: c.strictMcpConfig,
+    permissions: c.permissions, allowDangerouslySkipPermissions: c.allowDangerouslySkipPermissions === true, env: {}, pathToClaudeCodeExecutable: "winter-confined-guest",
+    includePartialMessages: true, maxBufferSize: 1024 * 1024 };
+}
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
 const idText = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value);
 
@@ -50,7 +60,7 @@ export function parseHostMetadata(bytes: Uint8Array): HostMetadata {
   const prompts = value.prompts;
   if (value.version !== 1 || !idText(value.workspaceKey) || !idText(value.incarnationId) || !Number.isSafeInteger(value.leaseEpoch) || value.leaseEpoch < 1
     || !Array.isArray(prompts) || prompts.length !== 2 || prompts.some((p: unknown) => typeof p !== "string" || p.length < 1 || Buffer.byteLength(p) > HOST_LIMITS.promptBytes)
-    || !isObject(value.runtimeConfig) || "requiredRuntimeContext" in value.runtimeConfig || !isObject(value.readerRegistration) || !isObject(value.fixture)) return refuse("metadata");
+    || !isObject(value.runtimeConfig) || "requiredRuntimeContext" in value.runtimeConfig || !isObject(value.readerRegistration) || Object.hasOwn(value.readerRegistration, "requiredRuntimeContext") || !isObject(value.fixture)) return refuse("metadata");
   if (Object.keys(value.fixture).sort().join(",") !== FIXTURE_KEYS.join(",") || !isObject(value.fixture.grants)
     || Object.keys(value.fixture.grants).sort().join(",") !== "folder,repository" || !Array.isArray(value.fixture.sources) || typeof value.fixture.bootId !== "string") return refuse("metadata");
   return value as HostMetadata;
@@ -104,7 +114,7 @@ export const parseCommand = (line: string): Command | undefined => (HOST_COMMAND
 export interface SdkPort {
   claimGuidedGuestIssuer(): { advance(key: string, incarnation: string, epoch: number): void; mint(request: any): unknown; revoke(key: string): void };
   prepareGuidedQuery(callbacks: { onRuntimeContext: any; spawnClaudeCodeProcess: any }): unknown;
-  consumeGuidedQueryCorrelation(claim: unknown, args: readonly string[]): { bindingId: string };
+  consumeGuidedQueryCorrelation(claim: unknown, args: readonly string[]): { version: number; bindingId: string };
   closeGuidedQuery(preparation: unknown): void;
   query(args: { prompt: string | AsyncIterable<string>; options: Record<string, unknown> }): AsyncIterable<any> & { return?(value?: unknown): Promise<unknown> };
 }
@@ -143,14 +153,22 @@ export async function runGuidedHost(meta: HostMetadata, ports: HostPorts): Promi
       // anything is consumed or created, whichever preparation asks.
       if (spawnAttempts++ > 0) throw new Error("host config refused");
       const correlation = sdk.consumeGuidedQueryCorrelation(spawn?.guidedQueryClaim, spawn?.args);
-      if (!correlation || typeof correlation.bindingId !== "string") throw new Error("host config refused");
-      try { ports.assertConfig(JSON.parse(spawn.args[2]), meta.readerRegistration); } catch { throw new Error("host config refused"); }
-      ports.emit({ kind: "host-spawn", version: 1 });
+      if (!correlation || correlation.version !== 1 || !UUID_V4.test(correlation.bindingId)) throw new Error("host config refused");
+      // The SDK discards every emitted config value but the binding correlation (guided-query-preparation: "all other config values
+      // are discarded, never authority"; the emitted config also carries keys, such as `brand`, that the closed profile refuses). So
+      // the profile asserts Root's trusted runtime config, with the SDK's own binding id for THIS spawn, against Root's registration
+      // with the same id. The id is chosen by query() per run, AFTER Root wrote the registration, which is why the metadata has none.
+      try {
+        const binding = Object.freeze({ version: correlation.version, bindingId: correlation.bindingId });
+        ports.assertConfig(Object.freeze({ ...meta.runtimeConfig, requiredRuntimeContext: binding }), Object.freeze({ ...meta.readerRegistration, requiredRuntimeContext: binding }));
+      } catch { throw new Error("host config refused"); }
+      // Root creates its reader service and launches the runtime only after this line, with this id. It is the only id printed.
+      ports.emit({ kind: "host-spawn", version: 1, bindingId: correlation.bindingId });
       return ports.createProcess();
     };
     preparation = sdk.prepareGuidedQuery({ onRuntimeContext, spawnClaudeCodeProcess });
     const ticket = issuer.mint({ workspaceKey: meta.workspaceKey, incarnationId: meta.incarnationId, leaseEpoch: meta.leaseEpoch, preparation });
-    const options = { ...meta.runtimeConfig, executionPosture: "confined-guest", guidedQueryPreparation: preparation, requireRuntimeContext: true, onRuntimeContext, spawnClaudeCodeProcess, guidedGuestTicket: ticket };
+    const options = { ...hostQueryOptions(meta.runtimeConfig), guidedQueryPreparation: preparation, requireRuntimeContext: true, onRuntimeContext, spawnClaudeCodeProcess, guidedGuestTicket: ticket };
     return { preparation, options };
   }
   const first = prepared();

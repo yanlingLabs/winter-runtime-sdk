@@ -73,11 +73,14 @@ const RUN2_ORIGINS: Record<string, { repository: string; head: string; tree: str
   runtime: { repository: "yanlingLabs/winter-runtime-sdk", head: "ce730190854fd807446ac3a229a358c553a57697", tree: "b1166e6cc45f6445e8c56d4c50bbb8525328179e" },
   winter: { repository: "yanlingLabs/winter", head: "8b52ef83d1ba721a4dd80cdbb205c617f8656555", tree: "703ad5263ef0a249e9666faa1eaf18a0f19c8be1" },
 };
+/** Builder files changed AFTER run 39227365159 (the host-spawn binding fix: the hostClient core, its spec and the README). Like run 1's
+ * list they are history for that run's pin; every other file run 2 pinned must still match the working tree. */
+export const RUN2_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-entries.test.ts`] as const;
 interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
 /** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
 const RUNS: Record<number, RunSpec> = {
   39165162201: { branch: "cowork/guided-packet-compile-fixture", artifactId: 12149668717, origins: RUN1_ORIGINS, placeholders: PLACEHOLDERS, superseded: SUPERSEDED_BUILDER_FILES },
-  39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: [] },
+  39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: RUN2_SUPERSEDED_BUILDER_FILES },
 };
 
 export function pinFiles(): string[] {
@@ -283,8 +286,9 @@ const MUTATIONS: Array<[string, Mutate, string, number[]?]> = [
   ["a builder file changes", (p) => { const k = `${BUILD}/build.py`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed"],
   ["a frozen-core builder file changes (graph)", (p) => { const k = `${BUILD}/graph.py`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed"],
   ["a superseded file is no longer in the pin", (p) => { delete p.builder.files[`${BUILD}/entries/host-client.ts`]; }, "pin builder files omit superseded", [RUN1]],
-  ["a real-entries file changes after run 2 (nothing is superseded)", (p) => { const k = `${BUILD}/entries/provider-worker.ts`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed", [RUN2]],
-  ["the builder README changes after run 2", (p) => { const k = `${BUILD}/README.md`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed", [RUN2]],
+  ["a real-entries file that run 2 froze changes", (p) => { const k = `${BUILD}/entries/provider-worker.ts`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed", [RUN2]],
+  ["the builder pins.py changes after run 2", (p) => { const k = `${BUILD}/pins.py`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed", [RUN2]],
+  ["a run-2 superseded file is no longer in the pin", (p) => { delete p.builder.files[`${BUILD}/entries/host-client-core.ts`]; }, "pin builder files omit superseded", [RUN2]],
   ["a builder file is gone", (p) => { p.builder.files["scripts/guest-guided-build/nope.py"] = "0".repeat(64); }, "pinned builder file is gone"],
   ["the reader helper is no longer pinned", (p) => { delete p.builder.files["scripts/guest-reader-build/provenance.py"]; }, "pin builder files omit scripts/guest-reader-build/provenance.py"],
   ["no builder files", (p) => { p.builder.files = {}; }, "pin builder files"],
@@ -323,6 +327,13 @@ describe("guided compile packet intake pin mutations", () => {
     const drift = ["pin dependency list hash differs from the workflow env", "pins.py does not name ", "pinned builder file changed", "pinned builder file is gone", "pin archive exceeds the builder's bound"];
     const uncovered = messages.filter((message) => message.length > 0 && !MUTATIONS.some(([, , e]) => e.includes(message) || message.includes(e)) && !drift.some((d) => d.includes(message) || message.includes(d)));
     expect(uncovered).toEqual([]);
+  });
+});
+
+describe("run 2's superseded builder files are a short, explicit list", () => {
+  test("only the host-spawn fix is superseded; the provider side and the build logic are not", () => {
+    expect([...RUN2_SUPERSEDED_BUILDER_FILES].sort()).toEqual([`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-entries.test.ts`]);
+    for (const frozen of ["build.py", "graph.py", "acquire.py", "pins.py", "entries/provider-worker.ts", "entries/provider-worker-core.ts", "entries/host-client.ts", "guided-compile-inputs.pin.json"]) expect(RUN2_SUPERSEDED_BUILDER_FILES as readonly string[]).not.toContain(`${BUILD}/${frozen}`);
   });
 });
 

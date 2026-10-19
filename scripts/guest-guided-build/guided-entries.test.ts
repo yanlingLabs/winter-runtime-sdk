@@ -164,7 +164,9 @@ const fixture = () => ({
   sources: [{ sourceId: "b", state: "ready" }, { sourceId: "a", state: "ready" }, { sourceId: "gone", state: "detached" }],
   grants: { folder: { ref1: { revoked: false } }, repository: { "auth|repo": { readable: true } } },
 });
-const hostMeta = (over: Record<string, unknown> = {}) => ({ version: 1, workspaceKey: "ws", incarnationId: "inc-1", leaseEpoch: 1, prompts: ["p1", "p2"], runtimeConfig: { model: "m" }, readerRegistration: { r: 1 }, fixture: fixture(), ...over });
+const RUNTIME_CONFIG = { executionPosture: "confined-guest", sessionId: "backend1", model: "m", cwd: "/workspace/folders/src", winterHome: "/run/winter/conversations/sess", storeHome: "/workspace/.winter/conversations/sess",
+  persistSession: true, settingSources: [], tools: ["Read"], allowedTools: [], skills: [], plugins: [], strictMcpConfig: true, mcpServers: {}, permissionMode: "default", permissions: { disableBypassPermissionsMode: true }, allowDangerouslySkipPermissions: false };
+const hostMeta = (over: Record<string, unknown> = {}) => ({ version: 1, workspaceKey: "ws", incarnationId: "inc-1", leaseEpoch: 1, prompts: ["p1", "p2"], runtimeConfig: RUNTIME_CONFIG, readerRegistration: { r: 1 }, fixture: fixture(), ...over });
 const metaBytes = (value: unknown) => Buffer.from(JSON.stringify(value));
 
 test("C-H1 only the fixed linux argv starts the host client", () => {
@@ -183,7 +185,7 @@ test("C-H2 the metadata file must be Root-owned and immutable; the five pipes Ro
 test("C-H3 metadata is closed canonical JSON with exactly two prompts and no requiredRuntimeContext", () => {
   expect(H.parseHostMetadata(metaBytes(hostMeta())).workspaceKey).toBe("ws");
   const bad = [hostMeta({ extra: 1 }), hostMeta({ version: 2 }), hostMeta({ workspaceKey: "" }), hostMeta({ leaseEpoch: 0 }), hostMeta({ prompts: ["a"] }), hostMeta({ prompts: ["a", ""] }),
-    hostMeta({ prompts: ["a", "b", "c"] }), hostMeta({ prompts: ["a", "x".repeat(1025)] }), hostMeta({ runtimeConfig: { requiredRuntimeContext: {} } }), hostMeta({ runtimeConfig: [] }), hostMeta({ readerRegistration: null }),
+    hostMeta({ prompts: ["a", "b", "c"] }), hostMeta({ prompts: ["a", "x".repeat(1025)] }), hostMeta({ runtimeConfig: { requiredRuntimeContext: {} } }), hostMeta({ runtimeConfig: [] }), hostMeta({ readerRegistration: null }), hostMeta({ readerRegistration: { r: 1, requiredRuntimeContext: { version: 1, bindingId: OTHER_BIND } } }), hostMeta({ readerRegistration: { r: 1, requiredRuntimeContext: null } }),
     hostMeta({ fixture: { ...fixture(), extra: 1 } }), hostMeta({ fixture: { ...fixture(), grants: { folder: {} } } }), hostMeta({ fixture: { ...fixture(), bootId: 1 } })];
   for (const value of bad) expect(() => H.parseHostMetadata(metaBytes(value))).toThrow("host client refused: metadata");
   expect(() => H.parseHostMetadata(Buffer.from(JSON.stringify(hostMeta(), null, 1)))).toThrow("host client refused: metadata");
@@ -211,9 +213,12 @@ test("C-H5 the fixture records answer exactly the reads Core makes and refuse an
   expect(() => built.currentBootId("other")).toThrow("fixture records refused");
 });
 
+const BIND = "3f2b8c1e-9a47-4d5e-8b21-7c6d5e4f3a29", OTHER_BIND = "11111111-2222-4333-8444-555555555555";
+// What the real SDK emits (keys the closed profile refuses, such as `brand`), plus its binding id: the host must never assert this.
+const emittedConfig = JSON.stringify({ brand: { name: "x" }, cwd: "/elsewhere", executionPosture: "confined-guest", model: "emitted", permissionMode: "default", sessionId: "emitted", requiredRuntimeContext: { version: 1, bindingId: BIND } });
 interface Trace { calls: string[]; lines: any[]; handlerArgs?: any; options?: any; consumed?: any; assertedConfig?: any }
 const HAPPY = ["dispatch 1", "dispatch 2", "premint", "reuse", "revoke", "present-premint", "finish"];
-function fakes(commands: (string | null)[] = HAPPY, over: { failConfig?: boolean; reuseAccepted?: boolean; longAnswer?: boolean; failResult?: boolean; spawnBeforeRefuse?: boolean; otherError?: boolean; lateResult?: boolean; noContext?: boolean } = {}) {
+function fakes(commands: (string | null)[] = HAPPY, over: { failConfig?: boolean; reuseAccepted?: boolean; longAnswer?: boolean; failResult?: boolean; spawnBeforeRefuse?: boolean; otherError?: boolean; lateResult?: boolean; noContext?: boolean; correlation?: { version: number; bindingId: string }; garbageEmitted?: boolean; emitSpawnThrows?: boolean } = {}) {
   const trace: Trace = { calls: [], lines: [] };
   let resolveLate!: () => void; const late = { promise: new Promise<void>(r => { resolveLate = r; }), resolve: () => resolveLate() };
   let revoked = false, streamDead = false, minted = 0; const spent = new Set<unknown>(), dead = new Set<unknown>(), live = new Set<unknown>(), preparations = new Map<unknown, any>();
@@ -225,13 +230,13 @@ function fakes(commands: (string | null)[] = HAPPY, over: { failConfig?: boolean
   const sdk: any = {
     claimGuidedGuestIssuer: () => { trace.calls.push("claim"); return issuer; },
     prepareGuidedQuery: (callbacks: any) => { trace.calls.push("prepare"); const prepared = { callbacks }; preparations.set(prepared, callbacks); return prepared; },
-    consumeGuidedQueryCorrelation: (claim: any, args: any) => { trace.calls.push("consume"); trace.consumed = { claim, args }; return { bindingId: "b" }; },
+    consumeGuidedQueryCorrelation: (claim: any, args: any) => { trace.calls.push("consume"); trace.consumed = { claim, args }; return over.correlation ?? { version: 1, bindingId: BIND }; },
     closeGuidedQuery: () => { trace.calls.push("close"); },
     query: ({ prompt, options }: any) => {
       trace.calls.push("query"); trace.options ??= options;
       return (async function* () {
         const ticket = options.guidedGuestTicket, refusal = new Error(over.otherError ? "something else" : "required_context_unavailable");
-        const spawn = () => options.spawnClaudeCodeProcess({ guidedQueryClaim: "claim-token", args: ["--run", "--config-json", '{"c":1}'] });
+        const spawn = () => options.spawnClaudeCodeProcess({ guidedQueryClaim: "claim-token", args: ["--run", "--config-json", over.garbageEmitted ? "not json {" : emittedConfig] });
         if ((spent.has(ticket) && !over.reuseAccepted) || dead.has(ticket)) { if (over.spawnBeforeRefuse) spawn(); throw refusal; }
         spent.add(ticket); spawn();
         let index = 0;
@@ -254,7 +259,7 @@ function fakes(commands: (string | null)[] = HAPPY, over: { failConfig?: boolean
     createHandler: (deps: any) => { trace.calls.push("handler"); trace.handlerArgs ??= deps; return async () => ({ snapshot: true }); },
     assertConfig: (config: any, registration: any) => { trace.calls.push("assert"); trace.assertedConfig = { config, registration }; if (over.failConfig) throw new Error("no"); },
     createProcess: () => { trace.calls.push("process"); return { proc: true }; },
-    emit: (line: any) => { trace.lines.push(line); },
+    emit: (line: any) => { if (line.kind === "host-spawn") { trace.calls.push("emit-spawn"); if (over.emitSpawnThrows) throw new Error("pipe"); } trace.lines.push(line); },
     nextCommand: async () => (queue.length ? queue.shift()! : null),
   };
   return { trace, ports: ports as any };
@@ -273,10 +278,60 @@ test("C-H6 order: claim issuer, advance, handler, prepare, mint, query; the same
 });
 test("C-H7 the spawn hook consumes the correlation from the exact args and asserts the real emitted config before any process exists", async () => {
   const f = fakes(["dispatch 1", "finish"]); await run(f);
-  expect(f.trace.consumed).toEqual({ claim: "claim-token", args: ["--run", "--config-json", '{"c":1}'] });
-  expect(f.trace.assertedConfig).toEqual({ config: { c: 1 }, registration: { r: 1 } });
+  expect(f.trace.consumed).toEqual({ claim: "claim-token", args: ["--run", "--config-json", emittedConfig] });
+  expect(f.trace.assertedConfig).toEqual({ config: { ...RUNTIME_CONFIG, requiredRuntimeContext: { version: 1, bindingId: BIND } }, registration: { r: 1, requiredRuntimeContext: { version: 1, bindingId: BIND } } });
+  expect(Object.keys(f.trace.assertedConfig.config)).not.toContain("brand");
   const calls = f.trace.calls;
-  expect(calls.indexOf("consume")).toBeLessThan(calls.indexOf("assert")); expect(calls.indexOf("assert")).toBeLessThan(calls.indexOf("process"));
+  expect(calls.indexOf("consume")).toBeLessThan(calls.indexOf("assert")); expect(calls.indexOf("assert")).toBeLessThan(calls.indexOf("emit-spawn")); expect(calls.indexOf("emit-spawn")).toBeLessThan(calls.indexOf("process"));
+});
+test("C-H7 the registration asserted against is the metadata's plus the SDK's own binding id, frozen, and the metadata object is untouched", async () => {
+  const f = fakes(["dispatch 1", "finish"]); const meta = H.parseHostMetadata(metaBytes(hostMeta())); const before = JSON.stringify(meta.readerRegistration);
+  await H.runGuidedHost(meta, f.ports);
+  const registration = f.trace.assertedConfig.registration;
+  expect(Object.isFrozen(registration) && Object.isFrozen(registration.requiredRuntimeContext)).toBe(true);
+  expect(JSON.stringify(meta.readerRegistration)).toBe(before); expect(Object.hasOwn(meta.readerRegistration, "requiredRuntimeContext")).toBe(false);
+});
+test("C-H7 the host-spawn line carries exactly the SDK's binding id, once, before the process exists; no other line carries it", async () => {
+  const f = fakes(); await run(f);
+  expect(f.trace.lines.filter(line => line.kind === "host-spawn")).toEqual([{ version: 1, kind: "host-spawn", bindingId: BIND }]);
+  expect(f.trace.lines.filter(line => JSON.stringify(line).includes(BIND)).map(line => line.kind)).toEqual(["host-spawn"]);
+  expect(f.trace.calls.filter(call => call === "emit-spawn")).toHaveLength(1);
+});
+test("C-H7 a spawn is refused, with no host-spawn line and no process, when the correlation is not a v1 uuid-v4, the config names another or no binding id, or the profile refuses", async () => {
+  const cases: Array<[string, Parameters<typeof fakes>[1]]> = [
+    ["not a uuid", { correlation: { version: 1, bindingId: "b" } }], ["uppercase uuid", { correlation: { version: 1, bindingId: BIND.toUpperCase() } }],
+    ["uuid v1", { correlation: { version: 1, bindingId: "3f2b8c1e-9a47-1d5e-8b21-7c6d5e4f3a29" } }], ["correlation version 2", { correlation: { version: 2, bindingId: BIND } }],
+    ["profile refuses", { failConfig: true }],
+  ];
+  for (const [label, over] of cases) {
+    const f = fakes(["dispatch 1", "finish"], over); const result = await run(f);
+    expect([label, f.trace.calls.includes("process"), f.trace.lines.some(line => line.kind === "host-spawn")]).toEqual([label, false, false]);
+    expect([label, result.passed]).toEqual([label, false]);
+  }
+});
+test("C-H7 the emitted config is never parsed or asserted: unparseable emitted text still spawns, on the trusted config", async () => {
+  const f = fakes(["dispatch 1", "finish"], { garbageEmitted: true }); const result = await run(f);
+  expect(f.trace.calls).toContain("process"); expect(replies(f, "host-dispatch")[0]).toMatchObject({ ok: true });
+  expect(f.trace.assertedConfig.config.sessionId).toBe("backend1"); expect(result.passed).toBe(false); // only because the finish came before the revoke steps
+});
+test("C-H6 host query options come from Root's config by a closed list: homes, the executable and unknown keys are not forwarded", async () => {
+  const options = H.hostQueryOptions({ ...RUNTIME_CONFIG, winterHome: "/x", storeHome: "/y", extra: 1, pathToClaudeCodeExecutable: "evil", env: { A: "1" }, brand: {} });
+  expect(Object.keys(options).sort()).toEqual(["allowDangerouslySkipPermissions", "allowedTools", "cwd", "env", "executionPosture", "includePartialMessages", "maxBufferSize", "mcpServers", "model", "pathToClaudeCodeExecutable",
+    "permissionMode", "permissions", "persistSession", "plugins", "sessionId", "settingSources", "skills", "strictMcpConfig", "tools"]);
+  expect(options.env).toEqual({}); expect(Object.keys(options.env as object)).toEqual([]);
+  expect(options).toMatchObject({ executionPosture: "confined-guest", env: {}, pathToClaudeCodeExecutable: "winter-confined-guest", sessionId: "backend1", cwd: "/workspace/folders/src", allowDangerouslySkipPermissions: false });
+  expect(H.hostQueryOptions({ ...RUNTIME_CONFIG, executionPosture: "none", allowDangerouslySkipPermissions: "yes" })).toMatchObject({ executionPosture: "confined-guest", allowDangerouslySkipPermissions: false });
+  expect(H.hostQueryOptions({ ...RUNTIME_CONFIG, allowDangerouslySkipPermissions: true }).allowDangerouslySkipPermissions).toBe(true);
+});
+test("C-H4 the registration id is never printed or compared: no stdout line carries it", async () => {
+  const meta = hostMeta({ readerRegistration: { r: 1, registrationId: "5e0b0000-0000-4000-8000-000000000001" } });
+  const f = fakes(); await H.runGuidedHost(H.parseHostMetadata(metaBytes(meta)), f.ports);
+  expect(JSON.stringify(f.trace.lines)).not.toContain("5e0b0000");
+  expect(f.trace.assertedConfig.registration.registrationId).toBe("5e0b0000-0000-4000-8000-000000000001");
+});
+test("C-H7 if the host-spawn line cannot be written, no process is created", async () => {
+  const f = fakes(["dispatch 1", "finish"], { emitSpawnThrows: true }); const result = await run(f);
+  expect(f.trace.calls).not.toContain("process"); expect(result.passed).toBe(false);
 });
 test("C-H7 a refused config creates no process; the dispatch reports failure and the run does not pass", async () => {
   const f = fakes(["dispatch 1", "finish"], { failConfig: true }); const result = await run(f);
@@ -362,7 +417,7 @@ test("C-H11 the run passes only if every step happened: a skipped reuse or prese
 test("C-H4 stdout carries only the closed line kinds and never a prompt, binding id or claim; an answer is bounded", async () => {
   const f = fakes(); await run(f);
   expect([...new Set(f.trace.lines.map(line => line.kind))].sort()).toEqual(["host-dispatch", "host-premint", "host-presented", "host-query-ended", "host-result", "host-revoked", "host-spawn"]);
-  for (const line of f.trace.lines.map(line => JSON.stringify(line))) { expect(Buffer.byteLength(line) + 1).toBeLessThanOrEqual(H.HOST_LIMITS.reportLineBytes); expect(line).not.toMatch(/"p[123]"|claim-token|"b"|frame/); }
+  for (const line of f.trace.lines.map(line => JSON.stringify(line))) { expect(Buffer.byteLength(line) + 1).toBeLessThanOrEqual(H.HOST_LIMITS.reportLineBytes); expect(line).not.toMatch(/"p[123]"|claim-token|"b"|frame/); if (!line.includes("host-spawn")) expect(line).not.toContain(BIND); }
   const long = fakes(["dispatch 1", "finish"], { longAnswer: true }); await run(long);
   expect(replies(long, "host-dispatch")[0].answer.length).toBe(H.HOST_ANSWER_BYTES);
   expect(H.HOST_COMMANDS).toEqual(["dispatch 1", "dispatch 2", "premint", "reuse", "revoke", "present-premint", "finish"]);
