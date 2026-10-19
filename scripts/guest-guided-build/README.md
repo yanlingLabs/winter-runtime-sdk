@@ -293,7 +293,7 @@ pruned-edge and tsconfig-`paths` rules, which the reader builder refuses. It is 
 ## The run
 
 `.github/workflows/cowork-guided-packet-compile-fixture.yml` fires only on the **first creation** of the branch
-`cowork/guided-packet-compile-fixture-2` (`created == true`, `run_attempt == '1'`). It has no pull request,
+`cowork/guided-packet-compile-fixture-3` (`created == true`, `run_attempt == '1'`). It has no pull request,
 dispatch, schedule or tag trigger, no `paths` filter, no secrets, `contents: read`, no sudo, and it runs on
 `ubuntu-24.04-arm`. It curls the pinned Bun zip and the 20 pinned tarballs (each checked by a strict checksum),
 runs `build.py` (which runs `bun build --compile` four times, `cc` six times, plus the semantic parser runs) and

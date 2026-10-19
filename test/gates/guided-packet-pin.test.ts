@@ -73,9 +73,9 @@ const RUN2_ORIGINS: Record<string, { repository: string; head: string; tree: str
   runtime: { repository: "yanlingLabs/winter-runtime-sdk", head: "ce730190854fd807446ac3a229a358c553a57697", tree: "b1166e6cc45f6445e8c56d4c50bbb8525328179e" },
   winter: { repository: "yanlingLabs/winter", head: "8b52ef83d1ba721a4dd80cdbb205c617f8656555", tree: "703ad5263ef0a249e9666faa1eaf18a0f19c8be1" },
 };
-/** Builder files changed AFTER run 39227365159 (the host-spawn binding fix: the hostClient core, its spec and the README). Like run 1's
+/** Builder files changed AFTER run 39227365159 (the host-spawn binding fix: the hostClient core, its spec and the README; the run-3 trigger branch: the input pin file and its test). Like run 1's
  * list they are history for that run's pin; every other file run 2 pinned must still match the working tree. */
-export const RUN2_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-entries.test.ts`] as const;
+export const RUN2_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/guided-entries.test.ts`, `${BUILD}/test_guided_build.py`] as const;
 interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
 /** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
 const RUNS: Record<number, RunSpec> = {
@@ -332,8 +332,8 @@ describe("guided compile packet intake pin mutations", () => {
 
 describe("run 2's superseded builder files are a short, explicit list", () => {
   test("only the host-spawn fix is superseded; the provider side and the build logic are not", () => {
-    expect([...RUN2_SUPERSEDED_BUILDER_FILES].sort()).toEqual([`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-entries.test.ts`]);
-    for (const frozen of ["build.py", "graph.py", "acquire.py", "pins.py", "entries/provider-worker.ts", "entries/provider-worker-core.ts", "entries/host-client.ts", "guided-compile-inputs.pin.json"]) expect(RUN2_SUPERSEDED_BUILDER_FILES as readonly string[]).not.toContain(`${BUILD}/${frozen}`);
+    expect([...RUN2_SUPERSEDED_BUILDER_FILES].sort()).toEqual([`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/guided-entries.test.ts`, `${BUILD}/test_guided_build.py`]);
+    for (const frozen of ["build.py", "graph.py", "acquire.py", "pins.py", "entries/provider-worker.ts", "entries/provider-worker-core.ts", "entries/host-client.ts"]) expect(RUN2_SUPERSEDED_BUILDER_FILES as readonly string[]).not.toContain(`${BUILD}/${frozen}`);
   });
 });
 

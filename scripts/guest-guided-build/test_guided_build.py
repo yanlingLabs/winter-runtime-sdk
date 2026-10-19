@@ -427,7 +427,7 @@ class PinCascadeTests(unittest.TestCase):
         self.assertEqual(pins.MAX_PACKET_BYTES,1024**3)
     def test_trigger_branch_is_new_and_not_a_reader_or_hosted_name(self):
         for used in ('cowork/instruction-reader-compile-fixture','cowork/reader-hosted-dependency-probe','cowork/reader-hosted-fixture-stderr','cowork/guided-packet-build'):self.assertNotEqual(pins.TRIGGER_BRANCH,used)
-        self.assertEqual(pins.TRIGGER_BRANCH,'cowork/guided-packet-compile-fixture-2')
+        self.assertEqual(pins.TRIGGER_BRANCH,'cowork/guided-packet-compile-fixture-3')
 
 class NoExecutionTests(unittest.TestCase):
     SOURCES=('build.py','graph.py','acquire.py','pins.py')
