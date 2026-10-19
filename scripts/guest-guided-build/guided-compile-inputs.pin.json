@@ -13,9 +13,9 @@
  "origins": {
   "agentSdk": {
    "repository": "yanlingLabs/winter-agent-sdk",
-   "head": "68e57c646f23feba09b00c78d05d8c80d6f2962d",
-   "tree": "86dcb48155e40f6b084e8b0ffea529679b5274c2",
-   "note": "main with compartment C applied (PR 34) and the Root reader service (PR 35, merge commit 68e57c64)."
+   "head": "9c980c326638489e0183d7fcddcf1a93553be0ba",
+   "tree": "e203a8d838369ca10586ac031dcdeef7bb0b2c69",
+   "note": "main with compartment C (PR 34), the Root reader service (PR 35) and the owner holder/CLOEXEC patch (PR 38, merge commit 9c980c32)."
   },
   "runtimeSdk": {
    "repository": "yanlingLabs/winter-runtime-sdk",
