@@ -176,6 +176,34 @@ class ReceiptRefusals(Base):
     def test_unparseable_receipt(self):
         model=files_model();model['receipt.json']=b'not json';failed,_=self.failing(model=model);self.assertIn('receipt, inputs and acquisition parse',failed)
 
+class ExitCodes(Base):
+    """The hosted path binds nothing unless the exit code is 0 (README "Exit codes")."""
+    def run_main(self,*extra):
+        import contextlib
+        out,err=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):code=vp.main(['verify_packet.py',*extra])
+        return code,out.getvalue(),err.getvalue()
+    def pin_file(self,model=None):
+        model=model or files_model();archive=self.dir/'p.tar.gz';write_tar(archive,entries_of(model));ab=archive.read_bytes()
+        inv=inventory_of(model,archiveSha256=sha(ab),archiveBytes=len(ab));ib=json.dumps(inv).encode();(self.dir/'inv.json').write_bytes(ib)
+        pin=pin_of(model,ib,ab);(self.dir/'pin.json').write_text(json.dumps(pin));return archive
+    def test_zero_only_when_every_check_holds(self):
+        archive=self.pin_file()
+        code,out,_=self.run_main(str(archive),str(self.dir/'inv.json'),'--pin',str(self.dir/'pin.json'))
+        self.assertEqual(code,0);self.assertTrue(json.loads(out)['allChecksHold'])
+    def test_one_when_a_check_fails_and_the_report_says_so(self):
+        archive=self.pin_file();pin=json.loads((self.dir/'pin.json').read_text());pin['archive']['sha256']='0'*64;(self.dir/'pin.json').write_text(json.dumps(pin))
+        code,out,_=self.run_main(str(archive),str(self.dir/'inv.json'),'--pin',str(self.dir/'pin.json'))
+        self.assertEqual(code,1);self.assertFalse(json.loads(out)['allChecksHold'])
+    def test_two_for_usage_missing_files_and_malformed_input_never_zero_or_one(self):
+        archive=self.pin_file()
+        for argv in ((),(str(archive),),(str(archive),str(self.dir/'inv.json'),'extra'),(str(self.dir/'missing.tar.gz'),str(self.dir/'inv.json'),'--pin',str(self.dir/'pin.json')),
+                     (str(archive),str(self.dir/'missing.json'),'--pin',str(self.dir/'pin.json')),(str(archive),str(self.dir/'inv.json'),'--pin',str(self.dir/'missing-pin.json'))):
+            code,out,err=self.run_main(*argv);self.assertEqual(code,2,argv);self.assertEqual(out,'',argv);self.assertNotIn(str(self.dir),err)
+        (self.dir/'bad.tar.gz').write_bytes(b'not a tar');code,out,_=self.run_main(str(self.dir/'bad.tar.gz'),str(self.dir/'inv.json'),'--pin',str(self.dir/'pin.json'))
+        self.assertIn(code,(1,2));self.assertNotEqual(code,0)
+    def test_the_codes_are_constants(self):self.assertEqual((vp.EXIT_HOLDS,vp.EXIT_FAILED,vp.EXIT_ERROR),(0,1,2))
+
 class NoExecution(unittest.TestCase):
     def test_the_verifier_cannot_start_a_process_or_extract(self):
         import re

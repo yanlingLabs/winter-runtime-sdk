@@ -28,9 +28,10 @@ ALIAS_ORIGINS=ORIGINS
 # Four compiled roles. `entry` is a packet-relative path. `required` are inputs that MUST appear in that role's bundle.
 ROLES={
   'runtimeEntry':{'entry':'source/sdk/packages/runtime/src/guest/linux-guided-host-query-main.ts','required':('source/sdk/packages/runtime/src/guest/linux-session-entry.ts','source/sdk/packages/runtime/src/guest/linux-session-admission.ts')},
-  'providerWorker':{'entry':'source/builder/scripts/guest-guided-build/entries/provider-worker.ts','required':('source/runtime/scripts/guest-guided-provider/stub.ts',)},
+  'providerWorker':{'entry':'source/builder/scripts/guest-guided-build/entries/provider-worker.ts','required':('source/runtime/scripts/guest-guided-provider/stub.ts','source/builder/scripts/guest-guided-build/entries/provider-worker-core.ts')},
   'hostClient':{'entry':'source/builder/scripts/guest-guided-build/entries/host-client.ts','required':(
-    'source/winter/packages/core/src/cowork/current-context.ts','source/winter/packages/core/src/cowork/current-context-resolver.ts','source/winter/packages/core/src/cowork/structured-instruction-mapper.ts')},
+    'source/builder/scripts/guest-guided-build/entries/host-client-core.ts','source/sdk/packages/sdk/src/guided-query-reader.ts','source/sdk/packages/runtime/src/guest/linux-guided-host-query-profile.ts',
+    'source/winter/packages/core/src/cowork/guided-reader-adapter.ts','source/winter/packages/core/src/cowork/current-context.ts','source/winter/packages/core/src/cowork/current-context-resolver.ts','source/winter/packages/core/src/cowork/structured-instruction-mapper.ts')},
   'instructionReader':{'entry':'source/runtime/src/guest/instruction-reader-entry.ts','required':('source/runtime/src/guest/instruction-reader-transport.ts',)},
 }
 ROLE_NAMES=tuple(ROLES)
@@ -52,7 +53,7 @@ ARTIFACT_NAMES=ROLE_NAMES+NATIVE_NAMES
 # Builder-origin files: this directory plus the reader builder's two modules this builder loads by hash-checked path.
 READER_HELPERS=('scripts/guest-reader-build/build.py','scripts/guest-reader-build/provenance.py')
 BUILDER_FILES=tuple('scripts/guest-guided-build/'+name for name in (
-  'pins.py','graph.py','acquire.py','build.py','test_guided_build.py','README.md','guided-compile-inputs.pin.json','dependencies.lst','pin-deps.ts','entries/provider-worker.ts','entries/host-client.ts'))+READER_HELPERS
+  'pins.py','graph.py','acquire.py','build.py','test_guided_build.py','README.md','guided-compile-inputs.pin.json','dependencies.lst','pin-deps.ts','entries/provider-worker.ts','entries/provider-worker-core.ts','entries/host-client.ts','entries/host-client-core.ts','guided-entries.test.ts'))+READER_HELPERS
 def package_directory(identifier):
     # pnpm virtual-store directory name: scope slash becomes a plus.
     return identifier.replace('/','+')

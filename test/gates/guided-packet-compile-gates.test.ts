@@ -16,11 +16,11 @@ const WORKFLOWS_DIR = join(ROOT, ".github", "workflows");
 const BUILD_DIR = "scripts/guest-guided-build";
 const WORKFLOW_NAME = "cowork-guided-packet-compile-fixture.yml";
 const SOURCE_NAME = "cowork-guided-build-source.yml";
-const TRIGGER_BRANCH = "cowork/guided-packet-compile-fixture";
+const TRIGGER_BRANCH = "cowork/guided-packet-compile-fixture-2";
 const REPOSITORY = "yanlingLabs/winter-runtime-sdk";
 const ALLOWED_ACTIONS = new Set(["actions/checkout", "actions/upload-artifact"]);
 // Branches that already fired, or are armed for, another workflow, or that carry this builder's own source: never reusable here.
-const USED_BRANCHES = ["cowork/instruction-reader-compile-fixture", "cowork/reader-hosted-dependency-probe", "cowork/reader-hosted-fixture-stderr", "cowork/guided-packet-build"];
+const USED_BRANCHES = ["cowork/instruction-reader-compile-fixture", "cowork/reader-hosted-dependency-probe", "cowork/reader-hosted-fixture-stderr", "cowork/guided-packet-build", "cowork/guided-packet-compile-fixture"];
 const ZERO_HEAD = "0".repeat(40);
 const BUN_URL = "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-aarch64.zip";
 const WORKFLOW_PATH = ".github/workflows/cowork-guided-packet-compile-fixture.yml";
@@ -114,6 +114,8 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
   if (JSON.stringify(on.push ?? {}) !== JSON.stringify({ branches: [TRIGGER_BRANCH] })) bad("on.push must be exactly one literal branch and nothing else");
   if (pin.trigger.branch !== TRIGGER_BRANCH || pin.trigger.workflow !== WORKFLOW_NAME || pin.trigger.sourceWorkflow !== SOURCE_NAME) bad("pin file trigger record differs from the gate");
   for (const [name, other] of Object.entries(ctx.others)) if (other.includes(TRIGGER_BRANCH)) bad(`${name} names the trigger branch`);
+  // A branch that already fired (or is frozen) is never named by this workflow, even as a prefix of the new one.
+  for (const used of USED_BRANCHES) if (new RegExp(`${used.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(?![\\w-])`).test(text)) bad(`workflow names a used branch: ${used}`);
 
   // 2. Least privilege, no secrets, no token, no sudo, no environment override below the workflow.
   if (JSON.stringify(doc.permissions) !== JSON.stringify({ contents: "read" })) bad("permissions must be exactly contents: read");
@@ -260,7 +262,7 @@ describe("guided packet compile-fixture workflow gates", () => {
 
   test("the trigger branch is new: not a reader, hosted or builder-source branch", () => {
     expect(USED_BRANCHES).not.toContain(TRIGGER_BRANCH);
-    expect(TRIGGER_BRANCH).toBe("cowork/guided-packet-compile-fixture");
+    expect(TRIGGER_BRANCH).toBe("cowork/guided-packet-compile-fixture-2");
   });
 
   test("the trigger is the exact first-creation push of one new branch, and nothing else", () => {
@@ -308,6 +310,7 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
   ["widen the branch to a glob", sub(`[${TRIGGER_BRANCH}]`, "['cowork/**']"), "on.push must be exactly one literal branch and nothing else"],
   ["add a tags filter", sub("  push:\n    branches:", "  push:\n    tags: ['*']\n    branches:"), "on.push must be exactly one literal branch and nothing else"],
   ["add a paths filter", sub(`branches: [${TRIGGER_BRANCH}]`, `branches: [${TRIGGER_BRANCH}]\n    paths: ['scripts/**']`), "on.push must be exactly one literal branch and nothing else"],
+  ["reuse the frozen first-run branch", (t) => t.replaceAll(TRIGGER_BRANCH, "cowork/guided-packet-compile-fixture"), "workflow names a used branch: cowork/guided-packet-compile-fixture"],
   ["swap to a previously used branch", (t) => t.replaceAll(TRIGGER_BRANCH, "cowork/instruction-reader-compile-fixture"), "on.push must be exactly one literal branch and nothing else"],
   ["drop the repository gate", sub(`github.repository == '${REPOSITORY}' && `, ""), `job if lacks: github.repository == '${REPOSITORY}'`],
   ["drop the event-name gate", sub("github.event_name == 'push' && ", ""), "job if lacks: github.event_name == 'push'"],

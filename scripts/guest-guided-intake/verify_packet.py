@@ -126,7 +126,8 @@ def audit(archive,inventory,pin):
     details['symlinks']={'total':len(links),'aliases':len(aliases)}
     return checks,details
 
-def main(argv):
+EXIT_HOLDS,EXIT_FAILED,EXIT_ERROR=0,1,2
+def run(argv):
     if os.geteuid()==0:raise SystemExit('unprivileged verification required')
     args=argv[1:];pin_path=None
     if '--pin' in args:
@@ -135,5 +136,13 @@ def main(argv):
     pin=json.loads((pin_path or default_pin()).read_bytes())
     checks,details=audit(args[0],args[1],pin)
     print(json.dumps({'kind':'winter-guided-packet-verification','allChecksHold':all(checks.values()),'checks':checks,**details,'outputsExecuted':False},indent=1,sort_keys=True))
-    return 0 if all(checks.values()) else 1
+    return EXIT_HOLDS if all(checks.values()) else EXIT_FAILED
+def main(argv):
+    """Stable exit codes: 0 only when every check holds (allChecksHold true), 1 when a check failed (allChecksHold false),
+    2 for anything else (usage, I/O, a malformed archive or pin, running as root). The hosted path binds nothing unless 0."""
+    try:return run(argv)
+    except SystemExit as stop:
+        print(stop.code if isinstance(stop.code,str) else 'verification refused',file=sys.stderr);return EXIT_ERROR
+    except Exception:
+        print('verification error',file=sys.stderr);return EXIT_ERROR
 if __name__=='__main__':raise SystemExit(main(sys.argv))
