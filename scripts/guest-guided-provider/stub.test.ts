@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createGuidedFixturePort, encodeFrame, LIMITS, SELECTION, sha256 } from "./stub.ts";
+import { createGuidedFixturePort, encodeFrame, LIMITS, SELECTION, STANDIN_SELECTION, sha256 } from "./stub.ts";
 
 const scope = { homeId: "home", workspaceId: "workspace", sessionId: "logical", backendSessionId: "backend", taskId: "task", incarnationId: "incarnation", bootId: "boot", leaseEpoch: 1, grantRevision: 2, accountRevision: 3, modelRevision: 4 };
 function script() { return { version: 1, scope: { ...scope }, selection: SELECTION, steps: [{ system: ["FACT:workspace", "HOST:publication"], user: ["SHARED:old", "SOURCE:root", "SOURCE:cwd"], absentSystem: [], absentUser: ["SHARED:new"], response: "guided-one" }, { system: ["FACT:workspace", "HOST:publication"], user: ["SHARED:new", "SOURCE:root", "SOURCE:cwd"], absentSystem: [], absentUser: ["SHARED:old"], response: "guided-two" }] }; }
@@ -159,4 +159,67 @@ test("replay, cross-invocation pulls, cancel and aborted ingress retain counts a
   }
   const p = port(); await p.exchange(encodeFrame(request())); expect(decode(await p.exchange(encodeFrame(request("cancel", 1))))).toMatchObject({ kind: "closed" }); expect(p.receipt()).toMatchObject({ completed: 0, receivedFrames: 2, closed: true });
   const aborted = port(), abort = new AbortController(); abort.abort(); await expect(aborted.exchange(encodeFrame(request()), abort.signal)).rejects.toThrow(); expect(aborted.receipt()).toMatchObject({ receivedBegins: 1, acceptedBegins: 0 });
+});
+
+// ---- reserved `winter-standin` selection: reachable only by explicit choice; the default behaviour is unchanged ----
+const standinScript = (over: (s: any) => void = () => {}) => {
+  const value: any = { version: 1, scope: { ...scope }, selection: STANDIN_SELECTION, steps: [
+    { system: [], user: [], absentSystem: [], absentUser: [], response: "canned-one" }, { system: [], user: [], absentSystem: [], absentUser: [], response: "canned-two" }] };
+  over(value); return value;
+};
+const standinPort = (value: unknown = standinScript()) => { const bytes = Buffer.from(JSON.stringify(value)); return createGuidedFixturePort(bytes, sha256(bytes), STANDIN_SELECTION); };
+const standinTurn = (over: (t: any) => void = () => {}) => { const t: any = { model: STANDIN_SELECTION.providerModelId, system: "any", messages: [{ role: "user", content: "hello" }] }; over(t); return t; };
+const standinRequest = (operation = "begin", sequence = 0, ordinal = 1, id = "invocation-one", t: unknown = standinTurn()): Record<string, unknown> => ({ version: 1, operation, invocationId: id, invocationOrdinal: ordinal, scope, sequence, ...(operation === "begin" ? { turn: t } : {}) });
+async function standinFinish(p: ReturnType<typeof standinPort>, ordinal: number, id: string) {
+  for (const [operation, sequence] of [["begin", 0], ["next", 1], ["next", 2]] as const) await p.exchange(encodeFrame(standinRequest(operation, sequence, ordinal, id, standinTurn())));
+}
+
+test("the default selection and the default port are byte-for-byte what they were", () => {
+  expect(JSON.stringify(SELECTION)).toBe('{"providerId":"openai","modelKey":"openai/gpt-5.6","providerModelId":"gpt-5.6","family":"openai","protocol":"openai-responses","continuationDomain":"openai/gpt-5.6","capabilities":{"toolCalling":"native","readableState":"summary"}}');
+  expect(JSON.stringify(STANDIN_SELECTION)).toBe('{"providerId":"winter-standin","modelKey":"winter-standin/scripted","providerModelId":"scripted","family":"winter-standin","protocol":"openai-responses","continuationDomain":"winter-standin/scripted","capabilities":{"toolCalling":"native","readableState":"summary"}}');
+  expect(Object.isFrozen(STANDIN_SELECTION) && Object.isFrozen(STANDIN_SELECTION.capabilities)).toBe(true);
+  const bytes = Buffer.from(JSON.stringify(script())); // no third argument: the same port as before
+  expect(createGuidedFixturePort(bytes, sha256(bytes)).receipt()).toMatchObject({ receivedFrames: 0, closed: false });
+});
+test("the stand-in serves exactly two canned answers with empty markers and a non-meta first message, then refuses and counts a third begin", async () => {
+  const p = standinPort();
+  await standinFinish(p, 1, "i1"); await standinFinish(p, 2, "i2");
+  expect(p.receipt()).toMatchObject({ receivedFrames: 6, receivedBegins: 2, acceptedBegins: 2, completed: 2, closed: false });
+  await expect(p.exchange(encodeFrame(standinRequest("begin", 0, 3, "i3")))).rejects.toThrow("fixture refused");
+  expect(p.receipt()).toMatchObject({ receivedFrames: 7, receivedBegins: 3, acceptedBegins: 2, completed: 2, closed: true });
+});
+test("the stand-in's answers are its script's", async () => {
+  const p = standinPort();
+  expect(decode(await p.exchange(encodeFrame(standinRequest())))).toMatchObject({ kind: "accepted" });
+  expect(decode(await p.exchange(encodeFrame(standinRequest("next", 1))))).toMatchObject({ event: { type: "text_delta", text: "canned-one" } });
+});
+test("each selection accepts only its own script and its own model", async () => {
+  const bytesOf = (value: unknown) => Buffer.from(JSON.stringify(value));
+  const standinBytes = bytesOf(standinScript()), defaultBytes = bytesOf(script());
+  expect(() => createGuidedFixturePort(standinBytes, sha256(standinBytes))).toThrow("fixture refused"); // default port, stand-in script
+  expect(() => createGuidedFixturePort(defaultBytes, sha256(defaultBytes), STANDIN_SELECTION)).toThrow("fixture refused"); // stand-in port, default script
+  const wrongModel = standinPort(); await expect(wrongModel.exchange(encodeFrame(standinRequest("begin", 0, 1, "i1", standinTurn(t => { t.model = SELECTION.providerModelId; }))))).rejects.toThrow("fixture refused");
+  const defaultPort = port(); await expect(defaultPort.exchange(encodeFrame({ ...request(), turn: { ...turn(), model: STANDIN_SELECTION.providerModelId } }))).rejects.toThrow("fixture refused");
+});
+test("empty markers and a non-meta first message are accepted ONLY by the stand-in", async () => {
+  for (const mutate of [(s: any) => { s.steps[0].system = []; }, (s: any) => { s.steps[0].user = []; }]) { const v = script(); mutate(v); expect(() => port(v)).toThrow("fixture refused"); }
+  const nonMeta = port(); await expect(nonMeta.exchange(encodeFrame({ ...request(), turn: { ...turn(), messages: [{ role: "user", content: "hello" }] } }))).rejects.toThrow("fixture refused");
+});
+test("the stand-in keeps every other refusal: scope, order, replay, absent markers, marker lines, bad hash, extra keys", async () => {
+  const bytes = Buffer.from(JSON.stringify(standinScript()));
+  expect(() => createGuidedFixturePort(bytes, "0".repeat(64), STANDIN_SELECTION)).toThrow("fixture refused");
+  for (const mutate of [(s: any) => { s.authorized = true; }, (s: any) => { s.version = 2; }, (s: any) => { s.steps.push(s.steps[0]); }, (s: any) => { s.scope.leaseEpoch = 0; },
+    (s: any) => { s.selection = SELECTION; }, (s: any) => { s.steps[0].system = "x"; }, (s: any) => { s.steps[0].response = ""; }, (s: any) => { s.steps[0].user = ["a\nb"]; }]) expect(() => standinPort(standinScript(mutate))).toThrow("fixture refused");
+  const wrongScope = standinPort(); await expect(wrongScope.exchange(encodeFrame({ ...standinRequest(), scope: { ...scope, taskId: "other" } }))).rejects.toThrow("fixture refused");
+  const replay = standinPort(); await replay.exchange(encodeFrame(standinRequest())); await expect(replay.exchange(encodeFrame(standinRequest()))).rejects.toThrow("fixture refused");
+  const absent = standinPort(standinScript(s => { s.steps[0].absentSystem = ["FORBIDDEN"]; }));
+  await expect(absent.exchange(encodeFrame(standinRequest("begin", 0, 1, "i1", standinTurn(t => { t.system = "FORBIDDEN"; }))))).rejects.toThrow("fixture refused");
+  const marked = standinPort(standinScript(s => { s.steps[0].user = ["MUST:see"]; })); // non-empty markers are still enforced
+  await expect(marked.exchange(encodeFrame(standinRequest()))).rejects.toThrow("fixture refused");
+});
+test("the selection argument is explicit and exact: undefined is the default; a copy, null, a string or another object is refused", () => {
+  const bytes = Buffer.from(JSON.stringify(script())), hash = sha256(bytes);
+  expect(() => createGuidedFixturePort(bytes, hash, undefined)).not.toThrow();
+  expect(() => createGuidedFixturePort(bytes, hash, SELECTION)).not.toThrow();
+  for (const bad of [{ ...SELECTION }, { ...STANDIN_SELECTION }, null, "winter-standin", {}, 0] as any[]) expect(() => createGuidedFixturePort(bytes, hash, bad)).toThrow("fixture refused");
 });
