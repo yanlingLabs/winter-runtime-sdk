@@ -76,11 +76,14 @@ const RUN2_ORIGINS: Record<string, { repository: string; head: string; tree: str
 /** Builder files changed AFTER run 39227365159 (the host-spawn binding fix: the hostClient core, its spec and the README; the run-3 trigger branch: the input pin file and its test). Like run 1's
  * list they are history for that run's pin; every other file run 2 pinned must still match the working tree. */
 export const RUN2_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/guided-entries.test.ts`, `${BUILD}/test_guided_build.py`] as const;
+/** Run 3's record of its origins: the same three heads as run 2 (the hostClient fix is in the builder origin, not in these). */
+const RUN3_ORIGINS = RUN2_ORIGINS;
 interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
 /** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
 const RUNS: Record<number, RunSpec> = {
   39165162201: { branch: "cowork/guided-packet-compile-fixture", artifactId: 12149668717, origins: RUN1_ORIGINS, placeholders: PLACEHOLDERS, superseded: SUPERSEDED_BUILDER_FILES },
   39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: RUN2_SUPERSEDED_BUILDER_FILES },
+  39327386044: { branch: "cowork/guided-packet-compile-fixture-3", artifactId: 12223150881, origins: RUN3_ORIGINS, placeholders: [], superseded: [] },
 };
 
 export function pinFiles(): string[] {
@@ -179,8 +182,8 @@ const PINS = pinFiles().sort().map((file) => ({ file, pin: JSON.parse(read(`${IN
 const pinOf = (id: number) => PINS.find((entry) => entry.pin.run.id === id)!.pin;
 
 describe("guided compile packet intake pins", () => {
-  test("the compile pins are exactly the two known runs, each named by its run id", () => {
-    expect(PINS.map((entry) => entry.file)).toEqual(["compile-39165162201.pin.json", "compile-39227365159.pin.json"]);
+  test("the compile pins are exactly the three known runs, each named by its run id", () => {
+    expect(PINS.map((entry) => entry.file)).toEqual(["compile-39165162201.pin.json", "compile-39227365159.pin.json", "compile-39327386044.pin.json"]);
     for (const { file, pin } of PINS) expect(file).toBe(`compile-${pin.run.id}.pin.json`);
   });
   test("a pin for a run that is not in the table is refused", () => {
@@ -197,7 +200,8 @@ describe("guided compile packet intake pins", () => {
     expect(readme).toContain("not bindable in full");
     expect(readme).toContain("providerWorker");
     expect(readme).toContain("hostClient");
-    expect(readme).toContain("39227365159");
+    expect(readme).toContain("39227365159"); expect(readme).toContain("39327386044");
+    expect(readme).toMatch(/--pin[^\n]*compile-39327386044\.pin\.json/);
     expect(readme).toMatch(/--pin[^\n]*compile-39227365159\.pin\.json/);
     expect(readme).toContain(STANDING_LINE);
     expect(readme).not.toMatch(/C59 (is|was) explained/i);
@@ -221,6 +225,18 @@ describe("guided compile packet intake pins", () => {
     expect(two.binding.notBindable).toEqual([]);
     expect(Object.keys(two.environment).sort()).toEqual(Object.keys(one.environment).sort());
     expect(two.bun.stageBase.sha256).toBe(one.bun.stageBase.sha256);
+  });
+  test("run 3 differs from run 2 in exactly the hostClient, its builder files in exactly the five run-2 superseded ones, and nothing is a placeholder", () => {
+    const two = pinOf(39227365159), three = pinOf(39327386044);
+    const changed = [...ROLES, ...NATIVES].filter((name) => ((two.artifacts.roles[name] ?? two.artifacts.natives[name])!.sha256) !== ((three.artifacts.roles[name] ?? three.artifacts.natives[name])!.sha256)).sort();
+    expect(changed).toEqual(["hostClient"]);
+    expect(three.continuity?.previousRun).toBe(39227365159);
+    expect([...three.continuity!.changedFromPreviousRun]).toEqual(["hostClient"]);
+    expect([...three.continuity!.identicalToPreviousRun].sort()).toEqual([...ROLES, ...NATIVES].filter((name) => name !== "hostClient").sort());
+    expect(Object.keys(three.builder.files).filter((path) => three.builder.files[path] !== two.builder.files[path]).sort()).toEqual([...RUN2_SUPERSEDED_BUILDER_FILES].sort());
+    expect(Object.values(three.artifacts.roles).some((role) => role.placeholder !== undefined)).toBe(false);
+    expect(three.binding.notBindable).toEqual([]);
+    expect(JSON.stringify(three.origins)).toBe(JSON.stringify(two.origins));
   });
   test("verify_packet.py and its synthetic-packet tests pass (pure data, nothing executed)", () => {
     const run = spawnSync("python3", ["-I", "-B", join(ROOT, INTAKE, "test_verify_packet.py")], { encoding: "utf8" });
