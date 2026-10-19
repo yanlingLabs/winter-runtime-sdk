@@ -57,6 +57,14 @@ export interface Context { inputs: Inputs; dependencyListSha256: string; pinsPy:
  * match, so an edit to the logic that produced the artifact still fails here. */
 export const SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/host-client.ts`, `${BUILD}/entries/provider-worker.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/pins.py`, `${BUILD}/test_guided_build.py`] as const;
 
+/** Run 1's record of its three origins. It is a historical fact about that run, so it is held to these literals and NOT to the
+ * current builder inputs, which move on (the runtime-sdk origin moved to the real entries; the agent-sdk origin will follow). */
+const RUN1_ORIGINS: Record<string, { repository: string; head: string; tree: string }> = {
+  sdk: { repository: "yanlingLabs/winter-agent-sdk", head: "68e57c646f23feba09b00c78d05d8c80d6f2962d", tree: "86dcb48155e40f6b084e8b0ffea529679b5274c2" },
+  runtime: { repository: "yanlingLabs/winter-runtime-sdk", head: "29eede4b3e085044f5ed6bc6cf99e8f6c4daf6a1", tree: "5eba2966b84ee23ddcd76298cc58427c97095277" },
+  winter: { repository: "yanlingLabs/winter", head: "8b52ef83d1ba721a4dd80cdbb205c617f8656555", tree: "703ad5263ef0a249e9666faa1eaf18a0f19c8be1" },
+};
+
 export function pinFiles(): string[] {
   return readdirSync(join(ROOT, INTAKE)).filter((name) => /^compile-\d+\.pin\.json$/.test(name));
 }
@@ -91,11 +99,11 @@ export function pinViolations(pin: Pin, ctx: Context): string[] {
   if (pin.archive.bytes > ctx.limits.packetBytes) bad("pin archive exceeds the builder's bound");
 
   // 3. Origins: the pin is the builder's input pin file, origin by origin.
-  const pairs: Array<[string, { head: string; tree: string; repository: string }]> = [["sdk", inputs.origins.agentSdk], ["runtime", inputs.origins.runtimeSdk], ["winter", inputs.origins.winterCore]];
+  const pairs: Array<[string, { head: string; tree: string; repository: string }]> = Object.entries(RUN1_ORIGINS);
   if (JSON.stringify(Object.keys(pin.origins).sort()) !== JSON.stringify(["runtime", "sdk", "winter"])) bad("pin origin set");
   for (const [role, want] of pairs) {
     const got = pin.origins[role];
-    if (!got || got.head !== want.head || got.tree !== want.tree || got.repository !== want.repository) bad(`pin origin ${role} differs from guided-compile-inputs.pin.json`);
+    if (!got || got.head !== want.head || got.tree !== want.tree || got.repository !== want.repository) bad(`pin origin ${role} differs from run 1's record`);
     if (got && (!hex(64).test(got.inventorySha256) || !(got.fileCount > 0))) bad(`pin origin ${role} inventory`);
   }
   if (!hex(40).test(pin.builder.head) || !hex(40).test(pin.builder.tree) || pin.builder.head === pin.workflowHead) bad("pin builder head and workflow head are distinct commits");
@@ -195,9 +203,9 @@ const MUTATIONS: Array<[string, Mutate, string]> = [
   ["archive hash malformed", (p) => { p.archive.sha256 = "abc"; }, "pin archive hash or size"],
   ["inventory size zero", (p) => { p.inventory.bytes = 0; }, "pin inventory hash or size"],
   ["packet over the builder bound", (p) => { p.inventory.fileBytes = 2 ** 31; }, "pin packet exceeds the builder's bound"],
-  ["sdk origin head drifts", (p) => { p.origins.sdk!.head = "1".repeat(40); }, "pin origin sdk differs from guided-compile-inputs.pin.json"],
-  ["runtime origin tree drifts", (p) => { p.origins.runtime!.tree = "1".repeat(40); }, "pin origin runtime differs from guided-compile-inputs.pin.json"],
-  ["winter origin repository drifts", (p) => { p.origins.winter!.repository = "someone/else"; }, "pin origin winter differs from guided-compile-inputs.pin.json"],
+  ["sdk origin head drifts", (p) => { p.origins.sdk!.head = "1".repeat(40); }, "pin origin sdk differs from run 1's record"],
+  ["runtime origin tree drifts", (p) => { p.origins.runtime!.tree = "1".repeat(40); }, "pin origin runtime differs from run 1's record"],
+  ["winter origin repository drifts", (p) => { p.origins.winter!.repository = "someone/else"; }, "pin origin winter differs from run 1's record"],
   ["extra origin", (p) => { p.origins.extra = { ...p.origins.sdk! }; }, "pin origin set"],
   ["origin inventory hash malformed", (p) => { p.origins.sdk!.inventorySha256 = "x"; }, "pin origin sdk inventory"],
   ["builder head equals workflow head", (p) => { p.builder.head = p.workflowHead; }, "pin builder head and workflow head are distinct commits"],

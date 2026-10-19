@@ -114,6 +114,9 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
   if (JSON.stringify(on.push ?? {}) !== JSON.stringify({ branches: [TRIGGER_BRANCH] })) bad("on.push must be exactly one literal branch and nothing else");
   if (pin.trigger.branch !== TRIGGER_BRANCH || pin.trigger.workflow !== WORKFLOW_NAME || pin.trigger.sourceWorkflow !== SOURCE_NAME) bad("pin file trigger record differs from the gate");
   for (const [name, other] of Object.entries(ctx.others)) if (other.includes(TRIGGER_BRANCH)) bad(`${name} names the trigger branch`);
+  // The only compile-fixture trigger name this workflow may carry is the trigger branch itself: any other `-fixture*` name (the frozen
+  // first branch, a `-3`, a stray comment) is refused, so no further name can be added without this gate changing.
+  for (const name of new Set(text.match(/cowork\/guided-packet-compile-fixture[\w-]*/g) ?? [])) if (name !== TRIGGER_BRANCH) bad(`workflow names a compile-fixture branch other than the trigger: ${name}`);
   // A branch that already fired (or is frozen) is never named by this workflow, even as a prefix of the new one.
   for (const used of USED_BRANCHES) if (new RegExp(`${used.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(?![\\w-])`).test(text)) bad(`workflow names a used branch: ${used}`);
 
@@ -310,6 +313,9 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
   ["widen the branch to a glob", sub(`[${TRIGGER_BRANCH}]`, "['cowork/**']"), "on.push must be exactly one literal branch and nothing else"],
   ["add a tags filter", sub("  push:\n    branches:", "  push:\n    tags: ['*']\n    branches:"), "on.push must be exactly one literal branch and nothing else"],
   ["add a paths filter", sub(`branches: [${TRIGGER_BRANCH}]`, `branches: [${TRIGGER_BRANCH}]\n    paths: ['scripts/**']`), "on.push must be exactly one literal branch and nothing else"],
+  ["a further compile-fixture name replaces the trigger", (t) => t.replaceAll(TRIGGER_BRANCH, "cowork/guided-packet-compile-fixture-3"), "workflow names a compile-fixture branch other than the trigger: cowork/guided-packet-compile-fixture-3"],
+  ["a further compile-fixture name in a comment", (t) => t.replace("name: guided-packet-compile-fixture", "# cowork/guided-packet-compile-fixture-3\nname: guided-packet-compile-fixture"), "workflow names a compile-fixture branch other than the trigger: cowork/guided-packet-compile-fixture-3"],
+  ["a bare prefix of the trigger name", (t) => t.replace("name: guided-packet-compile-fixture", "# cowork/guided-packet-compile-fixture\nname: guided-packet-compile-fixture"), "workflow names a compile-fixture branch other than the trigger: cowork/guided-packet-compile-fixture"],
   ["reuse the frozen first-run branch", (t) => t.replaceAll(TRIGGER_BRANCH, "cowork/guided-packet-compile-fixture"), "workflow names a used branch: cowork/guided-packet-compile-fixture"],
   ["swap to a previously used branch", (t) => t.replaceAll(TRIGGER_BRANCH, "cowork/instruction-reader-compile-fixture"), "on.push must be exactly one literal branch and nothing else"],
   ["drop the repository gate", sub(`github.repository == '${REPOSITORY}' && `, ""), `job if lacks: github.repository == '${REPOSITORY}'`],

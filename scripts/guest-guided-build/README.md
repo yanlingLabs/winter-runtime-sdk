@@ -230,7 +230,7 @@ block, and both test files fail when any copy drifts.
 | Pin | Value | Moves when |
 | --- | --- | --- |
 | agent-sdk head | `68e57c646f23feba09b00c78d05d8c80d6f2962d` (main, compartment C applied by PR 34, Root reader service by PR 35) | a later agent-sdk change; see below |
-| runtime-sdk head | `29eede4b3e085044f5ed6bc6cf99e8f6c4daf6a1` (main, includes the guided provider stub and the reader entry) | never for this run |
+| runtime-sdk head | `ce730190854fd807446ac3a229a358c553a57697` (main, includes the real entries, PR 20, and the `winter-standin` stub selection, PR 21; run 1 used `29eede4b`) | a later runtime-sdk change to a compiled input |
 | Winter Core head | `8b52ef83d1ba721a4dd80cdbb205c617f8656555` on `cowork/output-integration` (an exact commit, never the branch name) | Core's cowork sources change |
 | Bun | 1.3.14, archive and executable SHA-256 in the `bun` object | the owner chooses another version |
 | builder head | all zeros until armed | the arming step |
@@ -281,7 +281,7 @@ uploads the archive and inventory with 7-day retention. A failed run uploads dia
 never created, pushed or re-run by the author. After the one run the branch is frozen.
 
 The first run used `cowork/guided-packet-compile-fixture` (run 39165162201). That branch is frozen: this workflow no
-longer names it (a gate tripwire refuses the name, even as a prefix of the new one), so a push to it starts nothing.
+longer names it (a gate tripwire refuses that exact name, and any other `cowork/guided-packet-compile-fixture*` name except the new one), so a push to it starts nothing.
 The second run starts only from an owner-approved first-creation push of `cowork/guided-packet-compile-fixture-2`,
 made from the arming commit described below; no other event can start it, and the gate test proves that.
 
