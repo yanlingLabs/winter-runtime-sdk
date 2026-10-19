@@ -1,5 +1,6 @@
 // Cascade tests for the guided compile packet's intake pin (scripts/guest-guided-intake/compile-<run>.pin.json).
-// The pin records what compile run 39165162201 produced and what the audit found. These tests cannot download the
+// Each pin records what one compile run produced and what the audit found (run 39165162201, the first, whose providerWorker and
+// hostClient are placeholders; run 39227365159, the second, whose roles are the real entries). These tests cannot download the
 // artifact (CI has no access to it), so they pin the AGREEMENTS: the pin against the builder's input pin file, the
 // artifact inventory against the builder's promise, the builder-origin bytes against the committed files, and the
 // placeholder flags that stop anyone binding a hosted run to the two adapters. `pinViolations()` is a pure function
@@ -42,6 +43,7 @@ type Pin = {
   symlinks: { total: number; resolverAliases: number; dependencyLinks: number };
   flags: Record<string, boolean>;
   binding: { bindable: string[]; notBindable: string[]; reason: string };
+  continuity?: { previousRun: number; identicalToPreviousRun: string[]; changedFromPreviousRun: string[]; note: string };
 };
 type Inputs = {
   bun: { version: string; target: string; archiveSha256: string; executableSha256: string };
@@ -65,6 +67,19 @@ const RUN1_ORIGINS: Record<string, { repository: string; head: string; tree: str
   winter: { repository: "yanlingLabs/winter", head: "8b52ef83d1ba721a4dd80cdbb205c617f8656555", tree: "703ad5263ef0a249e9666faa1eaf18a0f19c8be1" },
 };
 
+/** Run 2's record of its three origins (held to literals for the same reason as run 1's). */
+const RUN2_ORIGINS: Record<string, { repository: string; head: string; tree: string }> = {
+  sdk: { repository: "yanlingLabs/winter-agent-sdk", head: "9c980c326638489e0183d7fcddcf1a93553be0ba", tree: "e203a8d838369ca10586ac031dcdeef7bb0b2c69" },
+  runtime: { repository: "yanlingLabs/winter-runtime-sdk", head: "ce730190854fd807446ac3a229a358c553a57697", tree: "b1166e6cc45f6445e8c56d4c50bbb8525328179e" },
+  winter: { repository: "yanlingLabs/winter", head: "8b52ef83d1ba721a4dd80cdbb205c617f8656555", tree: "703ad5263ef0a249e9666faa1eaf18a0f19c8be1" },
+};
+interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
+/** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
+const RUNS: Record<number, RunSpec> = {
+  39165162201: { branch: "cowork/guided-packet-compile-fixture", artifactId: 12149668717, origins: RUN1_ORIGINS, placeholders: PLACEHOLDERS, superseded: SUPERSEDED_BUILDER_FILES },
+  39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: [] },
+};
+
 export function pinFiles(): string[] {
   return readdirSync(join(ROOT, INTAKE)).filter((name) => /^compile-\d+\.pin\.json$/.test(name));
 }
@@ -79,13 +94,15 @@ export function pinViolations(pin: Pin, ctx: Context): string[] {
   const problems: string[] = [];
   const bad = (message: string) => problems.push(message);
   const { inputs } = ctx;
+  const spec = RUNS[pin.run?.id];
 
   // 1. The run.
   if (pin.kind !== "winter-guided-compile-pin" || pin.formatVersion !== 1) bad("pin kind or format");
-  if (pin.run.id !== 39165162201 || pin.run.attempt !== 1 || pin.run.event !== "push" || pin.run.conclusion !== "success") bad("pin run identity");
-  if (pin.run.branch !== "cowork/guided-packet-compile-fixture") bad("pin run branch");
+  if (!spec) { bad("pin run identity"); return problems; }
+  if (pin.run.attempt !== 1 || pin.run.event !== "push" || pin.run.conclusion !== "success") bad("pin run identity");
+  if (pin.run.branch !== spec.branch) bad("pin run branch");
   if (!hex(40).test(pin.run.armingCommit) || pin.run.armingCommit !== pin.workflowHead) bad("pin arming commit is the workflow head");
-  if (pin.artifact.name !== `guided-packet-compile-${pin.run.id}` || pin.artifact.id !== 12149668717) bad("pin artifact identity");
+  if (pin.artifact.name !== `guided-packet-compile-${pin.run.id}` || pin.artifact.id !== spec.artifactId) bad("pin artifact identity");
   if (!hex(64).test(pin.artifact.zipSha256) || !(pin.artifact.zipBytes > 0)) bad("pin artifact zip digest or size");
   const days = (Date.parse(pin.artifact.expiresAt) - Date.parse(pin.run.createdAt)) / 86_400_000;
   if (!(days > 6.9 && days < 7.1) || inputs.retentionDays !== 7) bad("pin artifact expiry is seven days after the run");
@@ -99,11 +116,11 @@ export function pinViolations(pin: Pin, ctx: Context): string[] {
   if (pin.archive.bytes > ctx.limits.packetBytes) bad("pin archive exceeds the builder's bound");
 
   // 3. Origins: the pin is the builder's input pin file, origin by origin.
-  const pairs: Array<[string, { head: string; tree: string; repository: string }]> = Object.entries(RUN1_ORIGINS);
+  const pairs: Array<[string, { head: string; tree: string; repository: string }]> = Object.entries(spec.origins);
   if (JSON.stringify(Object.keys(pin.origins).sort()) !== JSON.stringify(["runtime", "sdk", "winter"])) bad("pin origin set");
   for (const [role, want] of pairs) {
     const got = pin.origins[role];
-    if (!got || got.head !== want.head || got.tree !== want.tree || got.repository !== want.repository) bad(`pin origin ${role} differs from run 1's record`);
+    if (!got || got.head !== want.head || got.tree !== want.tree || got.repository !== want.repository) bad(`pin origin ${role} differs from the run's record`);
     if (got && (!hex(64).test(got.inventorySha256) || !(got.fileCount > 0))) bad(`pin origin ${role} inventory`);
   }
   if (!hex(40).test(pin.builder.head) || !hex(40).test(pin.builder.tree) || pin.builder.head === pin.workflowHead) bad("pin builder head and workflow head are distinct commits");
@@ -127,9 +144,10 @@ export function pinViolations(pin: Pin, ctx: Context): string[] {
   for (const [name, ent] of [...Object.entries(pin.artifacts.roles), ...Object.entries(pin.artifacts.natives), ...Object.entries(pin.metafiles)]) if (!hex(64).test(ent.sha256) || !(ent.bytes > 0)) bad(`pin artifact ${name} hash or size`);
   if (Object.keys(pin.environment).length !== 6) bad("pin environment holds exactly six libraries");
   const placeholders = Object.entries(pin.artifacts.roles).filter(([, v]) => v.placeholder === true).map(([k]) => k).sort();
-  if (JSON.stringify(placeholders) !== JSON.stringify(PLACEHOLDERS)) bad("pin placeholders are exactly providerWorker and hostClient");
+  if (JSON.stringify(placeholders) !== JSON.stringify([...spec.placeholders].sort())) bad("pin placeholders are exactly the run's declared set");
   if (Object.values(pin.artifacts.natives).some((v) => (v as { placeholder?: boolean }).placeholder !== undefined)) bad("pin natives are not placeholders");
-  if (JSON.stringify(pin.binding.notBindable.sort()) !== JSON.stringify(PLACEHOLDERS) || pin.binding.notBindable.some((n) => pin.binding.bindable.join("|").includes(n))) bad("pin binding excludes the placeholders");
+  if (JSON.stringify([...pin.binding.notBindable].sort()) !== JSON.stringify([...spec.placeholders].sort()) || pin.binding.notBindable.some((n) => pin.binding.bindable.join("|").includes(n))) bad("pin binding excludes the placeholders");
+  if (spec.placeholders.length === 0) for (const need of [String(pin.artifact.id), "verify_packet.py", "roles runtimeEntry, providerWorker, hostClient and instructionReader", "six native artifacts"]) if (!pin.binding.bindable.join("|").includes(need)) bad("pin binding names what it makes bindable");
 
   // 6. Links: the aliases are the builder's, the dependency links are the pin file's edges.
   const aliasCount = 6 * 4 + 1 + Object.values(inputs.dependencies.aliases).reduce((n, m) => n + Object.keys(m).length, 0);
@@ -142,9 +160,9 @@ export function pinViolations(pin: Pin, ctx: Context): string[] {
   for (const [path, digest] of Object.entries(pin.builder.files)) {
     const actual = ctx.files(path);
     if (actual === null) bad(`pinned builder file is gone: ${path}`);
-    else if (actual !== digest && !(SUPERSEDED_BUILDER_FILES as readonly string[]).includes(path)) bad(`pinned builder file changed: ${path}`);
+    else if (actual !== digest && !spec.superseded.includes(path)) bad(`pinned builder file changed: ${path}`);
   }
-  for (const path of SUPERSEDED_BUILDER_FILES) if (!(path in pin.builder.files)) bad(`pin builder files omit superseded ${path}`);
+  for (const path of spec.superseded) if (!(path in pin.builder.files)) bad(`pin builder files omit superseded ${path}`);
   for (const required of [`${BUILD}/build.py`, `${BUILD}/graph.py`, `${BUILD}/acquire.py`, `${BUILD}/pins.py`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/dependencies.lst`, "scripts/guest-reader-build/build.py", "scripts/guest-reader-build/provenance.py"]) {
     if (!(required in pin.builder.files)) bad(`pin builder files omit ${required}`);
   }
@@ -154,35 +172,61 @@ export function pinViolations(pin: Pin, ctx: Context): string[] {
   return problems;
 }
 
-describe("guided compile packet intake pin", () => {
-  const files = pinFiles();
-  test("exactly one compile pin exists and its name carries the run id", () => {
-    expect(files).toEqual(["compile-39165162201.pin.json"]);
+const PINS = pinFiles().sort().map((file) => ({ file, pin: JSON.parse(read(`${INTAKE}/${file}`)) as Pin }));
+const pinOf = (id: number) => PINS.find((entry) => entry.pin.run.id === id)!.pin;
+
+describe("guided compile packet intake pins", () => {
+  test("the compile pins are exactly the two known runs, each named by its run id", () => {
+    expect(PINS.map((entry) => entry.file)).toEqual(["compile-39165162201.pin.json", "compile-39227365159.pin.json"]);
+    for (const { file, pin } of PINS) expect(file).toBe(`compile-${pin.run.id}.pin.json`);
   });
-  const pin = JSON.parse(read(`${INTAKE}/compile-39165162201.pin.json`)) as Pin;
-  test("the pin agrees with every input it must agree with", () => {
-    expect(pinViolations(pin, loadContext())).toEqual([]);
+  test("a pin for a run that is not in the table is refused", () => {
+    const unknown = structuredClone(PINS[0]!.pin); unknown.run.id = 1;
+    expect(pinViolations(unknown, loadContext())).toContain("pin run identity");
   });
-  test("the README says the packet is not bindable in full, and keeps the standing line and no C59 claim", () => {
+  for (const { file, pin } of PINS) {
+    test(`${file} agrees with every input it must agree with`, () => {
+      expect(pinViolations(pin, loadContext())).toEqual([]);
+    });
+  }
+  test("the README says run 1 is not bindable in full, run 2 is bound only through verify_packet.py --pin, and keeps the standing line and no C59 claim", () => {
     const readme = read(`${INTAKE}/README.md`);
     expect(readme).toContain("not bindable in full");
     expect(readme).toContain("providerWorker");
     expect(readme).toContain("hostClient");
+    expect(readme).toContain("39227365159");
+    expect(readme).toMatch(/--pin[^\n]*compile-39227365159\.pin\.json/);
     expect(readme).toContain(STANDING_LINE);
     expect(readme).not.toMatch(/C59 (is|was) explained/i);
     expect(readme.toLowerCase()).toContain("frozen");
   });
-  test("the workflow on this branch is still unarmed: the pin cannot fire it", () => {
+  test("the workflow on this branch is still unarmed: neither pin can fire it", () => {
     expect(loadContext().workflow).toContain("BUILDER_HEAD: '0000000000000000000000000000000000000000'");
+  });
+  test("run 2 continuity with run 1 is exactly what the hashes say, and nothing in run 2 is a placeholder", () => {
+    const one = pinOf(39165162201), two = pinOf(39227365159);
+    const groups = ["roles", "natives"] as const;
+    const hashes = (pin: Pin) => Object.fromEntries(groups.flatMap((g) => Object.entries(pin.artifacts[g]).map(([name, ent]) => [name, ent.sha256])));
+    const a = hashes(one), b = hashes(two);
+    const same = Object.keys(b).filter((name) => a[name] === b[name]).sort(), changed = Object.keys(b).filter((name) => a[name] !== b[name]).sort();
+    expect(two.continuity?.previousRun).toBe(39165162201);
+    expect([...two.continuity!.identicalToPreviousRun].sort()).toEqual(same);
+    expect([...two.continuity!.changedFromPreviousRun].sort()).toEqual(changed);
+    expect(changed).toEqual(["hostClient", "ownerLibrary", "providerWorker"]);
+    expect(same).toEqual(["fileWorker", "instructionReader", "instructionReaderLauncher", "processWorker", "runtimeEntry", "runtimeLauncher", "toolLauncher"]);
+    expect(Object.values(two.artifacts.roles).some((role) => role.placeholder !== undefined)).toBe(false);
+    expect(two.binding.notBindable).toEqual([]);
+    expect(Object.keys(two.environment).sort()).toEqual(Object.keys(one.environment).sort());
+    expect(two.bun.stageBase.sha256).toBe(one.bun.stageBase.sha256);
   });
   test("verify_packet.py and its synthetic-packet tests pass (pure data, nothing executed)", () => {
     const run = spawnSync("python3", ["-I", "-B", join(ROOT, INTAKE, "test_verify_packet.py")], { encoding: "utf8" });
     expect(run.stderr + run.stdout).toContain("OK");
     expect(run.status).toBe(0);
   });
-  const evidence = process.env.WINTER_GUIDED_EVIDENCE_DIR;
-  test.skipIf(!evidence)("optional: the downloaded packet verifies against the pin (set WINTER_GUIDED_EVIDENCE_DIR to the artifact folder)", () => {
-    const run = spawnSync("python3", ["-I", "-B", join(ROOT, INTAKE, "verify_packet.py"), join(evidence!, "guided-packet.tar.gz"), join(evidence!, "packet-inventory.json")], { encoding: "utf8" });
+  const evidence = process.env.WINTER_GUIDED_EVIDENCE_DIR, evidenceRun = process.env.WINTER_GUIDED_EVIDENCE_RUN;
+  test.skipIf(!evidence || !evidenceRun)("optional: the downloaded packet verifies against its pin (set WINTER_GUIDED_EVIDENCE_DIR to the artifact folder and WINTER_GUIDED_EVIDENCE_RUN to the run id)", () => {
+    const run = spawnSync("python3", ["-I", "-B", join(ROOT, INTAKE, "verify_packet.py"), join(evidence!, "guided-packet.tar.gz"), join(evidence!, "packet-inventory.json"), "--pin", join(ROOT, INTAKE, `compile-${evidenceRun}.pin.json`)], { encoding: "utf8" });
     expect(run.status).toBe(0);
   });
 });
@@ -190,7 +234,8 @@ describe("guided compile packet intake pin", () => {
 // One broken pin per check; each must be caught by its own named violation.
 type Mutate = (pin: Pin, ctx: Context) => void;
 const FLIP = (hexValue: string) => (hexValue[0] === "0" ? "1" : "0") + hexValue.slice(1);
-const MUTATIONS: Array<[string, Mutate, string]> = [
+const RUN1 = 39165162201, RUN2 = 39227365159;
+const MUTATIONS: Array<[string, Mutate, string, number[]?]> = [
   ["wrong run id", (p) => { p.run.id = 1; }, "pin run identity"],
   ["second attempt", (p) => { p.run.attempt = 2; }, "pin run identity"],
   ["failed conclusion", (p) => { p.run.conclusion = "failure"; }, "pin run identity"],
@@ -203,9 +248,9 @@ const MUTATIONS: Array<[string, Mutate, string]> = [
   ["archive hash malformed", (p) => { p.archive.sha256 = "abc"; }, "pin archive hash or size"],
   ["inventory size zero", (p) => { p.inventory.bytes = 0; }, "pin inventory hash or size"],
   ["packet over the builder bound", (p) => { p.inventory.fileBytes = 2 ** 31; }, "pin packet exceeds the builder's bound"],
-  ["sdk origin head drifts", (p) => { p.origins.sdk!.head = "1".repeat(40); }, "pin origin sdk differs from run 1's record"],
-  ["runtime origin tree drifts", (p) => { p.origins.runtime!.tree = "1".repeat(40); }, "pin origin runtime differs from run 1's record"],
-  ["winter origin repository drifts", (p) => { p.origins.winter!.repository = "someone/else"; }, "pin origin winter differs from run 1's record"],
+  ["sdk origin head drifts", (p) => { p.origins.sdk!.head = "1".repeat(40); }, "pin origin sdk differs from the run's record"],
+  ["runtime origin tree drifts", (p) => { p.origins.runtime!.tree = "1".repeat(40); }, "pin origin runtime differs from the run's record"],
+  ["winter origin repository drifts", (p) => { p.origins.winter!.repository = "someone/else"; }, "pin origin winter differs from the run's record"],
   ["extra origin", (p) => { p.origins.extra = { ...p.origins.sdk! }; }, "pin origin set"],
   ["origin inventory hash malformed", (p) => { p.origins.sdk!.inventorySha256 = "x"; }, "pin origin sdk inventory"],
   ["builder head equals workflow head", (p) => { p.builder.head = p.workflowHead; }, "pin builder head and workflow head are distinct commits"],
@@ -222,18 +267,24 @@ const MUTATIONS: Array<[string, Mutate, string]> = [
   ["a metafile missing", (p) => { delete p.metafiles.hostClient; }, "pin metafiles are exactly the four role metafiles"],
   ["an artifact hash malformed", (p) => { p.artifacts.natives.toolLauncher!.sha256 = "x"; }, "pin artifact toolLauncher hash or size"],
   ["a library dropped", (p) => { delete p.environment[Object.keys(p.environment)[0]!]; }, "pin environment holds exactly six libraries"],
-  ["hostClient placeholder flag removed", (p) => { delete p.artifacts.roles.hostClient!.placeholder; }, "pin placeholders are exactly providerWorker and hostClient"],
-  ["providerWorker placeholder flag removed", (p) => { delete p.artifacts.roles.providerWorker!.placeholder; }, "pin placeholders are exactly providerWorker and hostClient"],
-  ["a real role marked placeholder", (p) => { p.artifacts.roles.runtimeEntry!.placeholder = true; }, "pin placeholders are exactly providerWorker and hostClient"],
+  ["hostClient placeholder flag removed", (p) => { delete p.artifacts.roles.hostClient!.placeholder; }, "pin placeholders are exactly the run's declared set", [RUN1]],
+  ["providerWorker placeholder flag removed", (p) => { delete p.artifacts.roles.providerWorker!.placeholder; }, "pin placeholders are exactly the run's declared set", [RUN1]],
+  ["a real role marked placeholder", (p) => { p.artifacts.roles.runtimeEntry!.placeholder = true; }, "pin placeholders are exactly the run's declared set"],
+  ["a role marked placeholder in the run that has none", (p) => { p.artifacts.roles.hostClient!.placeholder = true; }, "pin placeholders are exactly the run's declared set", [RUN2]],
+  ["a role marked not bindable in the run that binds all", (p) => { p.binding.notBindable = ["hostClient"]; }, "pin binding excludes the placeholders", [RUN2]],
+  ["the binding forgets the verifier", (p) => { p.binding.bindable = p.binding.bindable.map((line) => line.replace("verify_packet.py", "a check")); }, "pin binding names what it makes bindable", [RUN2]],
+  ["the binding forgets the artifact id", (p) => { p.binding.bindable = p.binding.bindable.map((line) => line.replace(String(p.artifact.id), "0")); }, "pin binding names what it makes bindable", [RUN2]],
   ["a native marked placeholder", (p) => { (p.artifacts.natives.toolLauncher as { placeholder?: boolean }).placeholder = true; }, "pin natives are not placeholders"],
-  ["binding lists a placeholder as bindable", (p) => { p.binding.bindable.push("hostClient"); }, "pin binding excludes the placeholders"],
-  ["binding drops a placeholder from the refusals", (p) => { p.binding.notBindable = ["hostClient"]; }, "pin binding excludes the placeholders"],
+  ["binding lists a placeholder as bindable", (p) => { p.binding.bindable.push("hostClient"); }, "pin binding excludes the placeholders", [RUN1]],
+  ["binding drops a placeholder from the refusals", (p) => { p.binding.notBindable = ["hostClient"]; }, "pin binding excludes the placeholders", [RUN1]],
   ["an alias dropped", (p) => { delete p.resolverBindings[Object.keys(p.resolverBindings)[0]!]; }, "pin resolver aliases equal the builder's alias count"],
   ["symlink total drifts", (p) => { p.symlinks.total = 46; }, "pin symlink total"],
   ["archive rules claim executable modes", (p) => { p.archiveRules.regularFileMode = "0755"; }, "pin archive rules"],
   ["a builder file changes", (p) => { const k = `${BUILD}/build.py`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed"],
   ["a frozen-core builder file changes (graph)", (p) => { const k = `${BUILD}/graph.py`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed"],
-  ["a superseded file is no longer in the pin", (p) => { delete p.builder.files[`${BUILD}/entries/host-client.ts`]; }, "pin builder files omit superseded"],
+  ["a superseded file is no longer in the pin", (p) => { delete p.builder.files[`${BUILD}/entries/host-client.ts`]; }, "pin builder files omit superseded", [RUN1]],
+  ["a real-entries file changes after run 2 (nothing is superseded)", (p) => { const k = `${BUILD}/entries/provider-worker.ts`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed", [RUN2]],
+  ["the builder README changes after run 2", (p) => { const k = `${BUILD}/README.md`; p.builder.files[k] = FLIP(p.builder.files[k]!); }, "pinned builder file changed", [RUN2]],
   ["a builder file is gone", (p) => { p.builder.files["scripts/guest-guided-build/nope.py"] = "0".repeat(64); }, "pinned builder file is gone"],
   ["the reader helper is no longer pinned", (p) => { delete p.builder.files["scripts/guest-reader-build/provenance.py"]; }, "pin builder files omit scripts/guest-reader-build/provenance.py"],
   ["no builder files", (p) => { p.builder.files = {}; }, "pin builder files"],
@@ -243,29 +294,31 @@ const MUTATIONS: Array<[string, Mutate, string]> = [
 ];
 
 describe("guided compile packet intake pin mutations", () => {
-  const pin = JSON.parse(read(`${INTAKE}/compile-39165162201.pin.json`)) as Pin;
   const ctx = loadContext();
   test("no duplicate names and a table large enough to mean something", () => {
     expect(new Set(MUTATIONS.map(([name]) => name)).size).toBe(MUTATIONS.length);
-    expect(MUTATIONS.length).toBeGreaterThanOrEqual(45);
+    expect(MUTATIONS.length).toBeGreaterThanOrEqual(50);
   });
-  for (const [name, mutate, expected] of MUTATIONS) {
-    test(`caught by its own check: ${name}`, () => {
-      const broken = structuredClone(pin);
-      mutate(broken, ctx);
-      expect(JSON.stringify(broken)).not.toBe(JSON.stringify(pin));
-      expect(pinViolations(broken, ctx).some((message) => message.includes(expected))).toBe(true);
+  for (const { file, pin } of PINS) {
+    for (const [name, mutate, expected, runs] of MUTATIONS) {
+      if (runs && !runs.includes(pin.run.id)) continue;
+      test(`${file}: caught by its own check: ${name}`, () => {
+        const broken = structuredClone(pin);
+        mutate(broken, ctx);
+        expect(JSON.stringify(broken)).not.toBe(JSON.stringify(pin));
+        expect(pinViolations(broken, ctx).some((message) => message.includes(expected))).toBe(true);
+      });
+    }
+    test(`${file}: context drift is caught too: the workflow env hash and the pins.py names`, () => {
+      expect(pinViolations(pin, { ...ctx, workflow: ctx.workflow.replace(/DEPENDENCY_LIST_SHA256: \w+/, "DEPENDENCY_LIST_SHA256: 0") }).join("\n")).toContain("pin dependency list hash differs from the workflow env");
+      expect(pinViolations(pin, { ...ctx, pinsPy: ctx.pinsPy.replace("'hostClient'", "'x'") }).join("\n")).toContain("pins.py does not name hostClient");
+      expect(pinViolations(pin, { ...ctx, files: () => "0".repeat(64) }).join("\n")).toContain("pinned builder file changed");
+      expect(pinViolations(pin, { ...ctx, limits: { packetBytes: 1 } }).join("\n")).toContain("pin archive exceeds the builder's bound");
     });
   }
-  test("context drift is caught too: the workflow env hash and the pins.py names", () => {
-    expect(pinViolations(pin, { ...ctx, workflow: ctx.workflow.replace(/DEPENDENCY_LIST_SHA256: \w+/, "DEPENDENCY_LIST_SHA256: 0") }).join("\n")).toContain("pin dependency list hash differs from the workflow env");
-    expect(pinViolations(pin, { ...ctx, pinsPy: ctx.pinsPy.replace("'hostClient'", "'x'") }).join("\n")).toContain("pins.py does not name hostClient");
-    expect(pinViolations(pin, { ...ctx, files: () => "0".repeat(64) }).join("\n")).toContain("pinned builder file changed");
-    expect(pinViolations(pin, { ...ctx, limits: { packetBytes: 1 } }).join("\n")).toContain("pin archive exceeds the builder's bound");
-  });
   test("every violation message is exercised by a mutation or by the context-drift test", () => {
     const source = readFileSync(import.meta.path, "utf8");
-    const body = source.slice(source.indexOf("export function pinViolations"), source.indexOf('describe("guided compile packet intake pin"'));
+    const body = source.slice(source.indexOf("export function pinViolations"), source.indexOf('describe("guided compile packet intake pins"'));
     const messages = [...body.matchAll(/bad\((["`])((?:\\.|(?!\1).)*)\1\)/g)].map((m) => (m[2] as string).split("${")[0] as string);
     const drift = ["pin dependency list hash differs from the workflow env", "pins.py does not name ", "pinned builder file changed", "pinned builder file is gone", "pin archive exceeds the builder's bound"];
     const uncovered = messages.filter((message) => message.length > 0 && !MUTATIONS.some(([, , e]) => e.includes(message) || message.includes(e)) && !drift.some((d) => d.includes(message) || message.includes(d)));

@@ -202,6 +202,15 @@ class ExitCodes(Base):
             code,out,err=self.run_main(*argv);self.assertEqual(code,2,argv);self.assertEqual(out,'',argv);self.assertNotIn(str(self.dir),err)
         (self.dir/'bad.tar.gz').write_bytes(b'not a tar');code,out,_=self.run_main(str(self.dir/'bad.tar.gz'),str(self.dir/'inv.json'),'--pin',str(self.dir/'pin.json'))
         self.assertIn(code,(1,2));self.assertNotEqual(code,0)
+    def test_the_default_pin_needs_exactly_one_pin_file_and_otherwise_exits_two_naming_the_flag(self):
+        archive=self.pin_file()
+        for count in (0,2):
+            with tempfile.TemporaryDirectory() as here:
+                for n in range(count):(Path(here)/f'compile-{n}.pin.json').write_text('{}')
+                saved=vp.HERE;vp.HERE=Path(here)
+                try:code,out,err=self.run_main(str(archive),str(self.dir/'inv.json'))
+                finally:vp.HERE=saved
+            self.assertEqual(code,2,count);self.assertEqual(out,'');self.assertIn('--pin',err)
     def test_the_codes_are_constants(self):self.assertEqual((vp.EXIT_HOLDS,vp.EXIT_FAILED,vp.EXIT_ERROR),(0,1,2))
 
 class NoExecution(unittest.TestCase):

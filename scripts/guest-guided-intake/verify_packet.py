@@ -21,7 +21,7 @@ SMALL=('receipt.json','inputs.json','compiler-acquisition.json')
 def digest_json(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 def default_pin():
     found=sorted(HERE.glob('compile-*.pin.json'))
-    if len(found)!=1:raise SystemExit('exactly one compile pin required')
+    if len(found)!=1:raise SystemExit('exactly one compile pin required; with several, pass --pin <pin.json>')
     return found[0]
 
 def hash_file(path,limit):
