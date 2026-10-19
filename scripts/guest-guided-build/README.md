@@ -229,8 +229,8 @@ block, and both test files fail when any copy drifts.
 
 | Pin | Value | Moves when |
 | --- | --- | --- |
-| agent-sdk head | `68e57c646f23feba09b00c78d05d8c80d6f2962d` (main, compartment C applied by PR 34, Root reader service by PR 35) | a later agent-sdk change; see below |
-| runtime-sdk head | `29eede4b3e085044f5ed6bc6cf99e8f6c4daf6a1` (main, includes the guided provider stub and the reader entry) | never for this run |
+| agent-sdk head | `9c980c326638489e0183d7fcddcf1a93553be0ba` (main, compartment C by PR 34, Root reader service by PR 35, owner holder/CLOEXEC patch by PR 38; run 1 used `68e57c64`) | a later agent-sdk change; see below |
+| runtime-sdk head | `ce730190854fd807446ac3a229a358c553a57697` (main, includes the real entries, PR 20, and the `winter-standin` stub selection, PR 21; run 1 used `29eede4b`) | a later runtime-sdk change to a compiled input |
 | Winter Core head | `8b52ef83d1ba721a4dd80cdbb205c617f8656555` on `cowork/output-integration` (an exact commit, never the branch name) | Core's cowork sources change |
 | Bun | 1.3.14, archive and executable SHA-256 in the `bun` object | the owner chooses another version |
 | builder head | all zeros until armed | the arming step |
@@ -281,7 +281,7 @@ uploads the archive and inventory with 7-day retention. A failed run uploads dia
 never created, pushed or re-run by the author. After the one run the branch is frozen.
 
 The first run used `cowork/guided-packet-compile-fixture` (run 39165162201). That branch is frozen: this workflow no
-longer names it (a gate tripwire refuses the name, even as a prefix of the new one), so a push to it starts nothing.
+longer names it (a gate tripwire refuses that exact name, and any other `cowork/guided-packet-compile-fixture*` name except the new one), so a push to it starts nothing.
 The second run starts only from an owner-approved first-creation push of `cowork/guided-packet-compile-fixture-2`,
 made from the arming commit described below; no other event can start it, and the gate test proves that.
 
@@ -311,10 +311,10 @@ respelled line each fail on their own check. No ruleset or repository setting is
   Python supervisor change (data in the captured SDK tree, not compiled here), so the compiled outputs only change
   if it touches a bundled TypeScript file or one of the six C sources. If the lockfile changed, rerun
   `pin-deps.ts` (it prints the whole `dependencies` block) and update `dependencies.lst` and its env hash.
-* **The run-2 agent-sdk head.** The builder is written against agent-sdk `68e57c64`. agent-sdk PR 37 proposes an owner-side
-  holder/CLOEXEC patch to `linux-session-owner.c`, the `ownerLibrary` native. When it lands on agent-sdk main, run 2 takes
-  that head so one more compile run is not needed: it is the same single-constant move (`origins.agentSdk.head`/`.tree`,
-  `AGENT_SDK_HEAD`), made before arming, and the entries do not change with it.
+* **The run-2 agent-sdk head.** Run 1 used agent-sdk `68e57c64`. Run 2 takes `9c980c32` (PR 38, the owner-side holder/CLOEXEC
+  patch to `linux-session-owner.c`, the `ownerLibrary` native), so a third compile run is not needed. Between the two heads no
+  lockfile or package manifest changed (so `pin-deps.ts` was not rerun) and no bundled TypeScript file changed; only that C
+  source did among compiled inputs. It was the same single-constant move (`origins.agentSdk.head`/`.tree`, `AGENT_SDK_HEAD`).
 * **Bun version.** Edit the `bun` object in the pin file (version, archive SHA-256, executable SHA-256) and the
   three mirrored `BUN_*` lines, then re-pin the run output. This is the owner's decision before the run. The
   standalone-layout decoder and the compiler parser checks were derived from Bun 1.3.14 sources, so another

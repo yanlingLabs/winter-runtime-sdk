@@ -439,9 +439,18 @@ class NoExecutionTests(unittest.TestCase):
         calls=re.findall(r"runner\(\[([^\]]*)\]",text);self.assertEqual(len(calls),4)
         for argv in calls:self.assertRegex(argv,r"^'/proc/self/fd/'\+str\((compiler_fd|cc_fd)\)")
     ENTRIES=('provider-worker.ts','provider-worker-core.ts','host-client.ts','host-client-core.ts')
-    BANNED=re.compile(r'\bimport\s*\(|child_process|node:(net|http|https|http2|dgram|tls|dns|worker_threads|cluster|vm)\b|\bfetch\s*\(|\bWebSocket\b|Bun\.(spawn|spawnSync|listen|connect|serve|udpSocket|\$)|\beval\s*\(|new Function|process\.env|require\s*\(')
+    # No network, process, dynamic-code or storage API, however it is spelled: bare calls (exec, spawn, fork and their sync/file forms),
+    # any import or require of a network/process/worker module with or without the `node:` prefix, and any `bun:` module but ffi.
+    BANNED=re.compile(r'\bimport\s*\(|\bchild_process\b|(?<![.\w])(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)\s*\(|\bfetch\s*\(|\bWebSocket\b|Bun\.(spawn|spawnSync|listen|connect|serve|udpSocket|\$)|\beval\s*\(|new Function|process\.env|require\s*\(|(from|import)\s*["\'](node:)?(net|http|https|http2|dgram|tls|dns|dns/promises|cluster|vm|worker_threads|inspector|repl|readline)["\']|["\']bun:(?!ffi["\'])')
     def test_no_entry_can_reach_the_network_a_child_process_or_dynamic_code(self):
         for name in self.ENTRIES:self.assertIsNone(self.BANNED.search((HERE/'entries'/name).read_text()),name)
+    def test_the_static_scan_catches_every_spelling_it_claims_to(self):
+        for hit in ('exec("x")','spawn(cmd)','  execSync ("x")','fork(','import x from "http"','import "dns"',"import { a } from 'net'",'from "node:tls"','import d from "dns/promises"',
+                    'import { Database } from "bun:sqlite"','const s = require("net")','await import("x")','child_process.exec','fetch("u")','new WebSocket(u)','Bun.spawn(a)','import cp from "child_process"'):
+            self.assertIsNotNone(self.BANNED.search(hit),hit)
+        for fine in ('/re/.exec(line)','match = pattern.exec(text)','import { dlopen } from "bun:ffi"','import { writeSync } from "node:fs"','const execution = 1;','respawn();','import a from "./net.ts"','// we do not exec( anything'):
+            if fine=='// we do not exec( anything':continue  # comments are scanned too: the sources must not contain such text
+            self.assertIsNone(self.BANNED.search(fine),fine)
     def test_the_two_cores_import_nothing_and_name_no_native_symbol(self):
         for name in ('provider-worker-core.ts','host-client-core.ts'):
             text=(HERE/'entries'/name).read_text()
