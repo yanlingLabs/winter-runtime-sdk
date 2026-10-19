@@ -107,3 +107,14 @@ RuntimeSDK checkout, with no install or dependency edits:
 ```sh
 node ../../winter-runtime-sdk/node_modules/typescript/bin/tsc --noEmit -p scripts/guest-guided-provider/tsconfig.json --typeRoots ../../winter-runtime-sdk/node_modules/@types
 ```
+
+## Reserved `winter-standin` selection
+
+`STANDIN_SELECTION` (`providerId` `winter-standin`, model `scripted`, no catalog row) is for the guest's scripted
+stand-in. It is reachable only by passing it as the third argument of `createGuidedFixturePort`; the default port, the
+default `SELECTION`, the two-begin limit and every existing refusal are unchanged. The argument must be the frozen
+`SELECTION` or `STANDIN_SELECTION` object itself (a copy, `null` or any other value refuses). For the stand-in only:
+the script's `selection` must equal `STANDIN_SELECTION`, the request model must be `scripted`, `system` and `user`
+markers may be empty (non-empty ones are still enforced, as are `absentSystem`/`absentUser`), and message 0 need not be a
+meta message. A script written for one selection is refused by a port of the other. A third begin is refused and still
+counted in `receivedBegins`.

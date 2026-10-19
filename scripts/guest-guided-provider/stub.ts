@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 type ObjectValue = Record<string, unknown>;
 export const LIMITS = Object.freeze({ requestBytes: 2 * 1024 * 1024 + 4096, scriptBytes: 64 * 1024, markers: 32, textBytes: 4096 });
 export const SELECTION = Object.freeze({ providerId: "openai", modelKey: "openai/gpt-5.6", providerModelId: "gpt-5.6", family: "openai", protocol: "openai-responses", continuationDomain: "openai/gpt-5.6", capabilities: Object.freeze({ toolCalling: "native", readableState: "summary" }) });
+/** Reserved selection for the guest's scripted stand-in. No catalog row has it. It is reachable only by passing it to
+ * createGuidedFixturePort explicitly; the default port, and every script written for it, stay on SELECTION. */
+export type StubSelection = typeof SELECTION | typeof STANDIN_SELECTION;
+export const STANDIN_SELECTION = Object.freeze({ providerId: "winter-standin", modelKey: "winter-standin/scripted", providerModelId: "scripted", family: "winter-standin", protocol: "openai-responses", continuationDomain: "winter-standin/scripted", capabilities: Object.freeze({ toolCalling: "native", readableState: "summary" }) });
 const SCOPE = ["homeId", "workspaceId", "sessionId", "backendSessionId", "taskId", "incarnationId", "bootId", "leaseEpoch", "grantRevision", "accountRevision", "modelRevision"];
 const TURN = ["model", "messages", "system", "systemBlocks", "tools", "toolChoice", "effort", "thinking", "maxOutputTokens", "requestSummary", "cacheTtl", "cacheDiagnostics", "cacheKey", "allowedTools", "toolChanges", "resumesPausedTurn"];
 class FixtureRefusal extends Error {
@@ -33,14 +37,14 @@ function decodeFrame(bytes: Uint8Array): ObjectValue {
 interface Step { system: string[]; user: string[]; absentSystem: string[]; absentUser: string[]; response: string }
 interface Script { scope: ObjectValue; steps: Step[] }
 function markers(value: unknown, allowEmpty = false): string[] { if (!Array.isArray(value) || !allowEmpty && !value.length || value.length > LIMITS.markers) refuse(); return value.map(item => { const marker = text(item, LIMITS.textBytes); if (/[\r\n]/.test(marker)) refuse(); return marker; }); }
-function readScript(bytes: Uint8Array, expectedHash: string): Script {
+function readScript(bytes: Uint8Array, expectedHash: string, selection: StubSelection): Script {
   if (!(bytes instanceof Uint8Array) || bytes.length > LIMITS.scriptBytes || !/^[a-f0-9]{64}$/.test(expectedHash) || sha256(bytes) !== expectedHash) refuse();
   const script = json(bytes); keys(script, ["version", "scope", "selection", "steps"]);
-  if (script.version !== 1 || canonical(script.selection) !== canonical(SELECTION)) refuse();
+  if (script.version !== 1 || canonical(script.selection) !== canonical(selection)) refuse();
   const scope = object(script.scope); keys(scope, SCOPE);
   for (const key of SCOPE) { const value = scope[key]; if (key.endsWith("Id")) text(value); else if (!Number.isSafeInteger(value) || Number(value) < 1) refuse(); }
   if (!Array.isArray(script.steps) || script.steps.length !== 2) refuse();
-  const steps = script.steps.map(value => { const step = object(value); keys(step, ["system", "user", "absentSystem", "absentUser", "response"]); return { system: markers(step.system), user: markers(step.user), absentSystem: markers(step.absentSystem, true), absentUser: markers(step.absentUser, true), response: text(step.response, LIMITS.textBytes) }; });
+  const steps = script.steps.map(value => { const step = object(value); keys(step, ["system", "user", "absentSystem", "absentUser", "response"]); return { system: markers(step.system, selection === STANDIN_SELECTION), user: markers(step.user, selection === STANDIN_SELECTION), absentSystem: markers(step.absentSystem, true), absentUser: markers(step.absentUser, true), response: text(step.response, LIMITS.textBytes) }; });
   return frozen({ scope, steps });
 }
 function ordered(haystack: string, needles: string[]): void { const lines = haystack.split(/\r?\n/); let at = 0; for (const needle of needles) { const found = lines.indexOf(needle, at); if (found < 0) refuse("ordered_marker"); at = found + 1; } }
@@ -66,9 +70,9 @@ function optionalTurnFields(turn: ObjectValue): void {
     for (const item of turn.tools) { const tool = object(item); keys(tool, ["name", "description", "inputSchema"], ["deferLoading", "namespace", "toolSearch"]); text(tool.name); if (typeof tool.description !== "string") refuse(); object(tool.inputSchema); if (tool.namespace !== undefined) text(tool.namespace); for (const key of ["deferLoading", "toolSearch"]) if (tool[key] !== undefined && tool[key] !== true) refuse(); }
   }
 }
-function validateTurn(value: unknown, step: Step): ObjectValue {
+function validateTurn(value: unknown, step: Step, selection: StubSelection): ObjectValue {
   const turn = object(value); keys(turn, ["model", "messages"], TURN);
-  if (turn.model !== SELECTION.providerModelId || typeof turn.system !== "string" || !Array.isArray(turn.messages) || !turn.messages.length) refuse();
+  if (turn.model !== selection.providerModelId || typeof turn.system !== "string" || !Array.isArray(turn.messages) || !turn.messages.length) refuse();
   optionalTurnFields(turn);
   if (turn.systemBlocks !== undefined) {
     if (!Array.isArray(turn.systemBlocks)) refuse();
@@ -87,7 +91,7 @@ function validateTurn(value: unknown, step: Step): ObjectValue {
   const current = object(turn.messages[0]);
   // Match current userContext only; stale markers in historical user/assistant text
   // cannot satisfy the next-dispatch guidance oracle.
-  if (current.role !== "user" || current.isMeta !== true) refuse();
+  if (current.role !== "user" || (selection !== STANDIN_SELECTION && current.isMeta !== true)) refuse();
   ordered(turn.system, step.system); ordered(content(current.content), step.user);
   absent(turn.system, step.absentSystem); absent(content(current.content), step.absentUser);
   return frozen(turn);
@@ -99,8 +103,9 @@ export interface GuidedFixturePort {
   receipt(): Readonly<{ scriptSha256: string; receivedFrames: number; receivedBegins: number; acceptedBegins: number; completed: number; closed: boolean; turns: readonly CapturedTurn[]; engineDispatchProven: false; nativeAdmissionProven: false }>;
 }
 /** The expected hash is Root fixture configuration, never taken from a request. */
-export function createGuidedFixturePort(scriptBytes: Uint8Array, expectedScriptSha256: string): GuidedFixturePort {
-  const script = readScript(scriptBytes, expectedScriptSha256);
+export function createGuidedFixturePort(scriptBytes: Uint8Array, expectedScriptSha256: string, selection: StubSelection = SELECTION): GuidedFixturePort {
+  if (selection !== SELECTION && selection !== STANDIN_SELECTION) refuse();
+  const script = readScript(scriptBytes, expectedScriptSha256, selection);
   let receivedFrames = 0, receivedBegins = 0, acceptedBegins = 0, completed = 0, closed = false, ordinal = 0;
   let active: { id: string; ordinal: number; next: number; response: string } | undefined;
   const seen = new Set<string>(), turns: CapturedTurn[] = [];
@@ -118,7 +123,7 @@ export function createGuidedFixturePort(scriptBytes: Uint8Array, expectedScriptS
         if (request.operation === "begin") {
           const step = script.steps[acceptedBegins];
           if (active || !step || request.sequence !== 0 || request.invocationOrdinal !== ordinal + 1 || seen.has(id)) refuse();
-          const turn = validateTurn(request.turn, step);
+          const turn = validateTurn(request.turn, step, selection);
           ordinal++; seen.add(id); acceptedBegins++;
           turns.push(frozen({ invocationId: id, ordinal, sha256: digest(turn), turn }));
           active = { id, ordinal, next: 1, response: step.response };
