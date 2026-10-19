@@ -13,12 +13,11 @@ import { createCoworkGuidedRuntimeContextHandler } from "../../../../winter/pack
 import { CoworkCurrentContextPlanner } from "../../../../winter/packages/core/src/cowork/current-context.ts";
 import { CoworkCurrentContextResolver } from "../../../../winter/packages/core/src/cowork/current-context-resolver.ts";
 import { mapStructuredCoworkInstructions } from "../../../../winter/packages/core/src/cowork/structured-instruction-mapper.ts";
-import { HOST_ARGV, HOST_EXIT, HOST_LIMITS, HostStartupRefusal, checkHostStartup, checkRootFile, checkRootPipe, hostFailureCode, parseHostMetadata, runGuidedHost } from "./host-client-core.ts";
+import { HOST_ARGV, HOST_EXIT, HOST_FDS, HOST_LIMITS, HostStartupRefusal, checkHostStartup, checkRootFile, checkRootPipe, hostFailureCode, parseHostMetadata, runGuidedHost } from "./host-client-core.ts";
 
 // Keep the three Core classes in the bundle graph as named, reviewed inputs (the glue reaches them through its own imports).
 export const hostClientCoreSurface = Object.freeze({ CoworkCurrentContextPlanner, CoworkCurrentContextResolver, mapStructuredCoworkInstructions });
 
-const FDS = Object.freeze({ input: 3, output: 4, error: 5, metadata: 6, lifecycle: 7, cancel: 8 });
 const FRAME_CARRY_BYTES = 2 * 1024 * 1024;
 
 function writeAll(fd: number, data: Uint8Array | string): void {
@@ -43,17 +42,17 @@ function createProcess() {
   let ended = false, killed = false;
   const process = {
     pid: null,
-    stdin: { write(chunk) { writeAll(FDS.input, chunk); }, end() { if (!ended) { ended = true; closeSync(FDS.input); } } },
-    stdout: chunks(FDS.output, FRAME_CARRY_BYTES),
-    stderr: chunks(FDS.error),
+    stdin: { write(chunk) { writeAll(HOST_FDS.input, chunk); }, end() { if (!ended) { ended = true; closeSync(HOST_FDS.input); } } },
+    stdout: chunks(HOST_FDS.output, FRAME_CARRY_BYTES),
+    stderr: chunks(HOST_FDS.error),
     exited: (async () => {
       let wire = "";
-      for await (const chunk of chunks(FDS.lifecycle)) { wire += chunk; if (Buffer.byteLength(wire) > 64) throw new Error("host lifecycle bound"); }
+      for await (const chunk of chunks(HOST_FDS.lifecycle)) { wire += chunk; if (Buffer.byteLength(wire) > 64) throw new Error("host lifecycle bound"); }
       if (!/^HQX1:[0-9]{1,3}\n$/.test(wire)) throw new Error("host lifecycle");
       const code = Number(wire.slice(5).trim()); if (code > 255) throw new Error("host lifecycle");
       return { code, signal: null };
     })(),
-    kill() { if (!killed) { killed = true; writeAll(FDS.cancel, "K"); } },
+    kill() { if (!killed) { killed = true; writeAll(HOST_FDS.cancel, "K"); } },
   };
   void process.exited.catch(() => {});
   return process;
@@ -82,9 +81,9 @@ async function main(): Promise<number> {
   try {
     checkHostStartup(process.platform, process.argv.slice(2));
     if (process.getuid?.() !== 40001) throw new HostStartupRefusal("identity");
-    checkRootFile(fstatSync(FDS.metadata), HOST_LIMITS.metadataBytes);
-    for (const fd of [FDS.input, FDS.output, FDS.error, FDS.lifecycle, FDS.cancel]) checkRootPipe(fstatSync(fd));
-    meta = parseHostMetadata(readFileSync(FDS.metadata));
+    checkRootFile(fstatSync(HOST_FDS.metadata), HOST_LIMITS.metadataBytes);
+    for (const fd of [HOST_FDS.input, HOST_FDS.output, HOST_FDS.error, HOST_FDS.lifecycle, HOST_FDS.cancel]) checkRootPipe(fstatSync(fd));
+    meta = parseHostMetadata(readFileSync(HOST_FDS.metadata));
   } catch (error) {
     emit({ kind: "host-refused", version: 1, code: error instanceof HostStartupRefusal ? error.code : "input" });
     return HOST_EXIT.startupRefused;

@@ -139,7 +139,10 @@ client does.
 * **C-H7** spawn hook: `consumeGuidedQueryCorrelation` is called with the hook's own `guidedQueryClaim` and exact `args`
   before anything else; the emitted `--config-json` is then parsed and validated by `assertLinuxGuidedHostQueryConfig`
   against `readerRegistration`; only then is the pipe-backed process created and `{"kind":"host-spawn"}` printed.
-  Any refusal throws `host config refused` and no process exists.
+  Any refusal throws `host config refused` and no process exists. Exactly one runtime process exists per run: a second
+  spawn, from any preparation, is refused before anything is consumed or created, so a presentation the SDK wrongly
+  accepted can never wrap the Root pipes again. Such a presentation is reported `refused:false`, `processStarted:true`
+  (meaning started or attempted), and the run does not pass.
 * **C-H8** frames: the adapter's `readFrame(signal)` is the SDK's `readGuidedQueryInstructions(preparation, signal)` for the
   exact preparation above; Core parses the frame as guest-controlled bytes. The runtime-context handler is called once
   per generation and a refusal propagates as `required_context_unavailable`.
@@ -155,7 +158,7 @@ client does.
 * **C-H10** presentations and revocation: `reuse` and `present-premint` each call `query` with a streaming-free prompt, the
   ticket's own preparation and callbacks, and read its first step. The reply is `{"kind":"host-presented","which":
   "spent"|"premint","refused":<bool>,"errorClass":"required_context_unavailable"|"other"|"none","processStarted":<bool>}`.
-  `refused` is true only when the first step threw AND no runtime process was created for it; `errorClass` is the SDK's
+  `refused` is true only when the first step threw AND no runtime process was started or attempted for it; `errorClass` is the SDK's
   own refusal text mapped to a closed class (`none` when the presentation produced a step). `issuer.revoke` kills the
   running first query (the SDK's contract); the client does not wait for that and does not send a third prompt. The
   zero-provider-requests observation is Root's: equal provider receipts (C-P11) before `revoke` and after

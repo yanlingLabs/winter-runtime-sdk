@@ -451,6 +451,11 @@ class NoExecutionTests(unittest.TestCase):
         self.assertEqual(re.findall(r'dlopen\(([^,]*),',runner),['"/proc/self/fd/5"'])
         self.assertEqual(len(re.findall(r'\bdlopen\b',runner)),2)  # the import and the one call
         self.assertNotIn('bun:ffi',(HERE/'entries/host-client.ts').read_text())
+    def test_the_runners_take_every_descriptor_number_from_the_core_constants(self):
+        provider=(HERE/'entries/provider-worker.ts').read_text();host=(HERE/'entries/host-client.ts').read_text()
+        self.assertNotRegex(provider,r'(fstatSync|readFileSync|receive_owner|accept)\(\d');self.assertNotRegex(host,r'(fstatSync|readFileSync|closeSync)\(\d')
+        self.assertNotRegex(host,r'const FDS\b');self.assertIn('PROVIDER_FDS.library',provider);self.assertEqual(provider.count('/proc/self/fd/5'),1)
+        self.assertEqual(sorted(set(re.findall(r'HOST_FDS\.(\w+)',host))),['cancel','error','input','lifecycle','metadata','output'])
     def test_each_runner_starts_only_when_it_is_the_main_module_and_its_imports_are_the_reviewed_set(self):
         for name,imports in (('provider-worker.ts',{'bun:ffi','node:fs','../../../../runtime/scripts/guest-guided-provider/stub.ts','./provider-worker-core.ts'}),
             ('host-client.ts',{'node:fs','@yanlinglabs/winter-agent-sdk','../../../../sdk/packages/sdk/src/guided-query-reader.ts','../../../../sdk/packages/runtime/src/guest/linux-guided-host-query-profile.ts',
@@ -463,7 +468,7 @@ class NoExecutionTests(unittest.TestCase):
     def test_the_runners_write_only_to_stdout_and_their_own_pipes_never_to_stderr(self):
         provider=(HERE/'entries/provider-worker.ts').read_text();host=(HERE/'entries/host-client.ts').read_text()
         self.assertEqual(re.findall(r'writeSync\((\w+)',provider),['1'])
-        self.assertEqual(sorted(set(re.findall(r'writeAll\(([\w.]+),',host))),['1','FDS.cancel','FDS.input'])
+        self.assertEqual(sorted(set(re.findall(r'writeAll\(([\w.]+),',host))),['1','HOST_FDS.cancel','HOST_FDS.input'])
         for text in (provider,host):self.assertNotRegex(text,r'console\.|process\.std(out|err)|writeAll\(2|writeSync\(2')
 
     def test_the_contract_ids_are_defined_in_the_readme_and_cited_by_the_entry_spec(self):

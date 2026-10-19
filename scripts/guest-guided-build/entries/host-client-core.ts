@@ -2,7 +2,9 @@
  * process and the Root barrier channel are all injected, so the order of every authority-bearing step is testable with
  * fakes (guided-entries.test.ts). Contract ids C-H1..C-H12 are defined in scripts/guest-guided-build/README.md. */
 
-export const HOST_ARGV = Object.freeze(["--input-fd", "3", "--output-fd", "4", "--error-fd", "5", "--metadata-fd", "6", "--lifecycle-fd", "7", "--cancel-fd", "8"]);
+/** The descriptor numbers, once. The runner uses these and HOST_ARGV is derived from them, so the two cannot disagree. */
+export const HOST_FDS = Object.freeze({ input: 3, output: 4, error: 5, metadata: 6, lifecycle: 7, cancel: 8 });
+export const HOST_ARGV = Object.freeze(["--input-fd", String(HOST_FDS.input), "--output-fd", String(HOST_FDS.output), "--error-fd", String(HOST_FDS.error), "--metadata-fd", String(HOST_FDS.metadata), "--lifecycle-fd", String(HOST_FDS.lifecycle), "--cancel-fd", String(HOST_FDS.cancel)]);
 export const HOST_EXIT = Object.freeze({ passed: 0, runFailed: 1, startupRefused: 2 });
 export const HOST_LIMITS = Object.freeze({ metadataBytes: 64 * 1024, promptBytes: 1024, reportLineBytes: 4096, commandBytes: 64 });
 /** Root's commands, one line each on stdin. Every command gets exactly one reply line on stdout. */
@@ -129,7 +131,7 @@ export async function runGuidedHost(meta: HostMetadata, ports: HostPorts): Promi
   const issuer = sdk.claimGuidedGuestIssuer();
   issuer.advance(meta.workspaceKey, meta.incarnationId, meta.leaseEpoch);
   const fixture = buildFixtureRecords(meta.fixture);
-  let contextCalls = 0, contextRefusals = 0, processes = 0;
+  let contextCalls = 0, contextRefusals = 0, spawnAttempts = 0;
   /** One preparation with its own callback objects; the SAME objects go to prepare and to query (C-H6). */
   function prepared() {
     let preparation: unknown;
@@ -137,10 +139,12 @@ export async function runGuidedHost(meta: HostMetadata, ports: HostPorts): Promi
     const handle = ports.createHandler({ records: fixture.records, grants: fixture.grants, currentBootId: fixture.currentBootId, registration: fixture.registration, capture: meta.fixture.capture, frames });
     const onRuntimeContext = async (request: any, options: any) => { contextCalls++; try { return await handle(request, options); } catch (error) { contextRefusals++; throw error; } };
     const spawnClaudeCodeProcess = (spawn: any) => {
+      // Exactly one runtime process per run. A second spawn would wrap the same Root pipes again, so it is refused before
+      // anything is consumed or created, whichever preparation asks.
+      if (spawnAttempts++ > 0) throw new Error("host config refused");
       const correlation = sdk.consumeGuidedQueryCorrelation(spawn?.guidedQueryClaim, spawn?.args);
       if (!correlation || typeof correlation.bindingId !== "string") throw new Error("host config refused");
       try { ports.assertConfig(JSON.parse(spawn.args[2]), meta.readerRegistration); } catch { throw new Error("host config refused"); }
-      processes++;
       ports.emit({ kind: "host-spawn", version: 1 });
       return ports.createProcess();
     };
@@ -180,13 +184,13 @@ export async function runGuidedHost(meta: HostMetadata, ports: HostPorts): Promi
   })();
 
   async function present(held: { options: Record<string, unknown> }) {
-    const before = processes; let refused = true, errorClass: "required_context_unavailable" | "other" | "none" = "none";
+    const before = spawnAttempts; let refused = true, errorClass: "required_context_unavailable" | "other" | "none" = "none";
     try {
       const presented = sdk.query({ prompt: "presentation", options: held.options });
       try { await (presented[Symbol.asyncIterator]() as AsyncIterator<any>).next(); refused = false; }
       finally { try { await presented.return?.(undefined); } catch { /* already refused or closed */ } }
     } catch (error) { refused = true; errorClass = refusalClass(error); }
-    return { refused: refused && processes === before, errorClass: refused ? errorClass : "none" as const, processStarted: processes !== before };
+    return { refused: refused && spawnAttempts === before, errorClass: refused && spawnAttempts === before ? errorClass : "none" as const, processStarted: spawnAttempts !== before };
   }
 
   let nextDispatch = 1, held: ReturnType<typeof prepared> | undefined, reuseTried = false, presentTried = false;

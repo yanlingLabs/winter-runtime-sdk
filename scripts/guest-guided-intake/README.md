@@ -18,7 +18,8 @@ commit `5f3e7c95` is reachable only from it; its parent is the builder head `5c7
 
 `verify_packet.py` exits **0** only when every check holds (`allChecksHold: true`), **1** when a check failed
 (`allChecksHold: false`), **2** for anything else (usage, missing or unreadable file, malformed archive or pin, running as
-root). Hosted-path contract: run it on the DOWNLOADED artifact and bind nothing unless it exits 0. CI cannot catch a
+root). Hosted-path contract: run it on the DOWNLOADED artifact and bind nothing unless it exits 0. With more than one pin file
+in this directory (run 2 adds one) the default pin lookup exits 2, so the hosted path MUST pass `--pin <the run-2 pin>`. CI cannot catch a
 well-formed wrong hash in a pin, because the real-archive test is skipped without the artifact.
 
 ## What was verified (and how to repeat it)

@@ -1,8 +1,10 @@
 /** Guided providerWorker, pure core. No import, no I/O, no native call: every effect is an injected port, so
  * test_guided_build.py's static scan and guided-entries.test.ts can pin the contract without a guest.
- * Contract ids C-P1..C-P10 are defined in scripts/guest-guided-build/README.md and cited by the tests. */
+ * Contract ids C-P1..C-P11 are defined in scripts/guest-guided-build/README.md and cited by the tests. */
 
-export const PROVIDER_ARGV = Object.freeze(["--listener-fd", "3", "--admission-fd", "4", "--owner-library-fd", "5", "--metadata-fd", "6"]);
+/** The descriptor numbers, once. The runner uses these and PROVIDER_ARGV is derived from them, so the two cannot disagree. */
+export const PROVIDER_FDS = Object.freeze({ listener: 3, admission: 4, library: 5, metadata: 6 });
+export const PROVIDER_ARGV = Object.freeze(["--listener-fd", String(PROVIDER_FDS.listener), "--admission-fd", String(PROVIDER_FDS.admission), "--owner-library-fd", String(PROVIDER_FDS.library), "--metadata-fd", String(PROVIDER_FDS.metadata)]);
 export const PROVIDER_EXIT = Object.freeze({ stopped: 0, startupRefused: 2, nativeFailure: 3 });
 export const PROVIDER_LIMITS = Object.freeze({ metadataBytes: 64 * 1024, libraryBytes: 4 * 1024 * 1024, requestBytes: 2 * 1024 * 1024 + 4096, reportLineBytes: 4096 });
 /** C-P3: a Root-owned, immutable, single-link regular file. The entry feeds it fstat results. */

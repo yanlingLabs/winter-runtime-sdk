@@ -21,6 +21,15 @@ function worker() {
 }
 const stat = (over: Partial<P.InputStat> = {}): P.InputStat => ({ isFile: () => true, uid: 0, nlink: 1, mode: 0o100444, size: 100, ...over });
 
+test("C-P1/C-H1 the argv constants are the contract's literal numbers, and the runners take their descriptor numbers from the same constants", () => {
+  expect([...P.PROVIDER_ARGV]).toEqual(["--listener-fd", "3", "--admission-fd", "4", "--owner-library-fd", "5", "--metadata-fd", "6"]);
+  expect({ ...P.PROVIDER_FDS }).toEqual({ listener: 3, admission: 4, library: 5, metadata: 6 });
+  expect([...H.HOST_ARGV]).toEqual(["--input-fd", "3", "--output-fd", "4", "--error-fd", "5", "--metadata-fd", "6", "--lifecycle-fd", "7", "--cancel-fd", "8"]);
+  expect({ ...H.HOST_FDS }).toEqual({ input: 3, output: 4, error: 5, metadata: 6, lifecycle: 7, cancel: 8 });
+  const pairs = (argv: readonly string[]) => Object.fromEntries(argv.reduce<string[][]>((all, value, index) => (index % 2 === 0 ? [...all, [value.slice(2, -3), argv[index + 1]!]] : all), []));
+  expect(pairs(P.PROVIDER_ARGV)).toEqual({ listener: "3", admission: "4", "owner-library": "5", metadata: "6" });
+  expect(pairs(H.HOST_ARGV)).toEqual({ input: "3", output: "4", error: "5", metadata: "6", lifecycle: "7", cancel: "8" });
+});
 test("C-P1 only the fixed linux argv starts the provider worker", () => {
   expect(() => P.checkStartup("linux", [...P.PROVIDER_ARGV])).not.toThrow();
   for (const bad of [[], [...P.PROVIDER_ARGV, "--x"], P.PROVIDER_ARGV.slice(0, 7), [...P.PROVIDER_ARGV].reverse(), P.PROVIDER_ARGV.map(v => (v === "3" ? "9" : v))]) expect(() => P.checkStartup("linux", bad)).toThrow("provider worker refused: argv");
@@ -109,6 +118,14 @@ test("C-P9 countersAgree is false when the fixture saw fewer frames than arrived
   expect((counter.receipt("x") as any).countersAgree).toBe(false);
   receipt.turns = Array.from({ length: 200 }, () => ({ sha256: "b".repeat(64) }));
   expect(() => counter.summary("signal")).toThrow("provider report line bound");
+});
+test("C-P11 the outcome list is capped at 64 while the counters keep counting", async () => {
+  const w = worker();
+  for (let i = 0; i < 70; i++) await w.counter.arrive(null);
+  const receipt = w.counter.receipt("cap") as any;
+  expect(receipt).toMatchObject({ requests: 70, unreadable: 70, countersAgree: true });
+  expect(receipt.outcomes).toHaveLength(P.PROVIDER_CONTROL.maxOutcomes); expect(P.PROVIDER_CONTROL.maxOutcomes).toBe(64);
+  expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(P.PROVIDER_LIMITS.reportLineBytes);
 });
 test("C-P11 Root reads the counters on request: a read-only snapshot per `receipt <tag>` line, refused otherwise", async () => {
   const w = worker();
@@ -296,6 +313,16 @@ test("C-H10 a presentation that is NOT refused is reported as such and fails the
   const f = fakes(HAPPY, { reuseAccepted: true }); const result = await run(f);
   expect(replies(f, "host-presented")[0]).toMatchObject({ which: "spent", refused: false, errorClass: "none", processStarted: true });
   expect(result).toMatchObject({ passed: false, reuseRefused: false });
+});
+test("C-H7 a second spawn, from any preparation, is refused before anything is consumed or created", async () => {
+  const f = fakes(HAPPY, { reuseAccepted: true }); const result = await run(f);
+  expect(f.trace.calls.filter(call => call === "process")).toHaveLength(1);
+  expect(f.trace.calls.filter(call => call === "consume")).toHaveLength(1);
+  expect(f.trace.calls.filter(call => call === "assert")).toHaveLength(1);
+  expect(replies(f, "host-presented")[0]).toMatchObject({ which: "spent", refused: false, processStarted: true });
+  expect(result.passed).toBe(false);
+  const both = fakes(HAPPY, { reuseAccepted: true, spawnBeforeRefuse: true }); await run(both);
+  expect(both.trace.calls.filter(call => call === "process")).toHaveLength(1);
 });
 test("C-H10 the first query is torn down by the revoke and says so; a dispatch after it is refused as out of order", async () => {
   const f = fakes(["dispatch 1", "dispatch 2", "revoke", "dispatch 1", "finish"]); const result = await run(f);
