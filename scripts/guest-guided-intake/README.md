@@ -1,8 +1,9 @@
 # Guided compile packet intake (DATA only)
 
-Two runs are pinned here: `compile-39165162201.pin.json` (run 1, placeholders, **not bindable in full**) and
-`compile-39227365159.pin.json` (run 2, the real entries; the packet the hosted lane binds). Run 2 is described in its own
-section at the end; everything before it describes run 1 and applies to run 2 unless stated.
+Three runs are pinned here: `compile-39165162201.pin.json` (run 1, placeholders, **not bindable in full**),
+`compile-39227365159.pin.json` (run 2, the real entries) and `compile-39327386044.pin.json` (run 3, run 2 plus the hostClient
+host-spawn binding fix; the packet the hosted lane binds). Runs 2 and 3 are described in their own sections at the end;
+everything before them describes run 1 and applies to later runs unless stated.
 
 `compile-39165162201.pin.json` pins the output of the ONE guided compile-fixture run
 (run 39165162201, attempt 1, success; artifact 12149668717). It is intake evidence, not an admission:
@@ -102,5 +103,24 @@ files against Git, the dependency store against a fresh unpack of the 20 tarball
 workflow) and found the same shapes; the four role bundles equal, input for input, the local dry bundles made before the
 run (579, 3, 166 and 62 inputs). It is still a claim about bytes only: nothing was executed, no native owner was admitted,
 no Linux or VM execution was verified, and nothing here explains C59.
+
+## Run 3 (compile run 39327386044): the packet the hosted lane binds
+
+`compile-39327386044.pin.json` pins run 39327386044 (attempt 1, success, branch `cowork/guided-packet-compile-fixture-3`, **FROZEN**
+like the others). The arming commit `e411a50f` sits on the PR 25 merge `f7b6add7` (the builder head) and changes only the
+`BUILDER_HEAD` line. Artifact 12223150881, `guided-packet-compile-39327386044`, zip sha256 `3e4e5359...57cb` (the API digest, re-derived
+from the downloaded zip), 195,490,807 bytes, expires 2026-10-26T21:26:36Z. The origins are unchanged from run 2 (runtime-sdk `ce730190`,
+agent-sdk `9c980c32`, Winter Core `8b52ef83`); the hostClient fix lives in the builder origin.
+
+```
+python3 -I -B scripts/guest-guided-intake/verify_packet.py <guided-packet.tar.gz> <packet-inventory.json> --pin scripts/guest-guided-intake/compile-39327386044.pin.json
+```
+
+Same contract as run 2: run exactly that on the DOWNLOADED artifact and bind nothing unless it exits 0. Against run 2, everything is
+byte-identical except `hostClient` (`37a2cf65...` to `82997255...`), and the builder-origin files differ in exactly the five files the run-2 gate
+lists as superseded. `guided-packet.tar.gz` is `fc2acae1...859a` and `packet-inventory.json` is `58c23a87...670d`. The audit repeated run 2's
+(archive shape, links, inventory, 1,647 source files against Git, the dependency store, the run log against the reviewed workflow, the four role
+bundles against local dry bundles of 579, 3, 166 and 62 inputs, a single SDK module instance in the hostClient metafile) with the same result. A
+claim about bytes only; nothing executed, nothing explains C59.
 
 Owner standing line: "if an automated safety flag fires on follow-on work, that work stops and is surfaced to the owner, never reworded or rerouted."
