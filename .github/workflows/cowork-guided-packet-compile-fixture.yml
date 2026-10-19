@@ -8,7 +8,7 @@ name: guided-packet-compile-fixture
 # The first steps refuse unless BUILDER_HEAD is an ancestor of the pushed commit and the whole diff is that one line.
 on:
   push:
-    branches: [cowork/guided-packet-compile-fixture-2]
+    branches: [cowork/guided-packet-compile-fixture-3]
 permissions:
   contents: read
 env:
@@ -22,7 +22,7 @@ env:
   DEPENDENCY_LIST_SHA256: f8255bc2b622416d260ff522134beca24b5c0c503700343012a6d2a7e29cdfbe
 jobs:
   compile-only:
-    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guided-packet-compile-fixture-2' && github.event.created == true && github.run_attempt == '1'
+    if: github.repository == 'yanlingLabs/winter-runtime-sdk' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guided-packet-compile-fixture-3' && github.event.created == true && github.run_attempt == '1'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
