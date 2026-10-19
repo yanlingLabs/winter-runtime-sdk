@@ -191,7 +191,7 @@ test("the stand-in serves exactly two canned answers with empty markers and a no
 test("the stand-in's answers are its script's", async () => {
   const p = standinPort();
   expect(decode(await p.exchange(encodeFrame(standinRequest())))).toMatchObject({ kind: "accepted" });
-  expect(decode(await p.exchange(encodeFrame(standinRequest("next", 1))))).toMatchObject({ event: { type: "text_delta", text: "canned-one" } });
+  expect(decode(await p.exchange(encodeFrame(standinRequest("next", 1))))).toMatchObject({ kind: "event", event: { text: "canned-one" } });
 });
 test("each selection accepts only its own script and its own model", async () => {
   const bytesOf = (value: unknown) => Buffer.from(JSON.stringify(value));
