@@ -275,6 +275,9 @@ test("C-H6 order: claim issuer, advance, handler, prepare, mint, query; the same
   expect(guidedQueryPreparation.callbacks.spawnClaudeCodeProcess).toBe(spawnClaudeCodeProcess);
   expect([requireRuntimeContext, executionPosture, guidedGuestTicket.id]).toEqual([true, "confined-guest", 1]);
   expect(f.trace.options.model).toBe("m");
+  // The options the SDK query actually receives: exactly the closed host list plus the guided keys, never Root's config spread.
+  expect(Object.keys(f.trace.options).sort()).toEqual([...Object.keys(H.hostQueryOptions(RUNTIME_CONFIG)), "guidedQueryPreparation", "requireRuntimeContext", "onRuntimeContext", "spawnClaudeCodeProcess", "guidedGuestTicket"].sort());
+  expect(f.trace.options).not.toHaveProperty("winterHome"); expect(f.trace.options).not.toHaveProperty("storeHome");
 });
 test("C-H7 the spawn hook consumes the correlation from the exact args and asserts the real emitted config before any process exists", async () => {
   const f = fakes(["dispatch 1", "finish"]); await run(f);
