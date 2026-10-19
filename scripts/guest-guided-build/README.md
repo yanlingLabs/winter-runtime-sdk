@@ -116,15 +116,19 @@ client does.
 * **C-H2** fd 6 is a Root-owned immutable regular file (at most 64 KiB, as C-P2); fds 3, 4, 5, 7 and 8 are Root-owned
   FIFOs with one link. Otherwise `host-refused` code `input`, exit 2.
 * **C-H3** the metadata is canonical `JSON.stringify` bytes with exactly `version` (1), `workspaceKey`, `incarnationId`,
-  `leaseEpoch`, `prompts` (exactly two non-empty dispatch prompts, at most 1024 bytes each),
-  `runtimeConfig` (the query options Root expects, without `requiredRuntimeContext`), `readerRegistration` (the Root
-  reader registration the SDK profile validates) and `fixture` (see C-H5). Otherwise `host-refused` code `metadata`, exit 2.
+  `leaseEpoch`, `prompts` (exactly two non-empty dispatch prompts, at most 1024 bytes each), `runtimeConfig`, `readerRegistration`
+  and `fixture` (see C-H5). `runtimeConfig` is Root's TRUSTED, complete profile config (the closed keys the guided profile
+  accepts: `sessionId` = the owner's backend session, `cwd` = the source cwd, `winterHome` and `storeHome` under the logical
+  session, `tools`, `permissionMode`, ...) WITHOUT `requiredRuntimeContext`. `readerRegistration` is Root's reader registration
+  (`version`, `registrationId`, `owner`, `views`, `limits`) WITHOUT `requiredRuntimeContext`: the binding id is chosen by the SDK's
+  `query()` for each run, after Root wrote the registration, so the host refuses metadata that carries one in either place.
+  Otherwise `host-refused` code `metadata`, exit 2.
 * **C-H4** stdin and stdout: stdin carries only Root's commands (C-H9), one per line, at most 64 bytes; end of input ends
   the run (never passed unless `finish` came first). stdout carries only `host-spawn`, `host-query-ended`, `host-dispatch`,
   `host-premint`, `host-presented`, `host-revoked`, `host-command-refused`, `host-result` and `host-refused` lines; every
-  command gets exactly one reply line. stderr is never written. The only free text ever printed is a dispatch's answer
+  command gets exactly one reply line. stderr is never written. The only id ever printed is the `host-spawn` line's binding id. The only free text ever printed is a dispatch's answer
   text (at most 512 bytes: the stub's scripted response, which Root compares with its own script); no prompt, guidance,
-  path, binding id or message text is printed. The host client never reports provider-call counts: that is C-P11.
+  path, registration id or message text is printed. The host client never reports provider-call counts: that is C-P11.
 * **C-H5** record sources: Winter Core's guided reader adapter takes a repository, a grant resolver, a boot id port and
   a registration port. This client supplies in-memory FIXTURE objects built from `metadata.fixture` (`registration`,
   `capture`, `runtimeRow`, `workspace`, `binding`, `policy`, `sources`, `grants`, `bootId`), not Winter's SQLite state: the
@@ -133,16 +137,31 @@ client does.
 * **C-H6** setup order, the contract: claim the SDK guest issuer (once per module instance) -> `advance(workspaceKey,
   incarnationId, leaseEpoch)` -> build the guided context handler -> `prepareGuidedQuery` with the SAME `onRuntimeContext`
   and `spawnClaudeCodeProcess` function objects later passed to `query` -> `mint` a ticket for that preparation ->
-  `query` with `executionPosture: "confined-guest"`, `requireRuntimeContext: true`, `guidedQueryPreparation`,
-  `guidedGuestTicket`, `onRuntimeContext`, `spawnClaudeCodeProcess` and a streaming prompt that sends nothing until a
-  `dispatch` command. Nothing is retried and no step is skipped. Every later presentation (C-H10) is prepared the same way.
-* **C-H7** spawn hook: `consumeGuidedQueryCorrelation` is called with the hook's own `guidedQueryClaim` and exact `args`
-  before anything else; the emitted `--config-json` is then parsed and validated by `assertLinuxGuidedHostQueryConfig`
-  against `readerRegistration`; only then is the pipe-backed process created and `{"kind":"host-spawn"}` printed.
-  Any refusal throws `host config refused` and no process exists. Exactly one runtime process exists per run: a second
-  spawn, from any preparation, is refused before anything is consumed or created, so a presentation the SDK wrongly
-  accepted can never wrap the Root pipes again. Such a presentation is reported `refused:false`, `processStarted:true`
-  (meaning started or attempted), and the run does not pass.
+  `query` with `guidedQueryPreparation`, `guidedGuestTicket`, `requireRuntimeContext: true`, `onRuntimeContext`,
+  `spawnClaudeCodeProcess`, the host-side options below, and a streaming prompt that sends nothing until a `dispatch` command.
+  The host-side options come from `runtimeConfig` by a closed list (`sessionId`, `model`, `cwd`, `persistSession`,
+  `permissionMode`, `tools`, `allowedTools`, `settingSources`, `plugins`, `skills`, `mcpServers`, `strictMcpConfig`, `permissions`,
+  `allowDangerouslySkipPermissions`, plus the fixed `executionPosture: "confined-guest"`, `env: {}`,
+  `pathToClaudeCodeExecutable: "winter-confined-guest"`, `includePartialMessages`, `maxBufferSize`: the v1 host client's mapping);
+  homes and any other key in the config are never forwarded. Nothing is retried and no step is skipped. Every later
+  presentation (C-H10) is prepared the same way.
+* **C-H7** spawn hook, in this order, each step a refusal that throws `host config refused` before the next: (1) refuse any
+  second spawn, from any preparation (exactly one runtime process per run; a presentation the SDK wrongly accepted can never
+  wrap the Root pipes again; it is reported `refused:false`, `processStarted:true`, and the run does not pass); (2)
+  `consumeGuidedQueryCorrelation` with the hook's own `guidedQueryClaim` and exact `args`, the only thing taken from the SDK's
+  emitted config (the SDK discards the rest, and the emitted config carries keys such as `brand` that the closed profile
+  refuses, and no homes), whose result must be version 1 and a lowercase UUID v4; (3) assert, with the real
+  `assertLinuxGuidedHostQueryConfig`, Root's trusted `runtimeConfig` plus `requiredRuntimeContext: {version: 1, bindingId}`
+  against Root's `readerRegistration` plus the same `requiredRuntimeContext`, both frozen, where `bindingId` is the SDK's id for
+  THIS spawn; the host never compares or prints `registrationId`; (4) print exactly one line
+  `{"version":1,"kind":"host-spawn","bindingId":"<lowercase uuid v4>"}`, synchronously, and (5) only then create the
+  pipe-backed process. No line means Root must not launch anything. The emitted `--config-json` text is not parsed or
+  asserted. If the line cannot be written, no process is created.
+  **Root's side:** after sending `dispatch 1`, read exactly one `host-spawn` line (a second one, or any other kind in that slot, is
+  a protocol failure), build the reader service and its registration with `requiredRuntimeContext = {version: 1, bindingId}`
+  from that line, check that everything else (owner, views, limits, the full `runtimeConfig`) is identical to what the host
+  received, and only then launch the runtime. The SDK writes to the host's stdin pipe before the runtime exists (pipe buffer).
+  Root's service generates its own `registrationId`, which may differ from the metadata's: that is fine, the host never uses it.
 * **C-H8** frames: the adapter's `readFrame(signal)` is the SDK's `readGuidedQueryInstructions(preparation, signal)` for the
   exact preparation above; Core parses the frame as guest-controlled bytes. The runtime-context handler is called once
   per generation and a refusal propagates as `required_context_unavailable`.
@@ -177,9 +196,10 @@ client does.
 
 1. The hosted fixture provides metadata files that satisfy C-P3 and C-H3, built by Root, and a Root reader that
    produces the five-descriptor registration and the immutable shared and source views. This builder does not supply them.
-2. `runtimeConfig` is a set of query options whose emitted config passes `assertLinuxGuidedHostQueryConfig` for the given
-   `readerRegistration`. This is checked at C-H7 and is an unverified assumption until the run: the option names that make
-   the SDK emit `winterHome` and `storeHome` were not derived from a run.
+2. `runtimeConfig` plus `requiredRuntimeContext` passes `assertLinuxGuidedHostQueryConfig` against `readerRegistration` plus the same
+   `requiredRuntimeContext` (C-H7). This was checked locally against the REAL SDK (agent-sdk 9c980c32) and the REAL profile with
+   the host core and a pipe-less fake process (nothing spawned): the hook reaches `host-spawn`; asserting the SDK's emitted
+   config instead is refused whatever binding id it is given, because that config carries `brand` and no homes.
 3. A streaming prompt (`AsyncIterable<string>`) is accepted by a guided `query`, and `issuer.revoke` ends it. The SDK's
    revoke contract says it tears down the running query; this is also unverified end to end.
 4. The lifecycle pipe (fd 7) carries `HQX1:<code>\n` as in the v1 harness.
