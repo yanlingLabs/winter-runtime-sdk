@@ -89,6 +89,11 @@ const RUN4_ORIGINS: Record<string, { repository: string; head: string; tree: str
 };
 /** Builder files changed AFTER run 39391435225 (the run-5 trigger branch: the input pin file, its test and the README). History for run 4's pin only. */
 export const RUN4_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/test_guided_build.py`] as const;
+/** Run 5's record of its origins: the runtime-sdk origin is the merge of PR 30 (the stub that accepts the engine's merged first message); agent-sdk and Winter Core are unchanged. */
+const RUN5_ORIGINS: Record<string, { repository: string; head: string; tree: string }> = {
+  ...RUN4_ORIGINS,
+  runtime: { repository: "yanlingLabs/winter-runtime-sdk", head: "2b170ab0a0cd3d137b620b1a30dc0ea9502e1822", tree: "e507b5e54046c75a0deb77662c14f446fda81c1c" },
+};
 interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
 /** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
 const RUNS: Record<number, RunSpec> = {
@@ -96,6 +101,7 @@ const RUNS: Record<number, RunSpec> = {
   39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: RUN2_HISTORY_BUILDER_FILES },
   39327386044: { branch: "cowork/guided-packet-compile-fixture-3", artifactId: 12223150881, origins: RUN3_ORIGINS, placeholders: [], superseded: RUN3_SUPERSEDED_BUILDER_FILES },
   39391435225: { branch: "cowork/guided-packet-compile-fixture-4", artifactId: 12249582986, origins: RUN4_ORIGINS, placeholders: [], superseded: RUN4_SUPERSEDED_BUILDER_FILES },
+  39399991186: { branch: "cowork/guided-packet-compile-fixture-5", artifactId: 12254327073, origins: RUN5_ORIGINS, placeholders: [], superseded: [] },
 };
 
 export function pinFiles(): string[] {
@@ -194,8 +200,8 @@ const PINS = pinFiles().sort().map((file) => ({ file, pin: JSON.parse(read(`${IN
 const pinOf = (id: number) => PINS.find((entry) => entry.pin.run.id === id)!.pin;
 
 describe("guided compile packet intake pins", () => {
-  test("the compile pins are exactly the four known runs, each named by its run id", () => {
-    expect(PINS.map((entry) => entry.file)).toEqual(["compile-39165162201.pin.json", "compile-39227365159.pin.json", "compile-39327386044.pin.json", "compile-39391435225.pin.json"]);
+  test("the compile pins are exactly the five known runs, each named by its run id", () => {
+    expect(PINS.map((entry) => entry.file)).toEqual(["compile-39165162201.pin.json", "compile-39227365159.pin.json", "compile-39327386044.pin.json", "compile-39391435225.pin.json", "compile-39399991186.pin.json"]);
     for (const { file, pin } of PINS) expect(file).toBe(`compile-${pin.run.id}.pin.json`);
   });
   test("a pin for a run that is not in the table is refused", () => {
@@ -212,7 +218,8 @@ describe("guided compile packet intake pins", () => {
     expect(readme).toContain("not bindable in full");
     expect(readme).toContain("providerWorker");
     expect(readme).toContain("hostClient");
-    expect(readme).toContain("39227365159"); expect(readme).toContain("39327386044"); expect(readme).toContain("39391435225");
+    expect(readme).toContain("39227365159"); expect(readme).toContain("39327386044"); expect(readme).toContain("39391435225"); expect(readme).toContain("39399991186");
+    expect(readme).toMatch(/--pin[^\n]*compile-39399991186\.pin\.json/);
     expect(readme).toMatch(/--pin[^\n]*compile-39391435225\.pin\.json/);
     expect(readme).toMatch(/--pin[^\n]*compile-39327386044\.pin\.json/);
     expect(readme).toMatch(/--pin[^\n]*compile-39227365159\.pin\.json/);
@@ -268,6 +275,25 @@ describe("guided compile packet intake pins", () => {
     expect(runtimeFour!.inventorySha256).not.toBe(runtimeThree!.inventorySha256);
     expect(JSON.stringify(four.environment)).toBe(JSON.stringify(three.environment));
     expect(four.bun).toEqual(three.bun); expect(four.dependencies).toEqual(three.dependencies);
+  });
+  test("run 5 differs from run 4 in exactly the providerWorker, its builder files in exactly the three run-4 superseded ones, and the runtime-sdk origin moved to the PR 30 merge", () => {
+    const four = pinOf(39391435225), five = pinOf(39399991186);
+    const changed = [...ROLES, ...NATIVES].filter((name) => ((four.artifacts.roles[name] ?? four.artifacts.natives[name])!.sha256) !== ((five.artifacts.roles[name] ?? five.artifacts.natives[name])!.sha256)).sort();
+    expect(changed).toEqual(["providerWorker"]);
+    expect(five.continuity?.previousRun).toBe(39391435225);
+    expect([...five.continuity!.changedFromPreviousRun]).toEqual(["providerWorker"]);
+    expect([...five.continuity!.identicalToPreviousRun].sort()).toEqual([...ROLES, ...NATIVES].filter((name) => name !== "providerWorker").sort());
+    expect(Object.keys(five.builder.files).filter((path) => five.builder.files[path] !== four.builder.files[path]).sort()).toEqual([...RUN4_SUPERSEDED_BUILDER_FILES].sort());
+    expect(Object.values(five.artifacts.roles).some((role) => role.placeholder !== undefined)).toBe(false);
+    expect(five.binding.notBindable).toEqual([]);
+    expect(five.origins.sdk).toEqual(four.origins.sdk); expect(five.origins.winter).toEqual(four.origins.winter);
+    const runtimeFive = five.origins.runtime, runtimeFour = four.origins.runtime;
+    expect(runtimeFive).toBeDefined(); expect(runtimeFour).toBeDefined();
+    expect(runtimeFive!.head).toBe("2b170ab0a0cd3d137b620b1a30dc0ea9502e1822");
+    expect(runtimeFive!.tree).toBe("e507b5e54046c75a0deb77662c14f446fda81c1c");
+    expect(runtimeFive!.inventorySha256).not.toBe(runtimeFour!.inventorySha256);
+    expect(JSON.stringify(five.environment)).toBe(JSON.stringify(four.environment));
+    expect(five.bun).toEqual(four.bun); expect(five.dependencies).toEqual(four.dependencies);
   });
   test("verify_packet.py and its synthetic-packet tests pass (pure data, nothing executed)", () => {
     const run = spawnSync("python3", ["-I", "-B", join(ROOT, INTAKE, "test_verify_packet.py")], { encoding: "utf8" });
