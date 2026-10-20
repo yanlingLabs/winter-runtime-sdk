@@ -10,13 +10,14 @@
 // guard, and the absence of any committed Anthropic artifact (this repository's own hard rule).
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const WORKFLOW_DIR = join(REPO_ROOT, ".github", "workflows");
 
-const readWorkflow = (name: string): string => readFileSync(join(WORKFLOW_DIR, name), "utf8");
+const RETIRED_DIR = join(REPO_ROOT, ".github", "retired-workflows"); // spent one-run workflows: inert records, never run by GitHub
+const readWorkflow = (name: string): string => readFileSync(join(existsSync(join(WORKFLOW_DIR, name)) ? WORKFLOW_DIR : RETIRED_DIR, name), "utf8");
 
 /**
  * The parsed workflow. `Bun.YAML.parse` is the structural reading (review r1, M6): the text slice
@@ -71,7 +72,7 @@ describe("the release workflow", () => {
 
   test("the publish steps are gated behind that workflow and nowhere else", () => {
     const workflows = readdirSync(WORKFLOW_DIR).sort();
-    expect(workflows).toEqual(["ci.yml", "cowork-guided-build-source.yml", "cowork-guided-packet-compile-fixture.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-compile-fixture.yml", "cowork-reader-intake-source.yml", "cowork-reader-native-reviewed.yml", "cowork-reader-native-source.yml", "release.yml"]);
+    expect(workflows).toEqual(["ci.yml", "cowork-guided-build-source.yml", "cowork-reader-abi-source.yml", "cowork-reader-build-source.yml", "cowork-reader-intake-source.yml", "cowork-reader-native-source.yml", "release.yml"]);
     for (const name of workflows.filter((name) => name !== "release.yml")) {
       const source = readWorkflow(name);
       // Non-release workflows may explain this rule in comments, but cannot run publication.

@@ -10,7 +10,7 @@ acquire=load('guided_acquire',HERE/'acquire.py')
 rt=load('reader_test_helpers',HERE.parent/'guest-reader-build'/'test_provenance.py')  # inert ELF/Bun-layout/git fixtures only
 elf,standalone_pair,git_commit,put=rt.elf,rt.standalone_pair,rt.git_commit,rt.put
 REPO=HERE.parents[1]
-WORKFLOW=REPO/'.github/workflows/cowork-guided-packet-compile-fixture.yml'
+WORKFLOW=REPO/'.github/retired-workflows/cowork-guided-packet-compile-fixture.yml'
 GUEST='packages/runtime/src/guest/'
 
 class Fixture(unittest.TestCase):
