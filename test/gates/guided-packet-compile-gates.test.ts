@@ -267,7 +267,7 @@ const gitTree = (head: string): string | undefined => {
   const run = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${head}^{tree}`], { cwd: ROOT, encoding: "utf8" });
   return run.status === 0 ? run.stdout.trim() : undefined;
 };
-export function runtimeTreeViolations(origin: { head: string; tree?: string }): string[] {
+export function runtimeTreeViolations(origin: { head: string; tree?: string | undefined }): string[] {
   const known = RUNTIME_SDK_TREES[origin.head];
   if (known === undefined) return ["runtime-sdk head has no recorded tree"];
   return origin.tree === known ? [] : ["runtime-sdk tree is not the head's tree"];
