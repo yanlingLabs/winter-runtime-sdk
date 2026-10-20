@@ -142,3 +142,20 @@ byte-identical except `providerWorker` (`4331d732...` to `bbf309b9...`); `hostCl
 (`refusalSites`, `frame_empty_or_nul`, `system_marker`, all present as strings). The builder-origin files differ in exactly the five files the run-3 gate
 lists as superseded. `guided-packet.tar.gz` is `791685a6...2a2` and `packet-inventory.json` is `1da4770d...c92`. The verifier exits 0 with 19 of 19 checks. A claim
 about bytes only; nothing was executed, nothing explains C59.
+
+## Run 5 (compile run 39399991186): the packet whose stub accepts the engine's merged first message
+
+`compile-39399991186.pin.json` pins run 39399991186 (attempt 1, success, branch `cowork/guided-packet-compile-fixture-5`, **FROZEN** like the others). The
+arming commit `d688520c` sits on the PR 31 merge `94d05e43` (the builder head) and changes only the `BUILDER_HEAD` line. Artifact 12254327073,
+`guided-packet-compile-39399991186`, zip sha256 `cf0df075...7229` (the API digest, re-derived from the downloaded zip), 195,504,867 bytes, expires
+2026-10-27T09:21:45Z. The runtime-sdk origin is `2b170ab0` (the PR 30 merge); agent-sdk `9c980c32` and Winter Core `8b52ef83` are unchanged.
+
+```
+python3 -I -B scripts/guest-guided-intake/verify_packet.py <guided-packet.tar.gz> <packet-inventory.json> --pin scripts/guest-guided-intake/compile-39399991186.pin.json
+```
+
+Same contract as runs 2 to 4: run exactly that on the DOWNLOADED artifact and bind nothing unless it exits 0. Against run 4, everything is byte-identical except
+`providerWorker` (`bbf309b9...` to `e34ab240...`): it carries the stub that reads the engine's merged first message (a closed reminder block, then the prompt) and
+still carries the refusal sites. The builder-origin files differ in exactly the three files the run-4 gate lists as superseded. `guided-packet.tar.gz` is
+`1594f281...7795` and `packet-inventory.json` is `2174dd3f...4727`. The verifier exits 0 with 19 of 19 checks. A claim about bytes only; nothing was executed,
+nothing explains C59.
