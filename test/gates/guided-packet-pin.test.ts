@@ -260,8 +260,10 @@ describe("guided compile packet intake pins", () => {
     expect(Object.values(four.artifacts.roles).some((role) => role.placeholder !== undefined)).toBe(false);
     expect(four.binding.notBindable).toEqual([]);
     expect(four.origins.sdk).toEqual(three.origins.sdk); expect(four.origins.winter).toEqual(three.origins.winter);
-    expect(four.origins.runtime.head).toBe("a32330d64a920d1957876a36f7a4a210de6e30e7");
-    expect(four.origins.runtime.inventorySha256).not.toBe(three.origins.runtime.inventorySha256);
+    const runtimeFour = four.origins.runtime, runtimeThree = three.origins.runtime;
+    expect(runtimeFour).toBeDefined(); expect(runtimeThree).toBeDefined();
+    expect(runtimeFour!.head).toBe("a32330d64a920d1957876a36f7a4a210de6e30e7");
+    expect(runtimeFour!.inventorySha256).not.toBe(runtimeThree!.inventorySha256);
     expect(JSON.stringify(four.environment)).toBe(JSON.stringify(three.environment));
     expect(four.bun).toEqual(three.bun); expect(four.dependencies).toEqual(three.dependencies);
   });
