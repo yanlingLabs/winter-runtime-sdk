@@ -250,7 +250,7 @@ block, and both test files fail when any copy drifts.
 | Pin | Value | Moves when |
 | --- | --- | --- |
 | agent-sdk head | `9c980c326638489e0183d7fcddcf1a93553be0ba` (main, compartment C by PR 34, Root reader service by PR 35, owner holder/CLOEXEC patch by PR 38; run 1 used `68e57c64`) | a later agent-sdk change; see below |
-| runtime-sdk head | `a32330d64a920d1957876a36f7a4a210de6e30e7` (main, adds the provider worker's refusal sites, PR 27; run 3 used `ce730190`; includes the real entries, PR 20, and the `winter-standin` stub selection, PR 21; run 1 used `29eede4b`) | a later runtime-sdk change to a compiled input |
+| runtime-sdk head | `2b170ab0a0cd3d137b620b1a30dc0ea9502e1822` (main, adds the stub's merged-first-message layout, PR 30; run 4 used `a32330d6`, the refusal sites, PR 27; run 3 used `ce730190`; includes the real entries, PR 20, and the `winter-standin` stub selection, PR 21; run 1 used `29eede4b`) | a later runtime-sdk change to a compiled input |
 | Winter Core head | `8b52ef83d1ba721a4dd80cdbb205c617f8656555` on `cowork/output-integration` (an exact commit, never the branch name) | Core's cowork sources change |
 | Bun | 1.3.14, archive and executable SHA-256 in the `bun` object | the owner chooses another version |
 | builder head | all zeros until armed | the arming step |
