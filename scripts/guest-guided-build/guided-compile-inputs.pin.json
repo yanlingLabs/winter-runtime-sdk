@@ -234,7 +234,7 @@
   ]
  },
  "trigger": {
-  "branch": "cowork/guided-packet-compile-fixture-4",
+  "branch": "cowork/guided-packet-compile-fixture-5",
   "workflow": "cowork-guided-packet-compile-fixture.yml",
   "sourceWorkflow": "cowork-guided-build-source.yml"
  },

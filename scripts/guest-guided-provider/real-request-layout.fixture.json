@@ -1,0 +1,52 @@
+{
+ "source": {
+  "note": "buildRequestMessages output (renderUserContext with one claudeMd entry, then the prompt), generated from the pinned agent-sdk source; regenerate only when the pin moves",
+  "repository": "yanlingLabs/winter-agent-sdk",
+  "commit": "9c980c326638489e0183d7fcddcf1a93553be0ba",
+  "path": "packages/runtime/src/context/request-layout.ts",
+  "sha256": "8a664c059c43016f188f34bde83ad1fb3681025e10fb9d86f4541fa36d4fd605"
+ },
+ "dispatch1": [
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# claudeMd\nGuided hosted run guidance, first version.\nThe shared guidance marker is ALPHA.\n\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+    },
+    {
+     "type": "text",
+     "text": "Answer with the first scripted reply."
+    }
+   ]
+  }
+ ],
+ "dispatch2": [
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# claudeMd\nGuided hosted run guidance, second version.\nThe shared guidance marker is BRAVO.\n\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+    },
+    {
+     "type": "text",
+     "text": "Answer with the first scripted reply."
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "first deterministic answer"
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "Answer with the second scripted reply."
+  }
+ ]
+}
