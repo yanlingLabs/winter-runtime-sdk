@@ -64,7 +64,15 @@ export function toNativeReply(frame: Uint8Array): Uint8Array | undefined {
 export interface PortReceipt { scriptSha256: string; receivedFrames: number; receivedBegins: number; acceptedBegins: number; completed: number; closed: boolean; turns: readonly { sha256: string }[] }
 export interface WorkerPort { exchange(frame: Uint8Array): Promise<Uint8Array>; receipt(): PortReceipt; close(): void }
 export type Outcome = "accepted" | "refused" | "unreadable";
-export const PROVIDER_CONTROL = Object.freeze({ lineBytes: 64, maxOutcomes: 64 });
+export const PROVIDER_CONTROL = Object.freeze({ lineBytes: 64, maxOutcomes: 64, maxRefusalSites: 16 });
+/** The closed vocabulary of WHERE a non-accepted arrival was stopped, never what it carried. The fixture port throws an error with one of
+ * these as `site` (a test pins that this list equals the stub's); anything else is reported as `decode`. */
+export const REFUSAL_SITES = Object.freeze(["read_null", "frame_empty_or_nul", "decode", "keys", "scope", "sequence", "model", "system_marker", "user_marker", "absent_marker", "not_meta", "closed", "reply_frame"] as const);
+export type RefusalSite = (typeof REFUSAL_SITES)[number];
+export function siteOf(error: unknown): RefusalSite {
+  const site = typeof error === "object" && error !== null ? (error as { site?: unknown }).site : undefined;
+  return (REFUSAL_SITES as readonly unknown[]).includes(site) ? (site as RefusalSite) : "decode";
+}
 /** C-P11: Root's control line is exactly `receipt <tag>` with a short lowercase tag; anything else is refused, never guessed. */
 export function parseControl(line: string): { tag: string } | undefined {
   const match = /^receipt ([a-z0-9][a-z0-9-]{0,31})$/.exec(line);
@@ -74,7 +82,7 @@ export function parseControl(line: string): { tag: string } | undefined {
 /** C-P4, C-P5, C-P7, C-P8. `write` is a synchronous, complete line write (the entry passes fs.writeSync(1, ...)). */
 export function createProviderCounter(port: WorkerPort, write: (line: string) => void) {
   let arrivals = 0, unreadable = 0, unframed = 0, refused = 0, answered = 0, controlRefused = 0;
-  const outcomes: Outcome[] = [];
+  const outcomes: Outcome[] = [], refusalSites: { n: number; site: RefusalSite }[] = [];
   const emit = (value: Record<string, unknown>): void => {
     const line = JSON.stringify(value) + "\n";
     if (Buffer.byteLength(line) > PROVIDER_LIMITS.reportLineBytes) throw new Error("provider report line bound");
@@ -89,12 +97,14 @@ export function createProviderCounter(port: WorkerPort, write: (line: string) =>
       emit({ kind: "provider-request", n, readable: nativeText !== null });
       let reply: Uint8Array | undefined, outcome: Outcome = "refused";
       const frame = nativeText === null ? undefined : toPortFrame(nativeText);
-      if (nativeText === null) { unreadable++; outcome = "unreadable"; }
-      else if (frame === undefined) unframed++;
+      let site: RefusalSite | undefined;
+      if (nativeText === null) { unreadable++; outcome = "unreadable"; site = "read_null"; }
+      else if (frame === undefined) { unframed++; site = "frame_empty_or_nul"; }
       else {
-        try { reply = toNativeReply(await port.exchange(frame)); if (reply) { outcome = "accepted"; answered++; } } catch { reply = undefined; }
+        try { reply = toNativeReply(await port.exchange(frame)); if (reply) { outcome = "accepted"; answered++; } else site = "reply_frame"; } catch (error) { reply = undefined; site = siteOf(error); }
       }
       if (outcome === "refused") refused++;
+      if (site !== undefined && refusalSites.length < PROVIDER_CONTROL.maxRefusalSites) refusalSites.push({ n, site });
       if (outcomes.length < PROVIDER_CONTROL.maxOutcomes) outcomes.push(outcome);
       emit({ kind: "provider-outcome", n, outcome });
       return reply;
@@ -105,7 +115,7 @@ export function createProviderCounter(port: WorkerPort, write: (line: string) =>
       const receipt = port.receipt();
       const line = { kind: "provider-receipt", version: 1, tag, requests: arrivals, unreadable, unframed, refused, answered,
         receivedFrames: receipt.receivedFrames, receivedBegins: receipt.receivedBegins, acceptedBegins: receipt.acceptedBegins, completed: receipt.completed,
-        portClosed: receipt.closed, outcomes: [...outcomes], countersAgree: arrivals === receipt.receivedFrames + unreadable + unframed, controlRefused };
+        portClosed: receipt.closed, outcomes: [...outcomes], refusalSites: refusalSites.map(item => ({ ...item })), countersAgree: arrivals === receipt.receivedFrames + unreadable + unframed, controlRefused };
       emit(line);
       return line;
     },
@@ -118,7 +128,7 @@ export function createProviderCounter(port: WorkerPort, write: (line: string) =>
       const receipt = port.receipt();
       const line = { kind: "provider-summary", version: 1, reason, requests: arrivals, unreadable, unframed, refused, answered, controlRefused,
         receivedFrames: receipt.receivedFrames, receivedBegins: receipt.receivedBegins, acceptedBegins: receipt.acceptedBegins, completed: receipt.completed,
-        portClosed: receipt.closed, outcomes: [...outcomes], scriptSha256: receipt.scriptSha256, turnSha256: receipt.turns.map(turn => turn.sha256),
+        portClosed: receipt.closed, outcomes: [...outcomes], refusalSites: refusalSites.map(item => ({ ...item })), scriptSha256: receipt.scriptSha256, turnSha256: receipt.turns.map(turn => turn.sha256),
         countersAgree: arrivals === receipt.receivedFrames + unreadable + unframed };
       emit(line);
       return line;

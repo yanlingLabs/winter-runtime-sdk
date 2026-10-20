@@ -55,7 +55,7 @@ test("current guidance excludes old markers and matches only complete delimited 
     const control = port(); await finish(control);
     const p = port(), r = request() as any;
     r.turn.messages[0].content[0].text = `${marker}\nSOURCE:root\nSOURCE:cwd`;
-    await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused: ordered_marker");
+    await expect(p.exchange(encodeFrame(r))).rejects.toThrow("fixture refused: user_marker");
   }
 });
 
@@ -91,7 +91,7 @@ test("CRLF and first-line markers work, absent arrays may be empty but must exis
   const empty = script(); empty.steps[0]!.absentUser = []; const control = port(empty); await finish(control);
   for (const key of ["absentSystem", "absentUser"]) {
     const s = script() as any; delete s.steps[0][key];
-    expect(() => port(s)).toThrow("fixture refused: invalid");
+    expect(() => port(s)).toThrow("fixture refused: keys");
   }
 });
 

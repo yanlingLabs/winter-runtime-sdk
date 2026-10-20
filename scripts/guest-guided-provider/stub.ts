@@ -10,12 +10,18 @@ export type StubSelection = typeof SELECTION | typeof STANDIN_SELECTION;
 export const STANDIN_SELECTION = Object.freeze({ providerId: "winter-standin", modelKey: "winter-standin/scripted", providerModelId: "scripted", family: "winter-standin", protocol: "openai-responses", continuationDomain: "winter-standin/scripted", capabilities: Object.freeze({ toolCalling: "native", readableState: "summary" }) });
 const SCOPE = ["homeId", "workspaceId", "sessionId", "backendSessionId", "taskId", "incarnationId", "bootId", "leaseEpoch", "grantRevision", "accountRevision", "modelRevision"];
 const TURN = ["model", "messages", "system", "systemBlocks", "tools", "toolChoice", "effort", "thinking", "maxOutputTokens", "requestSummary", "cacheTtl", "cacheDiagnostics", "cacheKey", "allowedTools", "toolChanges", "resumesPausedTurn"];
-class FixtureRefusal extends Error {
-  constructor(code: "invalid" | "ordered_marker" | "absent_marker" = "invalid") {
-    super(`guided fixture refused: ${code}`);
+/** The closed refusal-site vocabulary: WHERE a request was refused, never what it carried. `read_null` and `frame_empty_or_nul` are the
+ * provider worker's own sites (before the port sees anything); `reply_frame` is the worker refusing the port's reply. */
+export const REFUSAL_SITES = Object.freeze(["read_null", "frame_empty_or_nul", "decode", "keys", "scope", "sequence", "model", "system_marker", "user_marker", "absent_marker", "not_meta", "closed", "reply_frame"] as const);
+export type RefusalSite = (typeof REFUSAL_SITES)[number];
+export class FixtureRefusal extends Error {
+  constructor(readonly site: RefusalSite = "keys") {
+    super(`guided fixture refused: ${site}`);
   }
 }
-function refuse(code?: "invalid" | "ordered_marker" | "absent_marker"): never { throw new FixtureRefusal(code); }
+function refuse(site?: RefusalSite): never { throw new FixtureRefusal(site); }
+/** The site of any thrown value: a fixture refusal's own, otherwise `decode` (an unexpected error inside the port is a malformed input). */
+export function refusalSite(error: unknown): RefusalSite { return error instanceof FixtureRefusal ? error.site : "decode"; }
 function object(value: unknown): ObjectValue { if (!value || typeof value !== "object" || Array.isArray(value)) refuse(); return value as ObjectValue; }
 function keys(value: ObjectValue, required: string[], optional: string[] = []): void { if (required.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) refuse(); }
 function text(value: unknown, limit = 256): string { if (typeof value !== "string" || !value.length || Buffer.byteLength(value) > limit) refuse(); return value; }
@@ -24,15 +30,15 @@ export function sha256(bytes: Uint8Array): string { return createHash("sha256").
 function digest(value: unknown): string { return sha256(Buffer.from(canonical(value))); }
 function frozen<T>(value: T): T { if (value && typeof value === "object") { for (const child of Object.values(value)) frozen(child); Object.freeze(value); } return value; }
 function json(bytes: Uint8Array): ObjectValue {
-  const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes), value = object(JSON.parse(raw));
+  let raw: string, value: ObjectValue; try { raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes); value = object(JSON.parse(raw)); } catch (error) { if (error instanceof FixtureRefusal) throw error; return refuse("decode"); }
   // Existing SDK frames are JSON.stringify output. This also refuses duplicate keys,
   // replacement UTF-8, alternate number encodings and trailing/concatenated payloads.
-  if (JSON.stringify(value) !== raw) refuse(); return value;
+  if (JSON.stringify(value) !== raw) refuse("decode"); return value;
 }
 export function encodeFrame(value: unknown): Uint8Array { const body = Buffer.from(JSON.stringify(value)), frame = Buffer.alloc(body.length + 4); frame.writeUInt32BE(body.length); body.copy(frame, 4); return frame; }
 function decodeFrame(bytes: Uint8Array): ObjectValue {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 5 || bytes.byteLength > LIMITS.requestBytes + 4) refuse();
-  const frame = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength); if (frame.readUInt32BE() !== frame.length - 4) refuse(); return json(frame.subarray(4));
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 5 || bytes.byteLength > LIMITS.requestBytes + 4) refuse("decode");
+  const frame = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength); if (frame.readUInt32BE() !== frame.length - 4) refuse("decode"); return json(frame.subarray(4));
 }
 interface Step { system: string[]; user: string[]; absentSystem: string[]; absentUser: string[]; response: string }
 interface Script { scope: ObjectValue; steps: Step[] }
@@ -47,7 +53,7 @@ function readScript(bytes: Uint8Array, expectedHash: string, selection: StubSele
   const steps = script.steps.map(value => { const step = object(value); keys(step, ["system", "user", "absentSystem", "absentUser", "response"]); return { system: markers(step.system, selection === STANDIN_SELECTION), user: markers(step.user, selection === STANDIN_SELECTION), absentSystem: markers(step.absentSystem, true), absentUser: markers(step.absentUser, true), response: text(step.response, LIMITS.textBytes) }; });
   return frozen({ scope, steps });
 }
-function ordered(haystack: string, needles: string[]): void { const lines = haystack.split(/\r?\n/); let at = 0; for (const needle of needles) { const found = lines.indexOf(needle, at); if (found < 0) refuse("ordered_marker"); at = found + 1; } }
+function ordered(haystack: string, needles: string[], site: RefusalSite): void { const lines = haystack.split(/\r?\n/); let at = 0; for (const needle of needles) { const found = lines.indexOf(needle, at); if (found < 0) refuse(site); at = found + 1; } }
 function absent(haystack: string, needles: string[]): void { if (needles.some(needle => haystack.includes(needle))) refuse("absent_marker"); }
 function content(value: unknown): string {
   if (typeof value === "string") return value;
@@ -72,7 +78,8 @@ function optionalTurnFields(turn: ObjectValue): void {
 }
 function validateTurn(value: unknown, step: Step, selection: StubSelection): ObjectValue {
   const turn = object(value); keys(turn, ["model", "messages"], TURN);
-  if (turn.model !== selection.providerModelId || typeof turn.system !== "string" || !Array.isArray(turn.messages) || !turn.messages.length) refuse();
+  if (turn.model !== selection.providerModelId) refuse("model");
+  if (typeof turn.system !== "string" || !Array.isArray(turn.messages) || !turn.messages.length) refuse();
   optionalTurnFields(turn);
   if (turn.systemBlocks !== undefined) {
     if (!Array.isArray(turn.systemBlocks)) refuse();
@@ -91,8 +98,8 @@ function validateTurn(value: unknown, step: Step, selection: StubSelection): Obj
   const current = object(turn.messages[0]);
   // Match current userContext only; stale markers in historical user/assistant text
   // cannot satisfy the next-dispatch guidance oracle.
-  if (current.role !== "user" || (selection !== STANDIN_SELECTION && current.isMeta !== true)) refuse();
-  ordered(turn.system, step.system); ordered(content(current.content), step.user);
+  if (current.role !== "user" || (selection !== STANDIN_SELECTION && current.isMeta !== true)) refuse("not_meta");
+  ordered(turn.system, step.system, "system_marker"); ordered(content(current.content), step.user, "user_marker");
   absent(turn.system, step.absentSystem); absent(content(current.content), step.absentUser);
   return frozen(turn);
 }
@@ -115,28 +122,29 @@ export function createGuidedFixturePort(scriptBytes: Uint8Array, expectedScriptS
       try {
         const request = decodeFrame(frame);
         if (request.operation === "begin") receivedBegins++;
-        if (closed || signal?.aborted) refuse();
+        if (closed || signal?.aborted) refuse("closed");
         keys(request, ["version", "operation", "invocationId", "invocationOrdinal", "scope", "sequence"], request.operation === "begin" ? ["turn"] : []);
         const id = text(request.invocationId, 128);
-        if (request.version !== 1 || !Number.isSafeInteger(request.invocationOrdinal) || Number(request.invocationOrdinal) < 1 || !Number.isSafeInteger(request.sequence) || Number(request.sequence) < 0 || canonical(request.scope) !== canonical(script.scope)) refuse();
+        if (request.version !== 1 || !Number.isSafeInteger(request.invocationOrdinal) || Number(request.invocationOrdinal) < 1 || !Number.isSafeInteger(request.sequence) || Number(request.sequence) < 0) refuse("sequence");
+        if (canonical(request.scope) !== canonical(script.scope)) refuse("scope");
         const reply = (value: ObjectValue): Uint8Array => encodeFrame({ version: 1, invocationId: id, sequence: request.sequence, ...value });
         if (request.operation === "begin") {
           const step = script.steps[acceptedBegins];
-          if (active || !step || request.sequence !== 0 || request.invocationOrdinal !== ordinal + 1 || seen.has(id)) refuse();
+          if (active || !step || request.sequence !== 0 || request.invocationOrdinal !== ordinal + 1 || seen.has(id)) refuse("sequence");
           const turn = validateTurn(request.turn, step, selection);
           ordinal++; seen.add(id); acceptedBegins++;
           turns.push(frozen({ invocationId: id, ordinal, sha256: digest(turn), turn }));
           active = { id, ordinal, next: 1, response: step.response };
           return reply({ kind: "accepted" });
         }
-        if (!active || id !== active.id || request.invocationOrdinal !== active.ordinal || request.sequence !== active.next++) refuse();
+        if (!active || id !== active.id || request.invocationOrdinal !== active.ordinal || request.sequence !== active.next++) refuse("sequence");
         if (request.operation === "cancel") { active = undefined; closed = true; return reply({ kind: "closed" }); }
-        if (request.operation !== "next") refuse();
+        if (request.operation !== "next") refuse("sequence");
         if (request.sequence === 1) return reply({ kind: "event", event: { type: "text_delta", text: active.response } });
-        if (request.sequence !== 2) refuse();
+        if (request.sequence !== 2) refuse("sequence");
         active = undefined; completed++;
         return reply({ kind: "event", event: { type: "done", stopReason: "end_turn" } });
-      } catch (error) { closed = true; active = undefined; if (error instanceof FixtureRefusal) throw error; return refuse(); }
+      } catch (error) { closed = true; active = undefined; if (error instanceof FixtureRefusal) throw error; return refuse("decode"); }
     },
     close(): void { closed = true; active = undefined; },
     receipt() { return frozen({ scriptSha256: expectedScriptSha256, receivedFrames, receivedBegins, acceptedBegins, completed, closed, turns: [...turns], engineDispatchProven: false as const, nativeAdmissionProven: false as const }); },

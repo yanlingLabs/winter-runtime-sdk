@@ -93,10 +93,10 @@ fixture and the runtime never receives its descriptors.
   relayed by the host client: Root writes `receipt <tag>\n` on the worker's stdin (`tag` is 1 to 32 characters of
   `a-z0-9-`, starting with `a-z0-9`; the whole line is at most 64 bytes). The worker answers with exactly one
   `{"kind":"provider-receipt","tag":...,"requests","unreadable","unframed","refused","answered","receivedFrames",
-  "receivedBegins","acceptedBegins","completed","portClosed","outcomes":[...],"countersAgree","controlRefused"}` line. The
+  "receivedBegins","acceptedBegins","completed","portClosed","outcomes":[...],"refusalSites":[{"n","site"}],"countersAgree","controlRefused"}` line. The
   snapshot is read-only, counts no arrival and cannot straddle an arrival (no await separates the worker's count from the
   fixture's own). `outcomes` lists the first 64 arrivals as `accepted`/`refused`/`unreadable`, so a third begin that the
-  stub refuses still shows as `receivedBegins` 3, `acceptedBegins` 2, `refused` 1. Any other line is answered with
+  stub refuses still shows as `receivedBegins` 3, `acceptedBegins` 2, `refused` 1. `refusalSites` names WHERE each non-accepted arrival stopped (first 16, `n` is the arrival number), from a closed list and never from request content: `read_null`, `frame_empty_or_nul`, `decode`, `keys`, `scope`, `sequence`, `model`, `system_marker`, `user_marker`, `absent_marker`, `not_meta`, `closed`, `reply_frame`. The fixture port throws an error carrying one of these as `site`; any other thrown value is `decode`. Any other line is answered with
   `{"kind":"provider-control-refused","code":"line"}` and counted in `controlRefused`; end of input is not a stop.
 * **C-P10** exit codes: 0 stopped, 2 startup refusal (C-P1..C-P3), 3 native failure (C-P4, a failed reply write). A
   refused request never changes the exit code; S5 judges the run from the summary.
@@ -293,7 +293,7 @@ pruned-edge and tsconfig-`paths` rules, which the reader builder refuses. It is 
 ## The run
 
 `.github/workflows/cowork-guided-packet-compile-fixture.yml` fires only on the **first creation** of the branch
-`cowork/guided-packet-compile-fixture-3` (`created == true`, `run_attempt == '1'`). It has no pull request,
+`cowork/guided-packet-compile-fixture-4` (`created == true`, `run_attempt == '1'`). It has no pull request,
 dispatch, schedule or tag trigger, no `paths` filter, no secrets, `contents: read`, no sudo, and it runs on
 `ubuntu-24.04-arm`. It curls the pinned Bun zip and the 20 pinned tarballs (each checked by a strict checksum),
 runs `build.py` (which runs `bun build --compile` four times, `cc` six times, plus the semantic parser runs) and
@@ -304,6 +304,8 @@ The first run used `cowork/guided-packet-compile-fixture` (run 39165162201). Tha
 longer names it (a gate tripwire refuses that exact name, and any other `cowork/guided-packet-compile-fixture*` name except the new one), so a push to it starts nothing.
 The second run starts only from an owner-approved first-creation push of `cowork/guided-packet-compile-fixture-2`,
 made from the arming commit described below; no other event can start it, and the gate test proves that.
+The fourth run (the provider worker now names each refused arrival's site in its receipt, C-P11) starts only from a first-creation push of
+`cowork/guided-packet-compile-fixture-4`; `-3` is frozen and the gate refuses it.
 
 Deleting and recreating the branch would fire it again; nothing in YAML can prevent that, so the approval is the
 control. Read the run's output as data: nothing here explains C59, and a red or green result from this packet
