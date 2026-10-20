@@ -1,7 +1,7 @@
 /** Test-level spec of the two guided entries. Each test names the contract id (README "Entry contracts") it pins, so the
  * hosted fixture can quote ids instead of prose. Nothing here starts a process, a socket or a guest. */
 import { expect, test } from "bun:test";
-import { createGuidedFixturePort, encodeFrame, SELECTION, sha256 } from "../guest-guided-provider/stub.ts";
+import { createGuidedFixturePort, encodeFrame, REFUSAL_SITES, SELECTION, sha256 } from "../guest-guided-provider/stub.ts";
 import * as P from "./entries/provider-worker-core.ts";
 import * as H from "./entries/host-client-core.ts";
 
@@ -154,6 +154,64 @@ test("C-P11 a refused-but-counted third begin shows in the receipt: begins 3, ac
   expect(two).toMatchObject({ receivedBegins: 2, acceptedBegins: 2, completed: 2, receivedFrames: 6 });
   expect(third).toMatchObject({ receivedBegins: 3, acceptedBegins: 2, completed: 2, receivedFrames: 7, refused: 1, countersAgree: true });
   expect(third.outcomes.at(-1)).toBe("refused");
+});
+// A failed arrival is named by WHERE it stopped, from a closed list, and never by what it carried.
+const siteOfArrival = async (nativeText: string | null, prior: string[] = []) => {
+  const w = worker();
+  for (const line of prior) await w.counter.arrive(line);
+  const before = (w.counter.receipt("b") as any).refusalSites.length;
+  await w.counter.arrive(nativeText);
+  const sites = (w.counter.receipt("a") as any).refusalSites as { n: number; site: string }[];
+  expect(sites).toHaveLength(before + 1);
+  return sites.at(-1)!.site;
+};
+const beginWith = (change: (turn: any) => void, over: Record<string, unknown> = {}) => { const t: any = turn(); change(t); return text({ ...req("begin", 0), ...over, turn: t }); };
+test("C-P11 every refusal site is named once, from the closed vocabulary", async () => {
+  expect([...P.REFUSAL_SITES]).toEqual([...REFUSAL_SITES]);
+  expect(await siteOfArrival(null)).toBe("read_null");
+  expect(await siteOfArrival("a\0b")).toBe("frame_empty_or_nul");
+  expect(await siteOfArrival("")).toBe("frame_empty_or_nul");
+  expect(await siteOfArrival("{ not json")).toBe("decode");
+  expect(await siteOfArrival(text({ ...req("begin", 0), extra: 1 }))).toBe("keys");
+  expect(await siteOfArrival(text({ ...req("begin", 0), scope: { ...scope, bootId: "other" } }))).toBe("scope");
+  expect(await siteOfArrival(text(req("begin", 1)))).toBe("sequence");
+  expect(await siteOfArrival(text(req("next", 1)))).toBe("sequence");
+  expect(await siteOfArrival(beginWith(t => { t.model = "gpt-other"; }))).toBe("model");
+  expect(await siteOfArrival(beginWith(t => { t.system = "nothing"; }))).toBe("system_marker");
+  expect(await siteOfArrival(beginWith(t => { t.messages[0].content = [{ type: "text", text: "nothing" }]; }))).toBe("user_marker");
+  expect(await siteOfArrival(beginWith(t => { t.messages[0].content = [{ type: "text", text: "SHARED:old\nSHARED:new" }]; }))).toBe("absent_marker");
+  expect(await siteOfArrival(beginWith(t => { delete t.messages[0].isMeta; }))).toBe("not_meta");
+  expect(await siteOfArrival(text(req("begin", 0)), ["{ not json"])).toBe("closed");
+});
+test("C-P11 the port's reply that the worker cannot frame is named reply_frame, and an unknown thrown value is named decode", async () => {
+  const lines: string[] = [];
+  const bad = { exchange: async () => new Uint8Array([0, 0, 0, 9, 1]), receipt: () => ({ scriptSha256: "a", receivedFrames: 0, receivedBegins: 0, acceptedBegins: 0, completed: 0, closed: false, turns: [] }), close() {} };
+  const counter = P.createProviderCounter(bad as any, line => lines.push(line));
+  expect(await counter.arrive(text(req("begin", 0)))).toBeUndefined();
+  expect((counter.receipt("x") as any).refusalSites).toEqual([{ n: 1, site: "reply_frame" }]);
+  expect(P.siteOf(new Error("boom"))).toBe("decode");
+  expect(P.siteOf({ site: "not-a-site" })).toBe("decode");
+  expect(P.siteOf({ site: "scope" })).toBe("scope");
+  expect(P.siteOf(null)).toBe("decode");
+});
+test("C-P11 the site list is capped at 16 entries, keeps the first ones, rides the receipt and the summary, and stays inside the report line bound", async () => {
+  expect(P.PROVIDER_CONTROL.maxRefusalSites).toBe(16);
+  const w = worker();
+  await w.counter.arrive(null);
+  for (let i = 0; i < 80; i++) await w.counter.arrive("a\0b");
+  const receipt = w.counter.receipt("cap") as any, summary = w.counter.summary("signal") as any;
+  expect(receipt.refusalSites).toHaveLength(16);
+  expect(receipt.refusalSites[0]).toEqual({ n: 1, site: "read_null" });
+  expect(receipt.refusalSites[15]).toEqual({ n: 16, site: "frame_empty_or_nul" });
+  expect(summary.refusalSites).toEqual(receipt.refusalSites);
+  for (const line of w.lines) expect(Buffer.byteLength(line)).toBeLessThanOrEqual(P.PROVIDER_LIMITS.reportLineBytes);
+});
+test("C-P11 the sites name no request text: a secret-looking marker in a refused request appears in no report line", async () => {
+  const w = worker();
+  await w.counter.arrive(beginWith(t => { t.system = "TOPSECRET-sentinel"; t.messages[0].content = [{ type: "text", text: "TOPSECRET-sentinel" }]; }));
+  w.counter.receipt("leak"); w.counter.summary("signal");
+  expect(w.lines.join("")).not.toContain("TOPSECRET");
+  expect((w.counter.receipt("z") as any).refusalSites).toEqual([{ n: 1, site: "system_marker" }]);
 });
 test("C-P10 exit codes are fixed", () => { expect(P.PROVIDER_EXIT).toEqual({ stopped: 0, startupRefused: 2, nativeFailure: 3 }); });
 

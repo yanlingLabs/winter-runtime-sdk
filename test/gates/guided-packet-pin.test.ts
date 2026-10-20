@@ -78,12 +78,16 @@ const RUN2_ORIGINS: Record<string, { repository: string; head: string; tree: str
 export const RUN2_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/host-client-core.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/guided-entries.test.ts`, `${BUILD}/test_guided_build.py`] as const;
 /** Run 3's record of its origins: the same three heads as run 2 (the hostClient fix is in the builder origin, not in these). */
 const RUN3_ORIGINS = RUN2_ORIGINS;
+/** Builder files changed AFTER run 39327386044 (the provider worker names each refused arrival's site, C-P11; the run-4 trigger branch). History for run 3's
+ * pin and, for the provider worker core, for run 2's too (the run-2 -> run-3 list above stays exactly the host-spawn fix). */
+export const RUN3_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/entries/provider-worker-core.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/guided-entries.test.ts`, `${BUILD}/test_guided_build.py`] as const;
+export const RUN2_HISTORY_BUILDER_FILES = [...RUN2_SUPERSEDED_BUILDER_FILES, `${BUILD}/entries/provider-worker-core.ts`] as const;
 interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
 /** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
 const RUNS: Record<number, RunSpec> = {
   39165162201: { branch: "cowork/guided-packet-compile-fixture", artifactId: 12149668717, origins: RUN1_ORIGINS, placeholders: PLACEHOLDERS, superseded: SUPERSEDED_BUILDER_FILES },
-  39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: RUN2_SUPERSEDED_BUILDER_FILES },
-  39327386044: { branch: "cowork/guided-packet-compile-fixture-3", artifactId: 12223150881, origins: RUN3_ORIGINS, placeholders: [], superseded: [] },
+  39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: RUN2_HISTORY_BUILDER_FILES },
+  39327386044: { branch: "cowork/guided-packet-compile-fixture-3", artifactId: 12223150881, origins: RUN3_ORIGINS, placeholders: [], superseded: RUN3_SUPERSEDED_BUILDER_FILES },
 };
 
 export function pinFiles(): string[] {
@@ -358,5 +362,17 @@ describe("the superseded builder files are a short, explicit list", () => {
     expect([...SUPERSEDED_BUILDER_FILES].sort()).toEqual([
       `${BUILD}/README.md`, `${BUILD}/entries/host-client.ts`, `${BUILD}/entries/provider-worker.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/pins.py`, `${BUILD}/test_guided_build.py`]);
     for (const frozen of ["build.py", "graph.py", "acquire.py", "pin-deps.ts", "dependencies.lst"]) expect(SUPERSEDED_BUILDER_FILES as readonly string[]).not.toContain(`${BUILD}/${frozen}`);
+  });
+});
+
+describe("run 3's superseded builder files are a short, explicit list", () => {
+  test("only the provider-site change and the run-4 trigger are superseded; the build logic, the hostClient and the other entries are not", () => {
+    expect([...RUN3_SUPERSEDED_BUILDER_FILES].sort()).toEqual([`${BUILD}/README.md`, `${BUILD}/entries/provider-worker-core.ts`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/guided-entries.test.ts`, `${BUILD}/test_guided_build.py`]);
+    for (const frozen of ["build.py", "graph.py", "acquire.py", "pins.py", "entries/provider-worker.ts", "entries/host-client.ts", "entries/host-client-core.ts"]) expect(RUN3_SUPERSEDED_BUILDER_FILES as readonly string[]).not.toContain(`${BUILD}/${frozen}`);
+  });
+  test("a pin that omits a run-3 superseded file is refused", () => {
+    const three = PINS.find((item) => item.pin.run.id === 39327386044)!.pin, broken = structuredClone(three);
+    delete broken.builder.files[`${BUILD}/entries/provider-worker-core.ts`];
+    expect(pinViolations(broken, loadContext()).join("\n")).toContain("pin builder files omit superseded");
   });
 });
