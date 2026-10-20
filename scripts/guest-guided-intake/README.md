@@ -124,3 +124,21 @@ bundles against local dry bundles of 579, 3, 166 and 62 inputs, a single SDK mod
 claim about bytes only; nothing executed, nothing explains C59.
 
 Owner standing line: "if an automated safety flag fires on follow-on work, that work stops and is surfaced to the owner, never reworded or rerouted."
+
+## Run 4 (compile run 39391435225): the packet with the provider worker's refusal sites
+
+`compile-39391435225.pin.json` pins run 39391435225 (attempt 1, success, branch `cowork/guided-packet-compile-fixture-4`, **FROZEN** like the others). The
+arming commit `453d5eca` sits on the PR 28 merge `1e3ff285` (the builder head) and changes only the `BUILDER_HEAD` line. Artifact 12249582986,
+`guided-packet-compile-39391435225`, zip sha256 `9895ae16...fc9c` (the API digest, re-derived from the downloaded zip), 195,503,119 bytes, expires
+2026-10-27T08:10:56Z. The runtime-sdk origin is `a32330d6` (the PR 27 merge, which carries the stub that names refusal sites); agent-sdk `9c980c32` and
+Winter Core `8b52ef83` are unchanged.
+
+```
+python3 -I -B scripts/guest-guided-intake/verify_packet.py <guided-packet.tar.gz> <packet-inventory.json> --pin scripts/guest-guided-intake/compile-39391435225.pin.json
+```
+
+Same contract as runs 2 and 3: run exactly that on the DOWNLOADED artifact and bind nothing unless it exits 0. Against run 3, everything is
+byte-identical except `providerWorker` (`4331d732...` to `bbf309b9...`); `hostClient` is unchanged, and the packet's `providerWorker` carries the site names
+(`refusalSites`, `frame_empty_or_nul`, `system_marker`, all present as strings). The builder-origin files differ in exactly the five files the run-3 gate
+lists as superseded. `guided-packet.tar.gz` is `791685a6...2a2` and `packet-inventory.json` is `1da4770d...c92`. The verifier exits 0 with 19 of 19 checks. A claim
+about bytes only; nothing was executed, nothing explains C59.
