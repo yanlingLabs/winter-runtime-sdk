@@ -256,6 +256,41 @@ export function violations(text: string, ctx: Context = loadContext()): string[]
   return problems;
 }
 
+/** Every runtime-sdk head this pin has named, with the tree Git says it has. The pin's tree must equal its head's tree: CI checks out shallowly (the head object may be absent),
+ * so the table carries the real trees, and wherever Git does have the object the table is itself checked against it. */
+export const RUNTIME_SDK_TREES: Record<string, string> = {
+  ce730190854fd807446ac3a229a358c553a57697: "b1166e6cc45f6445e8c56d4c50bbb8525328179e",
+  a32330d64a920d1957876a36f7a4a210de6e30e7: "175a8e58aad591efb77d4827003e61a78fde5f52",
+  "2b170ab0a0cd3d137b620b1a30dc0ea9502e1822": "e507b5e54046c75a0deb77662c14f446fda81c1c",
+};
+const gitTree = (head: string): string | undefined => {
+  const run = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${head}^{tree}`], { cwd: ROOT, encoding: "utf8" });
+  return run.status === 0 ? run.stdout.trim() : undefined;
+};
+export function runtimeTreeViolations(origin: { head: string; tree?: string }): string[] {
+  const known = RUNTIME_SDK_TREES[origin.head];
+  if (known === undefined) return ["runtime-sdk head has no recorded tree"];
+  return origin.tree === known ? [] : ["runtime-sdk tree is not the head's tree"];
+}
+describe("the runtime-sdk origin's tree is its head's real tree", () => {
+  const origin = () => (JSON.parse(read(`${BUILD_DIR}/guided-compile-inputs.pin.json`)) as { origins: { runtimeSdk: { head: string; tree?: string } } }).origins.runtimeSdk;
+  test("the pin's runtime-sdk tree equals the recorded tree of its head, and the head is the workflow's", () => {
+    expect(runtimeTreeViolations(origin())).toEqual([]);
+    expect(origin().head).toBe("2b170ab0a0cd3d137b620b1a30dc0ea9502e1822");
+  });
+  test("a wrong tree, or a head with no recorded tree, fails", () => {
+    expect(runtimeTreeViolations({ ...origin(), tree: "0".repeat(40) })).toEqual(["runtime-sdk tree is not the head's tree"]);
+    expect(runtimeTreeViolations({ head: "1".repeat(40), tree: origin().tree })).toEqual(["runtime-sdk head has no recorded tree"]);
+    expect(runtimeTreeViolations({ head: origin().head })).toEqual(["runtime-sdk tree is not the head's tree"]);
+  });
+  test("where Git has the head, every recorded tree is its real tree", () => {
+    for (const [head, tree] of Object.entries(RUNTIME_SDK_TREES)) {
+      const real = gitTree(head);
+      if (real !== undefined) expect(real).toBe(tree);
+    }
+  });
+});
+
 describe("guided packet compile-fixture workflow gates", () => {
   const WORKFLOW = read(`.github/workflows/${WORKFLOW_NAME}`);
 

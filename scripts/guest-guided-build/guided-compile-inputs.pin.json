@@ -19,8 +19,8 @@
   },
   "runtimeSdk": {
    "repository": "yanlingLabs/winter-runtime-sdk",
-   "head": "a32330d64a920d1957876a36f7a4a210de6e30e7",
-   "tree": "175a8e58aad591efb77d4827003e61a78fde5f52"
+   "head": "2b170ab0a0cd3d137b620b1a30dc0ea9502e1822",
+   "tree": "e507b5e54046c75a0deb77662c14f446fda81c1c"
   },
   "winterCore": {
    "repository": "yanlingLabs/winter",
