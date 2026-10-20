@@ -60,6 +60,14 @@ function content(value: unknown): string {
   if (!Array.isArray(value)) refuse();
   return value.map(item => { const block = object(item); keys(block, ["type", "text"]); if (block.type !== "text" || typeof block.text !== "string") refuse(); return block.text; }).join("\n");
 }
+const REMINDER_OPEN = "<system-reminder>";
+/** True when the message content's first text (the string itself, or the first block) opens with the system-reminder marker. */
+function startsWithReminder(value: unknown): boolean {
+  if (typeof value === "string") return value.startsWith(REMINDER_OPEN);
+  if (!Array.isArray(value) || !value.length) return false;
+  const first = value[0] as ObjectValue | null;
+  return !!first && typeof first === "object" && first.type === "text" && typeof first.text === "string" && first.text.startsWith(REMINDER_OPEN);
+}
 function optionalTurnFields(turn: ObjectValue): void {
   for (const key of ["cacheKey"]) if (turn[key] !== undefined) text(turn[key], LIMITS.requestBytes);
   if (turn.effort !== undefined && !(typeof turn.effort === "number" && Number.isFinite(turn.effort)) && !(typeof turn.effort === "string" && ["low", "medium", "high", "xhigh", "max"].includes(turn.effort))) refuse();
@@ -98,7 +106,10 @@ function validateTurn(value: unknown, step: Step, selection: StubSelection): Obj
   const current = object(turn.messages[0]);
   // Match current userContext only; stale markers in historical user/assistant text
   // cannot satisfy the next-dispatch guidance oracle.
-  if (current.role !== "user" || (selection !== STANDIN_SELECTION && current.isMeta !== true)) refuse("not_meta");
+  // The engine merges the meta userContext message into the user turn that follows it (request-layout.ts buildRequestMessages: consecutive
+  // user-role messages become one, which drops `isMeta`), so the real first message is `[<system-reminder> block, prompt block]` with no flag.
+  // Either shape is the current userContext; anything else as the first message is not.
+  if (current.role !== "user" || (selection !== STANDIN_SELECTION && current.isMeta !== true && !startsWithReminder(current.content))) refuse("not_meta");
   ordered(turn.system, step.system, "system_marker"); ordered(content(current.content), step.user, "user_marker");
   absent(turn.system, step.absentSystem); absent(content(current.content), step.absentUser);
   return frozen(turn);

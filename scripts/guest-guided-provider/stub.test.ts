@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
 import { createGuidedFixturePort, encodeFrame, LIMITS, SELECTION, STANDIN_SELECTION, sha256 } from "./stub.ts";
 
@@ -222,4 +223,56 @@ test("the selection argument is explicit and exact: undefined is the default; a 
   expect(() => createGuidedFixturePort(bytes, hash, undefined)).not.toThrow();
   expect(() => createGuidedFixturePort(bytes, hash, SELECTION)).not.toThrow();
   for (const bad of [{ ...SELECTION }, { ...STANDIN_SELECTION }, null, "winter-standin", {}, 0] as any[]) expect(() => createGuidedFixturePort(bytes, hash, bad)).toThrow("fixture refused");
+});
+
+// The engine merges the meta userContext message into the following user turn (request-layout.ts buildRequestMessages), so a real first message has no `isMeta`.
+const merged = (second = false) => ({ ...turn(second), messages: [{ role: "user", content: [{ type: "text", text: `<system-reminder>\n# claudeMd\nSHARED:${second ? "new" : "old"}\nSOURCE:root\nSOURCE:cwd\n\n</system-reminder>\n` }, { type: "text", text: "question" }] }] });
+const withTurn = (value: unknown, ordinal = 1, id = "invocation-one") => ({ ...request("begin", 0, ordinal, id), turn: value });
+const refusedAt = async (value: unknown) => { const p = port(); try { await p.exchange(encodeFrame(withTurn(value))); } catch (error: any) { return error.site; } return undefined; };
+
+test("the real merged first message (a reminder block then the prompt, no isMeta) is the current userContext, and the old separate-meta shape still is", async () => {
+  const p = port();
+  expect(decode(await p.exchange(encodeFrame(withTurn(merged()))))).toMatchObject({ kind: "accepted" });
+  await finish(port());
+  const q = port();
+  expect(decode(await q.exchange(encodeFrame(withTurn(turn()))))).toMatchObject({ kind: "accepted" });
+});
+test("a first message that is neither meta nor opens with the reminder marker is not the userContext", async () => {
+  const plain = { ...turn(), messages: [{ role: "user", content: [{ type: "text", text: "SHARED:old\nSOURCE:root\nSOURCE:cwd" }, { type: "text", text: "question" }] }] };
+  expect(await refusedAt(plain)).toBe("not_meta");
+  const late = { ...turn(), messages: [{ role: "user", content: [{ type: "text", text: "question" }, { type: "text", text: "<system-reminder>\nSHARED:old\nSOURCE:root\nSOURCE:cwd\n</system-reminder>" }] }] };
+  expect(await refusedAt(late)).toBe("not_meta");
+  const text = { ...turn(), messages: [{ role: "user", content: "SHARED:old\nSOURCE:root\nSOURCE:cwd" }] };
+  expect(await refusedAt(text)).toBe("not_meta");
+  expect(await refusedAt({ ...turn(), messages: [{ role: "assistant", content: "<system-reminder>" }, { role: "user", content: "q" }] })).toBe("not_meta");
+  expect(await refusedAt({ ...turn(), messages: [{ role: "user", content: "<system-reminder>\nSHARED:old\nSOURCE:root\nSOURCE:cwd\n</system-reminder>" }] })).toBeUndefined();
+});
+test("the reminder marker does not excuse a missing or stale marker: user, system and absent checks still apply to the merged shape", async () => {
+  const stale = merged(); (stale.messages[0]!.content[0] as any).text = (stale.messages[0]!.content[0] as any).text.replace("SHARED:old", "SHARED:old\nSHARED:new");
+  expect(await refusedAt(stale)).toBe("absent_marker");
+  const missing = merged(); (missing.messages[0]!.content[0] as any).text = "<system-reminder>\nnothing\n</system-reminder>";
+  expect(await refusedAt(missing)).toBe("user_marker");
+  expect(await refusedAt({ ...merged(), system: "nothing", systemBlocks: undefined })).toBe("system_marker");
+});
+
+// The cross-check: the REAL engine layout, vendored with its source pinned, run through the stub for both dispatches of the hosted fixture.
+const layout = JSON.parse(readFileSync(new URL("./real-request-layout.fixture.json", import.meta.url), "utf8"));
+test("the vendored fixture names the pinned agent-sdk source it was generated from", () => {
+  expect(layout.source).toMatchObject({ repository: "yanlingLabs/winter-agent-sdk", commit: "9c980c326638489e0183d7fcddcf1a93553be0ba", path: "packages/runtime/src/context/request-layout.ts", sha256: "8a664c059c43016f188f34bde83ad1fb3681025e10fb9d86f4541fa36d4fd605" });
+  expect(layout.dispatch1[0].isMeta).toBeUndefined();
+  expect(layout.dispatch1).toHaveLength(1); expect(layout.dispatch1[0].content).toHaveLength(2);
+  expect(layout.dispatch2[0].isMeta).toBeUndefined(); expect(layout.dispatch2.map((m: any) => m.role)).toEqual(["user", "assistant", "user"]);
+});
+test("the stub accepts the real engine's request layout for both hosted dispatches, with the real guidance markers", async () => {
+  const markers = (version: string, mark: string) => [`Guided hosted run guidance, ${version} version.`, `The shared guidance marker is ${mark}.`];
+  const hosted = { version: 1, scope: { ...scope }, selection: SELECTION, steps: [
+    { system: ["Cowork current host context"], user: markers("first", "ALPHA"), absentSystem: [], absentUser: markers("second", "BRAVO"), response: "first deterministic answer" },
+    { system: ["Cowork current host context"], user: markers("second", "BRAVO"), absentSystem: [], absentUser: markers("first", "ALPHA"), response: "second deterministic answer" }] };
+  const p = port(hosted);
+  for (const [ordinal, key] of [[1, "dispatch1"], [2, "dispatch2"]] as const) {
+    const id = `invocation-${ordinal}`, t = { model: SELECTION.providerModelId, system: "Cowork current host context\n\nbase", messages: layout[key] };
+    expect(decode(await p.exchange(encodeFrame(withTurn(t, ordinal, id))))).toMatchObject({ kind: "accepted" });
+    for (const sequence of [1, 2]) await p.exchange(encodeFrame(request("next", sequence, ordinal, id)));
+  }
+  expect(p.receipt()).toMatchObject({ receivedBegins: 2, acceptedBegins: 2, completed: 2 });
 });

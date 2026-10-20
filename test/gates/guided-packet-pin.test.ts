@@ -87,13 +87,15 @@ const RUN4_ORIGINS: Record<string, { repository: string; head: string; tree: str
   ...RUN3_ORIGINS,
   runtime: { repository: "yanlingLabs/winter-runtime-sdk", head: "a32330d64a920d1957876a36f7a4a210de6e30e7", tree: "175a8e58aad591efb77d4827003e61a78fde5f52" },
 };
+/** Builder files changed AFTER run 39391435225 (the run-5 trigger branch: the input pin file, its test and the README). History for run 4's pin only. */
+export const RUN4_SUPERSEDED_BUILDER_FILES = [`${BUILD}/README.md`, `${BUILD}/guided-compile-inputs.pin.json`, `${BUILD}/test_guided_build.py`] as const;
 interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
 /** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
 const RUNS: Record<number, RunSpec> = {
   39165162201: { branch: "cowork/guided-packet-compile-fixture", artifactId: 12149668717, origins: RUN1_ORIGINS, placeholders: PLACEHOLDERS, superseded: SUPERSEDED_BUILDER_FILES },
   39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: RUN2_HISTORY_BUILDER_FILES },
   39327386044: { branch: "cowork/guided-packet-compile-fixture-3", artifactId: 12223150881, origins: RUN3_ORIGINS, placeholders: [], superseded: RUN3_SUPERSEDED_BUILDER_FILES },
-  39391435225: { branch: "cowork/guided-packet-compile-fixture-4", artifactId: 12249582986, origins: RUN4_ORIGINS, placeholders: [], superseded: [] },
+  39391435225: { branch: "cowork/guided-packet-compile-fixture-4", artifactId: 12249582986, origins: RUN4_ORIGINS, placeholders: [], superseded: RUN4_SUPERSEDED_BUILDER_FILES },
 };
 
 export function pinFiles(): string[] {
