@@ -140,7 +140,7 @@ class Tests(unittest.TestCase):
         root=Path(__file__).resolve().parents[2]
         for source in (root/'src').rglob('*.ts'):
             self.assertNotIn('guest-reader-native/wrapper',source.read_text())
-        workflow=(root/'.github/workflows/cowork-reader-native-reviewed.yml').read_text()
+        workflow=(root/'.github/retired-workflows/cowork-reader-native-reviewed.yml').read_text()
         self.assertEqual(workflow.count('module.log_result_projection(result)'),2)
         self.assertNotIn('print(json.dumps(result,sort_keys=True))',workflow)
 

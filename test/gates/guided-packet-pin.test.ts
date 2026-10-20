@@ -94,6 +94,8 @@ const RUN5_ORIGINS: Record<string, { repository: string; head: string; tree: str
   ...RUN4_ORIGINS,
   runtime: { repository: "yanlingLabs/winter-runtime-sdk", head: "2b170ab0a0cd3d137b620b1a30dc0ea9502e1822", tree: "e507b5e54046c75a0deb77662c14f446fda81c1c" },
 };
+/** Builder files changed AFTER run 39399991186: its test reads the compile workflow from the retired-workflows directory now. History for run 5's pin only. */
+export const RUN5_SUPERSEDED_BUILDER_FILES = [`${BUILD}/test_guided_build.py`] as const;
 interface RunSpec { branch: string; artifactId: number; origins: Record<string, { repository: string; head: string; tree: string }>; placeholders: string[]; superseded: readonly string[] }
 /** The runs this directory pins, by run id. A pin whose run id is not here is refused. */
 const RUNS: Record<number, RunSpec> = {
@@ -101,7 +103,7 @@ const RUNS: Record<number, RunSpec> = {
   39227365159: { branch: "cowork/guided-packet-compile-fixture-2", artifactId: 12174387240, origins: RUN2_ORIGINS, placeholders: [], superseded: RUN2_HISTORY_BUILDER_FILES },
   39327386044: { branch: "cowork/guided-packet-compile-fixture-3", artifactId: 12223150881, origins: RUN3_ORIGINS, placeholders: [], superseded: RUN3_SUPERSEDED_BUILDER_FILES },
   39391435225: { branch: "cowork/guided-packet-compile-fixture-4", artifactId: 12249582986, origins: RUN4_ORIGINS, placeholders: [], superseded: RUN4_SUPERSEDED_BUILDER_FILES },
-  39399991186: { branch: "cowork/guided-packet-compile-fixture-5", artifactId: 12254327073, origins: RUN5_ORIGINS, placeholders: [], superseded: [] },
+  39399991186: { branch: "cowork/guided-packet-compile-fixture-5", artifactId: 12254327073, origins: RUN5_ORIGINS, placeholders: [], superseded: RUN5_SUPERSEDED_BUILDER_FILES },
 };
 
 export function pinFiles(): string[] {
@@ -109,7 +111,7 @@ export function pinFiles(): string[] {
 }
 export function loadContext(): Context {
   const inputs = JSON.parse(read(`${BUILD}/guided-compile-inputs.pin.json`)) as Inputs;
-  return { inputs, dependencyListSha256: sha256(`${BUILD}/dependencies.lst`), pinsPy: read(`${BUILD}/pins.py`), workflow: read(".github/workflows/cowork-guided-packet-compile-fixture.yml"), limits: inputs.limits,
+  return { inputs, dependencyListSha256: sha256(`${BUILD}/dependencies.lst`), pinsPy: read(`${BUILD}/pins.py`), workflow: read(".github/retired-workflows/cowork-guided-packet-compile-fixture.yml"), limits: inputs.limits,
     files: (path) => (existsSync(join(ROOT, path)) ? sha256(path) : null) };
 }
 

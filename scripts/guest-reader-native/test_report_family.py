@@ -939,7 +939,7 @@ class Pins(unittest.TestCase):
             self.assertIn(needle, download)
 
     def test_workflow_and_gate_pins_name_the_actual_bootstrap_and_wrapper(self):
-        workflow = (ROOT / '.github/workflows/cowork-reader-native-reviewed.yml').read_text()
+        workflow = (ROOT / '.github/retired-workflows/cowork-reader-native-reviewed.yml').read_text()
         gate = (ROOT / 'test/gates/release-gates.test.ts').read_text()
         bootstrap, wrapper = self.digest('bootstrap.py'), self.digest('wrapper.py')
         self.assertEqual(workflow.count(bootstrap), 4); self.assertEqual(workflow.count(wrapper), 1)
@@ -950,7 +950,7 @@ class Pins(unittest.TestCase):
         self.assertEqual(workflow.count(download), 1); self.assertEqual(gate.count('"' + download + '"'), 1)
 
     def test_origins_base_is_a_commit_that_carries_exactly_the_files_the_bootstrap_pins(self):
-        workflow = (ROOT / '.github/workflows/cowork-reader-native-reviewed.yml').read_text()
+        workflow = (ROOT / '.github/retired-workflows/cowork-reader-native-reviewed.yml').read_text()
         gate = (ROOT / 'test/gates/release-gates.test.ts').read_text()
         ref = re.search(r"ref: ([0-9a-f]{40})\n\s+path: origins/base", workflow).group(1)
         self.assertEqual(gate.count('{ ref: "' + ref + '", path: "origins/base"'), 1)

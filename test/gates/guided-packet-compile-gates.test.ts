@@ -23,7 +23,8 @@ const ALLOWED_ACTIONS = new Set(["actions/checkout", "actions/upload-artifact"])
 const USED_BRANCHES = ["cowork/instruction-reader-compile-fixture", "cowork/reader-hosted-dependency-probe", "cowork/reader-hosted-fixture-stderr", "cowork/guided-packet-build", "cowork/guided-packet-compile-fixture", "cowork/guided-packet-compile-fixture-2", "cowork/guided-packet-compile-fixture-3", "cowork/guided-packet-compile-fixture-4"];
 const ZERO_HEAD = "0".repeat(40);
 const BUN_URL = "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-aarch64.zip";
-const WORKFLOW_PATH = ".github/workflows/cowork-guided-packet-compile-fixture.yml";
+const WORKFLOW_PATH = ".github/workflows/cowork-guided-packet-compile-fixture.yml"; // the path the RETIRED file had: the arming guard text inside it still names it
+
 /** The arming guard, line for line. It runs before any builder code is checked out and refuses unless BUILDER_HEAD is an
  * ancestor of the pushed commit AND the whole difference is the one BUILDER_HEAD line of this workflow. */
 const GUARD: Array<[string, string]> = [
@@ -292,7 +293,7 @@ describe("the runtime-sdk origin's tree is its head's real tree", () => {
 });
 
 describe("guided packet compile-fixture workflow gates", () => {
-  const WORKFLOW = read(`.github/workflows/${WORKFLOW_NAME}`);
+  const WORKFLOW = read(`.github/retired-workflows/${WORKFLOW_NAME}`);
 
   test("the committed workflow satisfies every gate", () => {
     expect(violations(WORKFLOW)).toEqual([]);
@@ -464,7 +465,7 @@ const MUTATIONS: Array<[string, (text: string) => string, string]> = [
 
 // A mutation is only evidence if it changed the text and was caught by the violation it names.
 describe("guided packet compile-fixture workflow gate mutations", () => {
-  const WORKFLOW = read(`.github/workflows/${WORKFLOW_NAME}`);
+  const WORKFLOW = read(`.github/retired-workflows/${WORKFLOW_NAME}`);
   const ctx = loadContext();
   test("the table has one entry per gate it claims and no duplicate names", () => {
     expect(new Set(MUTATIONS.map(([name]) => name)).size).toBe(MUTATIONS.length);
@@ -502,7 +503,7 @@ describe("guided packet compile-fixture workflow gate mutations", () => {
 
 // The guard is run for real, as bash, against throwaway Git repositories: each way an arming commit can be wrong must fail.
 describe("arming guard behaviour (runs the workflow's own guard script against temporary repositories)", () => {
-  const doc = yaml.parse(read(`.github/workflows/${WORKFLOW_NAME}`)) as Doc;
+  const doc = yaml.parse(read(`.github/retired-workflows/${WORKFLOW_NAME}`)) as Doc;
   const script = (Object.values(doc.jobs ?? {})[0]?.steps ?? [])[1]?.run ?? "";
   const workflow = (head: string, extra = "") => `name: x\nenv:\n  BUILDER_HEAD: '${head}'\n  OTHER: 1\n${extra}`;
   function git(cwd: string, ...args: string[]): string {
