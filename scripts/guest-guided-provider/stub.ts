@@ -60,13 +60,15 @@ function content(value: unknown): string {
   if (!Array.isArray(value)) refuse();
   return value.map(item => { const block = object(item); keys(block, ["type", "text"]); if (block.type !== "text" || typeof block.text !== "string") refuse(); return block.text; }).join("\n");
 }
-const REMINDER_OPEN = "<system-reminder>";
-/** True when the message content's first text (the string itself, or the first block) opens with the system-reminder marker. */
-function startsWithReminder(value: unknown): boolean {
-  if (typeof value === "string") return value.startsWith(REMINDER_OPEN);
-  if (!Array.isArray(value) || !value.length) return false;
+const REMINDER_OPEN = "<system-reminder>", REMINDER_CLOSE = "</system-reminder>";
+/** The merged layout's userContext: message content that is an array of at least two text blocks whose FIRST is one closed system-reminder
+ * (the prompt follows in its own block). Returns that first block's text, or undefined for any other content. */
+function reminderBlock(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length < 2) return undefined;
   const first = value[0] as ObjectValue | null;
-  return !!first && typeof first === "object" && first.type === "text" && typeof first.text === "string" && first.text.startsWith(REMINDER_OPEN);
+  if (!first || typeof first !== "object" || first.type !== "text" || typeof first.text !== "string") return undefined;
+  const body = first.text.trimEnd();
+  return first.text.startsWith(REMINDER_OPEN) && body.endsWith(REMINDER_CLOSE) && body.indexOf(REMINDER_CLOSE) === body.length - REMINDER_CLOSE.length ? first.text : undefined;
 }
 function optionalTurnFields(turn: ObjectValue): void {
   for (const key of ["cacheKey"]) if (turn[key] !== undefined) text(turn[key], LIMITS.requestBytes);
@@ -107,11 +109,15 @@ function validateTurn(value: unknown, step: Step, selection: StubSelection): Obj
   // Match current userContext only; stale markers in historical user/assistant text
   // cannot satisfy the next-dispatch guidance oracle.
   // The engine merges the meta userContext message into the user turn that follows it (request-layout.ts buildRequestMessages: consecutive
-  // user-role messages become one, which drops `isMeta`), so the real first message is `[<system-reminder> block, prompt block]` with no flag.
-  // Either shape is the current userContext; anything else as the first message is not.
-  if (current.role !== "user" || (selection !== STANDIN_SELECTION && current.isMeta !== true && !startsWithReminder(current.content))) refuse("not_meta");
-  ordered(turn.system, step.system, "system_marker"); ordered(content(current.content), step.user, "user_marker");
-  absent(turn.system, step.absentSystem); absent(content(current.content), step.absentUser);
+  // user-role messages become one, which drops `isMeta`), so the real first message is `[closed <system-reminder> block, prompt block]` with no
+  // flag. The separate `isMeta` message is the other accepted shape. In the merged shape the markers are matched against the reminder block
+  // ONLY: a marker in the prompt block, or in a block the user typed, is not the userContext.
+  if (current.role !== "user") refuse("not_meta");
+  let userText: string;
+  if (selection === STANDIN_SELECTION || current.isMeta === true) userText = content(current.content);
+  else { const block = reminderBlock(current.content); if (block === undefined) return refuse("not_meta"); userText = block; }
+  ordered(turn.system, step.system, "system_marker"); ordered(userText, step.user, "user_marker");
+  absent(turn.system, step.absentSystem); absent(userText, step.absentUser);
   return frozen(turn);
 }
 export interface CapturedTurn { readonly invocationId: string; readonly ordinal: number; readonly sha256: string; readonly turn: Readonly<ObjectValue> }
